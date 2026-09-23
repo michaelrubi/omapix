@@ -1,15 +1,25 @@
 //! Omapix image engine: pixel storage, colour management, file IO and
 //! processing. Has no UI or GPU dependencies so it can be tested headless.
 
+pub mod blend;
 pub mod color;
+pub mod composite;
 pub mod document;
+pub mod export;
+pub mod filters;
 pub mod io;
+pub mod layer;
+pub mod ops;
+pub mod ora;
 pub mod pyramid;
 pub mod raster;
+pub mod tiled;
 pub mod tiles;
 
+pub use blend::BlendMode;
 pub use color::{ColorProfile, DisplayTransform};
 pub use document::Document;
+pub use layer::{Layer, Mask};
 pub use raster::{Pixel, Raster};
 
 #[derive(Debug, thiserror::Error)]

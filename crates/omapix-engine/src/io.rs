@@ -10,17 +10,22 @@ use tiff::tags::Tag;
 use crate::raster::{OPAQUE, widen};
 use crate::{ColorProfile, Document, Error, Pixel, Raster, Result};
 
-/// Open an image file. TIFF is read directly so 16-bit data and the
-/// embedded ICC profile survive; PNG and JPEG go through the `image` crate.
+/// Open an image file. OpenRaster keeps its layers; TIFF is read directly
+/// so 16-bit data and the embedded ICC profile survive; PNG and JPEG go
+/// through the `image` crate.
 pub fn load(path: &Path) -> Result<Document> {
     let is_tiff = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"));
-    if is_tiff {
-        load_tiff(path)
-    } else {
-        load_other(path)
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("ora") => crate::ora::load(path),
+        _ if is_tiff => load_tiff(path),
+        _ => load_other(path),
     }
 }
 
@@ -69,12 +74,12 @@ fn load_tiff(path: &Path) -> Result<Document> {
         Some(icc) => ColorProfile::from_icc(icc)?,
         None => ColorProfile::srgb(),
     };
-    Ok(Document {
-        path: path.to_path_buf(),
-        raster: Raster::new(width, height, pixels),
+    Ok(Document::from_image(
+        path.to_path_buf(),
+        &Raster::new(width, height, pixels),
         profile,
-        source_bits: bits,
-    })
+        bits,
+    ))
 }
 
 fn load_other(path: &Path) -> Result<Document> {
@@ -95,12 +100,12 @@ fn load_other(path: &Path) -> Result<Document> {
         Some(icc) => ColorProfile::from_icc(icc)?,
         None => ColorProfile::srgb(),
     };
-    Ok(Document {
-        path: path.to_path_buf(),
-        raster: Raster::new(width, height, pixels),
+    Ok(Document::from_image(
+        path.to_path_buf(),
+        &Raster::new(width, height, pixels),
         profile,
         source_bits,
-    })
+    ))
 }
 
 /// Expand interleaved gray / gray+alpha / RGB / RGBA samples to RGBA pixels.
@@ -138,11 +143,11 @@ mod tests {
         let doc = load(Path::new(&path)).unwrap();
         println!(
             "{}x{} {}-bit, profile: {}",
-            doc.raster.width(),
-            doc.raster.height(),
+            doc.width,
+            doc.height,
             doc.source_bits,
             doc.profile.description()
         );
-        assert!(doc.raster.width() > 0);
+        assert!(doc.width > 0);
     }
 }
