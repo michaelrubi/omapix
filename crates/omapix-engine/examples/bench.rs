@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use omapix_engine::{filters, io, ops, tiled::Tiled};
+use omapix_engine::{export, filters, io, ops, ora, tiled::Tiled};
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: bench <image>");
@@ -44,4 +44,21 @@ fn main() {
     let t = Instant::now();
     let _ = Tiled::from_raster(&doc.composite());
     println!("stamp visible   {:>8.0?}", t.elapsed());
+
+    let dir = std::env::temp_dir().join(format!("omapix-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let t = Instant::now();
+    ora::save(&doc, &dir.join("bench.ora")).expect("save");
+    let size = std::fs::metadata(dir.join("bench.ora")).map(|m| m.len()).unwrap_or(0);
+    println!("save .ora       {:>8.0?}  {} MB, {} layers", t.elapsed(), size / 1_000_000, doc.layers.len());
+    let t = Instant::now();
+    let _ = ora::load(&dir.join("bench.ora")).expect("load");
+    println!("open .ora       {:>8.0?}", t.elapsed());
+    let t = Instant::now();
+    export::tiff(&doc, &dir.join("bench.tif")).expect("tiff");
+    println!("export tiff     {:>8.0?}", t.elapsed());
+    let t = Instant::now();
+    export::jpeg(&doc, &dir.join("bench.jpg"), 92).expect("jpeg");
+    println!("export jpeg     {:>8.0?}", t.elapsed());
+    std::fs::remove_dir_all(&dir).ok();
 }

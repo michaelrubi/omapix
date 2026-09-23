@@ -5,6 +5,7 @@ use std::io::BufWriter;
 use std::path::Path;
 
 use image::ImageEncoder;
+use rayon::prelude::*;
 use image::codecs::jpeg::JpegEncoder;
 use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
 use tiff::tags::Tag;
@@ -57,7 +58,9 @@ pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
     let image = doc.composite();
     let transform = DisplayTransform::to_srgb(&doc.profile)?;
     let mut rgba = vec![[0u8; 4]; image.pixels().len()];
-    transform.convert(image.pixels(), &mut rgba);
+    rgba.par_chunks_mut(65536)
+        .zip(image.pixels().par_chunks(65536))
+        .for_each(|(out, src)| transform.convert(src, out));
     let rgb: Vec<u8> = rgba
         .iter()
         .flat_map(|p| {
