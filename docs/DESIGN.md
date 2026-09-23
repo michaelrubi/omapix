@@ -111,8 +111,9 @@ unit tests, and leaves room to replace the UI toolkit later.
 
 Tile engine, pixel layers, opacity, 25 blend modes, layer masks, undo and
 redo, OpenRaster save/open, TIFF/JPEG export, Gaussian Blur, one-click
-frequency separation and dodge & burn layer, merge down, stamp visible.
-Layer groups are not done yet.
+frequency separation (with live preview) and dodge & burn layer, merge
+down, stamp visible, drag-to-reorder, Blend If (Blending Options, saved in
+OpenRaster), mask view. Layer groups are not done yet.
 
 ### 3. Retouch tools (mostly done)
 
