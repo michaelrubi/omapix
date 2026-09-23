@@ -114,16 +114,20 @@ redo, OpenRaster save/open, TIFF/JPEG export, Gaussian Blur, one-click
 frequency separation and dodge & burn layer, merge down, stamp visible.
 Layer groups are not done yet.
 
-### 3. Retouch tools (in progress)
+### 3. Retouch tools (mostly done)
 
 Done: brush and eraser with Photoshop's size, hardness, opacity and flow;
-painting on masks; eyedropper. Next: clone stamp, healing brush, spot
-healing brush, pen pressure (winit has no tablet support on Linux yet).
+painting on masks; eyedropper; Clone Stamp and Healing Brush with aligned
+sources, sampling the current layer or all layers; selections (rectangular
+marquee, lasso, add/subtract/intersect, inverse, feather) that limit
+brushes, fills and filters. Next: spot healing brush, elliptical marquee,
+pen pressure (winit has no tablet support on Linux yet).
 
-### 4. Adjustments
+### 4. Adjustments (mostly done)
 
-Curves, Levels, Hue/Saturation, Color Balance as adjustment layers; LUT
-loading; export with conversion to sRGB.
+Done: Curves, Levels, Hue/Saturation and Color Balance as adjustment
+layers with a live Properties panel, saved in OpenRaster. Next: LUT
+loading, histogram in Curves, Selective Color.
 
 ### 5. Beyond
 
@@ -142,11 +146,17 @@ All follow Photoshop.
 | Merge down / Stamp visible | Ctrl+E / Ctrl+Alt+Shift+E |
 | Bring forward / Send backward | Ctrl+] / Ctrl+[ |
 | Invert (layer or mask) | Ctrl+I |
-| Brush / Eraser | B / E |
+| Curves / Levels / Hue/Sat / Color Balance layer | Ctrl+M / Ctrl+L / Ctrl+U / Ctrl+B |
+| Select all / Deselect / Inverse | Ctrl+A / Ctrl+D / Ctrl+Shift+I |
+| Feather selection | Shift+F6 |
+| Fill foreground / background | Alt+Backspace / Ctrl+Backspace |
+| Clear | Delete |
+| Brush / Eraser / Clone / Healing | B / E / S / J |
+| Marquee / Lasso | M / L (Shift adds, Alt subtracts) |
 | Brush size / hardness | [ ] / Shift+[ Shift+] |
 | Opacity 10–100 % | 1–9, 0 |
 | Swap / reset colours | X / D |
-| Sample colour | Alt+click |
+| Sample colour / set clone source | Alt+click |
 | Fit on screen / 100 % | Ctrl+0 / Ctrl+1 |
 | Zoom in / out | Ctrl+= / Ctrl+- |
 | Zoom at cursor | Alt+scroll, Ctrl+scroll, pinch |
@@ -166,7 +176,8 @@ OMAPIX_SCRIPT="DodgeAndBurn,Size 300,Opacity 70,Stroke 3000 1450 4000 1450" \
 ```
 
 Steps are command names (`FrequencySeparation`, `AddMask`, …), `Stroke x0
-y0 x1 y1`, `Tool Brush|Eraser`, `Size n`, `Opacity percent`, `Color r g b`.
+y0 x1 y1`, `Tool Brush|Eraser|Clone|Heal|Marquee|Lasso`, `Size n`, `Opacity percent`,
+`Color r g b`, `Source x y`, `Look x y`.
 
 ## Licensing
 

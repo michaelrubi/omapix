@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::layer::Layer;
+use crate::selection::Selection;
 use crate::{ColorProfile, Raster};
 
 /// An open image: a stack of layers in one colour space.
@@ -20,6 +21,9 @@ pub struct Document {
     pub source_bits: u8,
     /// Bottom layer first.
     pub layers: Vec<Layer>,
+    /// The active selection; `None` means everything (Photoshop's
+    /// "nothing selected").
+    pub selection: Option<Selection>,
     next_id: u64,
 }
 
@@ -37,6 +41,7 @@ impl Document {
         Self {
             path,
             saved_path: None,
+            selection: None,
             width,
             height,
             profile,

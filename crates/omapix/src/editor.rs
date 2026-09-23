@@ -262,6 +262,9 @@ impl Editor {
             (Target::Pixels, _) => Surface::Pixels(layer.pixels.clone()),
         };
         let mut stroke = Stroke::new(settings, paint, surface);
+        if let Some(selection) = &self.doc.selection {
+            stroke = stroke.within(selection.coverage.clone());
+        }
         if copying {
             let source = if sample_all {
                 Tiled::from_raster(&self.doc.composite())

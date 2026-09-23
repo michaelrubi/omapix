@@ -81,6 +81,8 @@ pub struct Stroke {
     original: Surface,
     /// The image clone and heal strokes copy from.
     source: Option<Tiled<Pixel>>,
+    /// Selection coverage limiting where the stroke has effect.
+    limit: Option<Tiled<u16>>,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     last: Option<(f32, f32)>,
@@ -95,9 +97,25 @@ impl Stroke {
             paint,
             original,
             source: None,
+            limit: None,
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
+        }
+    }
+
+    /// Only paint where `selection` covers (0–65535 per pixel).
+    pub fn within(mut self, selection: Tiled<u16>) -> Self {
+        self.limit = Some(selection);
+        self
+    }
+
+    /// Selection coverage (0–1) of pixel `i` in tile (col, row).
+    #[inline]
+    fn limit_at(&self, col: u32, row: u32, i: usize) -> f32 {
+        match &self.limit {
+            None => 1.0,
+            Some(l) => f32::from(l.tile(col, row).map_or(l.fill(), |t| t[i])) / MAX,
         }
     }
 
@@ -211,7 +229,7 @@ impl Stroke {
                     let (w, h) = (orig.width(), orig.height());
                     let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
-                        let a = cov[i] * opacity;
+                        let a = cov[i] * opacity * self.limit_at(col, row, i);
                         out[i] = if copying {
                             let (x, y) = (tx + i as u32 % TILE, ty + i as u32 / TILE);
                             if a <= 0.0 || x >= w || y >= h {
@@ -236,7 +254,7 @@ impl Stroke {
                         .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[u16]>::to_vec);
                     let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
-                        let a = cov[i] * opacity;
+                        let a = cov[i] * opacity * self.limit_at(col, row, i);
                         let v = f32::from(base[i]);
                         out[i] = (v + (target - v) * a).round() as u16;
                     }
@@ -317,7 +335,7 @@ impl Stroke {
                 .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
             let out = dst.tile_mut(col, row);
             for i in 0..TILE_PIXELS {
-                let a = cov[i] * opacity;
+                let a = cov[i] * opacity * self.limit_at(col, row, i);
                 let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
                 if a <= 0.0 || x >= w || y >= h {
                     out[i] = base[i];
@@ -586,6 +604,28 @@ mod tests {
         // A plain clone would have brought the darker tone from the left.
         let cloned = img.get(90, 100)[0];
         assert!(healed.abs_diff(expected) < cloned.abs_diff(expected) / 3);
+    }
+
+    #[test]
+    fn selection_limits_where_strokes_paint() {
+        let surface = Surface::Pixels(white(200, 100));
+        let settings = BrushSettings {
+            size: 60.0,
+            hardness: 1.0,
+            ..Default::default()
+        };
+        let selection =
+            crate::selection::Selection::rectangle(200, 100, (0.0, 0.0), (100.0, 100.0));
+        let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), surface.clone())
+            .within(selection.coverage);
+        let mut out = surface;
+        let tiles = s.add_point(100.0, 50.0);
+        s.apply(&mut out, &tiles);
+        let Surface::Pixels(out) = out else {
+            unreachable!()
+        };
+        assert_eq!(out.get(90, 50)[0], 0);
+        assert_eq!(out.get(110, 50)[0], 65535);
     }
 
     #[test]

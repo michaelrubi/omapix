@@ -7,11 +7,12 @@ lightweight, and look native to your Omarchy theme.
 > Omapix is an independent project. It is not made by or affiliated with
 > Omarchy.
 
-**Status:** early but usable for layered retouching. It has 16-bit
-colour-managed editing, layers with Photoshop's blend modes and masks,
-undo, a brush and eraser, one-click frequency separation and dodge & burn
-layers, and OpenRaster save with TIFF/JPEG export. Clone and healing tools
-are next. See [docs/DESIGN.md](docs/DESIGN.md) for the plan and shortcuts.
+**Status:** early but usable for portrait retouching. It has 16-bit
+colour-managed editing; layers with Photoshop's blend modes and masks;
+undo; brush, eraser, clone stamp and healing brush; marquee and lasso
+selections with feathering; Curves, Levels, Hue/Saturation and Color
+Balance adjustment layers; one-click frequency separation and dodge & burn
+layers; and OpenRaster save with TIFF/JPEG export. See [docs/DESIGN.md](docs/DESIGN.md) for the plan and shortcuts.
 
 ## Build and run
 

@@ -24,6 +24,13 @@ pub enum Command {
     DeleteMask,
     ToggleMask,
     Invert,
+    SelectAll,
+    Deselect,
+    InvertSelection,
+    Feather,
+    FillForeground,
+    FillBackground,
+    Clear,
     NewCurves,
     NewLevels,
     NewHueSaturation,
@@ -70,6 +77,13 @@ impl Command {
         Command::DeleteMask,
         Command::ToggleMask,
         Command::Invert,
+        Command::SelectAll,
+        Command::Deselect,
+        Command::InvertSelection,
+        Command::Feather,
+        Command::FillForeground,
+        Command::FillBackground,
+        Command::Clear,
         Command::NewCurves,
         Command::NewLevels,
         Command::NewHueSaturation,
@@ -93,6 +107,7 @@ impl Command {
     /// checked before it.
     pub const KEYBOARD_ORDER: &[Command] = &[
         Command::StampVisible,
+        Command::InvertSelection,
         Command::SaveAs,
         Command::Redo,
         Command::NewLayer,
@@ -105,6 +120,12 @@ impl Command {
         Command::RaiseLayer,
         Command::LowerLayer,
         Command::Invert,
+        Command::SelectAll,
+        Command::Deselect,
+        Command::Feather,
+        Command::FillForeground,
+        Command::FillBackground,
+        Command::Clear,
         Command::NewCurves,
         Command::NewLevels,
         Command::NewHueSaturation,
@@ -136,6 +157,13 @@ impl Command {
             Command::DeleteMask => "Delete Layer Mask",
             Command::ToggleMask => "Disable/Enable Layer Mask",
             Command::Invert => "Invert",
+            Command::SelectAll => "All",
+            Command::Deselect => "Deselect",
+            Command::InvertSelection => "Inverse",
+            Command::Feather => "Feather…",
+            Command::FillForeground => "Fill with Foreground",
+            Command::FillBackground => "Fill with Background",
+            Command::Clear => "Clear",
             Command::NewCurves => "Curves…",
             Command::NewLevels => "Levels…",
             Command::NewHueSaturation => "Hue/Saturation…",
@@ -166,6 +194,13 @@ impl Command {
             Command::RaiseLayer => s(CMD, Key::CloseBracket),
             Command::LowerLayer => s(CMD, Key::OpenBracket),
             Command::Invert => s(CMD, Key::I),
+            Command::SelectAll => s(CMD, Key::A),
+            Command::Deselect => s(CMD, Key::D),
+            Command::InvertSelection => s(CMD_SHIFT, Key::I),
+            Command::Feather => s(Modifiers::SHIFT, Key::F6),
+            Command::FillForeground => s(Modifiers::ALT, Key::Backspace),
+            Command::FillBackground => s(CMD, Key::Backspace),
+            Command::Clear => s(Modifiers::NONE, Key::Delete),
             // Photoshop's shortcuts for these apply them destructively;
             // Omapix makes an adjustment layer instead.
             Command::NewCurves => s(CMD, Key::M),
@@ -227,5 +262,6 @@ mod tests {
         assert!(pos(Command::Redo) < pos(Command::Undo));
         assert!(pos(Command::SaveAs) < pos(Command::Save));
         assert!(pos(Command::StampVisible) < pos(Command::MergeDown));
+        assert!(pos(Command::InvertSelection) < pos(Command::Invert));
     }
 }

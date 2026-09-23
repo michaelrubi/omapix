@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Align, Button, Layout, Pos2, RichText, Ui};
 use omapix_engine::layer::{Layer, Mask};
+use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::{Document, export, filters, ops, ora};
 
 use crate::canvas::ToolInput;
@@ -64,7 +65,7 @@ struct FileJob {
 ///   default radius);
 /// - `Stroke x0 y0 x1 y1`: a brush stroke with the current tool, in image
 ///   pixels, through the same path as mouse strokes;
-/// - `Tool Brush|Eraser|Clone|Heal`, `Size n`, `Opacity percent`,
+/// - `Tool Brush|Eraser|Clone|Heal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
 ///   `Look x y` (centre the view on an image point at 100 %).
 #[derive(Debug)]
@@ -96,6 +97,8 @@ impl ScriptStep {
                 "Eraser" => ScriptStep::Tool(crate::tools::Tool::Eraser),
                 "Clone" => ScriptStep::Tool(crate::tools::Tool::CloneStamp),
                 "Heal" => ScriptStep::Tool(crate::tools::Tool::Healing),
+                "Marquee" => ScriptStep::Tool(crate::tools::Tool::Marquee),
+                "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -122,10 +125,14 @@ pub struct App {
     /// A transient message for the status bar, and whether it's an error.
     status: Option<(String, bool, Instant)>,
     blur_radius: f32,
+    feather_radius: f32,
     separation_radius: Option<f32>,
     /// The user chose to discard changes, so the next close goes through.
     allow_close: bool,
     title: String,
+    /// A selection being drawn: its points so far and how it will combine
+    /// with the current selection.
+    drawing: Option<(Vec<Pos2>, Combine)>,
     /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
     /// the real UI without a mouse; see [`ScriptStep`].
     script: VecDeque<ScriptStep>,
@@ -146,6 +153,7 @@ impl App {
             editor: None,
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
+            drawing: None,
             tools: Tools::default(),
             opening: None,
             picking: None,
@@ -153,6 +161,7 @@ impl App {
             dialog: None,
             status: None,
             blur_radius: 2.0,
+            feather_radius: 10.0,
             separation_radius: None,
             allow_close: false,
             title: String::new(),
@@ -412,6 +421,12 @@ impl App {
             Command::MergeDown | Command::LowerLayer => index.is_some_and(|i| i > 0),
             Command::RaiseLayer => index.is_some_and(|i| i + 1 < editor.doc.layers.len()),
             Command::AddMask => !has_mask,
+            Command::Deselect | Command::InvertSelection | Command::Feather => {
+                editor.doc.selection.is_some()
+            }
+            Command::FillForeground | Command::FillBackground | Command::Clear => {
+                editor.target == Target::Mask || !is_adjustment
+            }
             Command::DeleteMask | Command::ToggleMask => has_mask,
             Command::GaussianBlur => editor.target == Target::Pixels && !is_adjustment,
             Command::Invert => editor.target == Target::Mask || !is_adjustment,
@@ -435,6 +450,23 @@ impl App {
                     command: cmd,
                     radius: self.blur_radius,
                 });
+            }
+            Command::Feather => {
+                self.dialog = Some(Dialog::Radius {
+                    command: cmd,
+                    radius: self.feather_radius,
+                });
+            }
+            Command::FillForeground | Command::FillBackground | Command::Clear => {
+                let colour = match cmd {
+                    Command::FillForeground => Some(self.tools.foreground),
+                    Command::FillBackground => Some(self.tools.background),
+                    _ => None,
+                };
+                let background = self.tools.background;
+                if let Some(editor) = &mut self.editor {
+                    fill(editor, colour, background);
+                }
             }
             Command::FrequencySeparation => {
                 let Some(editor) = &self.editor else { return };
@@ -467,9 +499,22 @@ impl App {
                 editor.edit_in_background(
                     "Gaussian Blur",
                     move |doc, _| {
+                        let selection = doc.selection.clone();
                         if let Some(layer) = doc.layer_mut(id) {
-                            layer.pixels = filters::gaussian_blur(&layer.pixels, radius);
+                            let blurred = filters::gaussian_blur(&layer.pixels, radius);
+                            layer.pixels =
+                                ops::within_selection(&layer.pixels, blurred, selection.as_ref());
                         }
+                    },
+                    ctx,
+                );
+            }
+            Command::Feather => {
+                self.feather_radius = radius;
+                editor.edit_in_background(
+                    "Feather",
+                    move |doc, _| {
+                        doc.selection = doc.selection.as_ref().map(|s| s.feather(radius));
                     },
                     ctx,
                 );
@@ -525,6 +570,10 @@ impl App {
                     .map(|l| format!("Redo {l}"));
                 self.menu_item(ui, Command::Undo, undo);
                 self.menu_item(ui, Command::Redo, redo);
+                ui.separator();
+                self.menu_item(ui, Command::FillForeground, None);
+                self.menu_item(ui, Command::FillBackground, None);
+                self.menu_item(ui, Command::Clear, None);
             });
             ui.menu_button("Layer", |ui| {
                 self.menu_item(ui, Command::NewLayer, None);
@@ -540,6 +589,13 @@ impl App {
                 ui.separator();
                 self.menu_item(ui, Command::MergeDown, None);
                 self.menu_item(ui, Command::StampVisible, None);
+            });
+            ui.menu_button("Select", |ui| {
+                self.menu_item(ui, Command::SelectAll, None);
+                self.menu_item(ui, Command::Deselect, None);
+                self.menu_item(ui, Command::InvertSelection, None);
+                ui.separator();
+                self.menu_item(ui, Command::Feather, None);
             });
             ui.menu_button("Image", |ui| {
                 ui.menu_button("Adjustments", |ui| {
@@ -719,10 +775,14 @@ impl App {
         });
     }
 
-    fn tool_input(&mut self, input: ToolInput) {
+    fn tool_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
         let Some(editor) = &mut self.editor else {
             return;
         };
+        if self.tools.tool.selects() {
+            self.selection_input(input, modifiers);
+            return;
+        }
         match input {
             ToolInput::StrokeBegin(p) => {
                 let Some(paint) = self.tools.paint(editor.target, &editor.doc.profile, p) else {
@@ -744,6 +804,88 @@ impl App {
                     self.tools.sample(pixel, &editor.doc.profile);
                 }
             }
+        }
+    }
+
+    /// Drawing a selection with the marquee or lasso.
+    fn selection_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                let how = match (modifiers.shift, modifiers.alt) {
+                    (true, true) => Combine::Intersect,
+                    (true, false) => Combine::Add,
+                    (false, true) => Combine::Subtract,
+                    (false, false) => Combine::Replace,
+                };
+                self.drawing = Some((vec![p], how));
+            }
+            ToolInput::StrokeMove(p) => {
+                if let Some((points, _)) = &mut self.drawing {
+                    match self.tools.tool {
+                        crate::tools::Tool::Marquee => {
+                            points.truncate(1);
+                            points.push(p);
+                        }
+                        _ => {
+                            // Skip points closer than a pixel to the last.
+                            if points.last().is_none_or(|l| l.distance(p) >= 1.0) {
+                                points.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+            ToolInput::StrokeEnd => {
+                let Some((points, how)) = self.drawing.take() else {
+                    return;
+                };
+                let (w, h) = (editor.doc.width, editor.doc.height);
+                // A click without a real drag.
+                let tiny = points.iter().all(|q| q.distance(points[0]) < 2.0);
+                let shape = if tiny {
+                    None
+                } else if self.tools.tool == crate::tools::Tool::Marquee {
+                    Some(Selection::rectangle(
+                        w,
+                        h,
+                        (points[0].x, points[0].y),
+                        (points[1].x, points[1].y),
+                    ))
+                } else {
+                    let pts: Vec<(f32, f32)> = points.iter().map(|p| (p.x, p.y)).collect();
+                    Some(Selection::polygon(w, h, &pts))
+                };
+                let label = if self.tools.tool == crate::tools::Tool::Marquee {
+                    "Rectangular Marquee"
+                } else {
+                    "Lasso"
+                };
+                match (shape, how) {
+                    // A click without dragging deselects, as in Photoshop.
+                    (None, Combine::Replace) => {
+                        if editor.doc.selection.is_some() {
+                            editor.edit("Deselect", |doc, _| doc.selection = None);
+                        }
+                    }
+                    (None, _) => {}
+                    (Some(shape), how) => {
+                        editor.edit(label, |doc, _| {
+                            let combined = match (&doc.selection, how) {
+                                (Some(current), how) if how != Combine::Replace => {
+                                    current.combine(&shape, how)
+                                }
+                                (None, Combine::Subtract | Combine::Intersect) => return,
+                                _ => shape,
+                            };
+                            doc.selection = (!combined.is_empty()).then_some(combined);
+                        });
+                    }
+                }
+            }
+            ToolInput::Sample(_) => {}
         }
     }
 
@@ -772,14 +914,17 @@ impl App {
                 }
             }
             ScriptStep::Stroke([x0, y0, x1, y1]) => {
-                self.tool_input(ToolInput::StrokeBegin(egui::pos2(x0, y0)));
+                self.tool_input(
+                    ToolInput::StrokeBegin(egui::pos2(x0, y0)),
+                    egui::Modifiers::NONE,
+                );
                 // Several moves, like a real drag across frames.
                 for i in 1..=20 {
                     let t = i as f32 / 20.0;
                     let p = egui::pos2(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
-                    self.tool_input(ToolInput::StrokeMove(p));
+                    self.tool_input(ToolInput::StrokeMove(p), egui::Modifiers::NONE);
                 }
-                self.tool_input(ToolInput::StrokeEnd);
+                self.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
             }
             ScriptStep::Tool(tool) => self.tools.tool = tool,
             ScriptStep::Size(n) => self.tools.set_size(n),
@@ -809,6 +954,35 @@ impl App {
             self.title = title;
         }
     }
+}
+
+/// Fill the active layer (or its mask) where selected, like Photoshop's
+/// Alt+Backspace. `None` clears instead (Delete): pixels to transparency,
+/// masks to the background colour's grey, as Photoshop does.
+fn fill(editor: &mut Editor, colour: Option<[u8; 3]>, background: [u8; 3]) {
+    let id = editor.active;
+    let target = editor.target;
+    let profile = editor.doc.profile.clone();
+    let label = if colour.is_some() { "Fill" } else { "Clear" };
+    editor.edit(label, |doc, _| {
+        let selection = doc.selection.clone();
+        let Some(layer) = doc.layer_mut(id) else {
+            return;
+        };
+        match target {
+            Target::Mask => {
+                if let Some(mask) = layer.mask.as_mut() {
+                    let grey = crate::tools::grey(colour.unwrap_or(background));
+                    mask.pixels = ops::fill_mask(&mask.pixels, grey, selection.as_ref());
+                }
+            }
+            Target::Pixels => {
+                let pixel =
+                    colour.map(|rgb| profile.from_srgb8(rgb).unwrap_or([0, 0, 0, u16::MAX]));
+                layer.pixels = ops::fill_pixels(&layer.pixels, pixel, selection.as_ref());
+            }
+        }
+    });
 }
 
 /// Commands that only change the open document.
@@ -852,9 +1026,17 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.edit("Send Backward", |doc, _| doc.layers.swap(index, index - 1));
         }
         Command::AddMask => {
+            // With a selection, the mask reveals just the selection.
             editor.edit("Add Layer Mask", |doc, _| {
+                let mask = match &doc.selection {
+                    Some(sel) => Mask {
+                        pixels: sel.coverage.clone(),
+                        enabled: true,
+                    },
+                    None => Mask::white(w, h),
+                };
                 if let Some(l) = doc.layer_mut(id) {
-                    l.mask = Some(Mask::white(w, h));
+                    l.mask = Some(mask);
                 }
             });
             editor.target = Target::Mask;
@@ -885,7 +1067,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 editor.edit_in_background(
                     "Invert",
                     move |doc, _| {
+                        let selection = doc.selection.clone();
                         if let Some(l) = doc.layer_mut(id) {
+                            let original = l.pixels.clone();
                             l.pixels.par_update(|_, _, tile| {
                                 let max = u16::MAX;
                                 tile.map(|t| {
@@ -894,6 +1078,11 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                                         .collect()
                                 })
                             });
+                            l.pixels = ops::within_selection(
+                                &original,
+                                l.pixels.clone(),
+                                selection.as_ref(),
+                            );
                         }
                     },
                     ctx,
@@ -949,6 +1138,20 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             // Painting on an adjustment layer paints its mask.
             editor.target = Target::Mask;
         }
+        Command::SelectAll => {
+            editor.edit("Select All", |doc, _| {
+                doc.selection = Some(Selection::all(w, h))
+            });
+        }
+        Command::Deselect => {
+            editor.edit("Deselect", |doc, _| doc.selection = None);
+        }
+        Command::InvertSelection => {
+            editor.edit("Inverse", |doc, _| {
+                let inverted = doc.selection.as_ref().map(Selection::invert);
+                doc.selection = inverted.filter(|s| !s.is_empty());
+            });
+        }
         Command::ZoomIn => editor.canvas.step_zoom(true),
         Command::ZoomOut => editor.canvas.step_zoom(false),
         Command::FitOnScreen => editor.canvas.fit(),
@@ -960,13 +1163,12 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
-        if self.dialog.is_none() {
+        // While a text field (layer rename) has focus, keys edit the text.
+        if self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
             for cmd in Command::pressed(ctx) {
                 self.run(cmd, ctx);
             }
-            if !ctx.egui_wants_keyboard_input() {
-                self.tools.keys(ctx);
-            }
+            self.tools.keys(ctx);
         }
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
@@ -1025,18 +1227,41 @@ impl eframe::App for App {
         let pasteboard = self.theme.pasteboard();
         let brush = self.tools.settings();
         let source = self.tools.source_marker();
+        let tool = self.tools.tool;
+        let drawing: Option<Vec<Pos2>> = self.drawing.as_ref().map(|(points, _)| match tool {
+            // Show the marquee as its rectangle.
+            crate::tools::Tool::Marquee if points.len() == 2 => {
+                let (a, b) = (points[0], points[1]);
+                vec![a, egui::pos2(b.x, a.y), b, egui::pos2(a.x, b.y), a]
+            }
+            _ => points.clone(),
+        });
         let mut input = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
-                let cursor = (editor.busy().is_none()).then_some(brush.size);
-                input = editor.canvas.show(ui, pasteboard, cursor, source);
+                let idle = editor.busy().is_none();
+                let outlines = editor
+                    .doc
+                    .selection
+                    .as_ref()
+                    .map_or(&[][..], |s| &s.outlines[..]);
+                let overlay = crate::canvas::Overlay {
+                    tool: idle,
+                    alt_samples: !tool.selects(),
+                    brush: (!tool.selects()).then_some(brush.size),
+                    source,
+                    selection: outlines,
+                    drawing: drawing.as_deref(),
+                };
+                input = editor.canvas.show(ui, pasteboard, overlay);
             } else {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, pasteboard);
                 self.empty_state(ui);
             }
         });
         if let Some(input) = input {
-            self.tool_input(input);
+            let modifiers = ui.input(|i| i.modifiers);
+            self.tool_input(input, modifiers);
         }
         let ctx = ui.ctx().clone();
         self.dialogs(&ctx);

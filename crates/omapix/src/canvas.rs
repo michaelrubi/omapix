@@ -147,6 +147,23 @@ pub enum SourceMarker {
     Offset(Vec2),
 }
 
+/// What the active tool wants from the canvas this frame.
+#[derive(Default)]
+pub struct Overlay<'a> {
+    /// Send pointer input to the tool.
+    pub tool: bool,
+    /// Alt+click samples (eyedropper, clone source) rather than starting a
+    /// stroke with Alt held (selection subtract).
+    pub alt_samples: bool,
+    /// Brush diameter in image pixels, for its outline at the pointer.
+    pub brush: Option<f32>,
+    pub source: Option<SourceMarker>,
+    /// Selection outlines, image pixels, drawn as marching ants.
+    pub selection: &'a [Vec<(f32, f32)>],
+    /// A shape being drawn (lasso path or marquee), image pixels.
+    pub drawing: Option<&'a [Pos2]>,
+}
+
 /// Pointer input meant for the active tool, in image pixels.
 #[derive(Clone, Copy, Debug)]
 pub enum ToolInput {
@@ -364,9 +381,16 @@ impl Canvas {
         &mut self,
         ui: &mut Ui,
         pasteboard: Color32,
-        brush: Option<f32>,
-        source: Option<SourceMarker>,
+        overlay: Overlay<'_>,
     ) -> Option<ToolInput> {
+        let Overlay {
+            tool,
+            alt_samples,
+            brush,
+            source,
+            selection,
+            drawing,
+        } = overlay;
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
         let ppp = ui.pixels_per_point();
@@ -379,10 +403,10 @@ impl Canvas {
             let z = self.fit_zoom(canvas, ppp);
             self.center_at(z, canvas, ppp);
         }
-        let input = if navigating || brush.is_none() {
+        let input = if navigating || !tool {
             None
         } else {
-            self.tool_input(ui, &response)
+            self.tool_input(ui, &response, alt_samples)
         };
 
         self.receive_tiles(ui.ctx());
@@ -394,10 +418,15 @@ impl Canvas {
             (img.x >= 0.0 && img.y >= 0.0 && img.x < size.x && img.y < size.y)
                 .then_some((img.x as u32, img.y as u32))
         });
-        if let (Some(diameter), Some(pointer)) = (brush, response.hover_pos())
+        self.draw_outlines(ui, selection, drawing);
+        if let Some(pointer) = response.hover_pos()
             && !navigating
+            && tool
         {
-            self.brush_cursor(ui, pointer, diameter);
+            match brush {
+                Some(diameter) => self.brush_cursor(ui, pointer, diameter),
+                None => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
+            }
         }
         if let Some(marker) = source {
             let scale = self.view.zoom / self.ppp;
@@ -421,8 +450,51 @@ impl Canvas {
         input
     }
 
-    fn tool_input(&mut self, ui: &Ui, response: &egui::Response) -> Option<ToolInput> {
-        let alt = ui.input(|i| i.modifiers.alt);
+    /// Screen position (points) of an image position.
+    fn to_screen(&self, (x, y): (f32, f32)) -> Pos2 {
+        self.rect.min + self.snapped_origin(self.ppp) + vec2(x, y) * (self.view.zoom / self.ppp)
+    }
+
+    /// Marching ants round the selection, and the shape being drawn.
+    fn draw_outlines(&self, ui: &Ui, selection: &[Vec<(f32, f32)>], drawing: Option<&[Pos2]>) {
+        let painter = ui.painter_at(self.rect);
+        let ants = |points: Vec<Pos2>, closed: bool| {
+            if points.len() < 2 {
+                return;
+            }
+            let mut points = points;
+            if closed {
+                points.push(points[0]);
+            }
+            painter.add(egui::Shape::line(
+                points.clone(),
+                Stroke::new(1.0, Color32::BLACK),
+            ));
+            painter.extend(egui::Shape::dashed_line(
+                &points,
+                Stroke::new(1.0, Color32::WHITE),
+                4.0,
+                4.0,
+            ));
+        };
+        for outline in selection {
+            ants(outline.iter().map(|&p| self.to_screen(p)).collect(), true);
+        }
+        if let Some(path) = drawing {
+            ants(
+                path.iter().map(|p| self.to_screen((p.x, p.y))).collect(),
+                false,
+            );
+        }
+    }
+
+    fn tool_input(
+        &mut self,
+        ui: &Ui,
+        response: &egui::Response,
+        alt_samples: bool,
+    ) -> Option<ToolInput> {
+        let alt = ui.input(|i| i.modifiers.alt) && alt_samples;
         let pointer = ui
             .input(|i| i.pointer.interact_pos())
             .map(|p| self.to_image(p));

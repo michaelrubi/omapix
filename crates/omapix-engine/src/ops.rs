@@ -27,6 +27,86 @@ pub fn prepare_for_editing(doc: &mut Document) -> crate::Result<Option<String>> 
     Ok(Some(original.description().to_owned()))
 }
 
+/// Keep `changed` only where `selection` covers, and `original` elsewhere
+/// (blending partially selected pixels), so filters respect the selection.
+pub fn within_selection(
+    original: &Tiled<crate::Pixel>,
+    changed: Tiled<crate::Pixel>,
+    selection: Option<&crate::selection::Selection>,
+) -> Tiled<crate::Pixel> {
+    let Some(sel) = selection else { return changed };
+    let sel = &sel.coverage;
+    let mut out = changed;
+    out.par_update(|col, row, tile| {
+        let s = sel.tile(col, row);
+        if s.is_none() && sel.fill() == u16::MAX {
+            return None;
+        }
+        let o = original.tile(col, row);
+        let c = tile;
+        Some(
+            (0..crate::tiled::TILE_PIXELS)
+                .map(|i| {
+                    let k = f32::from(s.map_or(sel.fill(), |t| t[i])) / 65535.0;
+                    let a = o.map_or(original.fill(), |t| t[i]);
+                    let b = c.map_or(original.fill(), |t| t[i]);
+                    std::array::from_fn(|ch| {
+                        (f32::from(a[ch]) + (f32::from(b[ch]) - f32::from(a[ch])) * k).round()
+                            as u16
+                    })
+                })
+                .collect(),
+        )
+    });
+    out
+}
+
+/// Fill a layer with a colour where selected (everywhere without a
+/// selection), like Photoshop's Alt+Backspace. `None` clears to
+/// transparency instead (Delete).
+pub fn fill_pixels(
+    pixels: &Tiled<crate::Pixel>,
+    colour: Option<crate::Pixel>,
+    selection: Option<&crate::selection::Selection>,
+) -> Tiled<crate::Pixel> {
+    let filled = match colour {
+        Some(c) => Tiled::from_tiles(pixels.width(), pixels.height(), [0; 4], |_, _| {
+            Some(vec![c; crate::tiled::TILE_PIXELS])
+        }),
+        None => Tiled::new(pixels.width(), pixels.height(), [0; 4]),
+    };
+    within_selection(pixels, filled, selection)
+}
+
+/// Fill a mask with a grey level where selected.
+pub fn fill_mask(
+    mask: &Tiled<u16>,
+    value: u16,
+    selection: Option<&crate::selection::Selection>,
+) -> Tiled<u16> {
+    let Some(sel) = selection else {
+        return Tiled::new(mask.width(), mask.height(), value);
+    };
+    let sel = &sel.coverage;
+    let mut out = mask.clone();
+    out.par_update(|col, row, tile| {
+        let s = sel.tile(col, row);
+        if s.is_none() && sel.fill() == 0 {
+            return None;
+        }
+        Some(
+            (0..crate::tiled::TILE_PIXELS)
+                .map(|i| {
+                    let k = f32::from(s.map_or(sel.fill(), |t| t[i])) / 65535.0;
+                    let a = f32::from(tile.map_or(mask.fill(), |t| t[i]));
+                    (a + (f32::from(value) - a) * k).round() as u16
+                })
+                .collect(),
+        )
+    });
+    out
+}
+
 /// Photoshop's "Stamp Visible": a new layer holding the flattened image,
 /// placed above `above`. Returns the new layer's id.
 pub fn stamp_visible(doc: &mut Document, above: usize) -> u64 {
@@ -150,6 +230,25 @@ mod tests {
         // Only rounding differences, except where local contrast exceeds
         // half the range and the texture layer clips (same as Photoshop).
         assert!(worst <= 3, "worst channel difference {worst}");
+    }
+
+    #[test]
+    fn fills_and_filters_respect_the_selection() {
+        use crate::selection::Selection;
+        let (w, h) = (300, 100);
+        let doc = doc_with(vec![[40000, 40000, 40000, 65535]; (w * h) as usize], w, h);
+        let pixels = &doc.layers[0].pixels;
+        let sel = Selection::rectangle(w, h, (0.0, 0.0), (150.0, 100.0));
+        let filled = fill_pixels(pixels, Some([0, 0, 0, 65535]), Some(&sel));
+        assert_eq!(filled.get(10, 10), [0, 0, 0, 65535]);
+        assert_eq!(filled.get(200, 10), [40000, 40000, 40000, 65535]);
+        let cleared = fill_pixels(pixels, None, Some(&sel));
+        assert_eq!(cleared.get(10, 10)[3], 0);
+        assert_eq!(cleared.get(200, 10)[3], 65535);
+        let mask = fill_mask(&Tiled::new(w, h, u16::MAX), 0, Some(&sel));
+        assert_eq!((mask.get(10, 10), mask.get(200, 10)), (0, u16::MAX));
+        let everywhere = fill_pixels(pixels, Some([1, 2, 3, 65535]), None);
+        assert_eq!(everywhere.get(299, 99), [1, 2, 3, 65535]);
     }
 
     #[test]

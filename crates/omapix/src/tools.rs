@@ -12,6 +12,8 @@ const BRUSH_ICON: &str = "\u{f1fc}";
 const ERASER_ICON: &str = "\u{f12d}";
 const CLONE_ICON: &str = "\u{f24d}";
 const HEAL_ICON: &str = "\u{f0fa}";
+const MARQUEE_ICON: &str = "\u{f096}";
+const LASSO_ICON: &str = "\u{f0c4}";
 
 const MIN_SIZE: f32 = 1.0;
 const MAX_SIZE: f32 = 5000.0;
@@ -22,6 +24,8 @@ pub enum Tool {
     Eraser,
     CloneStamp,
     Healing,
+    Marquee,
+    Lasso,
 }
 
 impl Tool {
@@ -31,7 +35,14 @@ impl Tool {
             Tool::Eraser => "Eraser",
             Tool::CloneStamp => "Clone Stamp",
             Tool::Healing => "Healing Brush",
+            Tool::Marquee => "Rectangular Marquee",
+            Tool::Lasso => "Lasso",
         }
+    }
+
+    /// Tools that make selections rather than paint.
+    pub fn selects(self) -> bool {
+        matches!(self, Tool::Marquee | Tool::Lasso)
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -89,7 +100,7 @@ impl Default for Tools {
 impl Tools {
     pub fn settings(&self) -> BrushSettings {
         match self.tool {
-            Tool::Brush => self.brush,
+            Tool::Brush | Tool::Marquee | Tool::Lasso => self.brush,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
             Tool::Healing => self.heal,
@@ -106,7 +117,7 @@ impl Tools {
 
     fn settings_mut(&mut self) -> &mut BrushSettings {
         match self.tool {
-            Tool::Brush => &mut self.brush,
+            Tool::Brush | Tool::Marquee | Tool::Lasso => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
             Tool::Healing => &mut self.heal,
@@ -136,6 +147,9 @@ impl Tools {
     /// on. `None` for a clone or heal stroke with no source set yet, or on a
     /// mask (they only work on pixels).
     pub fn paint(&mut self, target: Target, profile: &ColorProfile, start: Pos2) -> Option<Paint> {
+        if self.tool.selects() {
+            return None;
+        }
         if self.tool.copies() {
             if target == Target::Mask {
                 return None;
@@ -197,6 +211,12 @@ impl Tools {
             if i.consume_key(Modifiers::NONE, Key::J) {
                 self.tool = Tool::Healing;
             }
+            if i.consume_key(Modifiers::NONE, Key::M) {
+                self.tool = Tool::Marquee;
+            }
+            if i.consume_key(Modifiers::NONE, Key::L) {
+                self.tool = Tool::Lasso;
+            }
             if i.consume_key(Modifiers::NONE, Key::X) {
                 std::mem::swap(&mut self.foreground, &mut self.background);
             }
@@ -247,6 +267,12 @@ impl Tools {
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.tool.name()).strong());
             ui.separator();
+            if self.tool.selects() {
+                let hint = "Drag to select · Shift adds · Alt subtracts · Shift+Alt intersects · \
+                            click outside to deselect · Shift+F6 feathers";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
             let s = self.settings_mut();
             ui.label("Size");
             ui.add(
@@ -307,6 +333,8 @@ impl Tools {
                 (Tool::Eraser, ERASER_ICON, "Eraser (E)"),
                 (Tool::CloneStamp, CLONE_ICON, "Clone Stamp (S)"),
                 (Tool::Healing, HEAL_ICON, "Healing Brush (J)"),
+                (Tool::Marquee, MARQUEE_ICON, "Rectangular Marquee (M)"),
+                (Tool::Lasso, LASSO_ICON, "Lasso (L)"),
             ] {
                 let selected = self.tool == tool;
                 let colour = if selected {
@@ -332,7 +360,7 @@ impl Tools {
 }
 
 /// Grey level of an sRGB colour, as a mask value.
-fn grey([r, g, b]: [u8; 3]) -> u16 {
+pub fn grey([r, g, b]: [u8; 3]) -> u16 {
     let luma = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
     (luma / 255.0 * 65535.0).round() as u16
 }
