@@ -116,6 +116,23 @@ impl ColorProfile {
     }
 }
 
+impl ColorProfile {
+    /// An 8-bit sRGB colour (from a colour picker) in this colour space.
+    pub fn from_srgb8(&self, rgb: [u8; 3]) -> Result<Pixel> {
+        let transform: Transform<[u8; 3], [u16; 3]> = Transform::new(
+            &Profile::new_srgb(),
+            PixelFormat::RGB_8,
+            &self.lcms_profile()?,
+            PixelFormat::RGB_16,
+            Intent::RelativeColorimetric,
+        )?;
+        let mut out = [[0u16; 3]];
+        transform.transform_pixels(&[rgb], &mut out);
+        let [r, g, b] = out[0];
+        Ok([r, g, b, u16::MAX])
+    }
+}
+
 /// Convert an image between colour spaces, keeping alpha as it is.
 pub fn convert(
     image: &Tiled<Pixel>,
@@ -203,6 +220,14 @@ mod tests {
         mlu.set_text("Linear ProPhoto RGB", Locale::none());
         p.write_tag(TagSignature::ProfileDescriptionTag, Tag::MLU(&mlu));
         ColorProfile::from_icc(p.icc().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn srgb_black_and_white_map_to_extremes() {
+        let gamma = linear_prophoto().with_gamma(1.8).unwrap();
+        assert_eq!(gamma.from_srgb8([0, 0, 0]).unwrap(), [0, 0, 0, 65535]);
+        let white = gamma.from_srgb8([255, 255, 255]).unwrap();
+        assert!(white[..3].iter().all(|&v| v > 65400), "{white:?}");
     }
 
     #[test]

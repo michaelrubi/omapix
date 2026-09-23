@@ -7,10 +7,12 @@ use egui::{Align, Button, Layout, RichText, Ui};
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::{Document, export, filters, ops, ora};
 
+use crate::canvas::ToolInput;
 use crate::commands::Command;
 use crate::editor::{Editor, Target};
 use crate::layers_panel::LayersPanel;
 use crate::theme::{self, Theme};
+use crate::tools::Tools;
 
 const OPEN_EXTENSIONS: [&str; 6] = ["ora", "tif", "tiff", "png", "jpg", "jpeg"];
 const JPEG_QUALITY: u8 = 92;
@@ -56,6 +58,42 @@ struct FileJob {
     rx: Receiver<Written>,
 }
 
+/// One step of an `OMAPIX_SCRIPT` (comma-separated steps):
+/// - a command name, e.g. `FrequencySeparation` (radius commands use their
+///   default radius);
+/// - `Stroke x0 y0 x1 y1`: a brush stroke with the current tool, in image
+///   pixels, through the same path as mouse strokes;
+/// - `Tool Brush|Eraser`, `Size n`, `Opacity percent`, `Color r g b` (sRGB).
+#[derive(Debug)]
+enum ScriptStep {
+    Command(Command),
+    Stroke([f32; 4]),
+    Tool(crate::tools::Tool),
+    Size(f32),
+    Opacity(f32),
+    Color([u8; 3]),
+}
+
+impl ScriptStep {
+    fn parse(step: &str) -> Option<Self> {
+        let mut words = step.split_whitespace();
+        let head = words.next()?;
+        let nums: Vec<f32> = words.clone().filter_map(|w| w.parse().ok()).collect();
+        Some(match (head, nums.as_slice()) {
+            ("Stroke", &[x0, y0, x1, y1]) => ScriptStep::Stroke([x0, y0, x1, y1]),
+            ("Size", &[n]) => ScriptStep::Size(n),
+            ("Opacity", &[n]) => ScriptStep::Opacity(n / 100.0),
+            ("Color", &[r, g, b]) => ScriptStep::Color([r as u8, g as u8, b as u8]),
+            ("Tool", _) => match words.next()? {
+                "Brush" => ScriptStep::Tool(crate::tools::Tool::Brush),
+                "Eraser" => ScriptStep::Tool(crate::tools::Tool::Eraser),
+                _ => return None,
+            },
+            _ => ScriptStep::Command(Command::from_name(head)?),
+        })
+    }
+}
+
 /// Work to do after a dialog closes, which needs the whole app.
 type DialogAction = Box<dyn FnOnce(&mut App, &egui::Context)>;
 
@@ -64,6 +102,7 @@ pub struct App {
     theme_rx: Receiver<Theme>,
     editor: Option<Editor>,
     layers: LayersPanel,
+    tools: Tools,
     /// A file being opened in the background.
     opening: Option<(PathBuf, Receiver<Opened>)>,
     /// A file dialog open in the background.
@@ -77,10 +116,9 @@ pub struct App {
     /// The user chose to discard changes, so the next close goes through.
     allow_close: bool,
     title: String,
-    /// Commands to run once an image is open, from `OMAPIX_SCRIPT`
-    /// (comma-separated command names). For testing the real UI without a
-    /// mouse; radius commands use their default radius.
-    script: VecDeque<Command>,
+    /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
+    /// the real UI without a mouse; see [`ScriptStep`].
+    script: VecDeque<ScriptStep>,
 }
 
 impl App {
@@ -97,6 +135,7 @@ impl App {
             theme_rx: theme::watch(ctx.clone()),
             editor: None,
             layers: LayersPanel::default(),
+            tools: Tools::default(),
             opening: None,
             picking: None,
             file_job: None,
@@ -110,12 +149,12 @@ impl App {
                 .unwrap_or_default()
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
-                .filter_map(|name| {
-                    let cmd = Command::from_name(name.trim());
-                    if cmd.is_none() {
-                        log::warn!("OMAPIX_SCRIPT: unknown command {name:?}");
+                .filter_map(|step| {
+                    let parsed = ScriptStep::parse(step.trim());
+                    if parsed.is_none() {
+                        log::warn!("OMAPIX_SCRIPT: can't understand {step:?}");
                     }
-                    cmd
+                    parsed
                 })
                 .collect(),
         };
@@ -657,6 +696,30 @@ impl App {
         });
     }
 
+    fn tool_input(&mut self, input: ToolInput) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                let paint = self.tools.paint(editor.target, &editor.doc.profile);
+                if editor.begin_stroke(self.tools.settings(), paint) {
+                    editor.stroke_to(p.x, p.y);
+                }
+            }
+            ToolInput::StrokeMove(p) => editor.stroke_to(p.x, p.y),
+            ToolInput::StrokeEnd => editor.end_stroke(),
+            ToolInput::Sample(p) => {
+                if p.x >= 0.0
+                    && p.y >= 0.0
+                    && let Some(pixel) = editor.canvas.sample(p.x as u32, p.y as u32)
+                {
+                    self.tools.sample(pixel, &editor.doc.profile);
+                }
+            }
+        }
+    }
+
     /// Run the next scripted command once the app is idle.
     fn run_script(&mut self, ctx: &egui::Context) {
         let idle = self.opening.is_none()
@@ -666,14 +729,32 @@ impl App {
         if !idle {
             return;
         }
-        let Some(cmd) = self.script.pop_front() else {
+        let Some(step) = self.script.pop_front() else {
             return;
         };
-        log::info!("script: {cmd:?}");
-        self.run(cmd, ctx);
-        // Radius commands open a dialog; accept its default.
-        if let Some(Dialog::Radius { command, radius }) = self.dialog.take() {
-            self.apply_radius(command, radius, ctx);
+        log::info!("script: {step:?}");
+        match step {
+            ScriptStep::Command(cmd) => {
+                self.run(cmd, ctx);
+                // Radius commands open a dialog; accept its default.
+                if let Some(Dialog::Radius { command, radius }) = self.dialog.take() {
+                    self.apply_radius(command, radius, ctx);
+                }
+            }
+            ScriptStep::Stroke([x0, y0, x1, y1]) => {
+                self.tool_input(ToolInput::StrokeBegin(egui::pos2(x0, y0)));
+                // Several moves, like a real drag across frames.
+                for i in 1..=20 {
+                    let t = i as f32 / 20.0;
+                    let p = egui::pos2(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+                    self.tool_input(ToolInput::StrokeMove(p));
+                }
+                self.tool_input(ToolInput::StrokeEnd);
+            }
+            ScriptStep::Tool(tool) => self.tools.tool = tool,
+            ScriptStep::Size(n) => self.tools.set_size(n),
+            ScriptStep::Opacity(o) => self.tools.set_opacity(o),
+            ScriptStep::Color(c) => self.tools.foreground = c,
         }
         ctx.request_repaint();
     }
@@ -826,6 +907,9 @@ impl eframe::App for App {
             for cmd in Command::pressed(ctx) {
                 self.run(cmd, ctx);
             }
+            if !ctx.egui_wants_keyboard_input() {
+                self.tools.keys(ctx);
+            }
         }
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
@@ -855,6 +939,17 @@ impl eframe::App for App {
         egui::Panel::bottom("status")
             .frame(bar)
             .show(ui, |ui| self.status_bar(ui));
+        if let Some(editor) = &self.editor {
+            let target = editor.target;
+            egui::Panel::top("options")
+                .frame(bar)
+                .show(ui, |ui| self.tools.options_bar(ui, target, &self.theme));
+            egui::Panel::left("tools")
+                .frame(bar)
+                .exact_size(44.0)
+                .resizable(false)
+                .show(ui, |ui| self.tools.toolbar(ui, &self.theme));
+        }
         if let Some(editor) = &mut self.editor {
             let mut command = None;
             egui::Panel::right("layers")
@@ -868,14 +963,20 @@ impl eframe::App for App {
             }
         }
         let pasteboard = self.theme.pasteboard();
+        let brush = self.tools.settings();
+        let mut input = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
-                editor.canvas.show(ui, pasteboard);
+                let cursor = (editor.busy().is_none()).then_some(brush.size);
+                input = editor.canvas.show(ui, pasteboard, cursor);
             } else {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, pasteboard);
                 self.empty_state(ui);
             }
         });
+        if let Some(input) = input {
+            self.tool_input(input);
+        }
         let ctx = ui.ctx().clone();
         self.dialogs(&ctx);
     }

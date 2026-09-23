@@ -1,22 +1,25 @@
-//! The image canvas: view transform, progressive tile streaming and
-//! Photoshop-style navigation.
+//! The image canvas: view transform, progressive tile streaming,
+//! Photoshop-style navigation, and pointer input for painting.
 //!
 //! The canvas shows a [`Render`]: the flattened document plus its zoom
-//! pyramid, produced in the background whenever the document changes.
+//! pyramid. Whole renders are produced in the background when the document
+//! changes; brush strokes update just the area they touch, in place.
 //! Visible tiles are converted to display colour on worker threads and
-//! uploaded as textures. When a new render arrives, the old textures stay on
-//! screen until their replacements are ready, so edits never flicker.
+//! uploaded as textures. Tiles that go stale stay on screen until their
+//! replacements are ready, so edits never flicker.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, RwLock};
 
 use egui::{
-    Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense,
+    Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Ui, Vec2, pos2, vec2,
 };
+use omapix_engine::layer::Layer;
 use omapix_engine::pyramid::Pyramid;
-use omapix_engine::{DisplayTransform, Pixel, Raster, tiles};
+use omapix_engine::tiled::TILE;
+use omapix_engine::{DisplayTransform, Pixel, Raster, composite, tiles};
 
 /// Photoshop's zoom presets, as fractions.
 const ZOOM_STEPS: [f32; 21] = [
@@ -52,20 +55,54 @@ const MAX_IN_FLIGHT: usize = 16;
 /// Size of one checkerboard square behind transparent areas, in points.
 const CHECKER: f32 = 8.0;
 
-/// The flattened document at one moment, ready to display.
+/// The flattened document at one moment, ready to display. Brush strokes
+/// update it in place while tile workers read it, hence the lock.
 pub struct Render {
-    pub image: Raster,
-    pub pyramid: Pyramid,
+    data: RwLock<RenderData>,
+}
+
+struct RenderData {
+    image: Raster,
+    pyramid: Pyramid,
+}
+
+impl RenderData {
+    fn level(&self, index: usize) -> &Raster {
+        self.pyramid.level(&self.image, index)
+    }
 }
 
 impl Render {
     pub fn new(image: Raster) -> Self {
         let pyramid = Pyramid::build(&image);
-        Self { image, pyramid }
+        Self {
+            data: RwLock::new(RenderData { image, pyramid }),
+        }
     }
 
-    fn level(&self, index: usize) -> &Raster {
-        self.pyramid.level(&self.image, index)
+    /// Recomposite the given 256 px engine tiles from `layers`. Returns the
+    /// changed area in image pixels as (x0, y0, x1, y1).
+    pub fn update_tiles(
+        &self,
+        layers: &[Layer],
+        engine_tiles: &[(u32, u32)],
+    ) -> Option<(u32, u32, u32, u32)> {
+        let mut data = self.data.write().expect("render lock");
+        let (w, h) = (data.image.width(), data.image.height());
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for &(col, row) in engine_tiles {
+            x0 = x0.min(col * TILE);
+            y0 = y0.min(row * TILE);
+            x1 = x1.max(((col + 1) * TILE).min(w));
+            y1 = y1.max(((row + 1) * TILE).min(h));
+        }
+        if x0 >= x1 || y0 >= y1 {
+            return None;
+        }
+        composite::composite_into(layers, &mut data.image, engine_tiles);
+        let RenderData { image, pyramid } = &mut *data;
+        pyramid.update_region(image, (x0, y0, x1, y1));
+        Some((x0, y0, x1, y1))
     }
 }
 
@@ -77,7 +114,8 @@ struct TileKey {
 }
 
 struct TileImage {
-    generation: u64,
+    /// Value of the canvas's generation counter when requested.
+    stamp: u64,
     key: TileKey,
     image: ColorImage,
 }
@@ -85,8 +123,7 @@ struct TileImage {
 struct TileTexture {
     texture: TextureHandle,
     bounds: tiles::TileBounds,
-    /// Render generation the texture was made from.
-    generation: u64,
+    stamp: u64,
 }
 
 /// Where the image is on screen.
@@ -101,24 +138,55 @@ struct View {
     fit: bool,
 }
 
+/// Pointer input meant for the active tool, in image pixels.
+#[derive(Clone, Copy, Debug)]
+pub enum ToolInput {
+    StrokeBegin(Pos2),
+    StrokeMove(Pos2),
+    StrokeEnd,
+    /// Alt+click or Alt+drag: sample the colour here.
+    Sample(Pos2),
+}
+
 pub struct Canvas {
     width: u32,
     height: u32,
+    /// Size of every pyramid level, level 0 first. Fixed per document.
+    levels: Vec<(u32, u32)>,
     transform: Arc<DisplayTransform>,
     render: Option<Arc<Render>>,
-    /// Bumped for every new render, to tell fresh tiles from stale ones.
+    /// Incremented on every invalidation. Textures made from a request
+    /// stamped before a tile's last invalidation are stale.
     generation: u64,
+    /// Every tile is stale if stamped before this (a whole new render).
+    stale_before: u64,
+    /// Per-tile invalidations from brush strokes.
+    dirty: HashMap<TileKey, u64>,
     view: View,
     textures: HashMap<TileKey, TileTexture>,
     in_flight: HashSet<TileKey>,
     tx: Sender<TileImage>,
     rx: Receiver<TileImage>,
     checker: Option<TextureHandle>,
+    /// A brush stroke is in progress.
+    painting: bool,
     /// Image pixel under the pointer, if any.
     pub hovered_pixel: Option<(u32, u32)>,
     /// Canvas area and scale from the last frame, for menu commands.
     rect: Rect,
     ppp: f32,
+}
+
+fn level_sizes(width: u32, height: u32) -> Vec<(u32, u32)> {
+    // Mirrors Pyramid::build: halve until the longest side is at most 128.
+    let mut sizes = vec![(width, height)];
+    while let Some(&(w, h)) = sizes.last() {
+        if w.max(h) <= 128 {
+            break;
+        }
+        sizes.push((w.div_ceil(2), h.div_ceil(2)));
+    }
+    sizes
 }
 
 impl Canvas {
@@ -127,9 +195,12 @@ impl Canvas {
         Self {
             width,
             height,
+            levels: level_sizes(width, height),
             transform: Arc::new(transform),
             render: None,
             generation: 0,
+            stale_before: 0,
+            dirty: HashMap::new(),
             view: View {
                 zoom: 1.0,
                 origin: Vec2::ZERO,
@@ -140,6 +211,7 @@ impl Canvas {
             tx,
             rx,
             checker: None,
+            painting: false,
             hovered_pixel: None,
             rect: Rect::NOTHING,
             ppp: 1.0,
@@ -151,12 +223,51 @@ impl Canvas {
     pub fn set_render(&mut self, render: Arc<Render>) {
         self.render = Some(render);
         self.generation += 1;
+        self.stale_before = self.generation;
+        self.dirty.clear();
+    }
+
+    pub fn render(&self) -> Option<&Arc<Render>> {
+        self.render.as_ref()
+    }
+
+    /// Mark display tiles covering an image-pixel area as out of date.
+    pub fn invalidate(&mut self, (x0, y0, x1, y1): (u32, u32, u32, u32)) {
+        self.generation += 1;
+        for (level, &(lw, lh)) in self.levels.iter().enumerate() {
+            let (kx, ky) = (
+                self.width as f32 / lw as f32,
+                self.height as f32 / lh as f32,
+            );
+            // Textures carry a 1 px border from their neighbours.
+            let lx0 = ((x0 as f32 / kx).floor() as u32).saturating_sub(1);
+            let ly0 = ((y0 as f32 / ky).floor() as u32).saturating_sub(1);
+            let lx1 = ((x1 as f32 / kx).ceil() as u32 + 1).min(lw);
+            let ly1 = ((y1 as f32 / ky).ceil() as u32 + 1).min(lh);
+            let t = tiles::TILE_SIZE;
+            for row in ly0 / t..=(ly1.saturating_sub(1)) / t {
+                for col in lx0 / t..=(lx1.saturating_sub(1)) / t {
+                    self.dirty
+                        .insert(TileKey { level, col, row }, self.generation);
+                }
+            }
+        }
+    }
+
+    fn is_fresh(&self, key: TileKey, stamp: u64) -> bool {
+        stamp >= self.stale_before && self.dirty.get(&key).is_none_or(|&d| stamp >= d)
     }
 
     /// Flattened value of the pixel under the pointer.
     pub fn hovered_value(&self) -> Option<((u32, u32), Pixel)> {
         let (x, y) = self.hovered_pixel?;
-        Some(((x, y), self.render.as_ref()?.image.get(x, y)))
+        Some(((x, y), self.sample(x, y)?))
+    }
+
+    /// Flattened value of an image pixel.
+    pub fn sample(&self, x: u32, y: u32) -> Option<Pixel> {
+        let data = self.render.as_ref()?.data.read().ok()?;
+        (x < self.width && y < self.height).then(|| data.image.get(x, y))
     }
 
     /// Zoom as Photoshop shows it: "33.33%", "100%".
@@ -218,7 +329,21 @@ impl Canvas {
         self.zoom_to(next, canvas.center(), canvas);
     }
 
-    pub fn show(&mut self, ui: &mut Ui, pasteboard: Color32) {
+    /// Screen position (points) to image pixels.
+    fn to_image(&self, p: Pos2) -> Pos2 {
+        ((p - self.rect.min - self.snapped_origin(self.ppp)) / (self.view.zoom / self.ppp))
+            .to_pos2()
+    }
+
+    /// Draw the canvas and handle navigation. `brush` is the diameter of the
+    /// active brush in image pixels, to draw its outline at the pointer.
+    /// Returns pointer input for the active tool.
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        pasteboard: Color32,
+        brush: Option<f32>,
+    ) -> Option<ToolInput> {
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
         let ppp = ui.pixels_per_point();
@@ -226,24 +351,90 @@ impl Canvas {
         self.ppp = ppp;
         ui.painter().rect_filled(canvas, 0.0, pasteboard);
 
-        self.navigate(ui, &response, canvas);
+        let navigating = self.navigate(ui, &response, canvas);
         if self.view.fit {
             let z = self.fit_zoom(canvas, ppp);
             self.center_at(z, canvas, ppp);
         }
+        let input = if navigating || brush.is_none() {
+            None
+        } else {
+            self.tool_input(ui, &response)
+        };
 
         self.receive_tiles(ui.ctx());
         self.draw(ui, canvas, ppp);
 
         self.hovered_pixel = response.hover_pos().and_then(|p| {
-            let img = (p - canvas.min - self.snapped_origin(ppp)) / (self.view.zoom / ppp);
+            let img = self.to_image(p);
             let size = self.image_size();
             (img.x >= 0.0 && img.y >= 0.0 && img.x < size.x && img.y < size.y)
                 .then_some((img.x as u32, img.y as u32))
         });
+        if let (Some(diameter), Some(pointer)) = (brush, response.hover_pos())
+            && !navigating
+        {
+            self.brush_cursor(ui, pointer, diameter);
+        }
+        input
     }
 
-    fn navigate(&mut self, ui: &Ui, response: &egui::Response, canvas: Rect) {
+    fn tool_input(&mut self, ui: &Ui, response: &egui::Response) -> Option<ToolInput> {
+        let alt = ui.input(|i| i.modifiers.alt);
+        let pointer = ui
+            .input(|i| i.pointer.interact_pos())
+            .map(|p| self.to_image(p));
+        if alt {
+            let sampling = response.clicked_by(PointerButton::Primary)
+                || response.dragged_by(PointerButton::Primary);
+            return pointer.filter(|_| sampling).map(ToolInput::Sample);
+        }
+        if response.drag_started_by(PointerButton::Primary) {
+            self.painting = true;
+            let origin = ui
+                .input(|i| i.pointer.press_origin())
+                .map(|p| self.to_image(p));
+            return origin.or(pointer).map(ToolInput::StrokeBegin);
+        }
+        if self.painting && response.dragged_by(PointerButton::Primary) {
+            return pointer.map(ToolInput::StrokeMove);
+        }
+        if self.painting && (response.drag_stopped() || !ui.input(|i| i.pointer.primary_down())) {
+            self.painting = false;
+            return Some(ToolInput::StrokeEnd);
+        }
+        if response.clicked_by(PointerButton::Primary) {
+            // A click without dragging paints a single dab; the next frame
+            // ends the stroke.
+            self.painting = true;
+            return pointer.map(ToolInput::StrokeBegin);
+        }
+        None
+    }
+
+    fn brush_cursor(&self, ui: &Ui, pointer: Pos2, diameter: f32) {
+        let radius = diameter * self.view.zoom / self.ppp / 2.0;
+        let painter = ui.painter_at(self.rect);
+        if radius >= 3.0 {
+            // Dark and light rings, visible on any image.
+            painter.circle_stroke(
+                pointer,
+                radius,
+                Stroke::new(1.5, Color32::from_black_alpha(160)),
+            );
+            painter.circle_stroke(
+                pointer,
+                radius,
+                Stroke::new(0.75, Color32::from_white_alpha(200)),
+            );
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+        } else {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+    }
+
+    /// Pan and zoom. Returns true while the pointer is being used to pan.
+    fn navigate(&mut self, ui: &Ui, response: &egui::Response, canvas: Rect) -> bool {
         let space = ui.input(|i| i.key_down(Key::Space));
         let panning = response.dragged_by(PointerButton::Middle)
             || (space && response.dragged_by(PointerButton::Primary));
@@ -255,25 +446,24 @@ impl Canvas {
             ui.ctx().set_cursor_icon(CursorIcon::Grab);
         }
 
-        if !response.hovered() {
-            return;
+        if let Some(pointer) = response.hover_pos() {
+            let (zoom_delta, scroll, modifiers) =
+                ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers));
+            if zoom_delta != 1.0 {
+                // Ctrl+scroll and touchpad pinch.
+                self.zoom_to(self.view.zoom * zoom_delta, pointer, canvas);
+            } else if modifiers.alt && scroll != Vec2::ZERO {
+                // Photoshop's Alt+scroll zoom.
+                let amount = if scroll.y != 0.0 { scroll.y } else { scroll.x };
+                self.zoom_to(self.view.zoom * (amount * 0.005).exp(), pointer, canvas);
+            } else if scroll != Vec2::ZERO
+                && (modifiers == Modifiers::NONE || modifiers.shift_only())
+            {
+                self.view.origin += scroll;
+                self.view.fit = false;
+            }
         }
-        let Some(pointer) = response.hover_pos() else {
-            return;
-        };
-        let (zoom_delta, scroll, modifiers) =
-            ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers));
-        if zoom_delta != 1.0 {
-            // Ctrl+scroll and touchpad pinch.
-            self.zoom_to(self.view.zoom * zoom_delta, pointer, canvas);
-        } else if modifiers.alt && scroll != Vec2::ZERO {
-            // Photoshop's Alt+scroll zoom.
-            let amount = if scroll.y != 0.0 { scroll.y } else { scroll.x };
-            self.zoom_to(self.view.zoom * (amount * 0.005).exp(), pointer, canvas);
-        } else if scroll != Vec2::ZERO && (modifiers == Modifiers::NONE || modifiers.shift_only()) {
-            self.view.origin += scroll;
-            self.view.fit = false;
-        }
+        space || panning
     }
 
     /// Origin rounded to whole physical pixels, so 100 % stays crisp.
@@ -283,22 +473,19 @@ impl Canvas {
 
     /// Pyramid level to draw at the current zoom: the smallest level that
     /// still has at least one pixel per screen pixel.
-    fn target_level(&self, levels: usize) -> usize {
+    fn target_level(&self) -> usize {
         if self.view.zoom >= 1.0 {
             return 0;
         }
         let level = (1.0 / self.view.zoom).log2().floor() as usize;
-        level.min(levels - 1)
+        level.min(self.levels.len() - 1)
     }
 
     fn receive_tiles(&mut self, ctx: &egui::Context) {
-        let Some(render) = self.render.clone() else {
-            return;
-        };
         while let Ok(tile) = self.rx.try_recv() {
             self.in_flight.remove(&tile.key);
-            if tile.generation != self.generation {
-                // Made from an older render; it will be requested again.
+            if !self.is_fresh(tile.key, tile.stamp) {
+                // Made before the area last changed; it will be requested again.
                 continue;
             }
             // Level 0 is shown nearest-neighbour when magnified, so pixels stay crisp.
@@ -312,23 +499,23 @@ impl Canvas {
                 minification: TextureFilter::Linear,
                 ..Default::default()
             };
-            let level = render.level(tile.key.level);
-            let bounds = tiles::bounds(level.width(), level.height(), tile.key.col, tile.key.row);
-            let name = format!("tile-{}-{}-{}", tile.key.level, tile.key.col, tile.key.row);
+            let (lw, lh) = self.levels[tile.key.level];
+            let bounds = tiles::bounds(lw, lh, tile.key.col, tile.key.row);
             match self.textures.get_mut(&tile.key) {
                 // Replace pixels in place, keeping the GPU texture.
                 Some(existing) => {
                     existing.texture.set(tile.image, options);
-                    existing.generation = tile.generation;
+                    existing.stamp = tile.stamp;
                 }
                 None => {
+                    let name = format!("tile-{}-{}-{}", tile.key.level, tile.key.col, tile.key.row);
                     let texture = ctx.load_texture(name, tile.image, options);
                     self.textures.insert(
                         tile.key,
                         TileTexture {
                             texture,
                             bounds,
-                            generation: tile.generation,
+                            stamp: tile.stamp,
                         },
                     );
                 }
@@ -352,6 +539,15 @@ impl Canvas {
             .id()
     }
 
+    /// Image pixels per level pixel, per axis (odd sizes round up when halving).
+    fn ratio(&self, level: usize) -> Vec2 {
+        let (lw, lh) = self.levels[level];
+        vec2(
+            self.width as f32 / lw as f32,
+            self.height as f32 / lh as f32,
+        )
+    }
+
     fn draw(&mut self, ui: &Ui, canvas: Rect, ppp: f32) {
         let painter = ui.painter_at(canvas);
         let origin = canvas.min + self.snapped_origin(ppp);
@@ -367,20 +563,17 @@ impl Canvas {
         let Some(render) = self.render.clone() else {
             return;
         };
-        let levels = render.pyramid.len();
-        let target = self.target_level(levels);
+        let levels = self.levels.len();
+        let target = self.target_level();
         let top = levels - 1;
         let visible = canvas.intersect(image_rect);
         if !visible.is_positive() {
             return;
         }
 
-        let level = render.level(target);
-        let to_image = vec2(
-            size.x / level.width() as f32,
-            size.y / level.height() as f32,
-        );
-        let (cols, rows) = tiles::grid(level.width(), level.height());
+        let (lw, lh) = self.levels[target];
+        let to_image = self.ratio(target);
+        let (cols, rows) = tiles::grid(lw, lh);
         let lo = ((visible.min - origin) / scale) / to_image;
         let hi = ((visible.max - origin) / scale) / to_image;
         let tile = tiles::TILE_SIZE as f32;
@@ -391,18 +584,6 @@ impl Canvas {
         let focus = (lo + hi) * 0.5;
 
         let mut wanted: Vec<(bool, f32, TileKey)> = Vec::new();
-        let mut want = |key: TileKey,
-                        distance: f32,
-                        textures: &HashMap<TileKey, TileTexture>,
-                        generation: u64| {
-            let fresh = textures
-                .get(&key)
-                .is_some_and(|t| t.generation == generation);
-            if !fresh {
-                wanted.push((key.level == top, distance, key));
-            }
-        };
-
         for row in r0..r1 {
             for col in c0..c1 {
                 let key = TileKey {
@@ -410,7 +591,7 @@ impl Canvas {
                     col,
                     row,
                 };
-                let b = tiles::bounds(level.width(), level.height(), col, row);
+                let b = tiles::bounds(lw, lh, col, row);
                 // The tile's content, in image pixels.
                 let region = Rect::from_min_max(
                     pos2(b.x as f32 * to_image.x, b.y as f32 * to_image.y),
@@ -419,15 +600,21 @@ impl Canvas {
                         (b.y + b.h) as f32 * to_image.y,
                     ),
                 );
-                let distance =
-                    (vec2((col as f32 + 0.5) * tile, (row as f32 + 0.5) * tile) - focus).length();
-                want(key, distance, &self.textures, self.generation);
+                if !self
+                    .textures
+                    .get(&key)
+                    .is_some_and(|t| self.is_fresh(key, t.stamp))
+                {
+                    let distance = (vec2((col as f32 + 0.5) * tile, (row as f32 + 0.5) * tile)
+                        - focus)
+                        .length();
+                    wanted.push((false, distance, key));
+                }
 
                 // Draw the best texture available for this region: the tile
                 // itself, or the part of a coarser tile that covers it.
                 let source = (target..levels).find_map(|l| {
-                    let lv = render.level(l);
-                    let k = to_image_ratio(size, lv);
+                    let k = self.ratio(l);
                     let key = TileKey {
                         level: l,
                         col: (region.min.x / k.x) as u32 / tiles::TILE_SIZE,
@@ -453,14 +640,13 @@ impl Canvas {
                     None => {
                         // Nothing yet: ask for the tiny top-level tile too, as
                         // an instant placeholder.
-                        let lv = render.level(top);
-                        let k = to_image_ratio(size, lv);
+                        let k = self.ratio(top);
                         let key = TileKey {
                             level: top,
                             col: (region.min.x / k.x) as u32 / tiles::TILE_SIZE,
                             row: (region.min.y / k.y) as u32 / tiles::TILE_SIZE,
                         };
-                        want(key, 0.0, &self.textures, self.generation);
+                        wanted.push((true, 0.0, key));
                     }
                 }
             }
@@ -483,31 +669,22 @@ impl Canvas {
         let render = Arc::clone(render);
         let transform = Arc::clone(&self.transform);
         let tx = self.tx.clone();
-        let generation = self.generation;
+        let stamp = self.generation;
         rayon::spawn(move || {
-            let level = render.level(key.level);
-            let b = tiles::bounds(level.width(), level.height(), key.col, key.row);
-            let rgba = tiles::render(level, &transform, b);
-            let image =
-                ColorImage::from_rgba_unmultiplied([b.tex_w as usize, b.tex_h as usize], &rgba);
-            if tx
-                .send(TileImage {
-                    generation,
-                    key,
-                    image,
-                })
-                .is_ok()
-            {
+            let rgba_and_size = {
+                let Ok(data) = render.data.read() else { return };
+                let level = data.level(key.level);
+                let b = tiles::bounds(level.width(), level.height(), key.col, key.row);
+                (
+                    tiles::render(level, &transform, b),
+                    [b.tex_w as usize, b.tex_h as usize],
+                )
+            };
+            let (rgba, size) = rgba_and_size;
+            let image = ColorImage::from_rgba_unmultiplied(size, &rgba);
+            if tx.send(TileImage { stamp, key, image }).is_ok() {
                 ctx.request_repaint();
             }
         });
     }
-}
-
-/// Image pixels per level pixel, per axis (odd sizes round up when halving).
-fn to_image_ratio(size: Vec2, level: &Raster) -> Vec2 {
-    vec2(
-        size.x / level.width() as f32,
-        size.y / level.height() as f32,
-    )
 }

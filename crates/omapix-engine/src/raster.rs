@@ -42,6 +42,11 @@ impl Raster {
         &self.pixels[start..start + self.width as usize]
     }
 
+    pub fn row_mut(&mut self, y: u32) -> &mut [Pixel] {
+        let start = y as usize * self.width as usize;
+        &mut self.pixels[start..start + self.width as usize]
+    }
+
     pub fn get(&self, x: u32, y: u32) -> Pixel {
         self.pixels[y as usize * self.width as usize + x as usize]
     }

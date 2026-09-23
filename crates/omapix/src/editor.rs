@@ -4,6 +4,8 @@
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 
+use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
+use omapix_engine::tiled::Tiled;
 use omapix_engine::{DisplayTransform, Document};
 
 use crate::canvas::{Canvas, Render};
@@ -52,6 +54,11 @@ pub struct Editor {
     /// Changed since last saved.
     pub modified: bool,
     pub canvas: Canvas,
+    /// The brush stroke in progress, and the layer it paints on.
+    stroke: Option<(Stroke, u64)>,
+    /// Last revision drawn straight into the canvas by a brush stroke.
+    /// Background renders of older revisions are thrown away.
+    painted: u64,
 }
 
 impl Editor {
@@ -72,6 +79,8 @@ impl Editor {
             job: None,
             modified: false,
             canvas,
+            stroke: None,
+            painted: 0,
         })
     }
 
@@ -227,6 +236,89 @@ impl Editor {
         }
     }
 
+    /// Start a brush stroke on the active layer (or its mask). Returns false
+    /// if there is nothing to paint on or a background job is running.
+    pub fn begin_stroke(&mut self, settings: BrushSettings, paint: Paint) -> bool {
+        if self.job.is_some() {
+            return false;
+        }
+        let target = self.target;
+        let Some(layer) = self.doc.layer(self.active) else {
+            return false;
+        };
+        let surface = match (target, &layer.mask) {
+            (Target::Mask, Some(mask)) => Surface::Mask(mask.pixels.clone()),
+            (Target::Mask, None) => return false,
+            (Target::Pixels, _) => Surface::Pixels(layer.pixels.clone()),
+        };
+        self.live = None;
+        let label = match (target, paint) {
+            (Target::Mask, _) => "Paint Mask",
+            (_, Paint::Erase) => "Eraser",
+            _ => "Brush Stroke",
+        };
+        let before = self.snapshot(label);
+        self.push_undo(before);
+        self.stroke = Some((Stroke::new(settings, paint, surface), self.active));
+        true
+    }
+
+    /// Continue the stroke to an image position.
+    pub fn stroke_to(&mut self, x: f32, y: f32) {
+        let Some((stroke, id)) = &mut self.stroke else {
+            return;
+        };
+        let tiles = stroke.add_point(x, y);
+        if tiles.is_empty() {
+            return;
+        }
+        let Some(layer) = self.doc.layer_mut(*id) else {
+            return;
+        };
+        // Move the surface out of the layer, paint, and put it back, so
+        // tiles are written in place rather than copied.
+        match self.target {
+            Target::Mask => {
+                let Some(mask) = layer.mask.as_mut() else {
+                    return;
+                };
+                let mut surface =
+                    Surface::Mask(std::mem::replace(&mut mask.pixels, Tiled::new(0, 0, 0)));
+                stroke.apply(&mut surface, &tiles);
+                if let Surface::Mask(t) = surface {
+                    mask.pixels = t;
+                }
+            }
+            Target::Pixels => {
+                let mut surface = Surface::Pixels(std::mem::replace(
+                    &mut layer.pixels,
+                    Tiled::new(0, 0, [0; 4]),
+                ));
+                stroke.apply(&mut surface, &tiles);
+                if let Surface::Pixels(t) = surface {
+                    layer.pixels = t;
+                }
+            }
+        }
+        let up_to_date = self.rendered == self.revision;
+        self.changed();
+        if let Some(render) = self.canvas.render().cloned()
+            && let Some(area) = render.update_tiles(&self.doc.layers, &tiles)
+        {
+            self.canvas.invalidate(area);
+            self.painted = self.revision;
+            // If the canvas was current before this dab, it still is. If
+            // not, a full render will catch up with the rest.
+            if up_to_date {
+                self.rendered = self.revision;
+            }
+        }
+    }
+
+    pub fn end_stroke(&mut self) {
+        self.stroke = None;
+    }
+
     /// Pick up finished background work and start rendering if the document
     /// changed. Call once per frame.
     pub fn update(&mut self, ctx: &egui::Context) {
@@ -249,13 +341,17 @@ impl Editor {
         if let Some((revision, rx)) = &self.rendering
             && let Ok(render) = rx.try_recv()
         {
-            self.rendered = *revision;
-            self.canvas.set_render(Arc::new(render));
+            // A render started before brush dabs were drawn in place would
+            // erase them from the screen; drop it and render again.
+            if *revision >= self.painted {
+                self.rendered = *revision;
+                self.canvas.set_render(Arc::new(render));
+            }
             self.rendering = None;
         }
         // One render at a time; when it finishes, the latest state is
         // rendered next, so fast slider drags skip intermediate states.
-        if self.rendering.is_none() && self.rendered != self.revision {
+        if self.rendering.is_none() && self.rendered != self.revision && self.stroke.is_none() {
             let (tx, rx) = channel();
             let doc = self.doc.clone();
             let ctx = ctx.clone();
@@ -279,5 +375,83 @@ impl Editor {
         if revision == self.revision {
             self.modified = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omapix_engine::layer::Mask;
+    use omapix_engine::{ColorProfile, Raster, ops};
+
+    fn editor() -> Editor {
+        let (w, h) = (600, 400);
+        let image = Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
+        let doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        Editor::new(doc).unwrap()
+    }
+
+    fn hard(size: f32) -> BrushSettings {
+        BrushSettings {
+            size,
+            hardness: 1.0,
+            opacity: 1.0,
+            flow: 1.0,
+        }
+    }
+
+    #[test]
+    fn stroke_paints_the_mask_when_it_is_targeted_and_undoes_in_one_step() {
+        let mut e = editor();
+        e.edit("D&B", |doc, active| {
+            *active = ops::dodge_and_burn_layer(doc, 0)
+        });
+        e.edit("Mask", |doc, active| {
+            doc.layer_mut(*active).unwrap().mask = Some(Mask::white(600, 400))
+        });
+        e.target = Target::Mask;
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0)));
+        e.stroke_to(100.0, 100.0);
+        e.stroke_to(300.0, 100.0);
+        e.end_stroke();
+        let layer = e.doc.layer(e.active).unwrap();
+        assert_eq!(layer.mask.as_ref().unwrap().pixels.get(200, 100), 0);
+        assert_eq!(layer.mask.as_ref().unwrap().pixels.get(200, 300), u16::MAX);
+        // Pixels untouched.
+        assert_eq!(layer.pixels.get(200, 100), [32768, 32768, 32768, 65535]);
+        e.undo();
+        assert!(
+            e.doc
+                .layer(e.active)
+                .unwrap()
+                .mask
+                .as_ref()
+                .unwrap()
+                .pixels
+                .tile(0, 0)
+                .is_none()
+        );
+        assert_eq!(e.undo_label(), Some("Mask"));
+    }
+
+    #[test]
+    fn in_place_render_updates_match_a_full_composite() {
+        let mut e = editor();
+        let render = Arc::new(Render::new(e.doc.composite()));
+        e.canvas.set_render(Arc::clone(&render));
+        e.rendered = e.revision;
+        assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535])));
+        e.stroke_to(250.0, 250.0);
+        e.stroke_to(290.0, 270.0);
+        e.end_stroke();
+        assert_eq!(
+            e.rendered, e.revision,
+            "canvas kept current without a full render"
+        );
+        assert_eq!(
+            e.canvas.sample(270, 260),
+            Some(e.doc.composite().get(270, 260))
+        );
+        assert_eq!(e.canvas.sample(270, 260), Some([0, 0, 65535, 65535]));
     }
 }

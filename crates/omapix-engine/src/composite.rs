@@ -45,6 +45,41 @@ pub fn composite(layers: &[Layer], width: u32, height: u32) -> Raster {
     Raster::new(width, height, out)
 }
 
+/// Recomposite only the given 256 px tiles (col, row) into an existing
+/// flattened image, e.g. the area a brush stroke just touched.
+pub fn composite_into(layers: &[Layer], image: &mut Raster, tiles: &[(u32, u32)]) {
+    let visible: Vec<&Layer> = layers
+        .iter()
+        .filter(|l| l.visible && l.opacity > 0.0)
+        .collect();
+    type Blended = ((u32, u32), Vec<[f32; 4]>);
+    let results: Vec<Blended> = tiles
+        .par_iter()
+        .map(|&(col, row)| {
+            let mut acc = vec![[0f32; 4]; TILE_PIXELS];
+            for layer in &visible {
+                blend_tile(&mut acc, layer, col, row);
+            }
+            ((col, row), acc)
+        })
+        .collect();
+    let (w, h) = (image.width(), image.height());
+    for ((col, row), acc) in results {
+        let (x0, y0) = (col * TILE, row * TILE);
+        if x0 >= w || y0 >= h {
+            continue;
+        }
+        let tw = TILE.min(w - x0) as usize;
+        for ty in 0..TILE.min(h - y0) {
+            let src = &acc[(ty * TILE) as usize..(ty * TILE) as usize + tw];
+            let line = &mut image.row_mut(y0 + ty)[x0 as usize..x0 as usize + tw];
+            for (dst, px) in line.iter_mut().zip(src) {
+                *dst = to_u16(*px);
+            }
+        }
+    }
+}
+
 fn blend_tile(acc: &mut [[f32; 4]], layer: &Layer, col: u32, row: u32) {
     // An empty tile is transparent and changes nothing.
     let Some(src) = layer.pixels.tile(col, row) else {
@@ -164,6 +199,19 @@ mod tests {
                 assert!(a[c].abs_diff(b[c]) <= 2, "{a:?} vs {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn partial_update_matches_full_composite() {
+        let (w, h) = (600, 400);
+        let bottom = solid(1, w, h, [10000, 20000, 30000, 65535]);
+        let mut top = solid(2, w, h, [65535, 0, 0, 40000]);
+        top.blend = BlendMode::Multiply;
+        let mut layers = vec![bottom, top];
+        let mut image = composite(&layers, w, h);
+        layers[1].pixels.tile_mut(1, 1)[5] = [0, 65535, 0, 65535];
+        composite_into(&layers, &mut image, &[(1, 1)]);
+        assert_eq!(image.pixels(), composite(&layers, w, h).pixels());
     }
 
     #[test]

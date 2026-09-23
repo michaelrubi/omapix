@@ -4,6 +4,7 @@ mod commands;
 mod editor;
 mod layers_panel;
 mod theme;
+mod tools;
 
 use std::path::PathBuf;
 

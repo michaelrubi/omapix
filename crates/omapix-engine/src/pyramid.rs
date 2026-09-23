@@ -34,6 +34,30 @@ impl Pyramid {
         false
     }
 
+    /// Recompute the part of every level that depends on the base image
+    /// rectangle `[x0, x1) × [y0, y1)`, after the base changed there.
+    pub fn update_region(
+        &mut self,
+        base: &Raster,
+        (mut x0, mut y0, mut x1, mut y1): (u32, u32, u32, u32),
+    ) {
+        for i in 0..self.reduced.len() {
+            let (before, rest) = self.reduced.split_at_mut(i);
+            let src = before.last().unwrap_or(base);
+            let dst = &mut rest[0];
+            x0 /= 2;
+            y0 /= 2;
+            x1 = x1.div_ceil(2).min(dst.width());
+            y1 = y1.div_ceil(2).min(dst.height());
+            for y in y0..y1 {
+                let row = dst.row_mut(y);
+                for x in x0..x1 {
+                    row[x as usize] = halved_pixel(src, x, y);
+                }
+            }
+        }
+    }
+
     pub fn level<'a>(&'a self, base: &'a Raster, index: usize) -> &'a Raster {
         if index == 0 {
             base
@@ -53,16 +77,25 @@ fn halve(src: &Raster) -> Raster {
         .par_chunks_mut(w as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            let y0 = y as u32 * 2;
-            let y1 = (y0 + 1).min(sh - 1);
-            let (r0, r1) = (src.row(y0), src.row(y1));
             for (x, out) in row.iter_mut().enumerate() {
-                let x0 = x * 2;
-                let x1 = (x0 + 1).min(sw as usize - 1);
-                *out = average([r0[x0], r0[x1], r1[x0], r1[x1]]);
+                *out = halved_pixel(src, x as u32, y as u32);
             }
         });
     Raster::new(w, h, pixels)
+}
+
+/// One pixel of the half-size image: the average of the 2×2 block it
+/// covers, clamped at the source's edges.
+fn halved_pixel(src: &Raster, x: u32, y: u32) -> Pixel {
+    let (sw, sh) = (src.width(), src.height());
+    let (x0, y0) = (x * 2, y * 2);
+    let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
+    average([
+        src.get(x0, y0),
+        src.get(x1, y0),
+        src.get(x0, y1),
+        src.get(x1, y1),
+    ])
 }
 
 fn average(px: [Pixel; 4]) -> Pixel {
@@ -87,6 +120,27 @@ mod tests {
             .collect();
         assert_eq!(sizes, vec![(600, 300), (300, 150), (150, 75), (75, 38)]);
         assert_eq!(p.level(&base, 3).get(0, 0), [1000, 2000, 3000, 65535]);
+    }
+
+    #[test]
+    fn region_update_matches_full_rebuild() {
+        let (w, h) = (700, 500);
+        let mut base = Raster::new(w, h, vec![[1000, 2000, 3000, 65535]; (w * h) as usize]);
+        let mut p = Pyramid::build(&base);
+        for y in 100..180 {
+            for px in &mut base.row_mut(y)[333..401] {
+                *px = [60000, 100, 5000, 65535];
+            }
+        }
+        p.update_region(&base, (333, 100, 401, 180));
+        let fresh = Pyramid::build(&base);
+        for i in 0..p.len() {
+            assert_eq!(
+                p.level(&base, i).pixels(),
+                fresh.level(&base, i).pixels(),
+                "level {i}"
+            );
+        }
     }
 
     #[test]
