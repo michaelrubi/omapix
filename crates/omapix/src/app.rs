@@ -46,6 +46,10 @@ enum Dialog {
 /// where, and whether it was a native save (vs a flattened export).
 type Written = Result<(u64, PathBuf, bool), String>;
 
+/// A document read from disk, with the original profile's name if a linear
+/// file was converted for editing.
+type Opened = Result<(Document, Option<String>), String>;
+
 /// A save or export running in the background.
 struct FileJob {
     label: String,
@@ -61,7 +65,7 @@ pub struct App {
     editor: Option<Editor>,
     layers: LayersPanel,
     /// A file being opened in the background.
-    opening: Option<(PathBuf, Receiver<Result<Document, String>>)>,
+    opening: Option<(PathBuf, Receiver<Opened>)>,
     /// A file dialog open in the background.
     picking: Option<(Purpose, Receiver<Option<PathBuf>>)>,
     file_job: Option<FileJob>,
@@ -135,7 +139,12 @@ impl App {
         let target = path.clone();
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result = omapix_engine::io::load(&target).map_err(|e| e.to_string());
+            let result = omapix_engine::io::load(&target)
+                .and_then(|mut doc| {
+                    let converted = ops::prepare_for_editing(&mut doc)?;
+                    Ok((doc, converted))
+                })
+                .map_err(|e| e.to_string());
             log::info!("opened {} in {:?}", target.display(), started.elapsed());
             let _ = tx.send(result);
             ctx.request_repaint();
@@ -278,8 +287,12 @@ impl App {
         {
             let path = path.clone();
             self.opening = None;
-            match result.and_then(Editor::new) {
-                Ok(editor) => {
+            match result.and_then(|(doc, converted)| Ok((Editor::new(doc)?, converted))) {
+                Ok((editor, converted)) => {
+                    if let Some(original) = converted {
+                        let now = editor.doc.profile.description().to_owned();
+                        self.message(format!("Converted {original} to {now} for editing"), false);
+                    }
                     self.editor = Some(editor);
                     self.separation_radius = None;
                 }

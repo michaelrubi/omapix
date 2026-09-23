@@ -7,6 +7,26 @@ use crate::layer::Layer;
 use crate::tiled::Tiled;
 use crate::{Document, Raster};
 
+/// Gamma that linear documents are converted to for editing. ProPhoto RGB's
+/// own standard gamma.
+pub const EDITING_GAMMA: f64 = 1.8;
+
+/// Get a freshly opened flat image ready for editing. Linear colour spaces
+/// (darktable's default export) make brushes, blurs and blend modes behave
+/// unlike Photoshop, so their pixels are converted to the same colour space
+/// with a normal gamma curve. Returns the original profile's name if it
+/// converted anything.
+pub fn prepare_for_editing(doc: &mut Document) -> crate::Result<Option<String>> {
+    if doc.layers.len() != 1 || !doc.profile.is_linear() {
+        return Ok(None);
+    }
+    let target = doc.profile.with_gamma(EDITING_GAMMA)?;
+    let layer = &mut doc.layers[0];
+    layer.pixels = crate::color::convert(&layer.pixels, &doc.profile, &target)?;
+    let original = std::mem::replace(&mut doc.profile, target);
+    Ok(Some(original.description().to_owned()))
+}
+
 /// Photoshop's "Stamp Visible": a new layer holding the flattened image,
 /// placed above `above`. Returns the new layer's id.
 pub fn stamp_visible(doc: &mut Document, above: usize) -> u64 {
