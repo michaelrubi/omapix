@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Omapix
+GenericName=Photo Editor
+Comment=Retouch photos with layers, masks, healing and frequency separation
+Exec=omapix %f
+Icon=omapix
+Terminal=false
+Categories=Graphics;2DGraphics;Photography;RasterGraphics;
+MimeType=image/tiff;image/png;image/jpeg;image/openraster;
+StartupWMClass=omapix

@@ -19,6 +19,10 @@ are next. See [docs/DESIGN.md](docs/DESIGN.md) for the plan and shortcuts.
 cargo run --release -- path/to/image.tif
 ```
 
+To install for your user (binary in `~/.local/bin`, plus a launcher entry
+and icon), run `make install`. It doesn't change which app opens images
+by default. `make uninstall` removes it.
+
 Requires Rust, Vulkan and Little CMS 2 (`lcms2`).
 
 ## License
