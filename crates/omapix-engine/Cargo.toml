@@ -1,0 +1,12 @@
+[package]
+name = "omapix-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+lcms2 = "6.2.0"
+rayon = "1.12.0"
+thiserror = "2.0.20"
+tiff = "0.11.3"
