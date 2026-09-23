@@ -373,14 +373,13 @@ impl Tools {
                 (Tool::Marquee, MARQUEE_ICON, "Rectangular Marquee (M)"),
                 (Tool::Lasso, LASSO_ICON, "Lasso (L)"),
             ] {
-                let selected = self.tool == tool;
-                let colour = if selected {
-                    theme.accent
-                } else {
+                let active = self.tool == tool;
+                let colour = if active {
                     theme.foreground
+                } else {
+                    theme.dark_foreground
                 };
-                let button =
-                    Button::new(RichText::new(icon).size(18.0).color(colour)).selected(selected);
+                let button = Button::new(RichText::new(icon).size(18.0).color(colour));
                 if ui.add(button).on_hover_text(tip).clicked() {
                     self.tool = tool;
                 }
@@ -470,5 +469,16 @@ mod tests {
             Some(Paint::Mask(u16::MAX))
         );
         assert_eq!(eraser.paint(Target::Pixels, &srgb, at), Some(Paint::Erase));
+    }
+
+    #[test]
+    fn toolbar_renders() {
+        let mut tools = Tools::default();
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            tools.toolbar(ui, &theme);
+        });
+        output.textures_delta.clear();
     }
 }
