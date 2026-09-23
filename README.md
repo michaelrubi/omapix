@@ -7,8 +7,11 @@ lightweight, and look native to your Omarchy theme.
 > Omapix is an independent project. It is not made by or affiliated with
 > Omarchy.
 
-**Status:** early. Milestone 1 (a colour-managed 16-bit image viewer) is in
-progress. See [docs/DESIGN.md](docs/DESIGN.md) for the plan.
+**Status:** early but usable for layered retouching. It has 16-bit
+colour-managed editing, layers with Photoshop's blend modes and masks,
+undo, a brush and eraser, one-click frequency separation and dodge & burn
+layers, and OpenRaster save with TIFF/JPEG export. Clone and healing tools
+are next. See [docs/DESIGN.md](docs/DESIGN.md) for the plan and shortcuts.
 
 ## Build and run
 

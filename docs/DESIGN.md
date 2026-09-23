@@ -39,8 +39,14 @@ unit tests, and leaves room to replace the UI toolkit later.
 - Documents are stored at 16 bits per channel, RGBA, in the document's own
   colour space (the ICC profile embedded in the file, or sRGB if none).
   8-bit files are promoted to 16-bit on load.
-- Milestone 1 holds each image as one contiguous buffer. The tile engine
-  (below) replaces this before layers land in milestone 2.
+- Layers are held in 256×256 copy-on-write tiles (`tiled.rs`). Cloning a
+  layer or the whole document shares tiles, and writing copies only the
+  tile touched. Tiles never written read as a fill value, so empty layers
+  and untouched masks cost nothing.
+- Flat images in a **linear** colour space (darktable's default "Linear
+  ProPhoto RGB" export) are converted on open to the same primaries with
+  gamma 1.8. Brushes, blurs and blend modes then behave as they do in
+  Photoshop. The status bar says when this happens.
 
 ### Colour management
 
@@ -64,16 +70,31 @@ unit tests, and leaves room to replace the UI toolkit later.
    the screen area. Above 100 %, pixels are drawn nearest-neighbour so they
    stay crisp, like Photoshop.
 
-### Tile engine (before milestone 2)
+### Compositing and undo
 
-- 256×256 tiles, copy-on-write, so undo stores only the tiles a stroke
-  touched.
-- Layers composite tile by tile. Blend modes run on the GPU for display and
-  on the CPU for export, with shared test vectors to keep them identical.
+- Layers composite tile by tile on the CPU in parallel (`composite.rs`),
+  about 100 ms for four layers at 24 MP. The canvas shows the latest
+  composite; a whole-document render runs in the background after each
+  edit, and brush strokes recomposite only the tiles they touch, in place.
+- Blend modes follow Photoshop's formulas (Soft Light included), plus
+  GIMP/Krita's Grain Extract/Merge for frequency separation.
+- Undo keeps whole-document snapshots, which cost almost nothing because
+  they share tiles (a snapshot of a 24 MP, four-layer document takes
+  ~30 µs). A continuous gesture, such as dragging a slider or one brush
+  stroke, is one undo step.
+
+### Files
+
+- **OpenRaster (.ora)** is the native format: layers as 16-bit PNGs with
+  the ICC profile, cropped to the area they use, blend modes under Krita's
+  names so files open correctly in Krita, and masks as extra PNGs under
+  `omapix:` attributes other apps ignore.
+- Exports: flattened 16-bit TIFF with ICC (back to darktable or to print)
+  and 8-bit sRGB JPEG (web and clients).
 
 ## Milestones
 
-### 1. Viewer (current)
+### 1. Viewer (done)
 
 - Open 16-bit (and 8-bit) TIFF with its embedded ICC profile; PNG and JPEG
   through the `image` crate.
@@ -86,16 +107,18 @@ unit tests, and leaves room to replace the UI toolkit later.
 - Status bar: zoom, document size, bit depth, colour profile, pixel under
   cursor.
 
-### 2. Layers
+### 2. Layers (done)
 
-Tile engine, pixel layers, groups, opacity, blend modes (including
-Soft Light, Grain Extract and Grain Merge), layer masks, undo and redo,
-native file format.
+Tile engine, pixel layers, opacity, 25 blend modes, layer masks, undo and
+redo, OpenRaster save/open, TIFF/JPEG export, Gaussian Blur, one-click
+frequency separation and dodge & burn layer, merge down, stamp visible.
+Layer groups are not done yet.
 
-### 3. Retouch tools
+### 3. Retouch tools (in progress)
 
-Pressure-sensitive brush engine, clone stamp, healing brush, spot healing
-brush, one-key frequency separation, dodge & burn setup.
+Done: brush and eraser with Photoshop's size, hardness, opacity and flow;
+painting on masks; eyedropper. Next: clone stamp, healing brush, spot
+healing brush, pen pressure (winit has no tablet support on Linux yet).
 
 ### 4. Adjustments
 
@@ -107,17 +130,43 @@ loading; export with conversion to sRGB.
 Liquify, AI-assisted retouching (local models via ONNX Runtime on the GPU),
 PSD import.
 
-## Shortcuts (milestone 1)
+## Shortcuts
+
+All follow Photoshop.
 
 | Action | Keys |
 |---|---|
-| Open | Ctrl+O |
-| Fit on screen | Ctrl+0 |
-| 100 % | Ctrl+1 |
+| Open / Save / Save As | Ctrl+O / Ctrl+S / Ctrl+Shift+S |
+| Undo / Redo | Ctrl+Z / Ctrl+Shift+Z |
+| New layer / Duplicate | Ctrl+Shift+N / Ctrl+J |
+| Merge down / Stamp visible | Ctrl+E / Ctrl+Alt+Shift+E |
+| Bring forward / Send backward | Ctrl+] / Ctrl+[ |
+| Invert (layer or mask) | Ctrl+I |
+| Brush / Eraser | B / E |
+| Brush size / hardness | [ ] / Shift+[ Shift+] |
+| Opacity 10–100 % | 1–9, 0 |
+| Swap / reset colours | X / D |
+| Sample colour | Alt+click |
+| Fit on screen / 100 % | Ctrl+0 / Ctrl+1 |
 | Zoom in / out | Ctrl+= / Ctrl+- |
 | Zoom at cursor | Alt+scroll, Ctrl+scroll, pinch |
 | Pan | Space+drag, middle-drag, scroll / Shift+scroll |
 | Quit | Ctrl+Q |
+
+Click a layer's mask icon to paint on the mask; Shift+click disables it.
+
+## Testing the UI
+
+`OMAPIX_SCRIPT` runs steps once an image opens, through the same code the
+mouse and menus use, for testing without a mouse:
+
+```bash
+OMAPIX_SCRIPT="DodgeAndBurn,Size 300,Opacity 70,Stroke 3000 1450 4000 1450" \
+  cargo run --release -- photo.tif
+```
+
+Steps are command names (`FrequencySeparation`, `AddMask`, …), `Stroke x0
+y0 x1 y1`, `Tool Brush|Eraser`, `Size n`, `Opacity percent`, `Color r g b`.
 
 ## Licensing
 
