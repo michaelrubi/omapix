@@ -13,17 +13,9 @@ These come from using the app for real, and they make everyday work smoother.
 
 Clicking anywhere on a row, including the blend-mode label and empty space, now selects the layer. A pixel layer paints on its pixels; an adjustment layer paints on its mask. Clicking the mask thumbnail still selects the layer and targets its mask. Double-clicking the name renames. Double-clicking a thumbnail or empty space opens Blending Options (this was never actually hooked up before). Rows still drag to reorder. Needs a check with a real mouse (see the checklist below).
 
-### Right-click menu on layers
+### ~~Right-click menu on layers~~ (done)
 
-**Problem:** Blending Options and mask commands are buried in the Layer menu.
-
-**Plan:** right-clicking a layer row opens a context menu for that layer:
-- Blending Options…
-- Duplicate Layer, Delete Layer, Rename
-- Add Layer Mask / Delete Layer Mask
-- Disable / Enable Layer Mask, Invert Mask, View Mask (Alt+click)
-- Merge Down
-- Right-clicking the mask thumbnail shows just the mask commands, as in Photoshop.
+Right-clicking anywhere on a layer row opens a context menu with Blending Options…, Duplicate Layer, Delete Layer, Rename, Add/Delete Layer Mask, Disable/Enable Layer Mask, Invert Mask, View Mask (Alt+click), and Merge Down. Right-clicking the mask thumbnail shows just the mask commands, as in Photoshop.
 
 ### Mask overlay (Photoshop's red "rubylith")
 
@@ -46,6 +38,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Blend If handles, including Alt+drag to split
 - [ ] Dragging layers to reorder them, including by the name
 - [ ] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
+- [ ] Right-clicking layer rows and mask thumbnails for context menus
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open

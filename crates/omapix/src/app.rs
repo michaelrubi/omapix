@@ -1153,6 +1153,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             });
         }
         Command::DeleteLayer => {
+            if editor.view() == View::Mask(id) {
+                editor.set_view(View::Image);
+            }
             editor.edit("Delete Layer", |doc, active| {
                 doc.layers.remove(index);
                 *active = doc.layers[index.saturating_sub(1).min(doc.layers.len() - 1)].id;
@@ -1182,6 +1185,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.target = Target::Mask;
         }
         Command::DeleteMask => {
+            if editor.view() == View::Mask(id) {
+                editor.set_view(View::Image);
+            }
             editor.edit("Delete Layer Mask", |doc, _| {
                 if let Some(l) = doc.layer_mut(id) {
                     l.mask = None;

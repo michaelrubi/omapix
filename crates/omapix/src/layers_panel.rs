@@ -262,116 +262,138 @@ impl LayersPanel {
             .id(row_id(id))
             .sense(Sense::click_and_drag());
         let row = ui.scope_builder(builder, |ui| {
-            frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    let eye = if visible { EYE } else { EYE_OFF };
-                    let eye_colour = if visible {
-                        theme.foreground
-                    } else {
-                        theme.dark_foreground
-                    };
-                    let eye_button = ui
-                        .add(Button::new(RichText::new(eye).color(eye_colour)).frame(false))
-                        .on_hover_text("Show/hide");
-                    if eye_button.clicked() {
-                        editor.edit(
-                            if visible { "Hide Layer" } else { "Show Layer" },
-                            |doc, _| {
-                                if let Some(l) = doc.layer_mut(id) {
-                                    l.visible = !l.visible;
-                                }
-                            },
-                        );
-                    }
-
-                    // Pixel thumbnail (or the adjustment icon), then the mask
-                    // thumbnail. Clicking one picks what painting applies to.
-                    if adjustment {
-                        // Not selectable, so clicks fall through to the row.
-                        ui.add(
-                            egui::Label::new(RichText::new(SLIDERS).size(18.0).color(theme.accent))
-                                .selectable(false),
-                        )
-                        .on_hover_text("Adjustment layer");
-                    } else {
-                        let targeted = selected && editor.target == Target::Pixels;
-                        let response = self.thumbnail(ui, editor, id, false, targeted, theme);
-                        if response.double_clicked() {
-                            self.command = Some(Command::BlendingOptions);
-                        } else if response.clicked() {
-                            editor.active = id;
-                            editor.target = Target::Pixels;
-                        }
-                    }
-                    if let Some(enabled) = mask {
-                        let targeted = selected && editor.target == Target::Mask;
-                        let response = self
-                            .thumbnail(ui, editor, id, true, targeted, theme)
-                            .on_hover_text(
-                                "Layer mask — click to paint on it, Shift+click to disable",
-                            );
-                        if response.clicked() {
-                            if ui.input(|i| i.modifiers.alt) {
-                                // Alt+click shows the mask on its own, or goes back.
-                                editor.active = id;
-                                editor.target = Target::Mask;
-                                let view = if editor.view() == View::Mask(id) {
-                                    View::Image
-                                } else {
-                                    View::Mask(id)
-                                };
-                                editor.set_view(view);
-                            } else if ui.input(|i| i.modifiers.shift) {
-                                let label = if enabled {
-                                    "Disable Layer Mask"
-                                } else {
-                                    "Enable Layer Mask"
-                                };
-                                editor.edit(label, |doc, _| {
-                                    if let Some(m) = doc.layer_mut(id).and_then(|l| l.mask.as_mut())
-                                    {
-                                        m.enabled = !m.enabled;
+            frame
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        let eye = if visible { EYE } else { EYE_OFF };
+                        let eye_colour = if visible {
+                            theme.foreground
+                        } else {
+                            theme.dark_foreground
+                        };
+                        let eye_button = ui
+                            .add(Button::new(RichText::new(eye).color(eye_colour)).frame(false))
+                            .on_hover_text("Show/hide");
+                        if eye_button.clicked() {
+                            editor.edit(
+                                if visible { "Hide Layer" } else { "Show Layer" },
+                                |doc, _| {
+                                    if let Some(l) = doc.layer_mut(id) {
+                                        l.visible = !l.visible;
                                     }
-                                });
-                            } else {
+                                },
+                            );
+                        }
+
+                        // Pixel thumbnail (or the adjustment icon), then the mask
+                        // thumbnail. Clicking one picks what painting applies to.
+                        let pixel_thumb = if adjustment {
+                            // Not selectable, so clicks fall through to the row.
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(SLIDERS).size(18.0).color(theme.accent),
+                                )
+                                .selectable(false),
+                            )
+                            .on_hover_text("Adjustment layer");
+                            None
+                        } else {
+                            let targeted = selected && editor.target == Target::Pixels;
+                            let response = self.thumbnail(ui, editor, id, false, targeted, theme);
+                            if response.double_clicked() {
+                                self.command = Some(Command::BlendingOptions);
+                            } else if response.clicked() {
+                                editor.active = id;
+                                editor.target = Target::Pixels;
+                            }
+                            Some(response)
+                        };
+
+                        if let Some(enabled) = mask {
+                            let targeted = selected && editor.target == Target::Mask;
+                            let response = self
+                                .thumbnail(ui, editor, id, true, targeted, theme)
+                                .on_hover_text(
+                                    "Layer mask — click to paint on it, Shift+click to disable",
+                                );
+                            if response.secondary_clicked() {
                                 editor.active = id;
                                 editor.target = Target::Mask;
                             }
+                            response.context_menu(|ui| {
+                                mask_context_menu(ui, editor, &mut self.command, id, enabled);
+                            });
+                            if response.clicked() {
+                                if ui.input(|i| i.modifiers.alt) {
+                                    // Alt+click shows the mask on its own, or goes back.
+                                    editor.active = id;
+                                    editor.target = Target::Mask;
+                                    let view = if editor.view() == View::Mask(id) {
+                                        View::Image
+                                    } else {
+                                        View::Mask(id)
+                                    };
+                                    editor.set_view(view);
+                                } else if ui.input(|i| i.modifiers.shift) {
+                                    let label = if enabled {
+                                        "Disable Layer Mask"
+                                    } else {
+                                        "Enable Layer Mask"
+                                    };
+                                    editor.edit(label, |doc, _| {
+                                        if let Some(m) =
+                                            doc.layer_mut(id).and_then(|l| l.mask.as_mut())
+                                        {
+                                            m.enabled = !m.enabled;
+                                        }
+                                    });
+                                } else {
+                                    editor.active = id;
+                                    editor.target = Target::Mask;
+                                }
+                            }
+                            if !enabled {
+                                // Photoshop crosses out a disabled mask.
+                                let r = response.rect;
+                                ui.painter().line_segment(
+                                    [r.left_top(), r.right_bottom()],
+                                    egui::Stroke::new(2.0, theme.red),
+                                );
+                                ui.painter().line_segment(
+                                    [r.right_top(), r.left_bottom()],
+                                    egui::Stroke::new(2.0, theme.red),
+                                );
+                            }
                         }
-                        if !enabled {
-                            // Photoshop crosses out a disabled mask.
-                            let r = response.rect;
-                            ui.painter().line_segment(
-                                [r.left_top(), r.right_bottom()],
-                                egui::Stroke::new(2.0, theme.red),
-                            );
-                            ui.painter().line_segment(
-                                [r.right_top(), r.left_bottom()],
-                                egui::Stroke::new(2.0, theme.red),
-                            );
-                        }
-                    }
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if blend != BlendMode::Normal {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(blend.name())
-                                        .small()
-                                        .color(theme.dark_foreground),
-                                )
-                                .selectable(false),
-                            );
-                        }
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            self.name(ui, editor, id, &name, selected);
-                        });
-                    });
-                });
-            })
+                        let name_response =
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if blend != BlendMode::Normal {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(blend.name())
+                                                .small()
+                                                .color(theme.dark_foreground),
+                                        )
+                                        .selectable(false),
+                                    );
+                                }
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    self.name(ui, editor, id, &name, selected)
+                                })
+                                .inner
+                            })
+                            .inner;
+
+                        (pixel_thumb, name_response)
+                    })
+                    .inner
+                })
+                .inner
         });
 
+        let (pixel_thumb, name_response) = row.inner;
         let response = row.response;
         if response.drag_started() && editor.busy().is_none() {
             self.dragging = Some(id);
@@ -381,6 +403,21 @@ impl LayersPanel {
         } else if response.clicked() {
             select(editor, id);
         }
+
+        let row_secondary = response.secondary_clicked()
+            || name_response.secondary_clicked()
+            || pixel_thumb.as_ref().is_some_and(|r| r.secondary_clicked());
+        if row_secondary {
+            select(editor, id);
+        }
+        let mut popup = egui::Popup::context_menu(&response);
+        if row_secondary {
+            popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
+        }
+        popup.show(|ui| {
+            layer_context_menu(ui, editor, &mut self.command, &mut self.renaming, id);
+        });
+
         response.rect
     }
 
@@ -407,7 +444,8 @@ impl LayersPanel {
             (false, Some(l)) => Some(ThumbSource::Pixels(l.pixels.clone())),
             _ => None,
         };
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let response = ui.interact(rect, thumb_id(id, mask), Sense::click());
         let Some(source) = source else {
             return response;
         };
@@ -454,7 +492,14 @@ impl LayersPanel {
         response
     }
 
-    fn name(&mut self, ui: &mut Ui, editor: &mut Editor, id: u64, name: &str, selected: bool) {
+    fn name(
+        &mut self,
+        ui: &mut Ui,
+        editor: &mut Editor,
+        id: u64,
+        name: &str,
+        selected: bool,
+    ) -> egui::Response {
         if let Some((rename_id, text)) = &mut self.renaming
             && *rename_id == id
         {
@@ -473,7 +518,7 @@ impl LayersPanel {
                     });
                 }
             }
-            return;
+            return response;
         }
         let text = if selected {
             RichText::new(name).strong()
@@ -482,22 +527,173 @@ impl LayersPanel {
         };
         // Not selectable: selectable labels grab drags, which would stop the
         // row being dragged by its name.
-        let label = egui::Label::new(text)
-            .truncate()
-            .selectable(false)
-            .sense(Sense::click());
-        let response = ui.add(label);
+        let label = egui::Label::new(text).truncate().selectable(false);
+        let resp = ui.add(label);
+        let response = ui.interact(resp.rect, name_id(id), Sense::click());
         if response.double_clicked() {
             self.renaming = Some((id, name.to_owned()));
         } else if response.clicked() {
             select(editor, id);
         }
+        response
     }
 }
 
 /// A layer row's id, which follows the layer when the stack is reordered.
 fn row_id(layer: u64) -> egui::Id {
     egui::Id::new(("layer-row", layer))
+}
+
+fn thumb_id(layer: u64, mask: bool) -> egui::Id {
+    row_id(layer).with(("thumb", layer, mask))
+}
+
+fn name_id(layer: u64) -> egui::Id {
+    row_id(layer).with(("name", layer))
+}
+
+fn menu_item(
+    ui: &mut Ui,
+    text: &str,
+    shortcut: Option<String>,
+    enabled: bool,
+    action: impl FnOnce(),
+) {
+    let mut button = Button::new(text);
+    if let Some(s) = shortcut {
+        button = button.shortcut_text(s);
+    }
+    if ui.add_enabled(enabled, button).clicked() {
+        action();
+        ui.close();
+    }
+}
+
+fn mask_menu_items(
+    ui: &mut Ui,
+    editor: &mut Editor,
+    command: &mut Option<Command>,
+    id: u64,
+    enabled: bool,
+) {
+    menu_item(ui, "Delete Layer Mask", None, true, || {
+        *command = Some(Command::DeleteMask);
+    });
+
+    let toggle_label = if enabled {
+        "Disable Layer Mask"
+    } else {
+        "Enable Layer Mask"
+    };
+    menu_item(ui, toggle_label, None, true, || {
+        *command = Some(Command::ToggleMask);
+    });
+
+    menu_item(
+        ui,
+        "Invert Mask",
+        Command::Invert
+            .shortcut()
+            .map(|s| ui.ctx().format_shortcut(&s)),
+        true,
+        || {
+            editor.active = id;
+            editor.target = Target::Mask;
+            *command = Some(Command::Invert);
+        },
+    );
+
+    let viewing = editor.view() == View::Mask(id);
+    let view_label = if viewing {
+        "Exit Mask View"
+    } else {
+        "View Mask"
+    };
+    menu_item(ui, view_label, Some("Alt+click".into()), true, || {
+        editor.active = id;
+        editor.target = Target::Mask;
+        editor.set_view(if viewing { View::Image } else { View::Mask(id) });
+    });
+}
+
+fn mask_context_menu(
+    ui: &mut Ui,
+    editor: &mut Editor,
+    command: &mut Option<Command>,
+    id: u64,
+    enabled: bool,
+) {
+    mask_menu_items(ui, editor, command, id, enabled);
+}
+
+fn layer_context_menu(
+    ui: &mut Ui,
+    editor: &mut Editor,
+    command: &mut Option<Command>,
+    renaming: &mut Option<(u64, String)>,
+    id: u64,
+) {
+    let Some(layer) = editor.doc.layer(id) else {
+        return;
+    };
+    let has_mask = layer.mask.is_some();
+    let mask_enabled = layer.mask.as_ref().is_some_and(|m| m.enabled);
+    let index = editor.doc.layers.iter().position(|l| l.id == id);
+    let can_merge_down =
+        index.is_some_and(|i| i > 0 && editor.doc.layers[i - 1].adjustment.is_none());
+    let can_delete = editor.doc.layers.len() > 1;
+
+    menu_item(ui, "Blending Options…", None, true, || {
+        *command = Some(Command::BlendingOptions);
+    });
+
+    ui.separator();
+
+    menu_item(
+        ui,
+        "Duplicate Layer",
+        Command::DuplicateLayer
+            .shortcut()
+            .map(|s| ui.ctx().format_shortcut(&s)),
+        true,
+        || {
+            *command = Some(Command::DuplicateLayer);
+        },
+    );
+
+    menu_item(ui, "Delete Layer", None, can_delete, || {
+        *command = Some(Command::DeleteLayer);
+    });
+
+    menu_item(ui, "Rename", None, true, || {
+        if let Some(l) = editor.doc.layer(id) {
+            *renaming = Some((id, l.name.clone()));
+        }
+    });
+
+    ui.separator();
+
+    if has_mask {
+        mask_menu_items(ui, editor, command, id, mask_enabled);
+    } else {
+        menu_item(ui, "Add Layer Mask", None, true, || {
+            *command = Some(Command::AddMask);
+        });
+    }
+
+    ui.separator();
+
+    menu_item(
+        ui,
+        "Merge Down",
+        Command::MergeDown
+            .shortcut()
+            .map(|s| ui.ctx().format_shortcut(&s)),
+        can_merge_down,
+        || {
+            *command = Some(Command::MergeDown);
+        },
+    );
 }
 
 /// Select a layer as clicking its row does: paint on its pixels, or on its
@@ -622,10 +818,93 @@ mod tests {
             self.button(pos, true).or(self.button(pos, false))
         }
 
+        fn name_point(&self, layer: u64) -> egui::Pos2 {
+            self.ctx.read_response(name_id(layer)).unwrap().rect.center()
+        }
+
+        fn mask_point(&self, layer: u64) -> egui::Pos2 {
+            self.ctx.read_response(thumb_id(layer, true)).unwrap().rect.center()
+        }
+
+        fn secondary_button(&mut self, pos: egui::Pos2, pressed: bool) -> Option<Command> {
+            self.frame(vec![
+                Event::PointerMoved(pos),
+                Event::PointerButton {
+                    pos,
+                    button: PointerButton::Secondary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ])
+        }
+
+        fn secondary_click(&mut self, pos: egui::Pos2) -> Option<Command> {
+            self.time += 1.0;
+            self.secondary_button(pos, true)
+                .or(self.secondary_button(pos, false))
+        }
+
         fn double_click(&mut self, pos: egui::Pos2) -> Option<Command> {
             self.click(pos);
             self.button(pos, true).or(self.button(pos, false))
         }
+    }
+
+    #[test]
+    fn right_clicking_a_row_selects_and_opens_menu() {
+        let mut h = Harness::new();
+        let background = h.background();
+        let pos = h.row_point(background);
+        h.secondary_click(pos);
+        assert_eq!(h.editor.active, background);
+        assert_eq!(h.editor.target, Target::Pixels);
+        assert!(egui::Popup::is_id_open(
+            &h.ctx,
+            row_id(background).with("popup")
+        ));
+
+        // Right-clicking the name also opens the row's context menu.
+        let name_pos = h.name_point(MULTIPLY);
+        h.secondary_click(name_pos);
+        assert_eq!(h.editor.active, MULTIPLY);
+        assert!(egui::Popup::is_id_open(
+            &h.ctx,
+            row_id(MULTIPLY).with("popup")
+        ));
+    }
+
+    #[test]
+    fn layer_and_mask_context_menus_render() {
+        let mut h = Harness::new();
+        let background = h.background();
+        let mut command = None;
+        let mut renaming = None;
+
+        // Background layer: no mask, bottom layer.
+        let mut out = h.ctx.run_ui(Default::default(), |ui| {
+            layer_context_menu(ui, &mut h.editor, &mut command, &mut renaming, background);
+        });
+        out.textures_delta.clear();
+
+        // Curves layer: has mask, adjustment layer.
+        let mut out = h.ctx.run_ui(Default::default(), |ui| {
+            layer_context_menu(ui, &mut h.editor, &mut command, &mut renaming, CURVES);
+            mask_context_menu(ui, &mut h.editor, &mut command, CURVES, true);
+        });
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn right_clicking_mask_thumbnail_targets_mask_and_opens_mask_menu() {
+        let mut h = Harness::new();
+        let mask_pos = h.mask_point(CURVES);
+        h.secondary_click(mask_pos);
+        assert_eq!(h.editor.active, CURVES);
+        assert_eq!(h.editor.target, Target::Mask);
+        assert!(egui::Popup::is_id_open(
+            &h.ctx,
+            thumb_id(CURVES, true).with("popup")
+        ));
     }
 
     #[test]
