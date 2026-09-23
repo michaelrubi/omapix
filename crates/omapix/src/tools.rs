@@ -379,7 +379,9 @@ impl Tools {
                 } else {
                     theme.dark_foreground
                 };
-                let button = Button::new(RichText::new(icon).size(18.0).color(colour));
+                let button = Button::new(RichText::new(icon).size(18.0).color(colour))
+                    .frame(false)
+                    .min_size(Vec2::splat(28.0));
                 if ui.add(button).on_hover_text(tip).clicked() {
                     self.tool = tool;
                 }
