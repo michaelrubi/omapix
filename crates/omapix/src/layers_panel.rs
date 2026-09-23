@@ -86,6 +86,8 @@ pub struct LayersPanel {
     renaming: Option<(u64, String)>,
     /// Thumbnails by (layer id, is mask).
     thumbs: std::collections::HashMap<(u64, bool), Thumb>,
+    /// Layer being dragged to a new place in the stack.
+    dragging: Option<u64>,
 }
 
 impl LayersPanel {
@@ -106,9 +108,18 @@ impl LayersPanel {
                 // Top of the stack first, as in Photoshop.
                 let ids: Vec<u64> = editor.doc.layers.iter().rev().map(|l| l.id).collect();
                 self.thumbs.retain(|(id, _), _| ids.contains(id));
-                for id in ids {
-                    self.row(ui, editor, theme, id);
+                let mut rows = Vec::with_capacity(ids.len());
+                for &id in &ids {
+                    let rect = self.row(ui, editor, theme, id);
+                    // The whole row can be dragged to reorder. It only senses
+                    // drags, so clicks still reach the eye, thumbnails and name.
+                    let drag = ui.interact(rect, egui::Id::new(("layer-drag", id)), Sense::drag());
+                    if drag.drag_started() && editor.busy().is_none() {
+                        self.dragging = Some(id);
+                    }
+                    rows.push((id, rect));
                 }
+                self.reorder(ui, editor, theme, &ids, &rows);
             });
 
         ui.separator();
@@ -178,9 +189,65 @@ impl LayersPanel {
         });
     }
 
-    fn row(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme, id: u64) {
-        let Some(layer) = editor.doc.layer(id) else {
+    /// While a row is dragged, show where it would land; on release, move it.
+    fn reorder(
+        &mut self,
+        ui: &mut Ui,
+        editor: &mut Editor,
+        theme: &Theme,
+        ids: &[u64],
+        rows: &[(u64, egui::Rect)],
+    ) {
+        let Some(dragged) = self.dragging else { return };
+        let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) else {
             return;
+        };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        // Slot k means "above the k-th row from the top".
+        let slot = rows
+            .iter()
+            .position(|(_, r)| pointer.y < r.center().y)
+            .unwrap_or(rows.len());
+        let y = match rows.get(slot) {
+            Some((_, r)) => r.top(),
+            None => rows.last().map_or(pointer.y, |(_, r)| r.bottom()),
+        };
+        if let Some((_, first)) = rows.first() {
+            ui.painter()
+                .hline(first.x_range(), y, egui::Stroke::new(2.0, theme.accent));
+        }
+        if ui.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.dragging = None;
+        let Some(from) = ids.iter().position(|&i| i == dragged) else {
+            return;
+        };
+        // Removing the row first shifts later slots up by one.
+        let to = if slot > from { slot - 1 } else { slot };
+        if to == from {
+            return;
+        }
+        let mut order = ids.to_vec();
+        order.remove(from);
+        order.insert(to, dragged);
+        editor.edit("Move Layer", |doc, _| {
+            // `order` is top first; the document stores bottom first.
+            let rank = |id: u64| {
+                order
+                    .iter()
+                    .rev()
+                    .position(|&o| o == id)
+                    .unwrap_or(usize::MAX)
+            };
+            doc.layers.sort_by_key(|l| rank(l.id));
+        });
+    }
+
+    /// Draw one layer row; returns its rectangle.
+    fn row(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme, id: u64) -> egui::Rect {
+        let Some(layer) = editor.doc.layer(id) else {
+            return egui::Rect::NOTHING;
         };
         let selected = editor.active == id;
         let (visible, name, blend, mask, adjustment) = (
@@ -195,9 +262,11 @@ impl LayersPanel {
         } else {
             egui::Color32::TRANSPARENT
         };
-        egui::Frame::new()
+        let dimmed = self.dragging == Some(id);
+        let frame = egui::Frame::new()
             .fill(fill)
             .inner_margin(egui::Margin::symmetric(4, 3))
+            .multiply_with_opacity(if dimmed { 0.5 } else { 1.0 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -299,6 +368,7 @@ impl LayersPanel {
                     });
                 });
             });
+        frame.response.rect
     }
 
     /// A small preview of a layer's pixels or mask, rebuilt only when its
@@ -410,5 +480,39 @@ impl LayersPanel {
                 Target::Pixels
             };
         }
+    }
+}
+
+/// The top-first layer order after dropping `dragged` in `slot` (above the
+/// slot-th row; `ids.len()` is below the last). `None` if nothing moves.
+fn reordered(ids: &[u64], dragged: u64, slot: usize) -> Option<Vec<u64>> {
+    let from = ids.iter().position(|&i| i == dragged)?;
+    // Removing the row first shifts later slots up by one.
+    let to = if slot > from { slot - 1 } else { slot };
+    if to == from {
+        return None;
+    }
+    let mut order = ids.to_vec();
+    order.remove(from);
+    order.insert(to.min(order.len()), dragged);
+    Some(order)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_moves_layers_like_photoshop() {
+        let ids = [4, 3, 2, 1]; // top first
+        // Drag the top layer below the second.
+        assert_eq!(reordered(&ids, 4, 2), Some(vec![3, 4, 2, 1]));
+        // Drag the bottom layer to the very top.
+        assert_eq!(reordered(&ids, 1, 0), Some(vec![1, 4, 3, 2]));
+        // Drag to the very bottom.
+        assert_eq!(reordered(&ids, 3, 4), Some(vec![4, 2, 1, 3]));
+        // Dropping just above or below itself changes nothing.
+        assert_eq!(reordered(&ids, 3, 1), None);
+        assert_eq!(reordered(&ids, 3, 2), None);
     }
 }
