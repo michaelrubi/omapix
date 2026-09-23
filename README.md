@@ -12,7 +12,8 @@ colour-managed editing; layers with Photoshop's blend modes and masks;
 undo; brush, eraser, clone stamp and healing brush; marquee and lasso
 selections with feathering; Curves, Levels, Hue/Saturation and Color
 Balance adjustment layers; one-click frequency separation and dodge & burn
-layers; and OpenRaster save with TIFF/JPEG export. See [docs/DESIGN.md](docs/DESIGN.md) for the plan and shortcuts.
+layers; and OpenRaster save with TIFF/JPEG export. See [docs/DESIGN.md](docs/DESIGN.md) for the design and shortcuts, and
+[docs/ROADMAP.md](docs/ROADMAP.md) for what's next.
 
 ## Build and run
 
