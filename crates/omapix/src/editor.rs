@@ -127,6 +127,7 @@ impl Editor {
         if self.job.is_some() {
             return false;
         }
+        self.end_stroke();
         self.live = None;
         let before = self.snapshot(label);
         f(&mut self.doc, &mut self.active);
@@ -141,6 +142,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
+        self.end_stroke();
         if self.live.as_deref() != Some(key) {
             let before = self.snapshot(key);
             self.push_undo(before);
@@ -164,6 +166,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
+        self.end_stroke();
         self.live = None;
         let (tx, rx) = channel();
         let mut doc = self.doc.clone();
@@ -184,6 +187,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
+        self.end_stroke();
         self.live = None;
         if let Some(prev) = self.undo.pop() {
             let current = Snapshot {
@@ -200,6 +204,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
+        self.end_stroke();
         self.live = None;
         if let Some(next) = self.redo.pop() {
             let current = Snapshot {
@@ -300,10 +305,13 @@ impl Editor {
         self.paint_tiles(&tiles, false);
     }
 
-    /// Finish the stroke (healing happens here).
+    /// Finish the stroke (healing happens here). Does nothing if no stroke
+    /// is in progress.
     pub fn end_stroke(&mut self) {
-        self.paint_tiles(&[], true);
-        self.stroke = None;
+        if self.stroke.is_some() {
+            self.paint_tiles(&[], true);
+            self.stroke = None;
+        }
     }
 
     /// Write the stroke's result for `tiles` into the layer (or, when
@@ -477,6 +485,26 @@ mod tests {
                 .is_none()
         );
         assert_eq!(e.undo_label(), Some("Mask"));
+    }
+
+    #[test]
+    fn undo_mid_stroke_finishes_the_stroke_first() {
+        let mut e = editor();
+        assert!(e.begin_stroke(hard(40.0), Paint::Color([0, 0, 0, 65535]), false));
+        e.stroke_to(100.0, 100.0);
+        e.undo();
+        // Later moves of the abandoned stroke change nothing.
+        e.stroke_to(300.0, 100.0);
+        assert_eq!(
+            e.doc.layers[0].pixels.get(300, 100),
+            [30000, 30000, 30000, 65535]
+        );
+        assert_eq!(
+            e.doc.layers[0].pixels.get(100, 100),
+            [30000, 30000, 30000, 65535]
+        );
+        e.redo();
+        assert_eq!(e.doc.layers[0].pixels.get(100, 100), [0, 0, 0, 65535]);
     }
 
     #[test]

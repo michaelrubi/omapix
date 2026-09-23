@@ -105,6 +105,7 @@ impl LayersPanel {
             .show(ui, |ui| {
                 // Top of the stack first, as in Photoshop.
                 let ids: Vec<u64> = editor.doc.layers.iter().rev().map(|l| l.id).collect();
+                self.thumbs.retain(|(id, _), _| ids.contains(id));
                 for id in ids {
                     self.row(ui, editor, theme, id);
                 }
