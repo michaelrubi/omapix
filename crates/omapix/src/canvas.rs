@@ -138,6 +138,15 @@ struct View {
     fit: bool,
 }
 
+/// Where a clone or heal tool copies from, drawn as a crosshair.
+#[derive(Clone, Copy, Debug)]
+pub enum SourceMarker {
+    /// A fixed image point (source set, no stroke yet).
+    Fixed(Pos2),
+    /// An offset from the pointer, in image pixels.
+    Offset(Vec2),
+}
+
 /// Pointer input meant for the active tool, in image pixels.
 #[derive(Clone, Copy, Debug)]
 pub enum ToolInput {
@@ -227,6 +236,11 @@ impl Canvas {
         self.dirty.clear();
     }
 
+    /// Laid out and showing a render, so view commands and strokes work.
+    pub fn ready(&self) -> bool {
+        self.rect.is_positive() && self.render.is_some()
+    }
+
     pub fn render(&self) -> Option<&Arc<Render>> {
         self.render.as_ref()
     }
@@ -309,6 +323,13 @@ impl Canvas {
         self.view.fit = false;
     }
 
+    /// Show image point `p` in the middle of the canvas at 100 %.
+    pub fn look_at(&mut self, p: Pos2) {
+        self.view.zoom = 1.0;
+        self.view.fit = false;
+        self.view.origin = self.rect.size() * 0.5 - p.to_vec2() / self.ppp;
+    }
+
     pub fn step_zoom(&mut self, zoom_in: bool) {
         let canvas = self.rect;
         let z = self.view.zoom;
@@ -336,13 +357,15 @@ impl Canvas {
     }
 
     /// Draw the canvas and handle navigation. `brush` is the diameter of the
-    /// active brush in image pixels, to draw its outline at the pointer.
-    /// Returns pointer input for the active tool.
+    /// active brush in image pixels, to draw its outline at the pointer;
+    /// `source` marks where a clone or heal tool copies from. Returns pointer
+    /// input for the active tool.
     pub fn show(
         &mut self,
         ui: &mut Ui,
         pasteboard: Color32,
         brush: Option<f32>,
+        source: Option<SourceMarker>,
     ) -> Option<ToolInput> {
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
@@ -375,6 +398,25 @@ impl Canvas {
             && !navigating
         {
             self.brush_cursor(ui, pointer, diameter);
+        }
+        if let Some(marker) = source {
+            let scale = self.view.zoom / self.ppp;
+            let at = match marker {
+                SourceMarker::Fixed(p) => {
+                    Some(self.rect.min + self.snapped_origin(self.ppp) + p.to_vec2() * scale)
+                }
+                SourceMarker::Offset(d) => response.hover_pos().map(|p| p + d * scale),
+            };
+            if let Some(at) = at {
+                let painter = ui.painter_at(self.rect);
+                for (width, colour) in
+                    [(3.0, Color32::from_black_alpha(160)), (1.0, Color32::WHITE)]
+                {
+                    let stroke = Stroke::new(width, colour);
+                    painter.line_segment([at - vec2(8.0, 0.0), at + vec2(8.0, 0.0)], stroke);
+                    painter.line_segment([at - vec2(0.0, 8.0), at + vec2(0.0, 8.0)], stroke);
+                }
+            }
         }
         input
     }

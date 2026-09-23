@@ -1,7 +1,7 @@
 //! Painting tools: the toolbar on the left, the options bar under the menus,
 //! and Photoshop's single-key tool shortcuts.
 
-use egui::{Button, Key, Modifiers, RichText, Slider, Ui};
+use egui::{Button, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
 
@@ -10,6 +10,8 @@ use crate::theme::Theme;
 
 const BRUSH_ICON: &str = "\u{f1fc}";
 const ERASER_ICON: &str = "\u{f12d}";
+const CLONE_ICON: &str = "\u{f24d}";
+const HEAL_ICON: &str = "\u{f0fa}";
 
 const MIN_SIZE: f32 = 1.0;
 const MAX_SIZE: f32 = 5000.0;
@@ -18,6 +20,8 @@ const MAX_SIZE: f32 = 5000.0;
 pub enum Tool {
     Brush,
     Eraser,
+    CloneStamp,
+    Healing,
 }
 
 impl Tool {
@@ -25,7 +29,14 @@ impl Tool {
         match self {
             Tool::Brush => "Brush",
             Tool::Eraser => "Eraser",
+            Tool::CloneStamp => "Clone Stamp",
+            Tool::Healing => "Healing Brush",
         }
+    }
+
+    /// Tools that copy pixels from a source point set with Alt+click.
+    pub fn copies(self) -> bool {
+        matches!(self, Tool::CloneStamp | Tool::Healing)
     }
 }
 
@@ -33,6 +44,15 @@ pub struct Tools {
     pub tool: Tool,
     brush: BrushSettings,
     eraser: BrushSettings,
+    clone: BrushSettings,
+    heal: BrushSettings,
+    /// Where the clone/heal source was set with Alt+click, in image pixels.
+    source: Option<Pos2>,
+    /// Source minus destination, fixed by the first stroke after setting a
+    /// source and kept for later strokes (Photoshop's "Aligned").
+    offset: Option<Vec2>,
+    /// Clone/heal from all visible layers rather than the active one.
+    pub sample_all: bool,
     /// Foreground and background colours, in sRGB as shown in the pickers.
     pub foreground: [u8; 3],
     pub background: [u8; 3],
@@ -47,6 +67,19 @@ impl Default for Tools {
                 hardness: 0.5,
                 ..BrushSettings::default()
             },
+            clone: BrushSettings {
+                size: 60.0,
+                hardness: 0.5,
+                ..BrushSettings::default()
+            },
+            heal: BrushSettings {
+                size: 40.0,
+                hardness: 0.7,
+                ..BrushSettings::default()
+            },
+            source: None,
+            offset: None,
+            sample_all: true,
             foreground: [0, 0, 0],
             background: [255, 255, 255],
         }
@@ -58,6 +91,8 @@ impl Tools {
         match self.tool {
             Tool::Brush => self.brush,
             Tool::Eraser => self.eraser,
+            Tool::CloneStamp => self.clone,
+            Tool::Healing => self.heal,
         }
     }
 
@@ -73,23 +108,67 @@ impl Tools {
         match self.tool {
             Tool::Brush => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
+            Tool::CloneStamp => &mut self.clone,
+            Tool::Healing => &mut self.heal,
         }
     }
 
-    /// What a stroke should do, given what it paints on.
-    pub fn paint(&self, target: Target, profile: &ColorProfile) -> Paint {
-        match (self.tool, target) {
+    /// Alt+click with a clone or heal tool: copy from here.
+    pub fn set_source(&mut self, at: Pos2) {
+        self.source = Some(at);
+        self.offset = None;
+    }
+
+    /// Where to mark the clone source on the canvas: a fixed point until
+    /// the first stroke, then an offset that follows the pointer.
+    pub fn source_marker(&self) -> Option<crate::canvas::SourceMarker> {
+        if !self.tool.copies() {
+            return None;
+        }
+        match (self.offset, self.source) {
+            (Some(offset), _) => Some(crate::canvas::SourceMarker::Offset(offset)),
+            (None, Some(at)) => Some(crate::canvas::SourceMarker::Fixed(at)),
+            (None, None) => None,
+        }
+    }
+
+    /// What a stroke starting at `start` should do, given what it paints
+    /// on. `None` for a clone or heal stroke with no source set yet, or on a
+    /// mask (they only work on pixels).
+    pub fn paint(&mut self, target: Target, profile: &ColorProfile, start: Pos2) -> Option<Paint> {
+        if self.tool.copies() {
+            if target == Target::Mask {
+                return None;
+            }
+            let offset = match self.offset {
+                Some(offset) => offset,
+                None => {
+                    let offset = self.source? - start;
+                    self.offset = Some(offset);
+                    offset
+                }
+            };
+            let (dx, dy) = (offset.x.round() as i32, offset.y.round() as i32);
+            return Some(match self.tool {
+                Tool::Healing => Paint::Heal { dx, dy },
+                _ => Paint::Clone { dx, dy },
+            });
+        }
+        Some(match (self.tool, target) {
             // On a mask, the eraser reveals and the brush paints the
             // foreground colour's grey level, as in Photoshop.
             (Tool::Eraser, Target::Mask) => Paint::Mask(u16::MAX),
             (Tool::Brush, Target::Mask) => Paint::Mask(grey(self.foreground)),
             (Tool::Eraser, Target::Pixels) => Paint::Erase,
-            (Tool::Brush, Target::Pixels) => Paint::Color(
-                profile
-                    .from_srgb8(self.foreground)
-                    .unwrap_or([0, 0, 0, u16::MAX]),
-            ),
-        }
+            (_, Target::Pixels) => {
+                Paint::Color(
+                    profile
+                        .from_srgb8(self.foreground)
+                        .unwrap_or([0, 0, 0, u16::MAX]),
+                )
+            }
+            (_, Target::Mask) => Paint::Mask(grey(self.foreground)),
+        })
     }
 
     /// Set the foreground colour from a document pixel (the eyedropper).
@@ -111,6 +190,12 @@ impl Tools {
             }
             if i.consume_key(Modifiers::NONE, Key::E) {
                 self.tool = Tool::Eraser;
+            }
+            if i.consume_key(Modifiers::NONE, Key::S) {
+                self.tool = Tool::CloneStamp;
+            }
+            if i.consume_key(Modifiers::NONE, Key::J) {
+                self.tool = Tool::Healing;
             }
             if i.consume_key(Modifiers::NONE, Key::X) {
                 std::mem::swap(&mut self.foreground, &mut self.background);
@@ -189,11 +274,27 @@ impl Tools {
             percent(ui, "Opacity", &mut s.opacity);
             percent(ui, "Flow", &mut s.flow);
             ui.separator();
-            let (text, colour) = match target {
-                Target::Mask => ("Painting on layer mask", theme.accent),
-                Target::Pixels => ("Painting on layer", theme.dark_foreground),
-            };
-            ui.label(RichText::new(text).color(colour));
+            if self.tool.copies() {
+                ui.label("Sample");
+                ui.selectable_value(&mut self.sample_all, false, "Current Layer");
+                ui.selectable_value(&mut self.sample_all, true, "All Layers");
+                ui.separator();
+                let (text, colour) = match (target, self.source) {
+                    (Target::Mask, _) => (
+                        "Select the layer, not its mask, to clone or heal",
+                        theme.red,
+                    ),
+                    (_, None) => ("Alt+click to set the source", theme.accent),
+                    (_, Some(_)) => ("Alt+click to set a new source", theme.dark_foreground),
+                };
+                ui.label(RichText::new(text).color(colour));
+            } else {
+                let (text, colour) = match target {
+                    Target::Mask => ("Painting on layer mask", theme.accent),
+                    Target::Pixels => ("Painting on layer", theme.dark_foreground),
+                };
+                ui.label(RichText::new(text).color(colour));
+            }
         });
     }
 
@@ -204,6 +305,8 @@ impl Tools {
             for (tool, icon, tip) in [
                 (Tool::Brush, BRUSH_ICON, "Brush (B)"),
                 (Tool::Eraser, ERASER_ICON, "Eraser (E)"),
+                (Tool::CloneStamp, CLONE_ICON, "Clone Stamp (S)"),
+                (Tool::Healing, HEAL_ICON, "Healing Brush (J)"),
             ] {
                 let selected = self.tool == tool;
                 let colour = if selected {
@@ -259,6 +362,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clone_offset_is_fixed_by_the_first_stroke_and_kept() {
+        let mut tools = Tools {
+            tool: Tool::CloneStamp,
+            ..Tools::default()
+        };
+        let srgb = ColorProfile::srgb();
+        assert_eq!(
+            tools.paint(Target::Pixels, &srgb, Pos2::new(50.0, 50.0)),
+            None
+        );
+        tools.set_source(Pos2::new(10.0, 20.0));
+        let first = tools.paint(Target::Pixels, &srgb, Pos2::new(50.0, 50.0));
+        assert_eq!(first, Some(Paint::Clone { dx: -40, dy: -30 }));
+        // A later stroke elsewhere keeps the same offset (aligned).
+        let second = tools.paint(Target::Pixels, &srgb, Pos2::new(300.0, 10.0));
+        assert_eq!(second, first);
+        assert_eq!(tools.paint(Target::Mask, &srgb, Pos2::ZERO), None);
+    }
+
+    #[test]
     fn bracket_steps_round_and_clamp() {
         assert_eq!(step_size(100.0, true), 125.0);
         assert_eq!(step_size(100.0, false), 90.0);
@@ -269,14 +392,18 @@ mod tests {
 
     #[test]
     fn mask_paint_follows_foreground_grey() {
-        let tools = Tools::default();
+        let mut tools = Tools::default();
         let srgb = ColorProfile::srgb();
-        assert_eq!(tools.paint(Target::Mask, &srgb), Paint::Mask(0));
-        let eraser = Tools {
+        let at = Pos2::ZERO;
+        assert_eq!(tools.paint(Target::Mask, &srgb, at), Some(Paint::Mask(0)));
+        let mut eraser = Tools {
             tool: Tool::Eraser,
             ..Tools::default()
         };
-        assert_eq!(eraser.paint(Target::Mask, &srgb), Paint::Mask(u16::MAX));
-        assert_eq!(eraser.paint(Target::Pixels, &srgb), Paint::Erase);
+        assert_eq!(
+            eraser.paint(Target::Mask, &srgb, at),
+            Some(Paint::Mask(u16::MAX))
+        );
+        assert_eq!(eraser.paint(Target::Pixels, &srgb, at), Some(Paint::Erase));
     }
 }

@@ -9,6 +9,10 @@
 //! The stroke keeps the untouched original of whatever it paints on and
 //! recomputes touched tiles from it, so the result never depends on how
 //! many dabs landed on a pixel beyond what coverage records.
+//!
+//! Clone and heal strokes paint pixels copied from a sampling image at a
+//! fixed offset. Healing then corrects the copied patch's tone and colour
+//! to match its new surroundings when the stroke ends (see [`Stroke::finish`]).
 
 use std::collections::HashMap;
 
@@ -49,6 +53,10 @@ pub enum Paint {
     Erase,
     /// Paint a grey level onto a layer mask (0 = hide, 65535 = reveal).
     Mask(u16),
+    /// Copy pixels from the sampling image, `dx, dy` pixels away.
+    Clone { dx: i32, dy: i32 },
+    /// Like `Clone`, then blend the copy's tone into its surroundings.
+    Heal { dx: i32, dy: i32 },
 }
 
 /// The surface a stroke paints on.
@@ -71,6 +79,8 @@ pub struct Stroke {
     settings: BrushSettings,
     paint: Paint,
     original: Surface,
+    /// The image clone and heal strokes copy from.
+    source: Option<Tiled<Pixel>>,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     last: Option<(f32, f32)>,
@@ -84,10 +94,33 @@ impl Stroke {
             settings,
             paint,
             original,
+            source: None,
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
         }
+    }
+
+    /// Set the image clone and heal strokes copy from.
+    pub fn sampling(mut self, source: Tiled<Pixel>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// The pixel a clone or heal stroke copies to (x, y), or transparent if
+    /// the source point falls outside the image.
+    fn copied(&self, x: u32, y: u32) -> Pixel {
+        let (Paint::Clone { dx, dy } | Paint::Heal { dx, dy }) = self.paint else {
+            return [0; 4];
+        };
+        let Some(src) = &self.source else {
+            return [0; 4];
+        };
+        let (sx, sy) = (i64::from(x) + i64::from(dx), i64::from(y) + i64::from(dy));
+        if sx < 0 || sy < 0 || sx >= i64::from(src.width()) || sy >= i64::from(src.height()) {
+            return [0; 4];
+        }
+        src.get(sx as u32, sy as u32)
     }
 
     fn spacing(&self) -> f32 {
@@ -173,16 +206,30 @@ impl Stroke {
                     let base: Vec<Pixel> = orig
                         .tile(col, row)
                         .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
+                    let copying = matches!(self.paint, Paint::Clone { .. } | Paint::Heal { .. });
+                    let (tx, ty) = (col * TILE, row * TILE);
+                    let (w, h) = (orig.width(), orig.height());
                     let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
-                        out[i] = paint_pixel(base[i], cov[i] * opacity, self.paint);
+                        let a = cov[i] * opacity;
+                        out[i] = if copying {
+                            let (x, y) = (tx + i as u32 % TILE, ty + i as u32 / TILE);
+                            if a <= 0.0 || x >= w || y >= h {
+                                base[i]
+                            } else {
+                                paint_pixel(base[i], a, Paint::Color(self.copied(x, y)))
+                            }
+                        } else {
+                            paint_pixel(base[i], a, self.paint)
+                        };
                     }
                 }
                 (Surface::Mask(dst), Surface::Mask(orig)) => {
                     let target = match self.paint {
                         Paint::Mask(v) => f32::from(v),
-                        Paint::Erase => MAX,
                         Paint::Color(c) => f32::from(c[1]),
+                        // Cloning isn't offered on masks; leave them alone.
+                        Paint::Erase | Paint::Clone { .. } | Paint::Heal { .. } => MAX,
                     };
                     let base: Vec<u16> = orig
                         .tile(col, row)
@@ -197,6 +244,104 @@ impl Stroke {
                 _ => {}
             }
         }
+    }
+}
+
+impl Stroke {
+    /// Complete the stroke. For healing, this replaces the copied patch with
+    /// a healed one and returns the tiles that changed; other strokes are
+    /// already final.
+    ///
+    /// Healing keeps the copy's fine texture but takes its tone and colour
+    /// from the destination's surroundings: it adds the difference between
+    /// the smoothed surroundings of the destination and of the source. Both
+    /// are smoothed with the painted area weighted out, so the blemish being
+    /// covered doesn't tint the result. This is a fast approximation of
+    /// Photoshop's healing brush (Poisson blending) that works well on skin.
+    pub fn finish(&mut self, surface: &mut Surface) -> Vec<(u32, u32)> {
+        let Paint::Heal { .. } = self.paint else {
+            return Vec::new();
+        };
+        let (Some(src), Surface::Pixels(orig), Surface::Pixels(dst)) =
+            (&self.source, &self.original, surface)
+        else {
+            return Vec::new();
+        };
+        let tiles: Vec<(u32, u32)> = self.coverage.keys().copied().collect();
+        if tiles.is_empty() {
+            return tiles;
+        }
+        let (w, h) = (orig.width(), orig.height());
+        let sigma = (self.settings.size * 0.5).max(3.0);
+        let margin = (sigma * 3.0).ceil() as u32;
+        let x0 = (tiles.iter().map(|t| t.0).min().unwrap() * TILE).saturating_sub(margin);
+        let y0 = (tiles.iter().map(|t| t.1).min().unwrap() * TILE).saturating_sub(margin);
+        let x1 = ((tiles.iter().map(|t| t.0).max().unwrap() + 1) * TILE + margin).min(w);
+        let y1 = ((tiles.iter().map(|t| t.1).max().unwrap() + 1) * TILE + margin).min(h);
+        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+
+        let coverage_at = |x: u32, y: u32| -> f32 {
+            self.coverage
+                .get(&(x / TILE, y / TILE))
+                .map_or(0.0, |c| c[((y % TILE) * TILE + x % TILE) as usize])
+        };
+        let norm = |p: Pixel| {
+            [
+                f32::from(p[0]) / MAX,
+                f32::from(p[1]) / MAX,
+                f32::from(p[2]) / MAX,
+            ]
+        };
+
+        // Surroundings of destination and source, painted area weighted out.
+        let mut dest = Vec::with_capacity(rw * rh);
+        let mut copy = Vec::with_capacity(rw * rh);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let weight = (1.0 - coverage_at(x, y)).powi(2);
+                let d = norm(src.get(x, y));
+                let c = self.copied(x, y);
+                let c = if c[3] == 0 { d } else { norm(c) };
+                dest.push([d[0] * weight, d[1] * weight, d[2] * weight, weight]);
+                copy.push([c[0] * weight, c[1] * weight, c[2] * weight, weight]);
+            }
+        }
+        let dest = crate::filters::blur_buffer(dest, rw, rh, sigma);
+        let copy = crate::filters::blur_buffer(copy, rw, rh, sigma);
+
+        let opacity = self.settings.opacity;
+        for &(col, row) in &tiles {
+            let cov = &self.coverage[&(col, row)];
+            let base: Vec<Pixel> = orig
+                .tile(col, row)
+                .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
+            let out = dst.tile_mut(col, row);
+            for i in 0..TILE_PIXELS {
+                let a = cov[i] * opacity;
+                let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
+                if a <= 0.0 || x >= w || y >= h {
+                    out[i] = base[i];
+                    continue;
+                }
+                let copied = self.copied(x, y);
+                if copied[3] == 0 {
+                    out[i] = base[i];
+                    continue;
+                }
+                let r = ((y - y0) as usize) * rw + (x - x0) as usize;
+                let (d, c) = (dest[r], copy[r]);
+                let mut healed = copied;
+                if d[3] > 1e-4 && c[3] > 1e-4 {
+                    for ch in 0..3 {
+                        let shift = d[ch] / d[3] - c[ch] / c[3];
+                        let v = f32::from(copied[ch]) / MAX + shift;
+                        healed[ch] = (v.clamp(0.0, 1.0) * MAX).round() as u16;
+                    }
+                }
+                out[i] = paint_pixel(base[i], a, Paint::Color(healed));
+            }
+        }
+        tiles
     }
 }
 
@@ -220,6 +365,11 @@ fn paint_pixel(base: Pixel, a: f32, paint: Paint) -> Pixel {
     let base_a = f32::from(base[3]) / MAX;
     match paint {
         Paint::Color(c) => {
+            // A colour's own alpha (from cloned pixels) scales coverage.
+            let a = a * f32::from(c[3]) / MAX;
+            if a <= 0.0 {
+                return base;
+            }
             let out_a = a + base_a * (1.0 - a);
             let mut out = [0u16; 4];
             for ch in 0..3 {
@@ -234,7 +384,7 @@ fn paint_pixel(base: Pixel, a: f32, paint: Paint) -> Pixel {
             out[3] = (base_a * (1.0 - a) * MAX).round() as u16;
             out
         }
-        Paint::Mask(_) => base,
+        Paint::Mask(_) | Paint::Clone { .. } | Paint::Heal { .. } => base,
     }
 }
 
@@ -367,6 +517,75 @@ mod tests {
         };
         assert_eq!(painted.get(50, 50), 0);
         assert_eq!(painted.get(5, 5), u16::MAX);
+    }
+
+    /// A smooth gradient with a dark blemish at (150, 100).
+    fn skin(w: u32, h: u32) -> Tiled<Pixel> {
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let tone = 30000 + (x * 60) as u16 + (y * 20) as u16;
+                let blemish = (x as i32 - 150).pow(2) + (y as i32 - 100).pow(2) < 100;
+                if blemish {
+                    [8000, 6000, 6000, 65535]
+                } else {
+                    [tone, tone - 4000, tone - 8000, 65535]
+                }
+            })
+            .collect();
+        Tiled::from_slice(w, h, [0; 4], &px)
+    }
+
+    #[test]
+    fn clone_copies_from_the_offset() {
+        let img = skin(300, 200);
+        let surface = Surface::Pixels(img.clone());
+        let settings = BrushSettings {
+            size: 30.0,
+            hardness: 1.0,
+            ..Default::default()
+        };
+        let mut s = Stroke::new(settings, Paint::Clone { dx: 0, dy: 50 }, surface.clone())
+            .sampling(img.clone());
+        let mut out = surface;
+        let tiles = s.add_point(150.0, 100.0);
+        s.apply(&mut out, &tiles);
+        let Surface::Pixels(out) = out else {
+            unreachable!()
+        };
+        assert_eq!(out.get(150, 100), img.get(150, 150));
+    }
+
+    #[test]
+    fn healing_removes_the_blemish_and_matches_the_surroundings() {
+        let img = skin(300, 200);
+        let surface = Surface::Pixels(img.clone());
+        let settings = BrushSettings {
+            size: 30.0,
+            hardness: 0.5,
+            ..Default::default()
+        };
+        // Source 60 px to the left: same texture, but a darker tone there.
+        let mut s = Stroke::new(settings, Paint::Heal { dx: -60, dy: 0 }, surface.clone())
+            .sampling(img.clone());
+        let mut out = surface;
+        let tiles = s.add_point(150.0, 100.0);
+        s.apply(&mut out, &tiles);
+        let tiles = s.finish(&mut out);
+        assert!(!tiles.is_empty());
+        let Surface::Pixels(out) = out else {
+            unreachable!()
+        };
+        let healed = out.get(150, 100)[0];
+        // What unblemished skin at that spot would be.
+        let expected = 30000 + 150 * 60 + 100 * 20;
+        assert!(
+            healed.abs_diff(expected) < 800,
+            "healed {healed}, expected about {expected}"
+        );
+        // A plain clone would have brought the darker tone from the left.
+        let cloned = img.get(90, 100)[0];
+        assert!(healed.abs_diff(expected) < cloned.abs_diff(expected) / 3);
     }
 
     #[test]

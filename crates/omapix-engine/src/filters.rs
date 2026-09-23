@@ -19,7 +19,7 @@ pub fn gaussian_blur(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
     if radius < 0.1 || w == 0 || h == 0 {
         return image.clone();
     }
-    let mut buf: Vec<[f32; 4]> = image
+    let buf: Vec<[f32; 4]> = image
         .to_vec()
         .into_par_iter()
         .map(|p| {
@@ -33,11 +33,7 @@ pub fn gaussian_blur(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
         })
         .collect();
 
-    let radii = box_radii(radius);
-    blur_rows(&mut buf, w, &radii);
-    let mut t = transpose(&buf, w, h);
-    blur_rows(&mut t, h, &radii);
-    let buf = transpose(&t, h, w);
+    let buf = blur_buffer(buf, w, h, radius);
 
     let pixels: Vec<Pixel> = buf
         .into_par_iter()
@@ -51,6 +47,19 @@ pub fn gaussian_blur(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
         })
         .collect();
     Tiled::from_slice(image.width(), image.height(), [0; 4], &pixels)
+}
+
+/// Gaussian-blur a row-major buffer of four-channel values, `sigma` being
+/// the standard deviation in pixels.
+pub fn blur_buffer(mut buf: Vec<[f32; 4]>, w: usize, h: usize, sigma: f32) -> Vec<[f32; 4]> {
+    if sigma < 0.1 || w == 0 || h == 0 {
+        return buf;
+    }
+    let radii = box_radii(sigma);
+    blur_rows(&mut buf, w, &radii);
+    let mut t = transpose(&buf, w, h);
+    blur_rows(&mut t, h, &radii);
+    transpose(&t, h, w)
 }
 
 /// Radii of three box blurs whose combination approximates a Gaussian with

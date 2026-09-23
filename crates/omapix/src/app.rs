@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use egui::{Align, Button, Layout, RichText, Ui};
+use egui::{Align, Button, Layout, Pos2, RichText, Ui};
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::{Document, export, filters, ops, ora};
 
@@ -63,7 +63,9 @@ struct FileJob {
 ///   default radius);
 /// - `Stroke x0 y0 x1 y1`: a brush stroke with the current tool, in image
 ///   pixels, through the same path as mouse strokes;
-/// - `Tool Brush|Eraser`, `Size n`, `Opacity percent`, `Color r g b` (sRGB).
+/// - `Tool Brush|Eraser|Clone|Heal`, `Size n`, `Opacity percent`,
+///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
+///   `Look x y` (centre the view on an image point at 100 %).
 #[derive(Debug)]
 enum ScriptStep {
     Command(Command),
@@ -72,6 +74,8 @@ enum ScriptStep {
     Size(f32),
     Opacity(f32),
     Color([u8; 3]),
+    Source(Pos2),
+    Look(Pos2),
 }
 
 impl ScriptStep {
@@ -84,9 +88,13 @@ impl ScriptStep {
             ("Size", &[n]) => ScriptStep::Size(n),
             ("Opacity", &[n]) => ScriptStep::Opacity(n / 100.0),
             ("Color", &[r, g, b]) => ScriptStep::Color([r as u8, g as u8, b as u8]),
+            ("Source", &[x, y]) => ScriptStep::Source(egui::pos2(x, y)),
+            ("Look", &[x, y]) => ScriptStep::Look(egui::pos2(x, y)),
             ("Tool", _) => match words.next()? {
                 "Brush" => ScriptStep::Tool(crate::tools::Tool::Brush),
                 "Eraser" => ScriptStep::Tool(crate::tools::Tool::Eraser),
+                "Clone" => ScriptStep::Tool(crate::tools::Tool::CloneStamp),
+                "Heal" => ScriptStep::Tool(crate::tools::Tool::Healing),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -702,13 +710,17 @@ impl App {
         };
         match input {
             ToolInput::StrokeBegin(p) => {
-                let paint = self.tools.paint(editor.target, &editor.doc.profile);
-                if editor.begin_stroke(self.tools.settings(), paint) {
+                let Some(paint) = self.tools.paint(editor.target, &editor.doc.profile, p) else {
+                    return;
+                };
+                let (settings, sample_all) = (self.tools.settings(), self.tools.sample_all);
+                if editor.begin_stroke(settings, paint, sample_all) {
                     editor.stroke_to(p.x, p.y);
                 }
             }
             ToolInput::StrokeMove(p) => editor.stroke_to(p.x, p.y),
             ToolInput::StrokeEnd => editor.end_stroke(),
+            ToolInput::Sample(p) if self.tools.tool.copies() => self.tools.set_source(p),
             ToolInput::Sample(p) => {
                 if p.x >= 0.0
                     && p.y >= 0.0
@@ -725,7 +737,10 @@ impl App {
         let idle = self.opening.is_none()
             && self.file_job.is_none()
             && self.dialog.is_none()
-            && self.editor.as_ref().is_some_and(|e| e.busy().is_none());
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|e| e.busy().is_none() && e.canvas.ready());
         if !idle {
             return;
         }
@@ -755,6 +770,12 @@ impl App {
             ScriptStep::Size(n) => self.tools.set_size(n),
             ScriptStep::Opacity(o) => self.tools.set_opacity(o),
             ScriptStep::Color(c) => self.tools.foreground = c,
+            ScriptStep::Source(p) => self.tools.set_source(p),
+            ScriptStep::Look(p) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.canvas.look_at(p);
+                }
+            }
         }
         ctx.request_repaint();
     }
@@ -964,11 +985,12 @@ impl eframe::App for App {
         }
         let pasteboard = self.theme.pasteboard();
         let brush = self.tools.settings();
+        let source = self.tools.source_marker();
         let mut input = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
                 let cursor = (editor.busy().is_none()).then_some(brush.size);
-                input = editor.canvas.show(ui, pasteboard, cursor);
+                input = editor.canvas.show(ui, pasteboard, cursor, source);
             } else {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, pasteboard);
                 self.empty_state(ui);

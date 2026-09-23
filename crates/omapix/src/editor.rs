@@ -236,40 +236,76 @@ impl Editor {
         }
     }
 
-    /// Start a brush stroke on the active layer (or its mask). Returns false
-    /// if there is nothing to paint on or a background job is running.
-    pub fn begin_stroke(&mut self, settings: BrushSettings, paint: Paint) -> bool {
+    /// Start a brush stroke on the active layer (or its mask). Clone and
+    /// heal strokes copy from the active layer, or from the whole visible
+    /// image if `sample_all`. Returns false if there is nothing to paint
+    /// on or a background job is running.
+    pub fn begin_stroke(
+        &mut self,
+        settings: BrushSettings,
+        paint: Paint,
+        sample_all: bool,
+    ) -> bool {
         if self.job.is_some() {
             return false;
         }
         let target = self.target;
+        let copying = matches!(paint, Paint::Clone { .. } | Paint::Heal { .. });
         let Some(layer) = self.doc.layer(self.active) else {
             return false;
         };
         let surface = match (target, &layer.mask) {
+            // Cloning and healing work on pixels only.
+            (Target::Mask, _) if copying => return false,
             (Target::Mask, Some(mask)) => Surface::Mask(mask.pixels.clone()),
             (Target::Mask, None) => return false,
             (Target::Pixels, _) => Surface::Pixels(layer.pixels.clone()),
         };
+        let mut stroke = Stroke::new(settings, paint, surface);
+        if copying {
+            let source = if sample_all {
+                Tiled::from_raster(&self.doc.composite())
+            } else {
+                layer.pixels.clone()
+            };
+            stroke = stroke.sampling(source);
+        }
         self.live = None;
         let label = match (target, paint) {
             (Target::Mask, _) => "Paint Mask",
             (_, Paint::Erase) => "Eraser",
+            (_, Paint::Clone { .. }) => "Clone Stamp",
+            (_, Paint::Heal { .. }) => "Healing Brush",
             _ => "Brush Stroke",
         };
         let before = self.snapshot(label);
         self.push_undo(before);
-        self.stroke = Some((Stroke::new(settings, paint, surface), self.active));
+        self.stroke = Some((stroke, self.active));
         true
     }
 
     /// Continue the stroke to an image position.
     pub fn stroke_to(&mut self, x: f32, y: f32) {
-        let Some((stroke, id)) = &mut self.stroke else {
+        let Some((stroke, _)) = &mut self.stroke else {
             return;
         };
         let tiles = stroke.add_point(x, y);
-        if tiles.is_empty() {
+        self.paint_tiles(&tiles, false);
+    }
+
+    /// Finish the stroke (healing happens here).
+    pub fn end_stroke(&mut self) {
+        self.paint_tiles(&[], true);
+        self.stroke = None;
+    }
+
+    /// Write the stroke's result for `tiles` into the layer (or, when
+    /// `finish`ing, whatever tiles finishing changes), and redraw them.
+    fn paint_tiles(&mut self, tiles: &[(u32, u32)], finish: bool) {
+        let Some((stroke, id)) = &mut self.stroke else {
+            return;
+        };
+        if tiles.is_empty() && !finish {
             return;
         }
         let Some(layer) = self.doc.layer_mut(*id) else {
@@ -277,33 +313,39 @@ impl Editor {
         };
         // Move the surface out of the layer, paint, and put it back, so
         // tiles are written in place rather than copied.
-        match self.target {
+        let mut surface = match self.target {
             Target::Mask => {
                 let Some(mask) = layer.mask.as_mut() else {
                     return;
                 };
-                let mut surface =
-                    Surface::Mask(std::mem::replace(&mut mask.pixels, Tiled::new(0, 0, 0)));
-                stroke.apply(&mut surface, &tiles);
-                if let Surface::Mask(t) = surface {
+                Surface::Mask(std::mem::replace(&mut mask.pixels, Tiled::new(0, 0, 0)))
+            }
+            Target::Pixels => Surface::Pixels(std::mem::replace(
+                &mut layer.pixels,
+                Tiled::new(0, 0, [0; 4]),
+            )),
+        };
+        let changed = if finish {
+            stroke.finish(&mut surface)
+        } else {
+            stroke.apply(&mut surface, tiles);
+            tiles.to_vec()
+        };
+        match surface {
+            Surface::Mask(t) => {
+                if let Some(mask) = layer.mask.as_mut() {
                     mask.pixels = t;
                 }
             }
-            Target::Pixels => {
-                let mut surface = Surface::Pixels(std::mem::replace(
-                    &mut layer.pixels,
-                    Tiled::new(0, 0, [0; 4]),
-                ));
-                stroke.apply(&mut surface, &tiles);
-                if let Surface::Pixels(t) = surface {
-                    layer.pixels = t;
-                }
-            }
+            Surface::Pixels(t) => layer.pixels = t,
+        }
+        if changed.is_empty() {
+            return;
         }
         let up_to_date = self.rendered == self.revision;
         self.changed();
         if let Some(render) = self.canvas.render().cloned()
-            && let Some(area) = render.update_tiles(&self.doc.layers, &tiles)
+            && let Some(area) = render.update_tiles(&self.doc.layers, &changed)
         {
             self.canvas.invalidate(area);
             self.painted = self.revision;
@@ -313,10 +355,6 @@ impl Editor {
                 self.rendered = self.revision;
             }
         }
-    }
-
-    pub fn end_stroke(&mut self) {
-        self.stroke = None;
     }
 
     /// Pick up finished background work and start rendering if the document
@@ -410,7 +448,7 @@ mod tests {
             doc.layer_mut(*active).unwrap().mask = Some(Mask::white(600, 400))
         });
         e.target = Target::Mask;
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0)));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), false));
         e.stroke_to(100.0, 100.0);
         e.stroke_to(300.0, 100.0);
         e.end_stroke();
@@ -440,7 +478,7 @@ mod tests {
         let render = Arc::new(Render::new(e.doc.composite()));
         e.canvas.set_render(Arc::clone(&render));
         e.rendered = e.revision;
-        assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535])));
+        assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535]), false));
         e.stroke_to(250.0, 250.0);
         e.stroke_to(290.0, 270.0);
         e.end_stroke();
