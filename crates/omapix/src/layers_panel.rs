@@ -88,7 +88,8 @@ pub struct LayersPanel {
     thumbs: std::collections::HashMap<(u64, bool), Thumb>,
     /// Layer being dragged to a new place in the stack.
     dragging: Option<u64>,
-    /// A command asked for from inside a row (double-click on a thumbnail).
+    /// A command asked for from inside a row (double-click on the row or its
+    /// thumbnail).
     command: Option<Command>,
 }
 
@@ -113,12 +114,6 @@ impl LayersPanel {
                 let mut rows = Vec::with_capacity(ids.len());
                 for &id in &ids {
                     let rect = self.row(ui, editor, theme, id);
-                    // The whole row can be dragged to reorder. It only senses
-                    // drags, so clicks still reach the eye, thumbnails and name.
-                    let drag = ui.interact(rect, egui::Id::new(("layer-drag", id)), Sense::drag());
-                    if drag.drag_started() && editor.busy().is_none() {
-                        self.dragging = Some(id);
-                    }
                     rows.push((id, rect));
                 }
                 self.reorder(ui, editor, theme, &ids, &rows);
@@ -260,8 +255,14 @@ impl LayersPanel {
         let frame = egui::Frame::new()
             .fill(fill)
             .inner_margin(egui::Margin::symmetric(4, 3))
-            .multiply_with_opacity(if dimmed { 0.5 } else { 1.0 })
-            .show(ui, |ui| {
+            .multiply_with_opacity(if dimmed { 0.5 } else { 1.0 });
+        // The whole row senses clicks and drags beneath its widgets, so the
+        // eye, thumbnails and name still get their own clicks.
+        let builder = egui::UiBuilder::new()
+            .id(row_id(id))
+            .sense(Sense::click_and_drag());
+        let row = ui.scope_builder(builder, |ui| {
+            frame.show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     let eye = if visible { EYE } else { EYE_OFF };
@@ -287,14 +288,18 @@ impl LayersPanel {
                     // Pixel thumbnail (or the adjustment icon), then the mask
                     // thumbnail. Clicking one picks what painting applies to.
                     if adjustment {
-                        ui.label(RichText::new(SLIDERS).size(18.0).color(theme.accent))
-                            .on_hover_text("Adjustment layer");
+                        // Not selectable, so clicks fall through to the row.
+                        ui.add(
+                            egui::Label::new(RichText::new(SLIDERS).size(18.0).color(theme.accent))
+                                .selectable(false),
+                        )
+                        .on_hover_text("Adjustment layer");
                     } else {
                         let targeted = selected && editor.target == Target::Pixels;
-                        if self
-                            .thumbnail(ui, editor, id, false, targeted, theme)
-                            .clicked()
-                        {
+                        let response = self.thumbnail(ui, editor, id, false, targeted, theme);
+                        if response.double_clicked() {
+                            self.command = Some(Command::BlendingOptions);
+                        } else if response.clicked() {
                             editor.active = id;
                             editor.target = Target::Pixels;
                         }
@@ -350,10 +355,13 @@ impl LayersPanel {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if blend != BlendMode::Normal {
-                            ui.label(
-                                RichText::new(blend.name())
-                                    .small()
-                                    .color(theme.dark_foreground),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(blend.name())
+                                        .small()
+                                        .color(theme.dark_foreground),
+                                )
+                                .selectable(false),
                             );
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -361,8 +369,19 @@ impl LayersPanel {
                         });
                     });
                 });
-            });
-        frame.response.rect
+            })
+        });
+
+        let response = row.response;
+        if response.drag_started() && editor.busy().is_none() {
+            self.dragging = Some(id);
+        }
+        if response.double_clicked() {
+            self.command = Some(Command::BlendingOptions);
+        } else if response.clicked() {
+            select(editor, id);
+        }
+        response.rect
     }
 
     /// A small preview of a layer's pixels or mask, rebuilt only when its
@@ -461,20 +480,36 @@ impl LayersPanel {
         } else {
             RichText::new(name)
         };
-        let response = ui.add(egui::Label::new(text).truncate().sense(Sense::click()));
+        // Not selectable: selectable labels grab drags, which would stop the
+        // row being dragged by its name.
+        let label = egui::Label::new(text)
+            .truncate()
+            .selectable(false)
+            .sense(Sense::click());
+        let response = ui.add(label);
         if response.double_clicked() {
             self.renaming = Some((id, name.to_owned()));
         } else if response.clicked() {
-            editor.active = id;
-            // An adjustment layer has no pixels to paint; its mask is the target.
-            let adjustment = editor.doc.layer(id).is_some_and(|l| l.adjustment.is_some());
-            editor.target = if adjustment {
-                Target::Mask
-            } else {
-                Target::Pixels
-            };
+            select(editor, id);
         }
     }
+}
+
+/// A layer row's id, which follows the layer when the stack is reordered.
+fn row_id(layer: u64) -> egui::Id {
+    egui::Id::new(("layer-row", layer))
+}
+
+/// Select a layer as clicking its row does: paint on its pixels, or on its
+/// mask for an adjustment layer (which has no pixels).
+fn select(editor: &mut Editor, id: u64) {
+    editor.active = id;
+    let adjustment = editor.doc.layer(id).is_some_and(|l| l.adjustment.is_some());
+    editor.target = if adjustment {
+        Target::Mask
+    } else {
+        Target::Pixels
+    };
 }
 
 /// The top-first layer order after dropping `dragged` in `slot` (above the
@@ -495,6 +530,151 @@ fn reordered(ids: &[u64], dragged: u64, slot: usize) -> Option<Vec<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{Event, PointerButton, pos2, vec2};
+    use omapix_engine::adjust::{Adjustment, Curves};
+    use omapix_engine::layer::Layer;
+    use omapix_engine::{ColorProfile, Document, Raster};
+
+    /// The panel running headless, driven by synthetic mouse events.
+    struct Harness {
+        ctx: egui::Context,
+        panel: LayersPanel,
+        editor: Editor,
+        theme: Theme,
+        time: f64,
+    }
+
+    /// Layer ids, top first: an adjustment, a Multiply layer, the background.
+    const CURVES: u64 = 100;
+    const MULTIPLY: u64 = 101;
+
+    impl Harness {
+        fn new() -> Self {
+            let (w, h) = (60, 40);
+            let image = Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
+            let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+            let mut multiply = Layer::empty(MULTIPLY, "Layer 1", w, h);
+            multiply.blend = BlendMode::Multiply;
+            doc.layers.push(multiply);
+            let curves = Adjustment::Curves(Curves::default());
+            doc.layers.push(Layer::adjustment(CURVES, curves, w, h));
+            let mut harness = Self {
+                ctx: egui::Context::default(),
+                panel: LayersPanel::default(),
+                editor: Editor::new(doc).unwrap(),
+                theme: Theme::default(),
+                time: 0.0,
+            };
+            harness.frame(vec![]);
+            harness
+        }
+
+        fn background(&self) -> u64 {
+            self.editor.doc.layers[0].id
+        }
+
+        fn top_first(&self) -> Vec<u64> {
+            self.editor.doc.layers.iter().rev().map(|l| l.id).collect()
+        }
+
+        fn frame(&mut self, events: Vec<Event>) -> Option<Command> {
+            self.time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    pos2(0.0, 0.0),
+                    vec2(300.0, 600.0),
+                )),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let (panel, editor, theme) = (&mut self.panel, &mut self.editor, &self.theme);
+            let mut command = None;
+            let mut output = self
+                .ctx
+                .run_ui(input, |ui| command = panel.show(ui, editor, theme));
+            // There's no renderer to upload textures to.
+            output.textures_delta.clear();
+            command
+        }
+
+        /// A point in a row's empty space, over the blend-mode label if any.
+        fn row_point(&self, layer: u64) -> egui::Pos2 {
+            let rect = self.ctx.read_response(row_id(layer)).unwrap().rect;
+            pos2(rect.right() - 8.0, rect.center().y)
+        }
+
+        fn button(&mut self, pos: egui::Pos2, pressed: bool) -> Option<Command> {
+            self.frame(vec![
+                Event::PointerMoved(pos),
+                Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ])
+        }
+
+        /// Click once, long enough after any earlier click not to double it.
+        fn click(&mut self, pos: egui::Pos2) -> Option<Command> {
+            self.time += 1.0;
+            self.button(pos, true).or(self.button(pos, false))
+        }
+
+        fn double_click(&mut self, pos: egui::Pos2) -> Option<Command> {
+            self.click(pos);
+            self.button(pos, true).or(self.button(pos, false))
+        }
+    }
+
+    #[test]
+    fn clicking_anywhere_on_a_row_selects_the_layer() {
+        let mut h = Harness::new();
+        let background = h.background();
+
+        h.editor.target = Target::Mask;
+        h.click(h.row_point(background));
+        assert_eq!(h.editor.active, background);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // Over the "Multiply" label, which used to swallow the click.
+        h.click(h.row_point(MULTIPLY));
+        assert_eq!(h.editor.active, MULTIPLY);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // An adjustment layer has no pixels, so its mask is painted.
+        h.click(h.row_point(CURVES));
+        assert_eq!(h.editor.active, CURVES);
+        assert_eq!(h.editor.target, Target::Mask);
+
+        assert_eq!(h.top_first(), [CURVES, MULTIPLY, background]);
+    }
+
+    #[test]
+    fn double_clicking_a_row_opens_blending_options() {
+        let mut h = Harness::new();
+        let command = h.double_click(h.row_point(MULTIPLY));
+        assert_eq!(command, Some(Command::BlendingOptions));
+        assert_eq!(h.editor.active, MULTIPLY);
+    }
+
+    #[test]
+    fn rows_still_drag_to_reorder() {
+        let mut h = Harness::new();
+        let background = h.background();
+        // Drag the background (by its empty space) above the top row.
+        let from = h.row_point(background);
+        let to = h.row_point(CURVES) - vec2(0.0, 20.0);
+        h.button(from, true);
+        for i in 1..=5 {
+            let pos = from + (to - from) * (i as f32 / 5.0);
+            h.frame(vec![Event::PointerMoved(pos)]);
+        }
+        h.button(to, false);
+        assert_eq!(h.top_first(), [background, CURVES, MULTIPLY]);
+        assert_eq!(h.panel.dragging, None);
+    }
 
     #[test]
     fn dropping_moves_layers_like_photoshop() {
