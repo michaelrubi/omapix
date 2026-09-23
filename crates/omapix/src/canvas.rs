@@ -16,10 +16,9 @@ use egui::{
     Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
     TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Ui, Vec2, pos2, vec2,
 };
-use omapix_engine::layer::Layer;
 use omapix_engine::pyramid::Pyramid;
 use omapix_engine::tiled::TILE;
-use omapix_engine::{DisplayTransform, Pixel, Raster, composite, tiles};
+use omapix_engine::{DisplayTransform, Pixel, Raster, tiles};
 
 /// Photoshop's zoom presets, as fractions.
 const ZOOM_STEPS: [f32; 21] = [
@@ -80,12 +79,18 @@ impl Render {
         }
     }
 
-    /// Recomposite the given 256 px engine tiles from `layers`. Returns the
+    #[cfg(test)]
+    pub fn sample_for_test(&self, x: u32, y: u32) -> Pixel {
+        self.data.read().expect("render lock").image.get(x, y)
+    }
+
+    /// Redraw the given 256 px engine tiles with `draw`, which writes them
+    /// into the full-size image, then update the pyramid. Returns the
     /// changed area in image pixels as (x0, y0, x1, y1).
     pub fn update_tiles(
         &self,
-        layers: &[Layer],
         engine_tiles: &[(u32, u32)],
+        draw: impl FnOnce(&mut Raster, &[(u32, u32)]),
     ) -> Option<(u32, u32, u32, u32)> {
         let mut data = self.data.write().expect("render lock");
         let (w, h) = (data.image.width(), data.image.height());
@@ -99,7 +104,7 @@ impl Render {
         if x0 >= x1 || y0 >= y1 {
             return None;
         }
-        composite::composite_into(layers, &mut data.image, engine_tiles);
+        draw(&mut data.image, engine_tiles);
         let RenderData { image, pyramid } = &mut *data;
         pyramid.update_region(image, (x0, y0, x1, y1));
         Some((x0, y0, x1, y1))

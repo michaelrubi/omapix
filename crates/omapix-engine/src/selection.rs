@@ -193,10 +193,12 @@ fn fill_polygon(width: u32, height: u32, points: &[(f32, f32)]) -> Tiled<u16> {
     let mut out = Tiled::new(width, height, 0u16);
     for (y, row) in rows {
         for (x, &v) in row.iter().enumerate() {
-            if v > 0.0 {
+            // Only store coverage that survives rounding, so a zero-area
+            // shape (a lasso drawn as a line) selects nothing at all.
+            let value = (v.min(1.0) * MAX).round() as u16;
+            if value > 0 {
                 let tile = out.tile_mut(x as u32 / TILE, y / TILE);
-                tile[((y % TILE) * TILE + x as u32 % TILE) as usize] =
-                    (v.min(1.0) * MAX).round() as u16;
+                tile[((y % TILE) * TILE + x as u32 % TILE) as usize] = value;
             }
         }
     }
@@ -237,6 +239,14 @@ mod tests {
         let edge = s.at(50, 50);
         assert!(edge > 0.3 && edge < 0.7, "{edge}");
         assert!(s.at(40, 50) > 0.0 && s.at(40, 50) < s.at(60, 50));
+    }
+
+    #[test]
+    fn a_lasso_drawn_as_a_line_selects_nothing() {
+        let line: Vec<(f32, f32)> = (0..20)
+            .map(|i| (10.0 + i as f32 * 3.7, 5.0 + i as f32 * 2.9))
+            .collect();
+        assert!(Selection::polygon(100, 100, &line).is_empty());
     }
 
     #[test]

@@ -5,14 +5,32 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 
 use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
-use omapix_engine::tiled::Tiled;
-use omapix_engine::{DisplayTransform, Document};
+use omapix_engine::layer::Layer;
+use omapix_engine::tiled::{TILE, Tiled};
+use omapix_engine::{BlendMode, DisplayTransform, Document, Pixel, Raster, composite, filters};
 
 use crate::canvas::{Canvas, Render};
 
 /// Undo steps kept. Snapshots share unchanged tiles, so this mostly costs
 /// memory for pixels that edits actually replaced.
 const HISTORY_LIMIT: usize = 50;
+
+/// What the canvas shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum View {
+    /// The finished image.
+    Image,
+    /// One layer's mask, in greyscale (Photoshop's Alt+click on a mask).
+    Mask(u64),
+    /// What frequency separation at `radius` would produce: the texture
+    /// layer, or the colour/tone layer.
+    Separation { radius: f32, texture: bool },
+}
+
+/// A finished background render: the revision and view it shows, and for
+/// separation previews the flattened image it started from (reused while
+/// only the radius changes).
+type Rendered = (Render, Option<Arc<Tiled<Pixel>>>);
 
 /// Which part of the active layer edits apply to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,9 +63,15 @@ pub struct Editor {
     live: Option<String>,
     /// Incremented on every change to `doc`.
     revision: u64,
-    /// Revision the canvas is showing or being rendered.
-    rendering: Option<(u64, Receiver<Render>)>,
-    rendered: u64,
+    /// What the canvas shows, and a counter bumped whenever that changes.
+    view: View,
+    view_generation: u64,
+    /// Revision and view generation being rendered, and the result.
+    rendering: Option<((u64, u64), Receiver<Rendered>)>,
+    /// Revision and view generation the canvas is showing.
+    rendered: (u64, u64),
+    /// Flattened image a separation preview blurs, with its revision.
+    separation_base: Option<(u64, Arc<Tiled<Pixel>>)>,
     /// A slow operation running in the background. Edits are refused until
     /// it finishes.
     job: Option<Job>,
@@ -74,8 +98,11 @@ impl Editor {
             redo: Vec::new(),
             live: None,
             revision: 1,
+            view: View::Image,
+            view_generation: 0,
             rendering: None,
-            rendered: 0,
+            rendered: (0, u64::MAX),
+            separation_base: None,
             job: None,
             modified: false,
             canvas,
@@ -357,17 +384,25 @@ impl Editor {
         if changed.is_empty() {
             return;
         }
-        let up_to_date = self.rendered == self.revision;
+        let up_to_date = self.rendered == (self.revision, self.view_generation);
         self.changed();
-        if let Some(render) = self.canvas.render().cloned()
-            && let Some(area) = render.update_tiles(&self.doc.layers, &changed)
-        {
+        let (layers, view) = (&self.doc.layers, self.view);
+        let updated = self.canvas.render().cloned().and_then(|render| match view {
+            View::Image => render.update_tiles(&changed, |image, tiles| {
+                composite::composite_into(layers, image, tiles)
+            }),
+            View::Mask(id) => {
+                render.update_tiles(&changed, |image, tiles| draw_mask(layers, id, image, tiles))
+            }
+            View::Separation { .. } => None,
+        });
+        if let Some(area) = updated {
             self.canvas.invalidate(area);
             self.painted = self.revision;
             // If the canvas was current before this dab, it still is. If
             // not, a full render will catch up with the rest.
             if up_to_date {
-                self.rendered = self.revision;
+                self.rendered = (self.revision, self.view_generation);
             }
         }
     }
@@ -391,29 +426,54 @@ impl Editor {
             self.changed();
         }
 
-        if let Some((revision, rx)) = &self.rendering
-            && let Ok(render) = rx.try_recv()
+        if let Some(((revision, generation), rx)) = &self.rendering
+            && let Ok((render, base)) = rx.try_recv()
         {
+            let (revision, generation) = (*revision, *generation);
+            self.rendering = None;
+            if let Some(base) = base {
+                self.separation_base = Some((revision, base));
+            }
             // A render started before brush dabs were drawn in place would
-            // erase them from the screen; drop it and render again.
-            if *revision >= self.painted {
-                self.rendered = *revision;
+            // erase them from the screen, and one for a previous view is
+            // simply out of date; drop both and render again.
+            if revision >= self.painted && generation == self.view_generation {
+                self.rendered = (revision, generation);
                 self.canvas.set_render(Arc::new(render));
             }
-            self.rendering = None;
         }
         // One render at a time; when it finishes, the latest state is
         // rendered next, so fast slider drags skip intermediate states.
-        if self.rendering.is_none() && self.rendered != self.revision && self.stroke.is_none() {
+        let current = (self.revision, self.view_generation);
+        if self.rendering.is_none() && self.rendered != current && self.stroke.is_none() {
             let (tx, rx) = channel();
             let doc = self.doc.clone();
+            let view = self.view;
+            let base = self
+                .separation_base
+                .as_ref()
+                .filter(|(r, _)| *r == self.revision)
+                .map(|(_, b)| Arc::clone(b));
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let render = Render::new(doc.composite());
-                let _ = tx.send(render);
+                let rendered = render_view(&doc, view, base);
+                let _ = tx.send(rendered);
                 ctx.request_repaint();
             });
-            self.rendering = Some((self.revision, rx));
+            self.rendering = Some((current, rx));
+        }
+    }
+
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// Change what the canvas shows. Old tiles stay up until the new view
+    /// is rendered.
+    pub fn set_view(&mut self, view: View) {
+        if view != self.view {
+            self.view = view;
+            self.view_generation += 1;
         }
     }
 
@@ -427,6 +487,66 @@ impl Editor {
     pub fn mark_saved(&mut self, revision: u64) {
         if revision == self.revision {
             self.modified = false;
+        }
+    }
+}
+
+/// Render what `view` shows. For separation previews, also return the
+/// flattened image used, so later radius changes can reuse it.
+fn render_view(doc: &Document, view: View, base: Option<Arc<Tiled<Pixel>>>) -> Rendered {
+    match view {
+        View::Image => (Render::new(doc.composite()), None),
+        View::Mask(id) => {
+            let mut image = Raster::new(
+                doc.width,
+                doc.height,
+                vec![[0; 4]; doc.width as usize * doc.height as usize],
+            );
+            let tiles: Vec<(u32, u32)> = (0..doc.height.div_ceil(TILE))
+                .flat_map(|r| (0..doc.width.div_ceil(TILE)).map(move |c| (c, r)))
+                .collect();
+            draw_mask(&doc.layers, id, &mut image, &tiles);
+            (Render::new(image), None)
+        }
+        View::Separation { radius, texture } => {
+            let base = base.unwrap_or_else(|| Arc::new(Tiled::from_raster(&doc.composite())));
+            let low = filters::gaussian_blur(&base, radius);
+            let image = if texture {
+                // The texture layer on its own: image grain-extract blurred.
+                let mut extract = Layer::from_pixels(0, "", low);
+                extract.blend = BlendMode::GrainExtract;
+                composite::composite(
+                    &[Layer::from_pixels(0, "", (*base).clone()), extract],
+                    doc.width,
+                    doc.height,
+                )
+            } else {
+                low.to_raster()
+            };
+            (Render::new(image), Some(base))
+        }
+    }
+}
+
+/// Write a layer's mask as opaque grey into the given tiles of `image`.
+fn draw_mask(layers: &[Layer], id: u64, image: &mut Raster, tiles: &[(u32, u32)]) {
+    let Some(mask) = layers
+        .iter()
+        .find(|l| l.id == id)
+        .and_then(|l| l.mask.as_ref())
+    else {
+        return;
+    };
+    let (w, h) = (image.width(), image.height());
+    for &(col, row) in tiles {
+        let tile = mask.pixels.tile(col, row);
+        for ty in 0..TILE.min(h.saturating_sub(row * TILE)) {
+            let y = row * TILE + ty;
+            let line = image.row_mut(y);
+            for tx in 0..TILE.min(w.saturating_sub(col * TILE)) {
+                let v = tile.map_or(mask.pixels.fill(), |t| t[(ty * TILE + tx) as usize]);
+                line[(col * TILE + tx) as usize] = [v, v, v, u16::MAX];
+            }
         }
     }
 }
@@ -508,17 +628,52 @@ mod tests {
     }
 
     #[test]
+    fn views_render_masks_and_separation_previews() {
+        let mut e = editor();
+        e.edit("Mask", |doc, active| {
+            let mut mask = Mask::white(600, 400);
+            mask.pixels.tile_mut(0, 0)[0] = 1234;
+            doc.layer_mut(*active).unwrap().mask = Some(mask);
+        });
+        let (render, _) = render_view(&e.doc, View::Mask(e.active), None);
+        let data = render.sample_for_test(0, 0);
+        assert_eq!(data, [1234, 1234, 1234, 65535]);
+
+        // A flat image has no texture: the preview is mid-grey everywhere,
+        // and the colour/tone preview is the image itself.
+        let (texture, base) = render_view(
+            &e.doc,
+            View::Separation {
+                radius: 5.0,
+                texture: true,
+            },
+            None,
+        );
+        assert!(texture.sample_for_test(300, 200)[0].abs_diff(32768) <= 2);
+        let (tone, _) = render_view(
+            &e.doc,
+            View::Separation {
+                radius: 5.0,
+                texture: false,
+            },
+            base,
+        );
+        assert!(tone.sample_for_test(300, 200)[0].abs_diff(30000) <= 2);
+    }
+
+    #[test]
     fn in_place_render_updates_match_a_full_composite() {
         let mut e = editor();
         let render = Arc::new(Render::new(e.doc.composite()));
         e.canvas.set_render(Arc::clone(&render));
-        e.rendered = e.revision;
+        e.rendered = (e.revision, e.view_generation);
         assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535]), false));
         e.stroke_to(250.0, 250.0);
         e.stroke_to(290.0, 270.0);
         e.end_stroke();
         assert_eq!(
-            e.rendered, e.revision,
+            e.rendered,
+            (e.revision, e.view_generation),
             "canvas kept current without a full render"
         );
         assert_eq!(

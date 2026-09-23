@@ -10,7 +10,7 @@ use omapix_engine::{Document, export, filters, ops, ora};
 
 use crate::canvas::ToolInput;
 use crate::commands::Command;
-use crate::editor::{Editor, Target};
+use crate::editor::{Editor, Target, View};
 use crate::layers_panel::LayersPanel;
 use crate::properties_panel::PropertiesPanel;
 use crate::theme::{self, Theme};
@@ -36,10 +36,13 @@ enum Then {
 }
 
 enum Dialog {
-    /// Ask for a radius, then run a filter.
+    /// Ask for a radius, then run a filter. For frequency separation,
+    /// `preview` shows the texture layer (`Some(true)`), the colour/tone
+    /// layer (`Some(false)`) or the image (`None`) while adjusting.
     Radius {
         command: Command,
         radius: f32,
+        preview: Option<bool>,
     },
     UnsavedChanges {
         then: Then,
@@ -67,7 +70,8 @@ struct FileJob {
 ///   pixels, through the same path as mouse strokes;
 /// - `Tool Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
-///   `Look x y` (centre the view on an image point at 100 %).
+///   `Look x y` (centre the view on an image point at 100 %),
+///   `View image|mask|texture r|tone r` (what the canvas shows).
 #[derive(Debug)]
 enum ScriptStep {
     Command(Command),
@@ -78,6 +82,7 @@ enum ScriptStep {
     Color([u8; 3]),
     Source(Pos2),
     Look(Pos2),
+    View(View),
 }
 
 impl ScriptStep {
@@ -92,6 +97,19 @@ impl ScriptStep {
             ("Color", &[r, g, b]) => ScriptStep::Color([r as u8, g as u8, b as u8]),
             ("Source", &[x, y]) => ScriptStep::Source(egui::pos2(x, y)),
             ("Look", &[x, y]) => ScriptStep::Look(egui::pos2(x, y)),
+            ("View", nums) => match (words.next()?, nums) {
+                ("image", _) => ScriptStep::View(View::Image),
+                ("mask", _) => ScriptStep::View(View::Mask(0)),
+                ("texture", &[radius]) => ScriptStep::View(View::Separation {
+                    radius,
+                    texture: true,
+                }),
+                ("tone", &[radius]) => ScriptStep::View(View::Separation {
+                    radius,
+                    texture: false,
+                }),
+                _ => return None,
+            },
             ("Tool", _) => match words.next()? {
                 "Brush" => ScriptStep::Tool(crate::tools::Tool::Brush),
                 "Eraser" => ScriptStep::Tool(crate::tools::Tool::Eraser),
@@ -450,12 +468,14 @@ impl App {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius: self.blur_radius,
+                    preview: None,
                 });
             }
             Command::Feather => {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius: self.feather_radius,
+                    preview: None,
                 });
             }
             Command::FillForeground | Command::FillBackground | Command::Clear => {
@@ -478,6 +498,7 @@ impl App {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius,
+                    preview: Some(true),
                 });
             }
             _ => {
@@ -629,6 +650,15 @@ impl App {
         ui.horizontal(|ui| {
             if let Some(editor) = &self.editor {
                 let doc = &editor.doc;
+                if let View::Mask(_) = editor.view() {
+                    ui.label(
+                        RichText::new(
+                            "Viewing layer mask — Alt+click the mask or press Esc to return",
+                        )
+                        .color(self.theme.accent),
+                    );
+                    ui.separator();
+                }
                 ui.label(editor.canvas.zoom_label());
                 ui.separator();
                 ui.label(RichText::new(format!("{} × {} px", doc.width, doc.height)).color(dim));
@@ -682,10 +712,21 @@ impl App {
             .as_ref()
             .map(|e| e.doc.file_name())
             .unwrap_or_default();
-        let response = egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
+        let mut modal = egui::Modal::new(egui::Id::new("dialog"));
+        if matches!(dialog, Dialog::Radius { .. }) {
+            // Keep the image visible while choosing a radius.
+            let area = egui::Modal::default_area(egui::Id::new("dialog"))
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-320.0, 90.0));
+            modal = modal.area(area).backdrop_color(egui::Color32::TRANSPARENT);
+        }
+        let response = modal.show(ctx, |ui| {
             ui.set_min_width(340.0);
             match dialog {
-                Dialog::Radius { command, radius } => {
+                Dialog::Radius {
+                    command,
+                    radius,
+                    preview,
+                } => {
                     ui.heading(command.label().trim_end_matches('…'));
                     ui.add_space(8.0);
                     if *command == Command::FrequencySeparation {
@@ -697,6 +738,13 @@ impl App {
                             .color(hint),
                         );
                         ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Preview");
+                            ui.selectable_value(preview, Some(true), "Texture");
+                            ui.selectable_value(preview, Some(false), "Color/Tone");
+                            ui.selectable_value(preview, None, "Image");
+                        });
+                        ui.add_space(4.0);
                     }
                     ui.horizontal(|ui| {
                         ui.label("Radius");
@@ -752,6 +800,29 @@ impl App {
         });
         if close || response.should_close() {
             self.dialog = None;
+        }
+        // Show the separation preview while its dialog is open.
+        if let Some(editor) = &mut self.editor {
+            match &self.dialog {
+                Some(Dialog::Radius {
+                    command: Command::FrequencySeparation,
+                    radius,
+                    preview,
+                }) => {
+                    let view = match preview {
+                        Some(texture) => View::Separation {
+                            radius: *radius,
+                            texture: *texture,
+                        },
+                        None => View::Image,
+                    };
+                    editor.set_view(view);
+                }
+                _ if matches!(editor.view(), View::Separation { .. }) => {
+                    editor.set_view(View::Image)
+                }
+                _ => {}
+            }
         }
         if let Some(action) = action {
             action(self, ctx);
@@ -910,7 +981,10 @@ impl App {
             ScriptStep::Command(cmd) => {
                 self.run(cmd, ctx);
                 // Radius commands open a dialog; accept its default.
-                if let Some(Dialog::Radius { command, radius }) = self.dialog.take() {
+                if let Some(Dialog::Radius {
+                    command, radius, ..
+                }) = self.dialog.take()
+                {
                     self.apply_radius(command, radius, ctx);
                 }
             }
@@ -932,6 +1006,17 @@ impl App {
             ScriptStep::Opacity(o) => self.tools.set_opacity(o),
             ScriptStep::Color(c) => self.tools.foreground = c,
             ScriptStep::Source(p) => self.tools.set_source(p),
+            ScriptStep::View(view) => {
+                if let Some(editor) = &mut self.editor {
+                    // "mask" means the active layer's mask.
+                    let view = if let View::Mask(_) = view {
+                        View::Mask(editor.active)
+                    } else {
+                        view
+                    };
+                    editor.set_view(view);
+                }
+            }
             ScriptStep::Look(p) => {
                 if let Some(editor) = &mut self.editor {
                     editor.canvas.look_at(p);
@@ -1174,6 +1259,15 @@ impl eframe::App for App {
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
                 editor.end_live();
+            }
+            // Leave mask view with Esc, or when its mask goes away.
+            if let View::Mask(id) = editor.view() {
+                let gone = editor.doc.layer(id).is_none_or(|l| l.mask.is_none());
+                let escape = self.dialog.is_none()
+                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                if gone || escape {
+                    editor.set_view(View::Image);
+                }
             }
             editor.update(ctx);
         }

@@ -7,7 +7,7 @@ use omapix_engine::tiled::Tiled;
 use omapix_engine::{BlendMode, DisplayTransform, Pixel};
 
 use crate::commands::Command;
-use crate::editor::{Editor, Target};
+use crate::editor::{Editor, Target, View};
 use crate::theme::Theme;
 
 // Nerd Font icons (Omarchy's fonts are all Nerd Fonts).
@@ -244,7 +244,17 @@ impl LayersPanel {
                                 "Layer mask — click to paint on it, Shift+click to disable",
                             );
                         if response.clicked() {
-                            if ui.input(|i| i.modifiers.shift) {
+                            if ui.input(|i| i.modifiers.alt) {
+                                // Alt+click shows the mask on its own, or goes back.
+                                editor.active = id;
+                                editor.target = Target::Mask;
+                                let view = if editor.view() == View::Mask(id) {
+                                    View::Image
+                                } else {
+                                    View::Mask(id)
+                                };
+                                editor.set_view(view);
+                            } else if ui.input(|i| i.modifiers.shift) {
                                 let label = if enabled {
                                     "Disable Layer Mask"
                                 } else {
