@@ -12,6 +12,7 @@ const BRUSH_ICON: &str = "\u{f1fc}";
 const ERASER_ICON: &str = "\u{f12d}";
 const CLONE_ICON: &str = "\u{f24d}";
 const HEAL_ICON: &str = "\u{f0fa}";
+const SPOT_ICON: &str = "\u{f0d0}";
 const MARQUEE_ICON: &str = "\u{f096}";
 const LASSO_ICON: &str = "\u{f0c4}";
 
@@ -23,6 +24,7 @@ pub enum Tool {
     Brush,
     Eraser,
     CloneStamp,
+    SpotHealing,
     Healing,
     Marquee,
     Lasso,
@@ -34,6 +36,7 @@ impl Tool {
             Tool::Brush => "Brush",
             Tool::Eraser => "Eraser",
             Tool::CloneStamp => "Clone Stamp",
+            Tool::SpotHealing => "Spot Healing Brush",
             Tool::Healing => "Healing Brush",
             Tool::Marquee => "Rectangular Marquee",
             Tool::Lasso => "Lasso",
@@ -56,6 +59,7 @@ pub struct Tools {
     brush: BrushSettings,
     eraser: BrushSettings,
     clone: BrushSettings,
+    spot: BrushSettings,
     heal: BrushSettings,
     /// Where the clone/heal source was set with Alt+click, in image pixels.
     source: Option<Pos2>,
@@ -83,6 +87,11 @@ impl Default for Tools {
                 hardness: 0.5,
                 ..BrushSettings::default()
             },
+            spot: BrushSettings {
+                size: 30.0,
+                hardness: 0.6,
+                ..BrushSettings::default()
+            },
             heal: BrushSettings {
                 size: 40.0,
                 hardness: 0.7,
@@ -103,6 +112,7 @@ impl Tools {
             Tool::Brush | Tool::Marquee | Tool::Lasso => self.brush,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
+            Tool::SpotHealing => self.spot,
             Tool::Healing => self.heal,
         }
     }
@@ -120,6 +130,7 @@ impl Tools {
             Tool::Brush | Tool::Marquee | Tool::Lasso => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
+            Tool::SpotHealing => &mut self.spot,
             Tool::Healing => &mut self.heal,
         }
     }
@@ -149,6 +160,9 @@ impl Tools {
     pub fn paint(&mut self, target: Target, profile: &ColorProfile, start: Pos2) -> Option<Paint> {
         if self.tool.selects() {
             return None;
+        }
+        if self.tool == Tool::SpotHealing {
+            return (target == Target::Pixels).then_some(Paint::SpotHeal);
         }
         if self.tool.copies() {
             if target == Target::Mask {
@@ -208,8 +222,17 @@ impl Tools {
             if i.consume_key(Modifiers::NONE, Key::S) {
                 self.tool = Tool::CloneStamp;
             }
+            // J is the Spot Healing Brush; Shift+J switches to the Healing
+            // Brush (Photoshop cycles the J tools with Shift+J).
+            if i.consume_key(Modifiers::SHIFT, Key::J) {
+                self.tool = if self.tool == Tool::Healing {
+                    Tool::SpotHealing
+                } else {
+                    Tool::Healing
+                };
+            }
             if i.consume_key(Modifiers::NONE, Key::J) {
-                self.tool = Tool::Healing;
+                self.tool = Tool::SpotHealing;
             }
             if i.consume_key(Modifiers::NONE, Key::M) {
                 self.tool = Tool::Marquee;
@@ -300,7 +323,20 @@ impl Tools {
             percent(ui, "Opacity", &mut s.opacity);
             percent(ui, "Flow", &mut s.flow);
             ui.separator();
-            if self.tool.copies() {
+            if self.tool == Tool::SpotHealing {
+                ui.label("Sample");
+                ui.selectable_value(&mut self.sample_all, false, "Current Layer");
+                ui.selectable_value(&mut self.sample_all, true, "All Layers");
+                ui.separator();
+                let (text, colour) = match target {
+                    Target::Mask => ("Select the layer, not its mask, to heal", theme.red),
+                    Target::Pixels => (
+                        "Paint over a blemish; it heals when you let go",
+                        theme.dark_foreground,
+                    ),
+                };
+                ui.label(RichText::new(text).color(colour));
+            } else if self.tool.copies() {
                 ui.label("Sample");
                 ui.selectable_value(&mut self.sample_all, false, "Current Layer");
                 ui.selectable_value(&mut self.sample_all, true, "All Layers");
@@ -332,7 +368,8 @@ impl Tools {
                 (Tool::Brush, BRUSH_ICON, "Brush (B)"),
                 (Tool::Eraser, ERASER_ICON, "Eraser (E)"),
                 (Tool::CloneStamp, CLONE_ICON, "Clone Stamp (S)"),
-                (Tool::Healing, HEAL_ICON, "Healing Brush (J)"),
+                (Tool::SpotHealing, SPOT_ICON, "Spot Healing Brush (J)"),
+                (Tool::Healing, HEAL_ICON, "Healing Brush (Shift+J)"),
                 (Tool::Marquee, MARQUEE_ICON, "Rectangular Marquee (M)"),
                 (Tool::Lasso, LASSO_ICON, "Lasso (L)"),
             ] {

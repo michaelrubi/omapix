@@ -120,8 +120,9 @@ Done: brush and eraser with Photoshop's size, hardness, opacity and flow;
 painting on masks; eyedropper; Clone Stamp and Healing Brush with aligned
 sources, sampling the current layer or all layers; selections (rectangular
 marquee, lasso, add/subtract/intersect, inverse, feather) that limit
-brushes, fills and filters. Next: spot healing brush, elliptical marquee,
-pen pressure (winit has no tablet support on Linux yet).
+brushes, fills and filters; Spot Healing Brush that picks its own source.
+Next: elliptical marquee, pen pressure (winit has no tablet support on
+Linux yet).
 
 ### 4. Adjustments (mostly done)
 
@@ -151,7 +152,8 @@ All follow Photoshop.
 | Feather selection | Shift+F6 |
 | Fill foreground / background | Alt+Backspace / Ctrl+Backspace |
 | Clear | Delete |
-| Brush / Eraser / Clone / Healing | B / E / S / J |
+| Brush / Eraser / Clone | B / E / S |
+| Spot Healing / Healing Brush | J / Shift+J |
 | Marquee / Lasso | M / L (Shift adds, Alt subtracts) |
 | Brush size / hardness | [ ] / Shift+[ Shift+] |
 | Opacity 10–100 % | 1–9, 0 |
@@ -176,7 +178,7 @@ OMAPIX_SCRIPT="DodgeAndBurn,Size 300,Opacity 70,Stroke 3000 1450 4000 1450" \
 ```
 
 Steps are command names (`FrequencySeparation`, `AddMask`, …), `Stroke x0
-y0 x1 y1`, `Tool Brush|Eraser|Clone|Heal|Marquee|Lasso`, `Size n`, `Opacity percent`,
+y0 x1 y1`, `Tool Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 `Color r g b`, `Source x y`, `Look x y`.
 
 ## Licensing

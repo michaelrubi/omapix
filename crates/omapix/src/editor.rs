@@ -250,7 +250,10 @@ impl Editor {
             return false;
         }
         let target = self.target;
-        let copying = matches!(paint, Paint::Clone { .. } | Paint::Heal { .. });
+        let copying = matches!(
+            paint,
+            Paint::Clone { .. } | Paint::Heal { .. } | Paint::SpotHeal
+        );
         let Some(layer) = self.doc.layer(self.active) else {
             return false;
         };
@@ -279,6 +282,7 @@ impl Editor {
             (_, Paint::Erase) => "Eraser",
             (_, Paint::Clone { .. }) => "Clone Stamp",
             (_, Paint::Heal { .. }) => "Healing Brush",
+            (_, Paint::SpotHeal) => "Spot Healing Brush",
             _ => "Brush Stroke",
         };
         let before = self.snapshot(label);

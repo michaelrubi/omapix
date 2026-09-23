@@ -65,7 +65,7 @@ struct FileJob {
 ///   default radius);
 /// - `Stroke x0 y0 x1 y1`: a brush stroke with the current tool, in image
 ///   pixels, through the same path as mouse strokes;
-/// - `Tool Brush|Eraser|Clone|Heal|Marquee|Lasso`, `Size n`, `Opacity percent`,
+/// - `Tool Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
 ///   `Look x y` (centre the view on an image point at 100 %).
 #[derive(Debug)]
@@ -97,6 +97,7 @@ impl ScriptStep {
                 "Eraser" => ScriptStep::Tool(crate::tools::Tool::Eraser),
                 "Clone" => ScriptStep::Tool(crate::tools::Tool::CloneStamp),
                 "Heal" => ScriptStep::Tool(crate::tools::Tool::Healing),
+                "SpotHeal" => ScriptStep::Tool(crate::tools::Tool::SpotHealing),
                 "Marquee" => ScriptStep::Tool(crate::tools::Tool::Marquee),
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 _ => return None,

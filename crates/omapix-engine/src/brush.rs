@@ -57,6 +57,10 @@ pub enum Paint {
     Clone { dx: i32, dy: i32 },
     /// Like `Clone`, then blend the copy's tone into its surroundings.
     Heal { dx: i32, dy: i32 },
+    /// Heal without a source: when the stroke ends, pick the best-matching
+    /// nearby patch automatically (Photoshop's Spot Healing Brush). While
+    /// painting, the stroke shows as a translucent dark overlay.
+    SpotHeal,
 }
 
 /// The surface a stroke paints on.
@@ -230,7 +234,10 @@ impl Stroke {
                     let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
                         let a = cov[i] * opacity * self.limit_at(col, row, i);
-                        out[i] = if copying {
+                        out[i] = if self.paint == Paint::SpotHeal {
+                            // Show where the stroke is until it heals on release.
+                            paint_pixel(base[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
+                        } else if copying {
                             let (x, y) = (tx + i as u32 % TILE, ty + i as u32 / TILE);
                             if a <= 0.0 || x >= w || y >= h {
                                 base[i]
@@ -247,7 +254,10 @@ impl Stroke {
                         Paint::Mask(v) => f32::from(v),
                         Paint::Color(c) => f32::from(c[1]),
                         // Cloning isn't offered on masks; leave them alone.
-                        Paint::Erase | Paint::Clone { .. } | Paint::Heal { .. } => MAX,
+                        Paint::Erase
+                        | Paint::Clone { .. }
+                        | Paint::Heal { .. }
+                        | Paint::SpotHeal => MAX,
                     };
                     let base: Vec<u16> = orig
                         .tile(col, row)
@@ -277,6 +287,22 @@ impl Stroke {
     /// covered doesn't tint the result. This is a fast approximation of
     /// Photoshop's healing brush (Poisson blending) that works well on skin.
     pub fn finish(&mut self, surface: &mut Surface) -> Vec<(u32, u32)> {
+        if self.paint == Paint::SpotHeal {
+            let Some((dx, dy)) = self.find_source() else {
+                // Nowhere to copy from: undo the overlay.
+                let tiles: Vec<(u32, u32)> = self.coverage.keys().copied().collect();
+                if let (Surface::Pixels(dst), Surface::Pixels(orig)) = (surface, &self.original) {
+                    for &(col, row) in &tiles {
+                        let base = orig
+                            .tile(col, row)
+                            .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
+                        dst.tile_mut(col, row).copy_from_slice(&base);
+                    }
+                }
+                return tiles;
+            };
+            self.paint = Paint::Heal { dx, dy };
+        }
         let Paint::Heal { .. } = self.paint else {
             return Vec::new();
         };
@@ -363,6 +389,105 @@ impl Stroke {
     }
 }
 
+impl Stroke {
+    /// Choose where a spot-heal stroke copies from: the nearby offset whose
+    /// surroundings best match the painted area's surroundings, preferring
+    /// smooth source texture so edges (hair, lips) aren't pulled in.
+    fn find_source(&self) -> Option<(i32, i32)> {
+        let src = self.source.as_ref()?;
+        let (w, h) = (src.width() as i64, src.height() as i64);
+        // Exact bounds of the painted pixels.
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for (&(col, row), cov) in &self.coverage {
+            for (i, &c) in cov.iter().enumerate() {
+                if c > 0.01 {
+                    let (x, y) = (
+                        i64::from(col * TILE) + (i as i64 % 256),
+                        i64::from(row * TILE) + (i as i64 / 256),
+                    );
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        if x0 >= x1 {
+            return None;
+        }
+        let margin = ((self.settings.size * 0.5) as i64).max(4);
+        let (rx0, ry0) = ((x0 - margin).max(0), (y0 - margin).max(0));
+        let (rx1, ry1) = ((x1 + margin).min(w), (y1 + margin).min(h));
+        let extent = (x1 - x0).max(y1 - y0) as f32;
+        let step = (((rx1 - rx0).max(ry1 - ry0) / 64).max(1)) as usize;
+
+        let rgb = |p: Pixel| {
+            [
+                f32::from(p[0]) / MAX,
+                f32::from(p[1]) / MAX,
+                f32::from(p[2]) / MAX,
+            ]
+        };
+        let cov_at = |x: i64, y: i64| -> f32 {
+            let (x, y) = (x as u32, y as u32);
+            self.coverage
+                .get(&(x / TILE, y / TILE))
+                .map_or(0.0, |c| c[((y % TILE) * TILE + x % TILE) as usize])
+        };
+
+        let mut best: Option<(f32, (i32, i32))> = None;
+        for ring in [1.1f32, 1.5, 2.0, 2.8] {
+            let dist = ring * extent + margin as f32;
+            for k in 0..16 {
+                let angle = k as f32 / 16.0 * std::f32::consts::TAU;
+                let (ox, oy) = (
+                    (angle.cos() * dist).round() as i64,
+                    (angle.sin() * dist).round() as i64,
+                );
+                if rx0 + ox < 0 || ry0 + oy < 0 || rx1 + ox + 1 > w || ry1 + oy + 1 > h {
+                    continue;
+                }
+                let (mut ring_err, mut ring_n, mut edges, mut inner_n) =
+                    (0.0f32, 0usize, 0.0f32, 0usize);
+                let mut usable = true;
+                for y in (ry0..ry1).step_by(step) {
+                    for x in (rx0..rx1).step_by(step) {
+                        let s = src.get((x + ox) as u32, (y + oy) as u32);
+                        if cov_at(x, y) < 0.01 {
+                            let d = rgb(src.get(x as u32, y as u32));
+                            let s = rgb(s);
+                            ring_err += (0..3).map(|c| (d[c] - s[c]).powi(2)).sum::<f32>();
+                            ring_n += 1;
+                        } else {
+                            if s[3] == 0 {
+                                usable = false;
+                            }
+                            let (s, right, down) = (
+                                rgb(s),
+                                rgb(src.get((x + ox + 1) as u32, (y + oy) as u32)),
+                                rgb(src.get((x + ox) as u32, (y + oy + 1) as u32)),
+                            );
+                            edges += (0..3)
+                                .map(|c| (s[c] - right[c]).abs() + (s[c] - down[c]).abs())
+                                .sum::<f32>();
+                            inner_n += 1;
+                        }
+                    }
+                }
+                if !usable || ring_n == 0 {
+                    continue;
+                }
+                let score =
+                    ring_err / ring_n as f32 + 0.5 * (edges / inner_n.max(1) as f32).powi(2);
+                if best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, (ox as i32, oy as i32)));
+                }
+            }
+        }
+        best.map(|(_, offset)| offset)
+    }
+}
+
 /// Dab shape at distance `d` (fraction of the radius) from the centre:
 /// 1 inside the hard core, easing smoothly to 0 at the edge.
 fn falloff(d: f32, hardness: f32) -> f32 {
@@ -402,7 +527,7 @@ fn paint_pixel(base: Pixel, a: f32, paint: Paint) -> Pixel {
             out[3] = (base_a * (1.0 - a) * MAX).round() as u16;
             out
         }
-        Paint::Mask(_) | Paint::Clone { .. } | Paint::Heal { .. } => base,
+        Paint::Mask(_) | Paint::Clone { .. } | Paint::Heal { .. } | Paint::SpotHeal => base,
     }
 }
 
@@ -626,6 +751,45 @@ mod tests {
         };
         assert_eq!(out.get(90, 50)[0], 0);
         assert_eq!(out.get(110, 50)[0], 65535);
+    }
+
+    #[test]
+    fn spot_healing_finds_a_clean_source_by_itself() {
+        // Skin with a blemish, and a hard dark bar nearby that a careless
+        // source choice would copy in.
+        let (w, h) = (400, 240);
+        let mut img = skin(w, h).to_vec();
+        for y in 0..h {
+            for x in 100..112 {
+                img[(y * w + x) as usize] = [3000, 3000, 3000, 65535];
+            }
+        }
+        let img = Tiled::from_slice(w, h, [0; 4], &img);
+        let surface = Surface::Pixels(img.clone());
+        let settings = BrushSettings {
+            size: 30.0,
+            hardness: 0.5,
+            ..Default::default()
+        };
+        let mut s = Stroke::new(settings, Paint::SpotHeal, surface.clone()).sampling(img.clone());
+        let mut out = surface;
+        let tiles = s.add_point(150.0, 100.0);
+        s.apply(&mut out, &tiles);
+        let tiles = s.finish(&mut out);
+        assert!(!tiles.is_empty());
+        let Surface::Pixels(out) = out else {
+            unreachable!()
+        };
+        let healed = out.get(150, 100)[0];
+        let expected = 30000 + 150 * 60 + 100 * 20;
+        assert!(
+            healed.abs_diff(expected) < 1000,
+            "healed {healed}, expected about {expected}"
+        );
+        // No dark bar pulled into the patch.
+        for x in 140..160 {
+            assert!(out.get(x, 100)[0] > 20000, "dark pixel at {x}");
+        }
     }
 
     #[test]
