@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::adjust::Adjustment;
 use crate::blend::BlendMode;
 use crate::tiled::Tiled;
@@ -22,6 +24,83 @@ pub struct Layer {
     /// For adjustment layers: the change applied to everything below. Their
     /// pixels are unused (always empty).
     pub adjustment: Option<Adjustment>,
+    /// Photoshop's Blend If (Blending Options): hide this layer where it or
+    /// the layers below are too dark or too light.
+    pub blend_if: Option<BlendIf>,
+}
+
+/// Which values Blend If compares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlendIfChannel {
+    #[default]
+    Gray,
+    Red,
+    Green,
+    Blue,
+}
+
+/// Photoshop's Blend If. Each range is `[black, black_split, white_split,
+/// white]` on 0–1: the layer shows fully between the inner points, fades
+/// out between each pair (split sliders, Alt+drag in Photoshop), and is
+/// hidden beyond them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlendIf {
+    pub channel: BlendIfChannel,
+    pub this: [f32; 4],
+    pub underlying: [f32; 4],
+}
+
+impl Default for BlendIf {
+    fn default() -> Self {
+        Self {
+            channel: BlendIfChannel::Gray,
+            this: [0.0, 0.0, 1.0, 1.0],
+            underlying: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+}
+
+impl BlendIf {
+    /// True when it hides nothing.
+    pub fn is_neutral(&self) -> bool {
+        let full = |r: [f32; 4]| r[1] <= 0.0 && r[2] >= 1.0;
+        full(self.this) && full(self.underlying)
+    }
+
+    fn pick(&self, c: [f32; 3]) -> f32 {
+        match self.channel {
+            BlendIfChannel::Gray => 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2],
+            BlendIfChannel::Red => c[0],
+            BlendIfChannel::Green => c[1],
+            BlendIfChannel::Blue => c[2],
+        }
+    }
+
+    fn range([black, black_split, white_split, white]: [f32; 4], v: f32) -> f32 {
+        let rise = if v >= black_split {
+            1.0
+        } else if v < black {
+            0.0
+        } else {
+            (v - black) / (black_split - black).max(1e-6)
+        };
+        let fall = if v <= white_split {
+            1.0
+        } else if v > white {
+            0.0
+        } else {
+            (white - v) / (white - white_split).max(1e-6)
+        };
+        rise * fall
+    }
+
+    /// How much of the layer shows (0–1) for this layer's colour over the
+    /// colour below it.
+    #[inline]
+    pub fn factor(&self, this: [f32; 3], underlying: [f32; 3]) -> f32 {
+        Self::range(self.this, self.pick(this))
+            * Self::range(self.underlying, self.pick(underlying))
+    }
 }
 
 #[derive(Clone)]
@@ -82,6 +161,7 @@ impl Layer {
             pixels,
             mask: None,
             adjustment: None,
+            blend_if: None,
         }
     }
 }

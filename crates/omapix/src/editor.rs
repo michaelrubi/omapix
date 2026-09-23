@@ -61,6 +61,9 @@ pub struct Editor {
     /// Key of the continuous edit in progress (e.g. dragging the opacity
     /// slider), so a whole drag is one undo step.
     live: Option<String>,
+    /// A dialog's edits, gathered into one undo step until it closes, and
+    /// whether anything changed.
+    group: Option<(String, bool)>,
     /// Incremented on every change to `doc`.
     revision: u64,
     /// What the canvas shows, and a counter bumped whenever that changes.
@@ -97,6 +100,7 @@ impl Editor {
             undo: Vec::new(),
             redo: Vec::new(),
             live: None,
+            group: None,
             revision: 1,
             view: View::Image,
             view_generation: 0,
@@ -170,6 +174,14 @@ impl Editor {
             return;
         }
         self.end_stroke();
+        let key = match &mut self.group {
+            Some((label, changed)) => {
+                *changed = true;
+                label.clone()
+            }
+            None => key.to_owned(),
+        };
+        let key = key.as_str();
         if self.live.as_deref() != Some(key) {
             let before = self.snapshot(key);
             self.push_undo(before);
@@ -180,7 +192,30 @@ impl Editor {
     }
 
     pub fn end_live(&mut self) {
+        if self.group.is_none() {
+            self.live = None;
+        }
+    }
+
+    /// Start gathering live edits into one undo step called `label`, for a
+    /// dialog with OK and Cancel.
+    pub fn begin_group(&mut self, label: &str) {
+        self.end_stroke();
         self.live = None;
+        self.group = Some((label.to_owned(), false));
+    }
+
+    /// Finish the group: keep its edits (OK), or revert them without a
+    /// trace in the history (Cancel).
+    pub fn end_group(&mut self, keep: bool) {
+        let Some((_, changed)) = self.group.take() else {
+            return;
+        };
+        self.live = None;
+        if changed && !keep {
+            self.undo();
+            self.redo.pop();
+        }
     }
 
     /// Run a slow edit on a background thread as one undo step.
@@ -659,6 +694,27 @@ mod tests {
             base,
         );
         assert!(tone.sample_for_test(300, 200)[0].abs_diff(30000) <= 2);
+    }
+
+    #[test]
+    fn dialog_groups_are_one_undo_step_and_cancel_reverts() {
+        let mut e = editor();
+        e.begin_group("Blending Options");
+        e.edit_live("a", |doc| doc.layers[0].opacity = 0.5);
+        e.end_live(); // pointer released between drags
+        e.edit_live("b", |doc| doc.layers[0].opacity = 0.2);
+        e.end_group(true);
+        assert_eq!(e.undo_label(), Some("Blending Options"));
+        e.undo();
+        assert_eq!(e.doc.layers[0].opacity, 1.0);
+        assert_eq!(e.undo_label(), None);
+
+        e.begin_group("Blending Options");
+        e.edit_live("a", |doc| doc.layers[0].opacity = 0.3);
+        e.end_group(false);
+        assert_eq!(e.doc.layers[0].opacity, 1.0);
+        // Cancelling leaves no trace in the history.
+        assert_eq!((e.undo_label(), e.redo_label()), (None, None));
     }
 
     #[test]

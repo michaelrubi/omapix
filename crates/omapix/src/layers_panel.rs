@@ -88,6 +88,8 @@ pub struct LayersPanel {
     thumbs: std::collections::HashMap<(u64, bool), Thumb>,
     /// Layer being dragged to a new place in the stack.
     dragging: Option<u64>,
+    /// A command asked for from inside a row (double-click on a thumbnail).
+    command: Option<Command>,
 }
 
 impl LayersPanel {
@@ -141,7 +143,7 @@ impl LayersPanel {
                 }
             }
         });
-        command
+        command.or(self.command.take())
     }
 
     fn header(&mut self, ui: &mut Ui, editor: &mut Editor) {

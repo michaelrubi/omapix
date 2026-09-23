@@ -165,7 +165,12 @@ All follow Photoshop.
 | Pan | Space+drag, middle-drag, scroll / Shift+scroll |
 | Quit | Ctrl+Q |
 
-Click a layer's mask icon to paint on the mask; Shift+click disables it.
+Click a layer's mask thumbnail to paint on the mask; Alt+click shows the
+mask on its own (Alt+click again or Esc returns); Shift+click disables it.
+Drag layer rows to reorder them. Double-click a layer thumbnail (or Layer ›
+Blending Options…) for Blend If; Alt+drag a slider handle to split it.
+The Frequency Separation dialog previews the texture or colour/tone layer
+live while you set the radius.
 
 ## Testing the UI
 
@@ -179,7 +184,8 @@ OMAPIX_SCRIPT="DodgeAndBurn,Size 300,Opacity 70,Stroke 3000 1450 4000 1450" \
 
 Steps are command names (`FrequencySeparation`, `AddMask`, …), `Stroke x0
 y0 x1 y1`, `Tool Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
-`Color r g b`, `Source x y`, `Look x y`.
+`Color r g b`, `Source x y`, `Look x y`, `View image|mask|texture r|tone r`,
+`BlendIf black black_split white_split white [under]` (0–255).
 
 ## Licensing
 

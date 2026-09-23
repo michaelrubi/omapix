@@ -1,4 +1,5 @@
 mod app;
+mod blending_options;
 mod canvas;
 mod commands;
 mod editor;

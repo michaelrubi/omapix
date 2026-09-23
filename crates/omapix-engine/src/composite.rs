@@ -99,6 +99,7 @@ fn blend_tile(
     }
     let opacity = layer.opacity;
     let mode = layer.blend;
+    let blend_if = layer.blend_if.as_ref().filter(|b| !b.is_neutral());
 
     // An adjustment layer changes what's below it: the adjusted colour is
     // blended onto the original with the layer's mode, opacity and mask.
@@ -111,7 +112,9 @@ fn blend_tile(
                 continue;
             }
             let cb = [br, bg, bb];
-            let blended = mode.apply(cb, adjustment.apply(cb));
+            let adjusted = adjustment.apply(cb);
+            let a = a * blend_if.map_or(1.0, |b| b.factor(adjusted, cb));
+            let blended = mode.apply(cb, adjusted);
             for c in 0..3 {
                 px[c] = cb[c] + (blended[c] - cb[c]) * a;
             }
@@ -138,6 +141,10 @@ fn blend_tile(
         ];
         let [br, bg, bb, a_b] = acc[i];
         let cb = [br, bg, bb];
+        let a_s = a_s * blend_if.map_or(1.0, |b| b.factor(cs, cb));
+        if a_s <= 0.0 {
+            continue;
+        }
         let blended = if a_b > 0.0 { mode.apply(cb, cs) } else { cs };
         let a_o = a_s + a_b * (1.0 - a_s);
         let mut out = [0.0; 4];
@@ -247,6 +254,39 @@ mod tests {
         let left = out.get(10, 5);
         assert!(left[0].abs_diff(left[1]) <= 2, "desaturated: {left:?}");
         assert_eq!(out.get(280, 5), [50000, 20000, 20000, 65535]);
+    }
+
+    #[test]
+    fn blend_if_hides_the_layer_over_dark_underlying_pixels() {
+        use crate::layer::BlendIf;
+        let (w, h) = (256, 1);
+        // Underlying: a black-to-white ramp. Top: solid red.
+        let ramp: Vec<Pixel> = (0..256)
+            .map(|x| {
+                let v = (x * 257) as u16;
+                [v, v, v, 65535]
+            })
+            .collect();
+        let bottom = Layer::from_raster(1, "ramp", &Raster::new(w, h, ramp));
+        let mut top = solid(2, w, h, [65535, 0, 0, 65535]);
+        // Show only over underlying values above ~50 %, fading in from 40 %.
+        top.blend_if = Some(BlendIf {
+            underlying: [0.4, 0.5, 1.0, 1.0],
+            ..BlendIf::default()
+        });
+        let out = composite(&[bottom, top], w, h);
+        assert_eq!(
+            out.get(50, 0),
+            [50 * 257, 50 * 257, 50 * 257, 65535],
+            "dark areas untouched"
+        );
+        assert_eq!(
+            out.get(200, 0),
+            [65535, 0, 0, 65535],
+            "light areas fully covered"
+        );
+        let mid = out.get(115, 0); // ~45 %: half-way through the fade
+        assert!(mid[0] > mid[1] && mid[1] > 0, "partially covered: {mid:?}");
     }
 
     #[test]

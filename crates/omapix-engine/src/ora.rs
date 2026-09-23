@@ -201,6 +201,10 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
             if layer.visible { "visible" } else { "hidden" },
             layer.blend.ora_name(),
         ));
+        if let Some(blend_if) = layer.blend_if.filter(|b| !b.is_neutral()) {
+            let json = serde_json::to_string(&blend_if).expect("blend-if always serialises");
+            xml.push_str(&format!(" omapix:blend-if=\"{}\"", xml_escape(&json)));
+        }
         if let Some(adjustment) = &layer.adjustment {
             xml.push_str(&format!(
                 " omapix:adjustment=\"{}\"",
@@ -291,6 +295,7 @@ struct LayerEntry {
     blend: BlendMode,
     mask: Option<(String, u32, u32, u16, bool)>,
     adjustment: Option<crate::adjust::Adjustment>,
+    blend_if: Option<crate::layer::BlendIf>,
 }
 
 fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
@@ -345,6 +350,9 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
                             adjustment: attrs
                                 .get("omapix:adjustment")
                                 .and_then(|json| crate::adjust::Adjustment::from_json(json)),
+                            blend_if: attrs
+                                .get("omapix:blend-if")
+                                .and_then(|json| serde_json::from_str(json).ok()),
                         });
                     }
                     _ => {}
@@ -434,6 +442,7 @@ pub fn load(path: &Path) -> Result<Document> {
                 layer.visible = e.visible;
                 layer.blend = e.blend;
                 layer.adjustment = e.adjustment.clone();
+                layer.blend_if = e.blend_if;
                 if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
                     let (mw, mh, samples, _) = decode_png(mask_png, false)?;
                     let area = (
@@ -491,6 +500,10 @@ mod tests {
         ops::frequency_separation(&mut doc, 0, 3.0);
         ops::dodge_and_burn_layer(&mut doc, 2);
         doc.layers[1].opacity = 0.5;
+        doc.layers[1].blend_if = Some(crate::layer::BlendIf {
+            this: [0.1, 0.2, 0.8, 0.95],
+            ..Default::default()
+        });
         doc.layers[2].visible = false;
         doc.layers[2].name = "Tex & <stuff>".into();
         let mut mask = Mask::white(w, h);
@@ -527,6 +540,7 @@ mod tests {
             assert_eq!(a.pixels.to_vec(), b.pixels.to_vec(), "pixels of {}", a.name);
             assert_eq!(a.mask.is_some(), b.mask.is_some());
             assert_eq!(a.adjustment, b.adjustment);
+            assert_eq!(a.blend_if, b.blend_if);
             if let (Some(ma), Some(mb)) = (&a.mask, &b.mask) {
                 assert_eq!(ma.enabled, mb.enabled);
                 assert_eq!(ma.pixels.to_vec(), mb.pixels.to_vec());

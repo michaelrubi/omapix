@@ -47,6 +47,7 @@ enum Dialog {
     UnsavedChanges {
         then: Then,
     },
+    BlendingOptions(crate::blending_options::BlendingOptions),
 }
 
 /// Result of a background save or export: the document revision written,
@@ -83,6 +84,8 @@ enum ScriptStep {
     Source(Pos2),
     Look(Pos2),
     View(View),
+    /// `BlendIf this|under black black_split white_split white` (0–255).
+    BlendIf(bool, [f32; 4]),
 }
 
 impl ScriptStep {
@@ -97,6 +100,10 @@ impl ScriptStep {
             ("Color", &[r, g, b]) => ScriptStep::Color([r as u8, g as u8, b as u8]),
             ("Source", &[x, y]) => ScriptStep::Source(egui::pos2(x, y)),
             ("Look", &[x, y]) => ScriptStep::Look(egui::pos2(x, y)),
+            ("BlendIf", &[a, b, c, d]) => {
+                let under = step.split_whitespace().any(|w| w == "under");
+                ScriptStep::BlendIf(under, [a / 255.0, b / 255.0, c / 255.0, d / 255.0])
+            }
             ("View", nums) => match (words.next()?, nums) {
                 ("image", _) => ScriptStep::View(View::Image),
                 ("mask", _) => ScriptStep::View(View::Mask(0)),
@@ -478,6 +485,14 @@ impl App {
                     preview: None,
                 });
             }
+            Command::BlendingOptions => {
+                if let Some(editor) = &mut self.editor {
+                    editor.begin_group("Blending Options");
+                    self.dialog = Some(Dialog::BlendingOptions(
+                        crate::blending_options::BlendingOptions::new(editor.active),
+                    ));
+                }
+            }
             Command::FillForeground | Command::FillBackground | Command::Clear => {
                 let colour = match cmd {
                     Command::FillForeground => Some(self.tools.foreground),
@@ -602,6 +617,8 @@ impl App {
                 self.menu_item(ui, Command::DuplicateLayer, None);
                 self.menu_item(ui, Command::DeleteLayer, None);
                 ui.separator();
+                self.menu_item(ui, Command::BlendingOptions, None);
+                ui.separator();
                 self.menu_item(ui, Command::AddMask, None);
                 self.menu_item(ui, Command::ToggleMask, None);
                 self.menu_item(ui, Command::DeleteMask, None);
@@ -701,6 +718,26 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if let (Some(Dialog::BlendingOptions(panel)), Some(editor)) =
+            (&mut self.dialog, &mut self.editor)
+        {
+            let closed = match panel.show(ctx, editor, &self.theme) {
+                Some(keep) => {
+                    editor.end_group(keep);
+                    true
+                }
+                // The layer went away.
+                None if editor.doc.layer(panel.layer).is_none() => {
+                    editor.end_group(false);
+                    true
+                }
+                None => false,
+            };
+            if closed {
+                self.dialog = None;
+            }
+            return;
+        }
         let Some(dialog) = &mut self.dialog else {
             return;
         };
@@ -771,6 +808,7 @@ impl App {
                         }
                     });
                 }
+                Dialog::BlendingOptions(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = *then;
                     ui.heading("Unsaved changes");
@@ -1006,6 +1044,22 @@ impl App {
             ScriptStep::Opacity(o) => self.tools.set_opacity(o),
             ScriptStep::Color(c) => self.tools.foreground = c,
             ScriptStep::Source(p) => self.tools.set_source(p),
+            ScriptStep::BlendIf(under, range) => {
+                if let Some(editor) = &mut self.editor {
+                    let id = editor.active;
+                    editor.edit("Blending Options", |doc, _| {
+                        if let Some(layer) = doc.layer_mut(id) {
+                            let mut b = layer.blend_if.unwrap_or_default();
+                            if under {
+                                b.underlying = range;
+                            } else {
+                                b.this = range;
+                            }
+                            layer.blend_if = Some(b);
+                        }
+                    });
+                }
+            }
             ScriptStep::View(view) => {
                 if let Some(editor) = &mut self.editor {
                     // "mask" means the active layer's mask.
