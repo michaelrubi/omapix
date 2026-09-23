@@ -1,5 +1,8 @@
 mod app;
 mod canvas;
+mod commands;
+mod editor;
+mod layers_panel;
 mod theme;
 
 use std::path::PathBuf;
