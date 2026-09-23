@@ -3,7 +3,8 @@
 //! middle, and layer buttons at the bottom.
 
 use egui::{Align, Button, ComboBox, Layout, RichText, ScrollArea, Sense, Slider, TextEdit, Ui};
-use omapix_engine::BlendMode;
+use omapix_engine::tiled::Tiled;
+use omapix_engine::{BlendMode, DisplayTransform, Pixel};
 
 use crate::commands::Command;
 use crate::editor::{Editor, Target};
@@ -18,10 +19,73 @@ const COPY: &str = "\u{f0c5}";
 const TRASH: &str = "\u{f1f8}";
 const SLIDERS: &str = "\u{f1de}";
 
+/// Thumbnail width (or height, for portrait images), in points.
+const THUMB: f32 = 40.0;
+
+/// What a thumbnail shows, kept to spot when it needs redrawing (layers
+/// share tiles until edited, so comparing tiles is cheap).
+enum ThumbSource {
+    Pixels(Tiled<Pixel>),
+    Mask(Tiled<u16>),
+}
+
+impl ThumbSource {
+    fn same(&self, other: &ThumbSource) -> bool {
+        match (self, other) {
+            (ThumbSource::Pixels(a), ThumbSource::Pixels(b)) => a.same_tiles(b),
+            (ThumbSource::Mask(a), ThumbSource::Mask(b)) => a.same_tiles(b) && a.fill() == b.fill(),
+            _ => false,
+        }
+    }
+
+    /// Sample the image down to `w`×`h` (nearest pixel) in display colour.
+    fn render(&self, w: usize, h: usize, transform: &DisplayTransform) -> egui::ColorImage {
+        let (w, h) = (w.max(1), h.max(1));
+        let (iw, ih) = match self {
+            ThumbSource::Pixels(t) => (t.width(), t.height()),
+            ThumbSource::Mask(t) => (t.width(), t.height()),
+        };
+        let at = |x: usize, y: usize| {
+            (
+                (((x as f32 + 0.5) / w as f32 * iw as f32) as u32).min(iw - 1),
+                (((y as f32 + 0.5) / h as f32 * ih as f32) as u32).min(ih - 1),
+            )
+        };
+        let rgba: Vec<u8> = match self {
+            ThumbSource::Pixels(t) => {
+                let samples: Vec<Pixel> = (0..w * h)
+                    .map(|i| {
+                        let (x, y) = at(i % w, i / w);
+                        t.get(x, y)
+                    })
+                    .collect();
+                let mut out = vec![[0u8; 4]; samples.len()];
+                transform.convert(&samples, &mut out);
+                out.into_iter().flatten().collect()
+            }
+            ThumbSource::Mask(t) => (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = at(i % w, i / w);
+                    let v = (t.get(x, y) >> 8) as u8;
+                    [v, v, v, 255]
+                })
+                .collect(),
+        };
+        egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba)
+    }
+}
+
+struct Thumb {
+    source: ThumbSource,
+    texture: egui::TextureHandle,
+}
+
 #[derive(Default)]
 pub struct LayersPanel {
     /// Layer being renamed, and the name typed so far.
     renaming: Option<(u64, String)>,
+    /// Thumbnails by (layer id, is mask).
+    thumbs: std::collections::HashMap<(u64, bool), Thumb>,
 }
 
 impl LayersPanel {
@@ -125,7 +189,6 @@ impl LayersPanel {
             layer.mask.as_ref().map(|m| m.enabled),
             layer.adjustment.is_some(),
         );
-
         let fill = if selected {
             theme.selection
         } else {
@@ -143,11 +206,10 @@ impl LayersPanel {
                     } else {
                         theme.dark_foreground
                     };
-                    if ui
+                    let eye_button = ui
                         .add(Button::new(RichText::new(eye).color(eye_colour)).frame(false))
-                        .on_hover_text("Show/hide")
-                        .clicked()
-                    {
+                        .on_hover_text("Show/hide");
+                    if eye_button.clicked() {
                         editor.edit(
                             if visible { "Hide Layer" } else { "Show Layer" },
                             |doc, _| {
@@ -158,41 +220,61 @@ impl LayersPanel {
                         );
                     }
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(enabled) = mask {
-                            let targeted = selected && editor.target == Target::Mask;
-                            let colour = match (enabled, targeted) {
-                                (false, _) => theme.red,
-                                (true, true) => theme.accent,
-                                (true, false) => theme.foreground,
-                            };
-                            let chip = ui
-                                .add(Button::new(RichText::new(MASK).color(colour)).frame(targeted))
-                                .on_hover_text(
-                                    "Layer mask — click to edit, Shift+click to disable",
-                                );
-                            if chip.clicked() {
-                                if ui.input(|i| i.modifiers.shift) {
-                                    editor.edit(
-                                        if enabled {
-                                            "Disable Layer Mask"
-                                        } else {
-                                            "Enable Layer Mask"
-                                        },
-                                        |doc, _| {
-                                            if let Some(m) =
-                                                doc.layer_mut(id).and_then(|l| l.mask.as_mut())
-                                            {
-                                                m.enabled = !m.enabled;
-                                            }
-                                        },
-                                    );
+                    // Pixel thumbnail (or the adjustment icon), then the mask
+                    // thumbnail. Clicking one picks what painting applies to.
+                    if adjustment {
+                        ui.label(RichText::new(SLIDERS).size(18.0).color(theme.accent))
+                            .on_hover_text("Adjustment layer");
+                    } else {
+                        let targeted = selected && editor.target == Target::Pixels;
+                        if self
+                            .thumbnail(ui, editor, id, false, targeted, theme)
+                            .clicked()
+                        {
+                            editor.active = id;
+                            editor.target = Target::Pixels;
+                        }
+                    }
+                    if let Some(enabled) = mask {
+                        let targeted = selected && editor.target == Target::Mask;
+                        let response = self
+                            .thumbnail(ui, editor, id, true, targeted, theme)
+                            .on_hover_text(
+                                "Layer mask — click to paint on it, Shift+click to disable",
+                            );
+                        if response.clicked() {
+                            if ui.input(|i| i.modifiers.shift) {
+                                let label = if enabled {
+                                    "Disable Layer Mask"
                                 } else {
-                                    editor.active = id;
-                                    editor.target = Target::Mask;
-                                }
+                                    "Enable Layer Mask"
+                                };
+                                editor.edit(label, |doc, _| {
+                                    if let Some(m) = doc.layer_mut(id).and_then(|l| l.mask.as_mut())
+                                    {
+                                        m.enabled = !m.enabled;
+                                    }
+                                });
+                            } else {
+                                editor.active = id;
+                                editor.target = Target::Mask;
                             }
                         }
+                        if !enabled {
+                            // Photoshop crosses out a disabled mask.
+                            let r = response.rect;
+                            ui.painter().line_segment(
+                                [r.left_top(), r.right_bottom()],
+                                egui::Stroke::new(2.0, theme.red),
+                            );
+                            ui.painter().line_segment(
+                                [r.right_top(), r.left_bottom()],
+                                egui::Stroke::new(2.0, theme.red),
+                            );
+                        }
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if blend != BlendMode::Normal {
                             ui.label(
                                 RichText::new(blend.name())
@@ -200,17 +282,82 @@ impl LayersPanel {
                                     .color(theme.dark_foreground),
                             );
                         }
-
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            if adjustment {
-                                ui.label(RichText::new(SLIDERS).color(theme.accent))
-                                    .on_hover_text("Adjustment layer");
-                            }
                             self.name(ui, editor, id, &name, selected);
                         });
                     });
                 });
             });
+    }
+
+    /// A small preview of a layer's pixels or mask, rebuilt only when its
+    /// tiles change.
+    fn thumbnail(
+        &mut self,
+        ui: &mut Ui,
+        editor: &Editor,
+        id: u64,
+        mask: bool,
+        targeted: bool,
+        theme: &Theme,
+    ) -> egui::Response {
+        let (w, h) = (editor.doc.width as f32, editor.doc.height as f32);
+        let size = if w >= h {
+            egui::vec2(THUMB, THUMB * h / w)
+        } else {
+            egui::vec2(THUMB * w / h, THUMB)
+        };
+        let layer = editor.doc.layer(id);
+        let source = match (mask, layer) {
+            (true, Some(l)) => l.mask.as_ref().map(|m| ThumbSource::Mask(m.pixels.clone())),
+            (false, Some(l)) => Some(ThumbSource::Pixels(l.pixels.clone())),
+            _ => None,
+        };
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let Some(source) = source else {
+            return response;
+        };
+
+        let key = (id, mask);
+        let stale = self
+            .thumbs
+            .get(&key)
+            .is_none_or(|t| !t.source.same(&source));
+        if stale {
+            let px = (size * ui.pixels_per_point()).round();
+            let image = source.render(px.x as usize, px.y as usize, editor.canvas.transform());
+            match self.thumbs.get_mut(&key) {
+                Some(t) => {
+                    t.texture.set(image, egui::TextureOptions::LINEAR);
+                    t.source = source;
+                }
+                None => {
+                    let texture = ui.ctx().load_texture(
+                        format!("thumb-{id}-{mask}"),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.thumbs.insert(key, Thumb { source, texture });
+                }
+            }
+        }
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(0x50));
+        if let Some(t) = self.thumbs.get(&key) {
+            painter.image(
+                t.texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        let outline = if targeted {
+            egui::Stroke::new(2.0, theme.accent)
+        } else {
+            egui::Stroke::new(1.0, theme.muted)
+        };
+        painter.rect_stroke(rect.expand(1.0), 0.0, outline, egui::StrokeKind::Outside);
+        response
     }
 
     fn name(&mut self, ui: &mut Ui, editor: &mut Editor, id: u64, name: &str, selected: bool) {

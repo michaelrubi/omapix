@@ -5,8 +5,8 @@ use std::io::BufWriter;
 use std::path::Path;
 
 use image::ImageEncoder;
-use rayon::prelude::*;
 use image::codecs::jpeg::JpegEncoder;
+use rayon::prelude::*;
 use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
 use tiff::tags::Tag;
 

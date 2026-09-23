@@ -253,6 +253,11 @@ impl Canvas {
         self.dirty.clear();
     }
 
+    /// Document colour to display colour.
+    pub fn transform(&self) -> &DisplayTransform {
+        &self.transform
+    }
+
     /// Laid out and showing a render, so view commands and strokes work.
     pub fn ready(&self) -> bool {
         self.rect.is_positive() && self.render.is_some()

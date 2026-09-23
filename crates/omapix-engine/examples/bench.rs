@@ -49,8 +49,15 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let t = Instant::now();
     ora::save(&doc, &dir.join("bench.ora")).expect("save");
-    let size = std::fs::metadata(dir.join("bench.ora")).map(|m| m.len()).unwrap_or(0);
-    println!("save .ora       {:>8.0?}  {} MB, {} layers", t.elapsed(), size / 1_000_000, doc.layers.len());
+    let size = std::fs::metadata(dir.join("bench.ora"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!(
+        "save .ora       {:>8.0?}  {} MB, {} layers",
+        t.elapsed(),
+        size / 1_000_000,
+        doc.layers.len()
+    );
     let t = Instant::now();
     let _ = ora::load(&dir.join("bench.ora")).expect("load");
     println!("open .ora       {:>8.0?}", t.elapsed());
