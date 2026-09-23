@@ -220,17 +220,9 @@ impl LayersPanel {
             return;
         }
         self.dragging = None;
-        let Some(from) = ids.iter().position(|&i| i == dragged) else {
+        let Some(order) = reordered(ids, dragged, slot) else {
             return;
         };
-        // Removing the row first shifts later slots up by one.
-        let to = if slot > from { slot - 1 } else { slot };
-        if to == from {
-            return;
-        }
-        let mut order = ids.to_vec();
-        order.remove(from);
-        order.insert(to, dragged);
         editor.edit("Move Layer", |doc, _| {
             // `order` is top first; the document stores bottom first.
             let rank = |id: u64| {
