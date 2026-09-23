@@ -201,6 +201,12 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
             if layer.visible { "visible" } else { "hidden" },
             layer.blend.ora_name(),
         ));
+        if let Some(adjustment) = &layer.adjustment {
+            xml.push_str(&format!(
+                " omapix:adjustment=\"{}\"",
+                xml_escape(&adjustment.to_json())
+            ));
+        }
         if let Some(((name, _, (mx, my)), fill)) = &enc.mask_png {
             let enabled = layer.mask.as_ref().is_some_and(|m| m.enabled);
             xml.push_str(&format!(
@@ -284,6 +290,7 @@ struct LayerEntry {
     visible: bool,
     blend: BlendMode,
     mask: Option<(String, u32, u32, u16, bool)>,
+    adjustment: Option<crate::adjust::Adjustment>,
 }
 
 fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
@@ -335,6 +342,9 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
                                 .and_then(|op| BlendMode::from_ora_name(op))
                                 .unwrap_or_default(),
                             mask,
+                            adjustment: attrs
+                                .get("omapix:adjustment")
+                                .and_then(|json| crate::adjust::Adjustment::from_json(json)),
                         });
                     }
                     _ => {}
@@ -423,6 +433,7 @@ pub fn load(path: &Path) -> Result<Document> {
                 layer.opacity = e.opacity.clamp(0.0, 1.0);
                 layer.visible = e.visible;
                 layer.blend = e.blend;
+                layer.adjustment = e.adjustment.clone();
                 if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
                     let (mw, mh, samples, _) = decode_png(mask_png, false)?;
                     let area = (
@@ -486,6 +497,15 @@ mod tests {
         mask.pixels.tile_mut(1, 0)[0] = 1000;
         mask.enabled = false;
         doc.layers[3].mask = Some(mask);
+        let id = doc.next_layer_id();
+        let mut curves = crate::adjust::Curves::default();
+        curves.master.points.insert(1, (0.4, 0.5));
+        doc.layers.push(Layer::adjustment(
+            id,
+            crate::adjust::Adjustment::Curves(curves),
+            w,
+            h,
+        ));
         // A small, empty-ish layer to exercise cropping and empty layers.
         let id = doc.next_layer_id();
         doc.layers.push(Layer::empty(id, "Empty", w, h));
@@ -506,6 +526,7 @@ mod tests {
             assert!((a.opacity - b.opacity).abs() < 1e-3);
             assert_eq!(a.pixels.to_vec(), b.pixels.to_vec(), "pixels of {}", a.name);
             assert_eq!(a.mask.is_some(), b.mask.is_some());
+            assert_eq!(a.adjustment, b.adjustment);
             if let (Some(ma), Some(mb)) = (&a.mask, &b.mask) {
                 assert_eq!(ma.enabled, mb.enabled);
                 assert_eq!(ma.pixels.to_vec(), mb.pixels.to_vec());

@@ -3,6 +3,7 @@ mod canvas;
 mod commands;
 mod editor;
 mod layers_panel;
+mod properties_panel;
 mod theme;
 mod tools;
 

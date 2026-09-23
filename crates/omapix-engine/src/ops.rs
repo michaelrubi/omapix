@@ -85,6 +85,10 @@ pub fn merge_down(doc: &mut Document, index: usize) -> Option<u64> {
     if index == 0 || index >= doc.layers.len() {
         return None;
     }
+    // Pixels can't be merged into an adjustment layer.
+    if doc.layers[index - 1].adjustment.is_some() {
+        return None;
+    }
     let upper = doc.layers.remove(index);
     let lower = &mut doc.layers[index - 1];
     let mut base = lower.clone();

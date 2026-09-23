@@ -11,6 +11,7 @@ use crate::canvas::ToolInput;
 use crate::commands::Command;
 use crate::editor::{Editor, Target};
 use crate::layers_panel::LayersPanel;
+use crate::properties_panel::PropertiesPanel;
 use crate::theme::{self, Theme};
 use crate::tools::Tools;
 
@@ -110,6 +111,7 @@ pub struct App {
     theme_rx: Receiver<Theme>,
     editor: Option<Editor>,
     layers: LayersPanel,
+    properties: PropertiesPanel,
     tools: Tools,
     /// A file being opened in the background.
     opening: Option<(PathBuf, Receiver<Opened>)>,
@@ -143,6 +145,7 @@ impl App {
             theme_rx: theme::watch(ctx.clone()),
             editor: None,
             layers: LayersPanel::default(),
+            properties: PropertiesPanel::default(),
             tools: Tools::default(),
             opening: None,
             picking: None,
@@ -398,6 +401,10 @@ impl App {
             .doc
             .layer(editor.active)
             .is_some_and(|l| l.mask.is_some());
+        let is_adjustment = editor
+            .doc
+            .layer(editor.active)
+            .is_some_and(|l| l.adjustment.is_some());
         match cmd {
             Command::Undo => editor.undo_label().is_some(),
             Command::Redo => editor.redo_label().is_some(),
@@ -406,7 +413,8 @@ impl App {
             Command::RaiseLayer => index.is_some_and(|i| i + 1 < editor.doc.layers.len()),
             Command::AddMask => !has_mask,
             Command::DeleteMask | Command::ToggleMask => has_mask,
-            Command::GaussianBlur => editor.target == Target::Pixels,
+            Command::GaussianBlur => editor.target == Target::Pixels && !is_adjustment,
+            Command::Invert => editor.target == Target::Mask || !is_adjustment,
             _ => true,
         }
     }
@@ -534,7 +542,14 @@ impl App {
                 self.menu_item(ui, Command::StampVisible, None);
             });
             ui.menu_button("Image", |ui| {
-                self.menu_item(ui, Command::Invert, None);
+                ui.menu_button("Adjustments", |ui| {
+                    self.menu_item(ui, Command::NewCurves, None);
+                    self.menu_item(ui, Command::NewLevels, None);
+                    self.menu_item(ui, Command::NewHueSaturation, None);
+                    self.menu_item(ui, Command::NewColorBalance, None);
+                    ui.separator();
+                    self.menu_item(ui, Command::Invert, None);
+                });
             });
             ui.menu_button("Filter", |ui| {
                 self.menu_item(ui, Command::GaussianBlur, None);
@@ -913,6 +928,27 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 *active = ops::dodge_and_burn_layer(doc, index);
             });
         }
+        Command::NewCurves
+        | Command::NewLevels
+        | Command::NewHueSaturation
+        | Command::NewColorBalance => {
+            use omapix_engine::adjust::{Adjustment, ColorBalance, Curves, HueSaturation, Levels};
+            let adjustment = match cmd {
+                Command::NewCurves => Adjustment::Curves(Curves::default()),
+                Command::NewLevels => Adjustment::Levels(Levels::default()),
+                Command::NewHueSaturation => Adjustment::HueSaturation(HueSaturation::default()),
+                _ => Adjustment::ColorBalance(ColorBalance::default()),
+            };
+            let label = format!("New {} Layer", adjustment.name());
+            editor.edit(&label, |doc, active| {
+                let new = doc.next_layer_id();
+                doc.layers
+                    .insert(index + 1, Layer::adjustment(new, adjustment, w, h));
+                *active = new;
+            });
+            // Painting on an adjustment layer paints its mask.
+            editor.target = Target::Mask;
+        }
         Command::ZoomIn => editor.canvas.step_zoom(true),
         Command::ZoomOut => editor.canvas.step_zoom(false),
         Command::FitOnScreen => editor.canvas.fit(),
@@ -977,7 +1013,10 @@ impl eframe::App for App {
                 .frame(bar)
                 .default_size(280.0)
                 .resizable(true)
-                .show(ui, |ui| command = self.layers.show(ui, editor, &self.theme));
+                .show(ui, |ui| {
+                    self.properties.show(ui, editor, &self.theme);
+                    command = self.layers.show(ui, editor, &self.theme);
+                });
             if let Some(cmd) = command {
                 let ctx = ui.ctx().clone();
                 self.run(cmd, &ctx);

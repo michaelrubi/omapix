@@ -1,6 +1,7 @@
 //! Omapix image engine: pixel storage, colour management, file IO and
 //! processing. Has no UI or GPU dependencies so it can be tested headless.
 
+pub mod adjust;
 pub mod blend;
 pub mod brush;
 pub mod color;

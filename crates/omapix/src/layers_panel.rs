@@ -16,6 +16,7 @@ const MASK: &str = "\u{f042}";
 const PLUS: &str = "\u{f067}";
 const COPY: &str = "\u{f0c5}";
 const TRASH: &str = "\u{f1f8}";
+const SLIDERS: &str = "\u{f1de}";
 
 #[derive(Default)]
 pub struct LayersPanel {
@@ -117,11 +118,12 @@ impl LayersPanel {
             return;
         };
         let selected = editor.active == id;
-        let (visible, name, blend, mask) = (
+        let (visible, name, blend, mask, adjustment) = (
             layer.visible,
             layer.name.clone(),
             layer.blend,
             layer.mask.as_ref().map(|m| m.enabled),
+            layer.adjustment.is_some(),
         );
 
         let fill = if selected {
@@ -200,6 +202,10 @@ impl LayersPanel {
                         }
 
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            if adjustment {
+                                ui.label(RichText::new(SLIDERS).color(theme.accent))
+                                    .on_hover_text("Adjustment layer");
+                            }
                             self.name(ui, editor, id, &name, selected);
                         });
                     });
@@ -238,7 +244,13 @@ impl LayersPanel {
             self.renaming = Some((id, name.to_owned()));
         } else if response.clicked() {
             editor.active = id;
-            editor.target = Target::Pixels;
+            // An adjustment layer has no pixels to paint; its mask is the target.
+            let adjustment = editor.doc.layer(id).is_some_and(|l| l.adjustment.is_some());
+            editor.target = if adjustment {
+                Target::Mask
+            } else {
+                Target::Pixels
+            };
         }
     }
 }

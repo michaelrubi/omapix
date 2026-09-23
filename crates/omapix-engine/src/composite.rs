@@ -2,6 +2,7 @@
 
 use rayon::prelude::*;
 
+use crate::adjust::Prepared;
 use crate::layer::Layer;
 use crate::tiled::{TILE, TILE_PIXELS};
 use crate::{Pixel, Raster};
@@ -14,10 +15,7 @@ const MAX: f32 = u16::MAX as f32;
 /// combined by its alpha × opacity × mask using source-over, as in
 /// Photoshop and the W3C compositing spec. Tiles are processed in parallel.
 pub fn composite(layers: &[Layer], width: u32, height: u32) -> Raster {
-    let visible: Vec<&Layer> = layers
-        .iter()
-        .filter(|l| l.visible && l.opacity > 0.0)
-        .collect();
+    let visible = prepare(layers);
     let w = width as usize;
     let mut out = vec![[0u16; 4]; w * height as usize];
     let cols = width.div_ceil(TILE);
@@ -29,8 +27,8 @@ pub fn composite(layers: &[Layer], width: u32, height: u32) -> Raster {
             let mut acc = vec![[0f32; 4]; TILE_PIXELS];
             for col in 0..cols {
                 acc.fill([0.0; 4]);
-                for layer in &visible {
-                    blend_tile(&mut acc, layer, col, row);
+                for (layer, adjustment) in &visible {
+                    blend_tile(&mut acc, layer, adjustment.as_ref(), col, row);
                 }
                 let x0 = (col * TILE) as usize;
                 let tw = (TILE as usize).min(w - x0);
@@ -48,17 +46,14 @@ pub fn composite(layers: &[Layer], width: u32, height: u32) -> Raster {
 /// Recomposite only the given 256 px tiles (col, row) into an existing
 /// flattened image, e.g. the area a brush stroke just touched.
 pub fn composite_into(layers: &[Layer], image: &mut Raster, tiles: &[(u32, u32)]) {
-    let visible: Vec<&Layer> = layers
-        .iter()
-        .filter(|l| l.visible && l.opacity > 0.0)
-        .collect();
+    let visible = prepare(layers);
     type Blended = ((u32, u32), Vec<[f32; 4]>);
     let results: Vec<Blended> = tiles
         .par_iter()
         .map(|&(col, row)| {
             let mut acc = vec![[0f32; 4]; TILE_PIXELS];
-            for layer in &visible {
-                blend_tile(&mut acc, layer, col, row);
+            for (layer, adjustment) in &visible {
+                blend_tile(&mut acc, layer, adjustment.as_ref(), col, row);
             }
             ((col, row), acc)
         })
@@ -80,11 +75,22 @@ pub fn composite_into(layers: &[Layer], image: &mut Raster, tiles: &[(u32, u32)]
     }
 }
 
-fn blend_tile(acc: &mut [[f32; 4]], layer: &Layer, col: u32, row: u32) {
-    // An empty tile is transparent and changes nothing.
-    let Some(src) = layer.pixels.tile(col, row) else {
-        return;
-    };
+/// Visible layers, each with its adjustment made ready to apply.
+fn prepare(layers: &[Layer]) -> Vec<(&Layer, Option<Prepared>)> {
+    layers
+        .iter()
+        .filter(|l| l.visible && l.opacity > 0.0)
+        .map(|l| (l, l.adjustment.as_ref().map(|a| a.prepare())))
+        .collect()
+}
+
+fn blend_tile(
+    acc: &mut [[f32; 4]],
+    layer: &Layer,
+    adjustment: Option<&Prepared>,
+    col: u32,
+    row: u32,
+) {
     let mask = layer.mask.as_ref().filter(|m| m.enabled).map(|m| &m.pixels);
     let mask_tile = mask.and_then(|m| m.tile(col, row));
     let mask_fill = mask.map_or(1.0, |m| f32::from(m.fill()) / MAX);
@@ -93,6 +99,30 @@ fn blend_tile(acc: &mut [[f32; 4]], layer: &Layer, col: u32, row: u32) {
     }
     let opacity = layer.opacity;
     let mode = layer.blend;
+
+    // An adjustment layer changes what's below it: the adjusted colour is
+    // blended onto the original with the layer's mode, opacity and mask.
+    // Transparency below is left as it is.
+    if let Some(adjustment) = adjustment {
+        for (i, px) in acc.iter_mut().enumerate() {
+            let [br, bg, bb, a_b] = *px;
+            let a = opacity * mask_tile.map_or(mask_fill, |t| f32::from(t[i]) / MAX);
+            if a_b <= 0.0 || a <= 0.0 {
+                continue;
+            }
+            let cb = [br, bg, bb];
+            let blended = mode.apply(cb, adjustment.apply(cb));
+            for c in 0..3 {
+                px[c] = cb[c] + (blended[c] - cb[c]) * a;
+            }
+        }
+        return;
+    }
+
+    // An empty tile is transparent and changes nothing.
+    let Some(src) = layer.pixels.tile(col, row) else {
+        return;
+    };
 
     for i in 0..TILE_PIXELS {
         let s = src[i];
@@ -199,6 +229,24 @@ mod tests {
                 assert!(a[c].abs_diff(b[c]) <= 2, "{a:?} vs {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn adjustment_layers_change_what_is_below_through_their_mask() {
+        use crate::adjust::{Adjustment, HueSaturation};
+        let (w, h) = (300, 10);
+        let bottom = solid(1, w, h, [50000, 20000, 20000, 65535]);
+        let grey = Adjustment::HueSaturation(HueSaturation {
+            saturation: -100.0,
+            ..Default::default()
+        });
+        let mut adj = Layer::adjustment(2, grey, w, h);
+        // Hide the adjustment on the right-hand tile.
+        adj.mask.as_mut().unwrap().pixels.tile_mut(1, 0).fill(0);
+        let out = composite(&[bottom, adj], w, h);
+        let left = out.get(10, 5);
+        assert!(left[0].abs_diff(left[1]) <= 2, "desaturated: {left:?}");
+        assert_eq!(out.get(280, 5), [50000, 20000, 20000, 65535]);
     }
 
     #[test]

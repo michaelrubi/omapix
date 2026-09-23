@@ -1,3 +1,4 @@
+use crate::adjust::Adjustment;
 use crate::blend::BlendMode;
 use crate::tiled::Tiled;
 use crate::{Pixel, Raster};
@@ -18,6 +19,9 @@ pub struct Layer {
     pub blend: BlendMode,
     pub pixels: Tiled<Pixel>,
     pub mask: Option<Mask>,
+    /// For adjustment layers: the change applied to everything below. Their
+    /// pixels are unused (always empty).
+    pub adjustment: Option<Adjustment>,
 }
 
 #[derive(Clone)]
@@ -55,6 +59,15 @@ impl Layer {
         Self::from_pixels(id, name, Tiled::new(width, height, [0; 4]))
     }
 
+    /// An adjustment layer with a white (reveal-all) mask, as Photoshop
+    /// creates them.
+    pub fn adjustment(id: u64, adjustment: Adjustment, width: u32, height: u32) -> Self {
+        let mut layer = Self::empty(id, adjustment.name(), width, height);
+        layer.adjustment = Some(adjustment);
+        layer.mask = Some(Mask::white(width, height));
+        layer
+    }
+
     pub fn from_raster(id: u64, name: impl Into<String>, raster: &Raster) -> Self {
         Self::from_pixels(id, name, Tiled::from_raster(raster))
     }
@@ -68,6 +81,7 @@ impl Layer {
             blend: BlendMode::Normal,
             pixels,
             mask: None,
+            adjustment: None,
         }
     }
 }
