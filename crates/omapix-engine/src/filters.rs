@@ -74,6 +74,9 @@ pub enum LayerFilter {
     HighPass { radius: f32 },
     /// `amount` 1 = 100 %; `threshold` in levels (0–255), as in Photoshop.
     UnsharpMask { amount: f32, radius: f32, threshold: f32 },
+    /// Noise added straight to the pixels (Omapix otherwise puts grain on
+    /// its own layer); used on masks.
+    AddNoise(NoiseOptions),
 }
 
 impl LayerFilter {
@@ -82,6 +85,7 @@ impl LayerFilter {
             Self::GaussianBlur { .. } => "Gaussian Blur",
             Self::HighPass { .. } => "High Pass",
             Self::UnsharpMask { .. } => "Unsharp Mask",
+            Self::AddNoise(_) => "Add Noise",
         }
     }
 
@@ -94,8 +98,28 @@ impl LayerFilter {
                 radius,
                 threshold,
             } => unsharp_mask(image, amount, radius, threshold),
+            Self::AddNoise(options) => add_noise(image, &options),
         }
     }
+}
+
+/// Photoshop's Add Noise applied to the pixels themselves: each moves by
+/// the grain's offset from mid grey (see [`generate_grain`]), scaled by
+/// `options.amount`. Alpha is kept.
+pub fn add_noise(image: &Tiled<Pixel>, options: &NoiseOptions) -> Tiled<Pixel> {
+    let (w, h) = (image.width(), image.height());
+    let grain = generate_grain(w, h, options, Some(image)).to_vec();
+    let k = options.amount / 100.0;
+    let out: Vec<Pixel> = image
+        .to_vec()
+        .into_par_iter()
+        .zip(grain)
+        .map(|(p, g)| {
+            let c = |i: usize| (f32::from(p[i]) + (f32::from(g[i]) - 32768.0) * k).round().clamp(0.0, MAX) as u16;
+            [c(0), c(1), c(2), p[3]]
+        })
+        .collect();
+    Tiled::from_slice(w, h, [0; 4], &out)
 }
 
 /// Photoshop's Unsharp Mask, on luminance only so edges don't get colour

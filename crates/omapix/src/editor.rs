@@ -39,10 +39,12 @@ pub enum View {
     /// What frequency separation at `radius` would produce: the texture
     /// layer, or the colour/tone layer.
     Separation { radius: f32, texture: bool },
-    /// What a Filter menu filter would do to `layer`.
+    /// What a Filter menu filter would do to `layer`, or with `mask` to
+    /// its mask.
     Filter {
         layer: u64,
         filter: omapix_engine::filters::LayerFilter,
+        mask: bool,
     },
     /// What adding noise with `options` above `layer` would produce.
     AddNoise { layer: u64, options: NoiseOptions },
@@ -1105,13 +1107,21 @@ pub(crate) fn render_view(
             };
             (Render::new(image), Some(base))
         }
-        View::Filter { layer, filter } => {
-            let Some(filtered) = ops::filtered(doc, layer, &filter) else {
-                return (Render::new(doc.composite()), None);
-            };
+        View::Filter {
+            layer,
+            filter,
+            mask,
+        } => {
             let mut layers = doc.layers.clone();
-            if let Some(target) = layers.iter_mut().find(|l| l.id == layer) {
-                target.pixels = filtered;
+            let target = layers.iter_mut().find(|l| l.id == layer);
+            match (target, mask) {
+                (Some(target), false) => target.pixels = ops::filtered(doc, layer, &filter).unwrap(),
+                (Some(target), true) => {
+                    if let (Some(m), Some(filtered)) = (&mut target.mask, ops::filtered_mask(doc, layer, &filter)) {
+                        m.pixels = filtered;
+                    }
+                }
+                (None, _) => {}
             }
             let image = composite::composite(&layers, doc.width, doc.height);
             (Render::new(image), None)
@@ -1447,6 +1457,7 @@ mod tests {
             View::Filter {
                 layer: e.active,
                 filter: omapix_engine::filters::LayerFilter::GaussianBlur { radius: 5.0 },
+                mask: false,
             },
             RED,
             None,
