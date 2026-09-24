@@ -86,11 +86,18 @@ impl Document {
 
     /// The next layer up in the same group as the one at `index`.
     fn sibling_above(&self, index: usize) -> Option<&Layer> {
+        self.sibling_above_index(index).map(|i| &self.layers[i])
+    }
+
+    /// The index of the next layer up in the same group as the one at
+    /// `index`.
+    fn sibling_above_index(&self, index: usize) -> Option<usize> {
         let parent = self.layers[index].parent;
-        self.layers[index + 1..]
+        let after = self.layers[index + 1..]
             .iter()
             .take_while(|l| Some(l.id) != parent)
-            .find(|l| l.parent == parent)
+            .position(|l| l.parent == parent)?;
+        Some(index + 1 + after)
     }
 
     /// The next layer down in the same group as the one at `index`.
@@ -276,6 +283,123 @@ impl Document {
         let group = Layer::group(id, name, self.width, self.height);
         self.insert_above(index, group);
         id
+    }
+
+    /// Of several selected layers, those not inside another of them (what's
+    /// in a selected group goes with it anyway), bottom first. Leaves out
+    /// ids that don't exist.
+    pub fn outermost(&self, ids: &[u64]) -> Vec<u64> {
+        let mut out: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|&id| self.layer(id).is_some())
+            .filter(|&id| !ids.iter().any(|&g| g != id && self.is_inside(id, g)))
+            .collect();
+        out.sort_by_key(|&id| self.index_of(id));
+        out.dedup();
+        out
+    }
+
+    /// Move several layers (see [`Self::outermost`]) to `place`, keeping
+    /// their order, as one block. Returns false if `place` is into one of
+    /// them.
+    pub fn move_layers(&mut self, ids: &[u64], place: Place) -> bool {
+        let ids = self.outermost(ids);
+        let (Place::Above(t) | Place::Below(t) | Place::IntoTop(t) | Place::IntoBottom(t)) = place;
+        if let (Some(k), Place::Above(_) | Place::Below(_)) =
+            (ids.iter().position(|&id| id == t), place)
+        {
+            // Just above or below one of them, they go there among the
+            // layers that stay: above the next one down in its group, or
+            // below the next one up.
+            let stays = |i: &usize| !ids.contains(&self.layers[*i].id);
+            let index = self.index_of(t).expect("outermost layers exist");
+            let below = std::iter::successors(self.sibling_below(index), |&i| self.sibling_below(i))
+                .find(stays);
+            let above = std::iter::successors(self.sibling_above_index(index), |&i| {
+                self.sibling_above_index(i)
+            })
+            .find(stays);
+            match (below, above) {
+                (Some(b), _) => return self.move_layers(&ids, Place::Above(self.layers[b].id)),
+                (None, Some(a)) => return self.move_layers(&ids, Place::Below(self.layers[a].id)),
+                _ => {}
+            }
+            // Nothing else is in their group: they gather round this one.
+            for i in k + 1..ids.len() {
+                self.move_layer(ids[i], Place::Above(ids[i - 1]));
+            }
+            for i in (0..k).rev() {
+                self.move_layer(ids[i], Place::Below(ids[i + 1]));
+            }
+            return true;
+        }
+        if ids.iter().any(|&id| t == id || self.is_inside(t, id)) {
+            return false;
+        }
+        // The top one goes to `place`, and each of the others below the one
+        // above it.
+        let mut place = place;
+        for &id in ids.iter().rev() {
+            if !self.move_layer(id, place) {
+                return false;
+            }
+            place = Place::Below(id);
+        }
+        true
+    }
+
+    /// Put several layers (see [`Self::outermost`]) in one new group,
+    /// keeping their order, where the top one was (Ctrl+G with several
+    /// selected). Returns the group's id, or `None` if there are none.
+    pub fn group_layers(&mut self, ids: &[u64]) -> Option<u64> {
+        let ids = self.outermost(ids);
+        let (&top, rest) = ids.split_last()?;
+        let group = self.group_layer(self.index_of(top)?);
+        let mut place = Place::Below(top);
+        for &id in rest.iter().rev() {
+            self.move_layer(id, place);
+            place = Place::Below(id);
+        }
+        Some(group)
+    }
+
+    /// Duplicate several layers (see [`Self::outermost`]), each just above
+    /// itself. Returns the copies' ids, bottom first.
+    pub fn duplicate_layers(&mut self, ids: &[u64]) -> Vec<u64> {
+        let ids = self.outermost(ids);
+        // From the top down, so the indices below stay put.
+        let mut copies = Vec::with_capacity(ids.len());
+        for &id in ids.iter().rev() {
+            if let Some(index) = self.index_of(id) {
+                copies.push(self.duplicate_layer(index));
+            }
+        }
+        copies.reverse();
+        copies
+    }
+
+    /// Remove several layers (see [`Self::outermost`]) and everything in
+    /// them. Returns the index just below where the lowest one was.
+    pub fn remove_layers(&mut self, ids: &[u64]) -> Option<usize> {
+        let ids = self.outermost(ids);
+        let lowest = self.span(self.index_of(*ids.first()?)?).start;
+        for &id in ids.iter().rev() {
+            if let Some(index) = self.index_of(id) {
+                self.remove_layer(index);
+            }
+        }
+        Some(lowest.saturating_sub(1))
+    }
+
+    /// How many layers removing several (see [`Self::remove_layers`])
+    /// would remove.
+    pub fn removed_count(&self, ids: &[u64]) -> usize {
+        self.outermost(ids)
+            .iter()
+            .filter_map(|&id| self.index_of(id))
+            .map(|index| self.span(index).len())
+            .sum()
     }
 
     /// Take everything out of the group at `index` and delete the group
@@ -515,5 +639,52 @@ mod tests {
         assert!(doc.toggle_clipping(c));
         assert_eq!(doc.clip_base(c), Some(g));
         assert!(doc.is_clip_base(g) && doc.is_clip_base(a));
+    }
+
+    #[test]
+    fn several_layers_group_move_duplicate_and_delete_together() {
+        let mut doc = grouped();
+        let [bg, a, g, c] = ["bg", "a", "g", "c"].map(|n| id(&doc, n));
+        // A layer inside a selected group goes with the group.
+        assert_eq!(doc.outermost(&[c, a, bg, g, 999]), [bg, g, c]);
+
+        // Grouped in stack order, where the top one was.
+        let mut grouping = doc.clone();
+        let outer = grouping.group_layers(&[c, bg]).unwrap();
+        check(&grouping);
+        assert_eq!(grouping.layer(outer).unwrap().name, "Group 1");
+        assert_eq!(names(&grouping), ["a(g)", "b(g)", "g", "bg(Group 1)", "c(Group 1)", "Group 1"]);
+        // From inside a group and outside it, the group goes where the top
+        // one was: at the top level.
+        let mut grouping = doc.clone();
+        grouping.group_layers(&[a, c]).unwrap();
+        check(&grouping);
+        assert_eq!(names(&grouping), ["bg", "b(g)", "g", "a(Group 1)", "c(Group 1)", "Group 1"]);
+
+        // Moved as a block, keeping their order.
+        let mut moving = doc.clone();
+        assert!(moving.move_layers(&[bg, c], Place::IntoTop(g)));
+        check(&moving);
+        assert_eq!(names(&moving), ["a(g)", "b(g)", "bg(g)", "c(g)", "g"]);
+        assert!(!moving.move_layers(&[bg, g], Place::Above(a)), "not into itself");
+        assert!(moving.move_layers(&[a, c], Place::Below(g)));
+        assert_eq!(names(&moving), ["a", "c", "b(g)", "bg(g)", "g"]);
+        // Next to one of them, the others gather round it.
+        assert!(moving.move_layers(&[a, id(&moving, "b")], Place::Above(a)));
+        check(&moving);
+        assert_eq!(names(&moving), ["a", "b", "c", "bg(g)", "g"]);
+
+        let copies = doc.duplicate_layers(&[bg, g]);
+        check(&doc);
+        assert_eq!(copies.len(), 2);
+        assert_eq!(
+            names(&doc),
+            ["bg", "bg copy", "a(g)", "b(g)", "g", "a(g copy)", "b(g copy)", "g copy", "c"]
+        );
+        assert_eq!(doc.layer(copies[1]).unwrap().name, "g copy");
+
+        assert_eq!(doc.removed_count(&[g, a, copies[1]]), 6);
+        assert_eq!(doc.remove_layers(&[g, copies[1]]), Some(1));
+        assert_eq!(names(&doc), ["bg", "bg copy", "c"]);
     }
 }

@@ -60,11 +60,17 @@ The marching ants follow the edge of the whole selection, traced from its covera
 
 **Plan:** Photoshop's tool groups: one toolbar slot per group, showing the tool last used, with a small corner triangle. Right-clicking (or holding the mouse on) the slot opens a menu of the group's tools with their letters, and Shift+letter cycles through the group. Groups: Rectangular/Elliptical Marquee (`M`); Lasso (`L`); Object Selection/Magic Wand (`W`); and the same for Spot Healing/Healing (`J`).
 
-### Selecting several layers
+### ~~Selecting several layers~~ (done)
 
-**Problem:** only one layer can be selected, so grouping, moving, deleting or merging several layers means doing them one at a time.
-
-**Plan:** Photoshop's multiple selection: Ctrl+click adds or removes a layer, Shift+click selects a range of rows. Ctrl+G then groups them all in one new group (in stack order, where the topmost was), dragging moves them together, Delete and Ctrl+J act on all of them, and Ctrl+E merges them (Merge Layers). The Move tool moves all of them. Painting and adjustments still apply to the last one clicked, which stays the active layer. The engine's group operations already move whole spans, so this is mostly panel and editor work.
+Ctrl+click on a layer row adds it to the selected layers or takes it out, and Shift+click selects the rows from the last one clicked (Ctrl+Shift+click adds them), as in Photoshop. Every selected row is highlighted; the last one clicked is the active layer (bold, with its thumbnail outlined), which painting, adjustments, the blend mode and opacity, masks and clipping still apply to. Selecting a layer any other way (a plain click, a new layer, undo to another layer) selects just that one.
+- Ctrl+G puts them all in one new group, in stack order, where the top one was.
+- Ctrl+J duplicates them all, and selects the copies. Delete (the key, the trash button or the menu) deletes them all.
+- Ctrl+E merges them into one layer where the top one was, with its name (Merge Layers). They're flattened on their own, as if nothing else were there, so hidden layers are dropped and blend modes are baked in.
+- Dragging one of the selected rows drags them all, keeping their order. Dropped next to one of them, they go there among the layers that stay.
+- The Move tool (and arrow-key nudges, and Alt+drag copies) moves all of them. With a pixel selection it moves just the active layer's selected pixels, as before.
+- Right-clicking one of the selected rows keeps them all selected, and its menu says Duplicate Layers, Delete Layers and Merge Layers.
+- A layer inside a selected group goes with the group.
+- Later: the blend mode and opacity for all of them at once, and moving selected pixels on several layers.
 
 ### Photoshop's layer navigation shortcuts
 
@@ -94,6 +100,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [ ] Clipping masks: Ctrl+Alt+G, Alt+click between rows (and its cursor and line), the arrow and underline, and a Curves clipped to the dodge & burn layer
 - [x] Open, Save As and Export file dialogs (xdg portal)
+- [ ] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
 - [ ] Undo/redo after each of the above (done for everything checked)
@@ -101,7 +108,7 @@ The UI has been tested through the same code paths with scripts
 ## 3. Retouching and editing
 
 - ~~**Layer groups**~~ (done): folders in the Layers panel with their own blend mode, opacity, mask and Blend If, nested to any depth. Groups are Pass Through by default, so what's in them blends onto the layers below as if ungrouped; any other mode composites the group on its own first, so adjustment layers inside it change only the group. Ctrl+G groups the selected layer and Ctrl+Shift+G ungroups; Layer › New Group and the folder button make an empty one. New layers go into the top of a selected group. Groups start closed; the triangle opens them, and they open by themselves to show the selected layer. Drag a layer onto a group's row to put it in, or between rows to place it; Ctrl+] and Ctrl+[ step into and out of groups. Duplicating, deleting and moving a group (including with the Move tool and Alt+drag) take everything in it, and Ctrl+E on a group merges it into one layer (Merge Group). Saved in OpenRaster as nested stacks, which Krita and GIMP read.
-  - Later: grouping several layers at once (see "Selecting several layers" above), and Alt+click on a triangle to open or close every group inside.
+  - Later: Alt+click on a triangle to open or close every group inside.
 - ~~**Clipping masks**~~ (done): Ctrl+Alt+G (Layer › Create Clipping Mask, or the layer's context menu) clips a layer to the one below, so it shows only where that layer does; on a clipped layer it releases it and the clipped layers above it. Alt+click the line between two rows does the same. Clipped rows get an arrow and are indented, and the layer they clip to is underlined. Several clipped layers in a row all clip to the first unclipped one below them in the same group, and a new layer made inside a clipping mask joins it. As with Photoshop's default "Blend Clipped Layers as Group", the clipped layers are composited onto the base on their own, then blended like the base, with its mode, opacity, mask and Blend If, so a Curves clipped to the Soft Light dodge & burn layer changes just that layer. Hiding the base hides them all. Merge Down of a clipped layer keeps it inside its base. Saved in OpenRaster as `omapix:clipped` (Krita doesn't save its "inherit alpha" in OpenRaster, so there was nothing to match; Krita shows them unclipped).
   - Clipping to a group clips to what's in it, composited as if it weren't Pass Through. Clipping to an adjustment layer clips to its mask.
   - Later: the Blending Options for "Blend Clipped Layers as Group" off, and dragging a layer into a clipping mask making it clipped (as new layers are).

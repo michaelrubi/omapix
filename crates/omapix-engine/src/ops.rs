@@ -212,6 +212,37 @@ pub fn merge_group(doc: &mut Document, index: usize) -> Option<u64> {
     Some(id)
 }
 
+/// Merge several layers (see [`Document::outermost`]) into one, where the
+/// top one was, with its name (Photoshop's Merge Layers, Ctrl+E with several
+/// selected). They're flattened on their own, as if nothing else were
+/// there. Returns the merged layer's id, or `None` for fewer than two.
+pub fn merge_layers(doc: &mut Document, ids: &[u64]) -> Option<u64> {
+    let ids = doc.outermost(ids);
+    if ids.len() < 2 {
+        return None;
+    }
+    let mut layers = Vec::new();
+    for &id in &ids {
+        let index = doc.index_of(id)?;
+        let span = doc.span(index);
+        let base = doc.clip_base(id);
+        layers.extend_from_slice(&doc.layers[span]);
+        // Clipped to a layer that isn't merged, it shows unclipped.
+        if base.is_some_and(|b| !ids.contains(&b)) {
+            layers.last_mut().expect("just added").clipped = false;
+        }
+    }
+    let merged = composite(&layers, doc.width, doc.height);
+    let (&top, rest) = ids.split_last()?;
+    let index = doc.index_of(top)?;
+    let old = &doc.layers[index];
+    let mut layer = Layer::from_raster(old.id, old.name.clone(), &merged);
+    layer.parent = old.parent;
+    doc.layers.splice(doc.span(index), [layer]);
+    doc.remove_layers(rest);
+    Some(top)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +397,35 @@ mod tests {
         merge_down(&mut doc, 1).unwrap();
         assert_eq!(doc.layers.len(), 1);
         assert_eq!(doc.composite().get(5, 5), before.get(5, 5));
+    }
+
+    #[test]
+    fn merge_layers_flattens_several_where_the_top_one_was() {
+        let (w, h) = (10, 10);
+        let mut doc = doc_with(vec![[40000, 40000, 40000, 65535]; 100], w, h);
+        let solid = |doc: &mut Document, name: &str, px: crate::Pixel| {
+            let id = doc.next_layer_id();
+            doc.layers.push(Layer::from_raster(id, name, &Raster::new(w, h, vec![px; 100])));
+            id
+        };
+        let red = solid(&mut doc, "red", [65535, 0, 0, 65535]);
+        let skip = solid(&mut doc, "skip", [0, 65535, 0, 65535]);
+        let blue = solid(&mut doc, "blue", [0, 0, 65535, 32768]);
+        doc.layer_mut(red).unwrap().opacity = 0.5;
+        let skip_index = doc.index_of(skip).unwrap();
+        let group = doc.group_layer(skip_index);
+
+        assert_eq!(merge_layers(&mut doc, &[blue]), None, "one isn't enough");
+        assert_eq!(merge_layers(&mut doc, &[red, blue]), Some(blue));
+        // Where "blue" was, with its name, above the untouched group.
+        let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Background", "skip", "Group 1", "blue"]);
+        assert_eq!(doc.layers[1].parent, Some(group));
+        let merged = doc.layer(blue).unwrap();
+        assert_eq!((merged.opacity, merged.blend), (1.0, BlendMode::Normal));
+        // Half blue over half red over transparency, not over the rest.
+        let px = merged.pixels.get(5, 5);
+        assert!(px[3].abs_diff(49152) <= 2, "{px:?}");
+        assert!((px[2] - 2 * px[0], px[1]) == (0, 0), "{px:?}");
     }
 }

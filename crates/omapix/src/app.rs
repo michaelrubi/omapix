@@ -526,9 +526,11 @@ impl App {
             Command::Undo => editor.undo_label().is_some(),
             Command::Redo => editor.redo_label().is_some(),
             // Something must be left.
-            Command::DeleteLayer => index.is_some_and(|i| doc.span(i).len() < doc.layers.len()),
+            Command::DeleteLayer => doc.removed_count(&editor.selected()) < doc.layers.len(),
             Command::MergeDown => {
-                is_group || index.is_some_and(|i| ops::can_merge_down(doc, i))
+                is_group
+                    || editor.several_selected()
+                    || index.is_some_and(|i| ops::can_merge_down(doc, i))
             }
             Command::RaiseLayer => doc.raise_place(editor.active).is_some(),
             Command::LowerLayer => doc.lower_place(editor.active).is_some(),
@@ -554,6 +556,11 @@ impl App {
     }
 
     fn run(&mut self, cmd: Command, ctx: &egui::Context) {
+        // Delete with several layers selected deletes them, as in Photoshop.
+        let cmd = match (cmd, &self.editor) {
+            (Command::Clear, Some(e)) if e.several_selected() => Command::DeleteLayer,
+            _ => cmd,
+        };
         if !self.enabled(cmd) {
             return;
         }
@@ -794,9 +801,11 @@ impl App {
                 self.menu_item(ui, Command::Clear, None);
             });
             ui.menu_button("Layer", |ui| {
+                let several = self.editor.as_ref().is_some_and(|e| e.several_selected());
+                let plural = |label: &str| several.then(|| format!("{label}s"));
                 self.menu_item(ui, Command::NewLayer, None);
-                self.menu_item(ui, Command::DuplicateLayer, None);
-                self.menu_item(ui, Command::DeleteLayer, None);
+                self.menu_item(ui, Command::DuplicateLayer, plural("Duplicate Layer"));
+                self.menu_item(ui, Command::DeleteLayer, plural("Delete Layer"));
                 ui.separator();
                 self.menu_item(ui, Command::NewGroup, None);
                 self.menu_item(ui, Command::GroupLayers, None);
@@ -814,7 +823,11 @@ impl App {
                 self.menu_item(ui, Command::RaiseLayer, None);
                 self.menu_item(ui, Command::LowerLayer, None);
                 ui.separator();
-                let merge = self.active_is_group().then(|| "Merge Group".to_owned());
+                let merge = if several {
+                    Some("Merge Layers".to_owned())
+                } else {
+                    self.active_is_group().then(|| "Merge Group".to_owned())
+                };
                 self.menu_item(ui, Command::MergeDown, merge);
                 self.menu_item(ui, Command::StampVisible, None);
             });
@@ -1526,6 +1539,8 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
     let id = editor.active;
     let is_group = editor.doc.layer(id).is_some_and(|l| l.is_group);
     let (w, h) = (editor.doc.width, editor.doc.height);
+    let selected = editor.selected();
+    let several = editor.several_selected();
     match cmd {
         Command::Undo => editor.undo(),
         Command::Redo => editor.redo(),
@@ -1538,15 +1553,26 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 *active = new;
             });
         }
+        Command::DuplicateLayer if several => {
+            // The copies are selected, the active layer's copy (or the top
+            // one) active.
+            let mut copies = Vec::new();
+            let roots = editor.doc.outermost(&selected);
+            editor.edit("Duplicate Layers", |doc, _| copies = doc.duplicate_layers(&roots));
+            if let Some(&top) = copies.last() {
+                let at = roots.iter().position(|&r| r == id);
+                editor.select_layers(at.map_or(top, |i| copies[i]), copies);
+            }
+        }
         Command::DuplicateLayer => {
             let label = if is_group { "Duplicate Group" } else { "Duplicate Layer" };
             editor.edit(label, |doc, active| *active = doc.duplicate_layer(index));
         }
         Command::DeleteLayer => {
-            editor.edit("Delete Layer", |doc, active| {
-                let start = doc.span(index).start;
-                doc.remove_layer(index);
-                *active = doc.layers[start.saturating_sub(1).min(doc.layers.len() - 1)].id;
+            let label = if several { "Delete Layers" } else { "Delete Layer" };
+            editor.edit(label, |doc, active| {
+                let below = doc.remove_layers(&selected).unwrap_or(0);
+                *active = doc.layers[below.min(doc.layers.len() - 1)].id;
             });
             editor.fix_selection();
         }
@@ -1567,7 +1593,11 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.fix_selection();
         }
         Command::GroupLayers => {
-            editor.edit("Group Layers", |doc, active| *active = doc.group_layer(index));
+            editor.edit("Group Layers", |doc, active| {
+                if let Some(group) = doc.group_layers(&selected) {
+                    *active = group;
+                }
+            });
             editor.fix_selection();
         }
         Command::UngroupLayers => {
@@ -1655,6 +1685,18 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                     ctx,
                 );
             }
+        }
+        Command::MergeDown if several => {
+            editor.target = Target::Pixels;
+            editor.edit_in_background(
+                "Merge Layers",
+                move |doc, active| {
+                    if let Some(merged) = ops::merge_layers(doc, &selected) {
+                        *active = merged;
+                    }
+                },
+                ctx,
+            );
         }
         Command::MergeDown => {
             editor.target = Target::Pixels;
@@ -2359,6 +2401,69 @@ mod tests {
         assert_eq!(names(&editor), ["Group 1", "Layer 1", "Layer 2"]);
         assert!(!editor.doc.layers[0].is_group);
         assert_eq!(editor.doc.layers[0].pixels.get(5, 5), [30000, 30000, 30000, 65535]);
+    }
+
+    #[test]
+    fn commands_act_on_all_the_selected_layers() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let editor = app.editor.as_mut().unwrap();
+        let background = editor.active;
+        let names = |e: &Editor| -> Vec<String> {
+            e.doc
+                .layers
+                .iter()
+                .map(|l| match l.parent.and_then(|p| e.doc.layer(p)) {
+                    Some(g) => format!("{}({})", l.name, g.name),
+                    None => l.name.clone(),
+                })
+                .collect()
+        };
+        for _ in 0..3 {
+            run_on_editor(editor, Command::NewLayer, &ctx);
+        }
+        let [_, one, two, three] = [0, 1, 2, 3].map(|i| editor.doc.layers[i].id);
+        editor.select_layers(two, vec![one, three]);
+
+        // Ctrl+J copies them all, and selects the copies.
+        run_on_editor(editor, Command::DuplicateLayer, &ctx);
+        assert_eq!(editor.undo_label(), Some("Duplicate Layers"));
+        assert_eq!(editor.selected().len(), 3);
+        assert_eq!(editor.doc.layer(editor.active).unwrap().name, "Layer 2 copy");
+        // Delete deletes them all, rather than clearing the active one.
+        editor.doc.selection = None;
+        app.run(Command::Clear, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        assert_eq!(editor.undo_label(), Some("Delete Layers"));
+        assert_eq!(names(editor), ["Background", "Layer 1", "Layer 2", "Layer 3"]);
+        assert_eq!(editor.active, one, "the layer below the lowest is selected");
+
+        // Ctrl+G puts them all in one group, where the top one was.
+        editor.select_layers(three, vec![one]);
+        run_on_editor(editor, Command::GroupLayers, &ctx);
+        assert_eq!(
+            names(editor),
+            ["Background", "Layer 2", "Layer 1(Group 1)", "Layer 3(Group 1)", "Group 1"]
+        );
+        assert_eq!(editor.selected().len(), 1, "the group");
+        editor.undo();
+
+        // Ctrl+E merges them into one, with the top one's name.
+        editor.select_layers(three, vec![one, background]);
+        assert!(app.enabled(Command::MergeDown));
+        let editor = app.editor.as_mut().unwrap();
+        run_on_editor(editor, Command::MergeDown, &ctx);
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Merge Layers"));
+        assert_eq!(names(editor), ["Layer 2", "Layer 3"]);
+        assert_eq!(editor.doc.layers[1].pixels.get(5, 5), [30000, 30000, 30000, 65535]);
+
+        // Something must be left.
+        editor.select_layers(two, vec![three]);
+        assert!(!app.enabled(Command::DeleteLayer));
     }
 
     #[test]
