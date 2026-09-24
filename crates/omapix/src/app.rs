@@ -533,6 +533,9 @@ impl App {
             Command::RaiseLayer => doc.raise_place(editor.active).is_some(),
             Command::LowerLayer => doc.lower_place(editor.active).is_some(),
             Command::UngroupLayers => is_group,
+            Command::ClippingMask => {
+                layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i))
+            }
             Command::AddMask => !has_mask,
             Command::Deselect | Command::InvertSelection | Command::Feather => {
                 editor.doc.selection.is_some()
@@ -707,6 +710,13 @@ impl App {
             .is_some_and(|l| l.is_group)
     }
 
+    fn active_is_clipped(&self) -> bool {
+        self.editor
+            .as_ref()
+            .and_then(|e| e.doc.layer(e.active))
+            .is_some_and(|l| l.clipped)
+    }
+
     fn menu_item(&mut self, ui: &mut Ui, cmd: Command, label: Option<String>) {
         let text = label.unwrap_or_else(|| cmd.label().to_owned());
         let mut button = Button::new(text);
@@ -791,6 +801,9 @@ impl App {
                 self.menu_item(ui, Command::NewGroup, None);
                 self.menu_item(ui, Command::GroupLayers, None);
                 self.menu_item(ui, Command::UngroupLayers, None);
+                ui.separator();
+                let release = self.active_is_clipped().then(|| "Release Clipping Mask".to_owned());
+                self.menu_item(ui, Command::ClippingMask, release);
                 ui.separator();
                 self.menu_item(ui, Command::BlendingOptions, None);
                 ui.separator();
@@ -1564,6 +1577,17 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 }
             });
             editor.fix_selection();
+        }
+        Command::ClippingMask => {
+            let clipped = editor.doc.layer(id).is_some_and(|l| l.clipped);
+            let label = if clipped {
+                "Release Clipping Mask"
+            } else {
+                "Create Clipping Mask"
+            };
+            editor.edit(label, |doc, _| {
+                doc.toggle_clipping(id);
+            });
         }
         Command::AddMask => {
             // With a selection, the mask reveals just the selection.
@@ -2428,5 +2452,26 @@ mod tests {
         app.run_script(&ctx);
         assert_eq!(app.editor.as_ref().unwrap().history_active_index(), base_index + 1);
         assert_eq!(app.editor.as_ref().unwrap().doc.layers[0].opacity, 0.7);
+    }
+
+    #[test]
+    fn clipping_mask_command_clips_and_releases() {
+        let ctx = egui::Context::default();
+        let mut editor = editor_with_selection();
+        assert!(!editor.doc.can_clip(0), "nothing below the background");
+        run_on_editor(&mut editor, Command::NewLayer, &ctx);
+        let layer = editor.active;
+        run_on_editor(&mut editor, Command::ClippingMask, &ctx);
+        assert!(editor.doc.layer(layer).unwrap().clipped);
+        assert_eq!(editor.undo_label(), Some("Create Clipping Mask"));
+        // A new layer above a clipped one joins the clipping mask.
+        run_on_editor(&mut editor, Command::NewLayer, &ctx);
+        assert!(editor.doc.layer(editor.active).unwrap().clipped);
+        editor.active = layer;
+        run_on_editor(&mut editor, Command::ClippingMask, &ctx);
+        assert_eq!(editor.undo_label(), Some("Release Clipping Mask"));
+        assert!(editor.doc.layers.iter().all(|l| !l.clipped));
+        editor.undo();
+        assert!(editor.doc.layer(layer).unwrap().clipped);
     }
 }

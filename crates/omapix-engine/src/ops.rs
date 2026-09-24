@@ -182,8 +182,12 @@ pub fn merge_down(doc: &mut Document, index: usize) -> Option<u64> {
     base.opacity = 1.0;
     base.blend = BlendMode::Normal;
     base.mask = None;
+    base.clipped = false;
     let mut upper = upper;
     upper.visible = true;
+    // Clipped to the lower layer, it merges in clipped; clipped along with
+    // it to something further down, the merged layer is clipped anyway.
+    upper.clipped &= !lower.clipped;
     let merged = composite(&[base, upper], doc.width, doc.height);
     lower.pixels = Tiled::from_raster(&merged);
     Some(lower.id)
@@ -319,6 +323,26 @@ mod tests {
         }
         // Now it's a plain layer above the background, it merges down.
         assert!(can_merge_down(&doc, 1));
+    }
+
+    #[test]
+    fn merge_down_keeps_a_clipped_layer_inside_its_base() {
+        let (w, h) = (300, 10);
+        let mut doc = doc_with(vec![[50000, 10000, 10000, 65535]; (w * h) as usize], w, h);
+        let base = doc.next_layer_id();
+        let mut layer = Layer::empty(base, "base", w, h);
+        layer.pixels.tile_mut(0, 0).fill([0, 65535, 0, 65535]);
+        doc.layers.push(layer);
+        let top = doc.next_layer_id();
+        let mut blue = Layer::empty(top, "blue", w, h);
+        blue.pixels.tile_mut(0, 0).fill([0, 0, 65535, 65535]);
+        blue.pixels.tile_mut(1, 0).fill([0, 0, 65535, 65535]);
+        blue.clipped = true;
+        doc.layers.push(blue);
+        let before = doc.composite();
+        assert_eq!(merge_down(&mut doc, 2), Some(base));
+        assert_eq!(doc.composite().pixels(), before.pixels());
+        assert!(doc.layers[1].pixels.tile(1, 0).is_none_or(|t| t.iter().all(|p| p[3] == 0)));
     }
 
     #[test]

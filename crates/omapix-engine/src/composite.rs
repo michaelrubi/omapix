@@ -6,7 +6,7 @@ use rayon::prelude::*;
 
 use crate::adjust::Prepared;
 use crate::blend::BlendMode;
-use crate::layer::Layer;
+use crate::layer::{BlendIf, Layer};
 use crate::tiled::{TILE, TILE_PIXELS};
 use crate::{Pixel, Raster};
 
@@ -67,11 +67,13 @@ pub fn composite_tiles(layers: &[Layer], tiles: &[(u32, u32)]) -> Vec<Vec<Pixel>
 }
 
 /// A visible layer ready to blend: its adjustment made ready to apply,
-/// and for a group, the visible layers in it.
+/// for a group, the visible layers in it, and the visible layers clipped
+/// to it.
 struct Node<'a> {
     layer: &'a Layer,
     adjustment: Option<Prepared>,
     children: Vec<Node<'a>>,
+    clipped: Vec<Node<'a>>,
 }
 
 /// The visible layers as a tree of groups, bottom first. Layers whose group
@@ -82,10 +84,29 @@ fn prepare(layers: &[Layer]) -> Vec<Node<'_>> {
 }
 
 fn nodes<'a>(layers: &'a [Layer], within: &dyn Fn(&Layer) -> bool) -> Vec<Node<'a>> {
-    layers
-        .iter()
-        .filter(|l| within(l) && l.visible && l.opacity > 0.0)
-        .map(|l| Node {
+    let mut out: Vec<Node> = Vec::new();
+    // What clipped layers clip to: nothing yet (they show unclipped), a
+    // hidden layer (they're hidden too), or the last node in `out`.
+    #[derive(PartialEq)]
+    enum Base {
+        None,
+        Hidden,
+        Shown,
+    }
+    let mut base = Base::None;
+    for l in layers.iter().filter(|l| within(l)) {
+        let shown = l.visible && l.opacity > 0.0;
+        let clipped = l.clipped && base != Base::None;
+        if clipped && base == Base::Hidden {
+            continue;
+        }
+        if !clipped && !l.clipped {
+            base = if shown { Base::Shown } else { Base::Hidden };
+        }
+        if !shown {
+            continue;
+        }
+        let node = Node {
             layer: l,
             adjustment: l.adjustment.as_ref().map(|a| a.prepare()),
             children: if l.is_group {
@@ -93,8 +114,14 @@ fn nodes<'a>(layers: &'a [Layer], within: &dyn Fn(&Layer) -> bool) -> Vec<Node<'
             } else {
                 Vec::new()
             },
-        })
-        .collect()
+            clipped: Vec::new(),
+        };
+        match out.last_mut() {
+            Some(b) if clipped => b.clipped.push(node),
+            _ => out.push(node),
+        }
+    }
+    out
 }
 
 fn blend_all(acc: &mut [[f32; 4]], nodes: &[Node], col: u32, row: u32) {
@@ -110,6 +137,11 @@ struct Coverage<'a> {
 }
 
 impl<'a> Coverage<'a> {
+    const FULL: Coverage<'static> = Coverage {
+        tile: None,
+        fill: 1.0,
+    };
+
     /// `None` where the mask hides the whole tile.
     fn of(layer: &'a Layer, col: u32, row: u32) -> Option<Self> {
         let mask = layer.mask.as_ref().filter(|m| m.enabled).map(|m| &m.pixels);
@@ -128,27 +160,69 @@ impl<'a> Coverage<'a> {
     }
 }
 
+/// How a tile of colours is laid over what's below.
+#[derive(Clone, Copy)]
+struct Params<'a> {
+    mode: BlendMode,
+    opacity: f32,
+    blend_if: Option<&'a BlendIf>,
+    /// Keep what's below's alpha, as layers clipped to it do (the W3C's
+    /// source-atop): it's painted on only where there's something already.
+    atop: bool,
+}
+
+impl<'a> Params<'a> {
+    /// A layer's own mode, opacity and Blend If. A group that passes through
+    /// but is blended as one layer anyway (clipped, or with layers clipped
+    /// to it) counts as Normal.
+    fn of(layer: &'a Layer) -> Self {
+        Self {
+            mode: match layer.blend {
+                BlendMode::PassThrough => BlendMode::Normal,
+                mode => mode,
+            },
+            opacity: layer.opacity,
+            blend_if: layer.blend_if.as_ref().filter(|b| !b.is_neutral()),
+            atop: false,
+        }
+    }
+
+    fn atop(self, atop: bool) -> Self {
+        Self { atop, ..self }
+    }
+}
+
 fn blend_node(acc: &mut [[f32; 4]], node: &Node, col: u32, row: u32) {
+    if !node.clipped.is_empty() {
+        blend_clipping(acc, node, col, row);
+    } else {
+        blend_one(acc, node, false, col, row);
+    }
+}
+
+/// Blend a layer without what's clipped to it, `atop` what's below if it's
+/// itself clipped.
+fn blend_one(acc: &mut [[f32; 4]], node: &Node, atop: bool, col: u32, row: u32) {
     let layer = node.layer;
     if !layer.is_group {
-        blend_tile(acc, layer, node.adjustment.as_ref(), col, row);
+        blend_tile(acc, layer, node.adjustment.as_ref(), atop, col, row);
         return;
     }
     let Some(coverage) = Coverage::of(layer, col, row) else {
         return;
     };
-    let blend_if = layer.blend_if.as_ref().filter(|b| !b.is_neutral());
-    if layer.blend != BlendMode::PassThrough {
+    if layer.blend != BlendMode::PassThrough || atop {
         // Composite the contents on their own, then blend the result like
         // a single layer.
         let mut inner = vec![[0f32; 4]; TILE_PIXELS];
         blend_all(&mut inner, &node.children, col, row);
-        blend_source(acc, layer, &coverage, |i| inner[i]);
+        blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| inner[i]);
         return;
     }
     // Pass Through: the contents blend straight onto what's below. The
     // group's opacity, mask and Blend If then fade between that and what
     // was there before.
+    let blend_if = layer.blend_if.as_ref().filter(|b| !b.is_neutral());
     if layer.opacity >= 1.0 && coverage.is_full() && blend_if.is_none() {
         blend_all(acc, &node.children, col, row);
         return;
@@ -160,6 +234,53 @@ fn blend_node(acc: &mut [[f32; 4]], node: &Node, col: u32, row: u32) {
         let t = layer.opacity * coverage.at(i) * blend_if.map_or(1.0, |f| f.factor(cs, cb));
         *px = mix(*b, *px, t);
     }
+}
+
+/// A clipping mask: a base layer and the layers clipped to it, which show
+/// only where it does. As with Photoshop's default "Blend Clipped Layers
+/// as Group", they're composited onto the base on their own, then the
+/// result is blended like the base, with its mode, opacity and Blend If.
+fn blend_clipping(acc: &mut [[f32; 4]], node: &Node, col: u32, row: u32) {
+    let base = node.layer;
+    let Some(coverage) = Coverage::of(base, col, row) else {
+        return;
+    };
+    if base.adjustment.is_some() {
+        // An adjustment layer has no pixels to clip to, so its mask is the
+        // shape: the clipped layers blend onto what's below through it.
+        blend_one(acc, node, false, col, row);
+        let before = acc.to_vec();
+        for c in &node.clipped {
+            blend_one(acc, c, false, col, row);
+        }
+        for (i, (px, b)) in acc.iter_mut().zip(&before).enumerate() {
+            *px = mix(*b, *px, coverage.at(i));
+        }
+        return;
+    }
+    let mut inner = vec![[0f32; 4]; TILE_PIXELS];
+    if base.is_group {
+        blend_all(&mut inner, &node.children, col, row);
+        for (i, px) in inner.iter_mut().enumerate() {
+            px[3] *= coverage.at(i);
+        }
+    } else {
+        let Some(src) = base.pixels.tile(col, row) else {
+            // Transparent, so nothing clipped to it shows either.
+            return;
+        };
+        let normal = Params {
+            mode: BlendMode::Normal,
+            opacity: 1.0,
+            blend_if: None,
+            atop: false,
+        };
+        blend_source(&mut inner, normal, &coverage, |i| unpack(src[i]));
+    }
+    for c in &node.clipped {
+        blend_one(&mut inner, c, true, col, row);
+    }
+    blend_source(acc, Params::of(base), &Coverage::FULL, |i| inner[i]);
 }
 
 /// `a` faded towards `b` by `t`, with premultiplied alpha, so a colour
@@ -183,10 +304,16 @@ fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     out
 }
 
+#[inline]
+fn unpack(s: Pixel) -> [f32; 4] {
+    s.map(|v| f32::from(v) / MAX)
+}
+
 fn blend_tile(
     acc: &mut [[f32; 4]],
     layer: &Layer,
     adjustment: Option<&Prepared>,
+    atop: bool,
     col: u32,
     row: u32,
 ) {
@@ -222,28 +349,25 @@ fn blend_tile(
     let Some(src) = layer.pixels.tile(col, row) else {
         return;
     };
-    blend_source(acc, layer, &coverage, |i| {
-        let s = src[i];
-        [
-            f32::from(s[0]) / MAX,
-            f32::from(s[1]) / MAX,
-            f32::from(s[2]) / MAX,
-            f32::from(s[3]) / MAX,
-        ]
+    blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| {
+        unpack(src[i])
     });
 }
 
-/// Blend a tile of colours (0–1, straight alpha) onto `acc` with `layer`'s
-/// blend mode, opacity, Blend If and mask coverage.
+/// Blend a tile of colours (0–1, straight alpha) onto `acc` with these
+/// params and mask coverage.
 fn blend_source(
     acc: &mut [[f32; 4]],
-    layer: &Layer,
+    params: Params,
     coverage: &Coverage,
     src: impl Fn(usize) -> [f32; 4],
 ) {
-    let opacity = layer.opacity;
-    let mode = layer.blend;
-    let blend_if = layer.blend_if.as_ref().filter(|b| !b.is_neutral());
+    let Params {
+        mode,
+        opacity,
+        blend_if,
+        atop,
+    } = params;
     for (i, px) in acc.iter_mut().enumerate() {
         let [sr, sg, sb, sa] = src(i);
         let a_s = sa * opacity * coverage.at(i);
@@ -252,12 +376,21 @@ fn blend_source(
         }
         let cs = [sr, sg, sb];
         let [br, bg, bb, a_b] = *px;
+        if atop && a_b <= 0.0 {
+            continue;
+        }
         let cb = [br, bg, bb];
         let a_s = a_s * blend_if.map_or(1.0, |b| b.factor(cs, cb));
         if a_s <= 0.0 {
             continue;
         }
         let blended = if a_b > 0.0 { mode.apply(cb, cs) } else { cs };
+        if atop {
+            for c in 0..3 {
+                px[c] = cb[c] + (blended[c] - cb[c]) * a_s;
+            }
+            continue;
+        }
         let a_o = a_s + a_b * (1.0 - a_s);
         let mut out = [0.0; 4];
         for c in 0..3 {
@@ -534,6 +667,113 @@ mod tests {
         let out = composite(&layers, w, h).get(5, 5);
         assert_eq!(out[0], 65535, "colour stays white: {out:?}");
         assert!(out[3].abs_diff(32768) <= 1);
+    }
+
+    /// A layer of `px` over the left-hand tile only, transparent elsewhere.
+    fn left_tile(id: u64, w: u32, h: u32, px: Pixel) -> Layer {
+        let mut layer = Layer::empty(id, "left", w, h);
+        layer.pixels.tile_mut(0, 0).fill(px);
+        layer
+    }
+
+    fn clipped(mut layer: Layer) -> Layer {
+        layer.clipped = true;
+        layer
+    }
+
+    #[test]
+    fn clipped_layers_show_only_where_the_base_does() {
+        let (w, h) = (300, 10);
+        let red = [50000, 10000, 10000, 65535];
+        let bottom = solid(1, w, h, red);
+        let base = left_tile(2, w, h, [10000, 50000, 10000, 65535]);
+        let blue = clipped(solid(3, w, h, [0, 0, 65535, 65535]));
+        let layers = vec![bottom, base, blue];
+        let out = composite(&layers, w, h);
+        assert_eq!(out.get(10, 5), [0, 0, 65535, 65535]);
+        assert_eq!(out.get(280, 5), red, "outside the base");
+
+        // Partial updates agree with full ones.
+        let mut image = Raster::new(w, h, vec![[0; 4]; (w * h) as usize]);
+        composite_into(&layers, &mut image, &[(0, 0), (1, 0)]);
+        assert_eq!(image.pixels(), out.pixels());
+    }
+
+    #[test]
+    fn clipped_adjustments_change_only_the_base() {
+        let (w, h) = (300, 10);
+        let red = [50000, 10000, 10000, 65535];
+        let bottom = solid(1, w, h, red);
+        // Half transparent, so the red below would show the adjustment
+        // too if it weren't clipped.
+        let base = left_tile(2, w, h, [10000, 50000, 10000, 32768]);
+        let layers = vec![bottom.clone(), base.clone(), clipped(desaturate(3, w, h))];
+        let out = composite(&layers, w, h);
+        assert_eq!(out.get(280, 5), red);
+        // The base turned grey and was then laid over the red at half
+        // strength, so the red still shows.
+        let grey = composite(&[base, desaturate(3, w, h)], w, h).get(10, 5);
+        assert!(grey[0].abs_diff(grey[1]) <= 2 && grey[3] == 32768, "{grey:?}");
+        let grey_layer = solid(4, w, h, grey);
+        let over = composite(&[bottom, grey_layer], w, h);
+        assert_eq!(out.get(10, 5), over.get(10, 5));
+    }
+
+    #[test]
+    fn a_clipped_run_takes_the_bases_mode_opacity_and_visibility() {
+        let (w, h) = (10, 10);
+        let grey = [30000, 30000, 30000, 65535];
+        let bottom = solid(1, w, h, grey);
+        // A dodge & burn layer: 50 % grey in Soft Light changes nothing
+        // until painted. A clipped white layer paints it white.
+        let mut dodge = solid(2, w, h, [32768, 32768, 32768, 65535]);
+        dodge.blend = BlendMode::SoftLight;
+        let white = clipped(solid(3, w, h, [65535; 4]));
+        let mut layers = vec![bottom.clone(), dodge, white];
+        let mut soft_white = solid(4, w, h, [65535; 4]);
+        soft_white.blend = BlendMode::SoftLight;
+        let expected = composite(&[bottom, soft_white], w, h).get(5, 5);
+        assert!(expected[0] > grey[0] + 5000);
+        assert_eq!(composite(&layers, w, h).get(5, 5), expected);
+
+        // The base's opacity fades the whole run.
+        layers[1].opacity = 0.0;
+        assert_eq!(composite(&layers, w, h).get(5, 5), grey);
+        layers[1].opacity = 1.0;
+        layers[1].visible = false;
+        assert_eq!(composite(&layers, w, h).get(5, 5), grey, "hidden base hides the run");
+    }
+
+    #[test]
+    fn clipping_to_an_adjustment_layer_uses_its_mask() {
+        let (w, h) = (300, 10);
+        let red = [50000, 10000, 10000, 65535];
+        let bottom = solid(1, w, h, red);
+        let mut adj = desaturate(2, w, h);
+        adj.opacity = 0.0001; // Barely there, so only the clipped layer shows.
+        adj.mask.as_mut().unwrap().pixels.tile_mut(1, 0).fill(0);
+        let blue = clipped(solid(3, w, h, [0, 0, 65535, 65535]));
+        let out = composite(&[bottom, adj, blue], w, h);
+        assert_eq!(out.get(10, 5), [0, 0, 65535, 65535]);
+        assert_eq!(out.get(280, 5), red);
+    }
+
+    #[test]
+    fn clipping_to_a_group_clips_to_its_contents() {
+        let (w, h) = (300, 10);
+        let red = [50000, 10000, 10000, 65535];
+        let mut layers = vec![solid(1, w, h, red)];
+        layers.extend(grouped(10, vec![left_tile(2, w, h, [0, 65535, 0, 65535])], w, h));
+        layers.push(clipped(solid(3, w, h, [0, 0, 65535, 65535])));
+        let out = composite(&layers, w, h);
+        assert_eq!(out.get(10, 5), [0, 0, 65535, 65535]);
+        assert_eq!(out.get(280, 5), red);
+    }
+
+    #[test]
+    fn clipped_layers_with_nothing_below_show_unclipped() {
+        let blue = clipped(solid(1, 10, 10, [0, 0, 65535, 65535]));
+        assert_eq!(composite(&[blue], 10, 10).get(5, 5), [0, 0, 65535, 65535]);
     }
 
     #[test]

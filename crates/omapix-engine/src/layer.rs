@@ -33,6 +33,10 @@ pub struct Layer {
     pub is_group: bool,
     /// The group this layer is in, if any.
     pub parent: Option<u64>,
+    /// Clipped to the layer below (Photoshop's clipping mask): it shows only
+    /// where that layer does. A run of clipped layers all clip to the first
+    /// unclipped layer below them in the same group.
+    pub clipped: bool,
 }
 
 /// Which values Blend If compares.
@@ -178,6 +182,7 @@ impl Layer {
             blend_if: None,
             is_group: false,
             parent: None,
+            clipped: false,
         }
     }
 

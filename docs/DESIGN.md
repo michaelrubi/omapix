@@ -92,6 +92,11 @@ unit tests, and leaves room to replace the UI toolkit later.
   fades between before and after by its opacity and mask; any other mode
   composites the contents on their own and blends the result as one
   layer.
+- A clipped layer is flagged `clipped` and clips to the first unclipped
+  layer below it in its group, so clipping masks need no structure of
+  their own. Compositing hangs each run of clipped layers off its base in
+  the tree, composites them onto the base alone (keeping its alpha, the
+  W3C's source-atop), then blends the result like the base.
 - Undo keeps whole-document snapshots, which cost almost nothing because
   they share tiles (a snapshot of a 24 MP, four-layer document takes
   ~30 µs). A continuous gesture, such as dragging a slider or one brush
@@ -102,7 +107,8 @@ unit tests, and leaves room to replace the UI toolkit later.
 - **OpenRaster (.ora)** is the native format: layers as 16-bit PNGs with
   the ICC profile, cropped to the area they use, blend modes under Krita's
   names so files open correctly in Krita, layer groups as nested stacks,
-  and masks as extra PNGs under `omapix:` attributes other apps ignore.
+  and masks (as extra PNGs), Blend If and clipping under `omapix:`
+  attributes other apps ignore.
 - Exports: flattened 16-bit TIFF with ICC (back to darktable or to print)
   and 8-bit sRGB JPEG (web and clients).
 
@@ -128,7 +134,7 @@ redo, OpenRaster save/open, TIFF/JPEG export, Gaussian Blur, one-click
 frequency separation (with live preview) and dodge & burn layer, merge
 down, stamp visible, drag-to-reorder, Blend If (Blending Options, saved in
 OpenRaster), mask view, layer groups (Pass Through or isolated, nested,
-with their own opacity, mask and Blend If).
+with their own opacity, mask and Blend If), clipping masks.
 
 ### 3. Retouch tools (mostly done)
 
