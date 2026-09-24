@@ -115,6 +115,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
 - [ ] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
 - [ ] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
+- [ ] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
 - [x] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
 - [ ] Alt+click on a group's triangle: opens or closes that group and every group inside it, and Alt+click between rows still clips
 - [x] Add Noise: dialog controls (Amount, Uniform/Gaussian, Monochromatic, Grain Size, Roughness, shadow/highlight falloff), live preview, and the new Grain layer in Overlay mode
@@ -141,7 +142,7 @@ The UI has been tested through the same code paths with scripts
 - ~~**Filters on masks**~~ (done): with a mask targeted, Filter › Gaussian Blur, High Pass and Unsharp Mask work on the mask, previewed live and within the selection, as in Photoshop: blur a mask to soften its edge. Add Noise on a mask adds the noise straight into it (no Grain layer), which breaks up banding in a smooth gradient mask.
   - Later: previewing a filter on a mask while viewing the mask itself (Alt+click the mask thumbnail); the preview shows the image for now.
 - ~~**Live preview for Gaussian Blur**~~ (done): updates the canvas live as the radius changes, with a Preview checkbox in the dialog, respecting layer masks, blend modes, adjustments and selections.
-- **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.
+- ~~**Brush size and hardness by dragging**~~ (done): Alt+right-drag over the canvas with a painting tool, as in Photoshop: left and right change the size, up and down the hardness (down is harder), with the brush outline staying where the drag began. Hyprland's mouse bindings all use Super, so Alt+right-drag is free.
 - **Tablet support:** pen pressure for size and opacity (and later tilt). Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol (`tablet-v2`) on the same Wayland connection. Tablet buttons (ExpressKeys, stylus buttons) are best mapped to keystrokes outside Omapix (Hyprland binds or OpenTabletDriver), so they work through custom hotkeys rather than needing pad support in Omapix.
 - **Liquify:** forward warp, push, bloat and pucker, with a mesh that can be edited again later. Shares its warp engine with the slider-driven Symmetry and Reshape in section 7 ([AI.md](AI.md)), and is how their results get touched up by hand.
 
