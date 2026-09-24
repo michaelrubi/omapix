@@ -87,6 +87,8 @@ pub struct Stroke {
     source: Option<Tiled<Pixel>>,
     /// Selection coverage limiting where the stroke has effect.
     limit: Option<Tiled<u16>>,
+    /// Keep each pixel's alpha (Lock Transparent Pixels).
+    keep_alpha: bool,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     last: Option<(f32, f32)>,
@@ -102,6 +104,7 @@ impl Stroke {
             original,
             source: None,
             limit: None,
+            keep_alpha: false,
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -112,6 +115,24 @@ impl Stroke {
     pub fn within(mut self, selection: Tiled<u16>) -> Self {
         self.limit = Some(selection);
         self
+    }
+
+    /// Change only colour, keeping each pixel's alpha, as painting on a
+    /// layer with Lock Transparent Pixels does. Erasing then does nothing.
+    pub fn keeping_alpha(mut self) -> Self {
+        self.keep_alpha = true;
+        self
+    }
+
+    /// Paint onto `base` (see [`paint_pixel`]). With alpha kept, the colour
+    /// changes as if the pixel were opaque, as in Photoshop.
+    fn paint_onto(&self, base: Pixel, a: f32, paint: Paint) -> Pixel {
+        if !self.keep_alpha {
+            return paint_pixel(base, a, paint);
+        }
+        let mut out = paint_pixel([base[0], base[1], base[2], u16::MAX], a, paint);
+        out[3] = base[3];
+        out
     }
 
     /// Selection coverage (0–1) of pixel `i` in tile (col, row).
@@ -236,16 +257,16 @@ impl Stroke {
                         let a = cov[i] * opacity * self.limit_at(col, row, i);
                         out[i] = if self.paint == Paint::SpotHeal {
                             // Show where the stroke is until it heals on release.
-                            paint_pixel(base[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
+                            self.paint_onto(base[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
                         } else if copying {
                             let (x, y) = (tx + i as u32 % TILE, ty + i as u32 / TILE);
                             if a <= 0.0 || x >= w || y >= h {
                                 base[i]
                             } else {
-                                paint_pixel(base[i], a, Paint::Color(self.copied(x, y)))
+                                self.paint_onto(base[i], a, Paint::Color(self.copied(x, y)))
                             }
                         } else {
-                            paint_pixel(base[i], a, self.paint)
+                            self.paint_onto(base[i], a, self.paint)
                         };
                     }
                 }
@@ -382,7 +403,7 @@ impl Stroke {
                         healed[ch] = (v.clamp(0.0, 1.0) * MAX).round() as u16;
                     }
                 }
-                out[i] = paint_pixel(base[i], a, Paint::Color(healed));
+                out[i] = self.paint_onto(base[i], a, Paint::Color(healed));
             }
         }
         tiles
@@ -572,6 +593,37 @@ mod tests {
         };
         assert_eq!(out.get(100, 100), [0, 0, 0, 65535]);
         assert_eq!(out.get(100, 125), [65535; 4]);
+    }
+
+    #[test]
+    fn keeping_alpha_changes_only_colour() {
+        // Opaque, half-transparent and transparent white columns.
+        let px: Vec<Pixel> = (0..30 * 10)
+            .map(|i| [65535, 65535, 65535, [65535, 32768, 0][i % 30 / 10]])
+            .collect();
+        let surface = Surface::Pixels(Tiled::from_slice(30, 10, [0; 4], &px));
+        let settings = BrushSettings {
+            size: 200.0,
+            hardness: 1.0,
+            opacity: 0.5,
+            ..Default::default()
+        };
+        let run = |paint| {
+            let mut s = Stroke::new(settings, paint, surface.clone()).keeping_alpha();
+            let mut out = surface.clone();
+            let tiles = s.add_point(15.0, 5.0);
+            s.apply(&mut out, &tiles);
+            let Surface::Pixels(out) = out else { unreachable!() };
+            [5, 15, 25].map(|x| out.get(x, 5))
+        };
+        // Half-way to black everywhere, as if opaque, with alpha unchanged.
+        let painted = run(Paint::Color([0, 0, 0, 65535]));
+        for (p, alpha) in painted.iter().zip([65535, 32768, 0]) {
+            assert!(p[0].abs_diff(32768) <= 1, "{p:?}");
+            assert_eq!(p[3], alpha);
+        }
+        // Erasing does nothing.
+        assert_eq!(run(Paint::Erase), [px[5], px[15], px[25]]);
     }
 
     #[test]

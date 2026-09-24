@@ -5,6 +5,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use egui::{Align, Align2, Button, Layout, Pos2, RichText, Sense, Ui, Vec2, pos2, vec2};
+use omapix_engine::brush::Paint;
 use omapix_engine::clip::{self, Clip};
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::selection::{Combine, Selection};
@@ -547,6 +548,7 @@ impl App {
                 layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i))
             }
             Command::AddMask => !has_mask,
+            Command::LockTransparent => !no_pixels,
             Command::Deselect | Command::InvertSelection | Command::Feather => {
                 editor.doc.selection.is_some()
             }
@@ -735,6 +737,13 @@ impl App {
             .is_some_and(|l| l.is_group)
     }
 
+    fn active_is_locked(&self) -> bool {
+        self.editor
+            .as_ref()
+            .and_then(|e| e.doc.layer(e.active))
+            .is_some_and(|l| l.lock_alpha)
+    }
+
     fn active_is_clipped(&self) -> bool {
         self.editor
             .as_ref()
@@ -831,6 +840,8 @@ impl App {
                 ui.separator();
                 let release = self.active_is_clipped().then(|| "Release Clipping Mask".to_owned());
                 self.menu_item(ui, Command::ClippingMask, release);
+                let unlock = self.active_is_locked().then(|| "Unlock Transparent Pixels".to_owned());
+                self.menu_item(ui, Command::LockTransparent, unlock);
                 ui.separator();
                 self.menu_item(ui, Command::BlendingOptions, None);
                 ui.separator();
@@ -1233,9 +1244,17 @@ impl App {
         }
         match input {
             ToolInput::StrokeBegin(p) => {
-                let Some(paint) = self.tools.paint(editor.target, &editor.doc.profile, p) else {
+                let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p)
+                else {
                     return;
                 };
+                // With transparency locked, the eraser paints the background
+                // colour, as in Photoshop.
+                let locked = editor.doc.layer(editor.active).is_some_and(|l| l.lock_alpha);
+                if paint == Paint::Erase && locked && editor.target == Target::Pixels {
+                    let background = editor.doc.profile.from_srgb8(self.tools.background);
+                    paint = Paint::Color(background.unwrap_or([65535; 4]));
+                }
                 let (settings, sample_all) = (self.tools.settings(), self.tools.sample_all);
                 if editor.begin_stroke(settings, paint, sample_all) {
                     editor.stroke_to(p.x, p.y);
@@ -1531,9 +1550,17 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
                 }
             }
             Target::Pixels => {
+                // With transparency locked, Delete fills with the background
+                // colour, and only the colour of what's there changes.
+                let colour = colour.or(layer.lock_alpha.then_some(background));
                 let pixel =
                     colour.map(|rgb| profile.from_srgb8(rgb).unwrap_or([0, 0, 0, u16::MAX]));
-                layer.pixels = ops::fill_pixels(&layer.pixels, pixel, selection.as_ref());
+                let filled = ops::fill_pixels(&layer.pixels, pixel, selection.as_ref());
+                layer.pixels = if layer.lock_alpha {
+                    ops::keep_alpha(&layer.pixels, filled)
+                } else {
+                    filled
+                };
             }
         }
     });
@@ -1628,6 +1655,21 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                     doc.move_layer(id, place);
                 });
             }
+        }
+        Command::LockTransparent => {
+            let lock = !editor.doc.layer(id).is_some_and(|l| l.lock_alpha);
+            let label = if lock {
+                "Lock Transparent Pixels"
+            } else {
+                "Unlock Transparent Pixels"
+            };
+            editor.edit(label, |doc, _| {
+                for &s in &selected {
+                    if let Some(l) = doc.layer_mut(s).filter(|l| l.has_pixels()) {
+                        l.lock_alpha = lock;
+                    }
+                }
+            });
         }
         Command::BringToFront | Command::SendToBack => {
             let (label, place) = if cmd == Command::BringToFront {
@@ -2144,6 +2186,39 @@ mod tests {
         assert_eq!((mask.get(150, 150), mask.get(250, 150)), (0, 65535));
         // Copy Merged copies what's visible, which the mask now hides.
         assert!(copy(&editor, true).is_none());
+    }
+
+    #[test]
+    fn locked_transparency_keeps_alpha_for_fills_and_strokes() {
+        let ctx = egui::Context::default();
+        let mut editor = editor_with_selection();
+        let background = editor.active;
+        run_on_editor(&mut editor, Command::NewLayer, &ctx);
+        let empty = editor.active;
+        run_on_editor(&mut editor, Command::LockTransparent, &ctx);
+        assert!(editor.doc.layer(empty).unwrap().lock_alpha);
+        assert_eq!(editor.undo_label(), Some("Lock Transparent Pixels"));
+
+        // Nothing there to fill or paint on.
+        fill(&mut editor, "Fill", Some([255, 0, 0]), [255, 255, 255]);
+        let settings = omapix_engine::brush::BrushSettings::default();
+        assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), false));
+        editor.stroke_to(300.0, 300.0);
+        editor.end_stroke();
+        let pixels = &editor.doc.layer(empty).unwrap().pixels;
+        assert_eq!((pixels.get(150, 150)[3], pixels.get(300, 300)[3]), (0, 0));
+
+        // On an opaque layer, Delete fills with the background colour.
+        editor.select_layers(background, Vec::new());
+        run_on_editor(&mut editor, Command::LockTransparent, &ctx);
+        fill(&mut editor, "Clear", None, [255, 255, 255]);
+        let pixels = &editor.doc.layer(background).unwrap().pixels;
+        assert_eq!(pixels.get(150, 150), [65535; 4]);
+        assert_eq!(pixels.get(250, 150), [30000, 30000, 30000, 65535]);
+
+        run_on_editor(&mut editor, Command::LockTransparent, &ctx);
+        assert_eq!(editor.undo_label(), Some("Unlock Transparent Pixels"));
+        assert!(!editor.doc.layer(background).unwrap().lock_alpha);
     }
 
     #[test]

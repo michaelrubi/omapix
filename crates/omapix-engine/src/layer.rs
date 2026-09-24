@@ -37,6 +37,9 @@ pub struct Layer {
     /// where that layer does. A run of clipped layers all clip to the first
     /// unclipped layer below them in the same group.
     pub clipped: bool,
+    /// Photoshop's Lock Transparent Pixels (`/`): painting and fills change
+    /// colour only, keeping each pixel's transparency.
+    pub lock_alpha: bool,
 }
 
 /// Which values Blend If compares.
@@ -183,6 +186,7 @@ impl Layer {
             is_group: false,
             parent: None,
             clipped: false,
+            lock_alpha: false,
         }
     }
 

@@ -26,6 +26,7 @@ const FOLDER_OPEN: &str = "\u{f07c}";
 const CARET_RIGHT: &str = "\u{f0da}";
 const CARET_DOWN: &str = "\u{f0d7}";
 const CLIPPED: &str = "\u{f149}";
+const LOCK: &str = "\u{f023}";
 
 /// How far each level of group nesting is indented, in points.
 const INDENT: f32 = 14.0;
@@ -239,6 +240,7 @@ impl LayersPanel {
         let mut opacity = layer.opacity * 100.0;
         let id = editor.active;
         let is_group = layer.is_group;
+        let (lockable, locked) = (layer.has_pixels(), layer.lock_alpha);
 
         ComboBox::from_id_salt("blend-mode")
             .selected_text(blend.name())
@@ -278,6 +280,17 @@ impl LayersPanel {
                         l.opacity = opacity / 100.0;
                     }
                 });
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Lock");
+            let button = Button::selectable(locked, LOCK);
+            if ui
+                .add_enabled(lockable, button)
+                .on_hover_text("Lock transparent pixels (/)")
+                .clicked()
+            {
+                self.command = Some(Command::LockTransparent);
             }
         });
     }
@@ -402,6 +415,7 @@ impl LayersPanel {
         let depth = editor.doc.depth(id);
         let clipped = editor.doc.clip_base(id).is_some();
         let clip_base = editor.doc.is_clip_base(id);
+        let locked = editor.doc.layer(id).is_some_and(|l| l.lock_alpha);
         // Shown only if every group it's in is shown too.
         let doc = &editor.doc;
         let shown = visible && ancestors(doc, id).all(|g| doc.layer(g).is_some_and(|l| l.visible));
@@ -595,6 +609,15 @@ impl LayersPanel {
 
                         let name_response =
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if locked {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(LOCK).small().color(theme.dark_foreground),
+                                        )
+                                        .selectable(false),
+                                    )
+                                    .on_hover_text("Transparent pixels locked");
+                                }
                                 if blend != BlendMode::Normal && blend != BlendMode::PassThrough {
                                     ui.add(
                                         egui::Label::new(
