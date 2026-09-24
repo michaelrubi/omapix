@@ -109,7 +109,7 @@ The UI has been tested through the same code paths with scripts
 - **Live preview for Gaussian Blur**, like the frequency-separation preview.
 - **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.
 - **Tablet support:** pen pressure for size and opacity (and later tilt). Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol (`tablet-v2`) on the same Wayland connection. Tablet buttons (ExpressKeys, stylus buttons) are best mapped to keystrokes outside Omapix (Hyprland binds or OpenTabletDriver), so they work through custom hotkeys rather than needing pad support in Omapix.
-- **Liquify:** forward warp, push, bloat and pucker, with a mesh that can be edited again later.
+- **Liquify:** forward warp, push, bloat and pucker, with a mesh that can be edited again later. Shares its warp engine with the slider-driven Symmetry and Reshape in section 7 ([AI.md](AI.md)), and is how their results get touched up by hand.
 
 ## 4. Colour and adjustments
 
@@ -119,6 +119,27 @@ The UI has been tested through the same code paths with scripts
 - ~~**LUT adjustment layer:** load `.cube` files~~ (done).
 - **Monitor colour management:** read the display's ICC profile instead of assuming sRGB.
 - **Soft proofing** for print and web.
+
+### Denoise, sharpen and add noise
+
+Michael's finishing workflow, from years of Topaz and Nik Collection: denoise first, then retouch and grade, then sharpen, and add noise last, which makes the photo look more natural. Each goes on its own layer by default, so its opacity is its strength and a mask can keep it off the eyes or the background.
+
+- **Denoise** (Filter › Noise › Reduce Noise…), the first step.
+  - AI denoising with the NIND model darktable already installed here (`denoise-nind`: 768 px tiles, GPL-3.0 like Omapix), found through the shared model folders and run on the GPU with the same runtime as section 7 ([AI.md](AI.md)).
+  - Separate luminance and colour noise amounts. The result goes on a **Denoise** layer above the image.
+  - A classical fallback on the CPU (wavelet or non-local means) when there's no model.
+  - For raws, darktable's raw denoise before export is better still. Omapix's is for files that arrive already developed.
+- **Sharpen** (Filter › Sharpen), near the end.
+  - Photoshop's **Unsharp Mask** (Amount, Radius, Threshold) and **Smart Sharpen** (Gaussian or lens blur, noise reduction, fading in shadows and highlights), on luminance only, so edges don't get colour fringes.
+  - A one-click **High Pass sharpening** setup, like Frequency Separation: a High Pass copy of the visible image in Overlay or Linear Light, whose opacity and mask set the strength. Needs a High Pass filter, which is handy anyway.
+  - Previewed at 100 % in the dialog (Photoshop's filter preview box), since sharpening can't be judged zoomed out.
+  - Later, output sharpening for the export size, once exports can resize (see Batch export).
+- **Add Noise** (Filter › Noise › Add Noise…), the last step.
+  - Photoshop's controls (Amount, Uniform or Gaussian, Monochromatic), plus film-like grain: grain size, roughness, and less grain in deep shadows and bright highlights than in the midtones.
+  - Goes on a **Grain** layer by default: 50 % grey in Overlay carrying the grain, like the Dodge & Burn layer, so opacity is the amount.
+  - Seeded, so the same settings always give the same grain, without seams between tiles.
+  - Grain is measured in pixels, so an export at a smaller size loses it. Once exports can resize, grain should be added at the output size.
+- Later, a **Finish** action that runs Sharpen then Add Noise with saved settings, which Batch export can reuse.
 
 ## 5. Workflow and files
 
@@ -141,11 +162,15 @@ The UI has been tested through the same code paths with scripts
 
 ## 7. The big one: AI-assisted retouching
 
-The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription. This will need its own design document before any code.
-- Skin and face-part segmentation (skin, eyes, lips, hair) to make masks automatically.
-- Automatic blemish detection that feeds the Spot Healing Brush.
+The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription, for client and personal work alike. Design: [AI.md](AI.md) (proposal, with milestones and a couple of open questions).
+- Object Selection (`W`) and Select › Subject, which prove the groundwork first.
+- Skin and face-part segmentation (skin, eyes, lips, teeth, hair) to make masks automatically, per face and per person.
+- Automatic blemish detection that feeds the Spot Healing Brush, onto its own layer.
 - Skin smoothing that keeps texture, built on frequency separation plus the segmentation masks.
-- Models run through ONNX Runtime on the GPU (already set up on this machine for darktable).
+- Even tone: the Dodge & Burn setup with its masks filled in automatically.
+- Auto Retouch: all of the above in one click, with each face edited on its own or all together, as layer groups whose opacity sets the strength.
+- Face symmetry, and Reshape ("easy Liquify"): sliders for face and body shape, driven by face and body landmarks.
+- Models run through ONNX Runtime on the GPU (already set up on this machine for darktable), shared with darktable's model folder.
 
 ## Out of scope for now
 - Vector and layout tools (Omapix is raster only).
