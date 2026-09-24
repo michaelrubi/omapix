@@ -54,11 +54,9 @@ The selection, and the marquee (rectangular or elliptical) or lasso shape being 
 
 The marching ants follow the edge of the whole selection, traced from its coverage where it crosses 50 % after every change, as in Photoshop. Shapes added together with Shift share one outline, without lines through the overlap, and subtracting, intersecting, inverting, feathering and moving all show the right edge; a selection with a hole gets an outline round the hole. Outlines are cut off at the canvas edge. As in Photoshop, the outline follows the edges of the pixels that are more than half selected, so corners are square and curves are stepped when zoomed in. Tracing a 24 MP selection takes about 5 ms.
 
-### Selection tools grouped in the toolbar
+### ~~Selection tools grouped in the toolbar~~ (done)
 
-**Problem:** each selection tool gets its own toolbar button, and the list will grow with the magic wand and object selection.
-
-**Plan:** Photoshop's tool groups: one toolbar slot per group, showing the tool last used, with a small corner triangle. Right-clicking (or holding the mouse on) the slot opens a menu of the group's tools with their letters, and Shift+letter cycles through the group. Groups: Rectangular/Elliptical Marquee (`M`); Lasso (`L`); Object Selection/Magic Wand (`W`); and the same for Spot Healing/Healing (`J`).
+Each group shares one slot in the left toolbar showing the tool last used, with a small bottom-right corner triangle for multi-tool groups. Right-clicking or holding down the mouse (> 0.35 s) opens a pop-up menu of the group's tools with their shortcut letters. Plain shortcut keys switch to the group's last-used tool, and Shift+key cycles through the tools in that group (e.g. `M` / `Shift+M` for Rectangular/Elliptical Marquee, `J` / `Shift+J` for Spot Healing/Healing Brush).
 
 ### Selecting several layers
 
@@ -88,6 +86,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [x] Marching ants move, and Omapix goes idle again once there's no selection
+- [ ] Tool groups in the toolbar: one slot per group with corner triangle, right-click and hold-to-open menus, last-used tool remembered, and Shift+key cycling
 - [ ] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
   - Hand-tested: sliders work but the image could follow them faster; Move tool drags work but feel sluggish. Both are what GPU compositing should fix.
 - [x] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
