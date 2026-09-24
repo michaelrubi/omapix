@@ -100,17 +100,18 @@ The UI has been tested through the same code paths with scripts
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [x] Marching ants move, and Omapix goes idle again once there's no selection
-- [ ] Tool groups in the toolbar: one slot per group with corner triangle, right-click and hold-to-open menus, last-used tool remembered, and Shift+key cycling
-- [ ] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
+- [x] Tool groups in the toolbar: one slot per group with corner triangle, right-click and hold-to-open menus, last-used tool remembered, and Shift+key cycling
+- [x] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
   - Hand-tested: sliders work but the image could follow them faster; Move tool drags work but feel sluggish. Both are what GPU compositing should fix.
 - [x] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
-- [ ] Clipping masks: Ctrl+Alt+G, Alt+click between rows (and its cursor and line), the arrow and underline, and a Curves clipped to the dodge & burn layer
+- [x] Clipping masks: Ctrl+Alt+G, Alt+click between rows (and its cursor and line), the arrow and underline, and a Curves clipped to the dodge & burn layer
 - [x] Open, Save As and Export file dialogs (xdg portal)
-- [ ] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
+- [x] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
+- [ ] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -120,7 +121,8 @@ The UI has been tested through the same code paths with scripts
 - ~~**Clipping masks**~~ (done): Ctrl+Alt+G (Layer › Create Clipping Mask, or the layer's context menu) clips a layer to the one below, so it shows only where that layer does; on a clipped layer it releases it and the clipped layers above it. Alt+click the line between two rows does the same. Clipped rows get an arrow and are indented, and the layer they clip to is underlined. Several clipped layers in a row all clip to the first unclipped one below them in the same group, and a new layer made inside a clipping mask joins it. As with Photoshop's default "Blend Clipped Layers as Group", the clipped layers are composited onto the base on their own, then blended like the base, with its mode, opacity, mask and Blend If, so a Curves clipped to the Soft Light dodge & burn layer changes just that layer. Hiding the base hides them all. Merge Down of a clipped layer keeps it inside its base. Saved in OpenRaster as `omapix:clipped` (Krita doesn't save its "inherit alpha" in OpenRaster, so there was nothing to match; Krita shows them unclipped).
   - Clipping to a group clips to what's in it, composited as if it weren't Pass Through. Clipping to an adjustment layer clips to its mask.
   - Later: the Blending Options for "Blend Clipped Layers as Group" off, and dragging a layer into a clipping mask making it clipped (as new layers are).
-- **Retouching setups as groups:** now that groups exist, Frequency Separation can put its two layers in a "Frequency Separation" group (hide it to compare before and after), and a second, curves-based **Dodge & Burn** setup can make the pro workflow in one step: a group with a brightening and a darkening Curves layer, each with a black mask to paint on.
+- ~~**Retouching setups as groups**~~ (done): Retouch › Frequency Separation now puts its two layers in a Pass Through "Frequency Separation" group, so hiding the group shows the image before. Retouch › Dodge & Burn Curves makes the pro setup in one step: a "Dodge & Burn" group with a "Dodge" Curves layer (midtones 50 % → 65 %) above a "Burn" one (50 % → 35 %), each with a black mask. It selects the Dodge mask, ready to paint white with a soft, low-opacity brush; select Burn to darken. The grey Soft Light Dodge & Burn Layer is still there too.
+  - Later: choosing how strong the curves are, and Luminosity mode for either layer if darkening shifts colour too much (both can be set by hand for now).
 - **Lock transparent pixels** (`/`): brushes and fills change only pixels that are already there, as in Photoshop. Handy for recolouring a pasted patch or a hair layer. Lock All later.
 - ~~**Elliptical marquee**~~ (done): Shift+M switches between the rectangular and elliptical marquees, and Shift constrains either to a square or circle.
 - ~~**Magic Wand**~~ (done): `W` picks the Magic Wand (grouped with Object Selection). Click to select similar colours, with Tolerance (0–255), Anti-alias, Contiguous and Sample All Layers in the options bar, and Shift/Alt to add, subtract and intersect as with the marquees. Click outside the canvas deselects. Smooth anti-aliased edges feed Feather and layer masks directly.

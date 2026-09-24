@@ -861,6 +861,7 @@ impl App {
             ui.menu_button("Retouch", |ui| {
                 self.menu_item(ui, Command::FrequencySeparation, None);
                 self.menu_item(ui, Command::DodgeAndBurn, None);
+                self.menu_item(ui, Command::DodgeAndBurnCurves, None);
             });
             ui.menu_button("View", |ui| {
                 self.menu_item(ui, Command::ZoomIn, None);
@@ -1753,6 +1754,13 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 *active = ops::dodge_and_burn_layer(doc, index);
             });
         }
+        Command::DodgeAndBurnCurves => {
+            // Ready to paint the Dodge layer's mask.
+            editor.target = Target::Mask;
+            editor.edit("Dodge & Burn Curves", |doc, active| {
+                *active = ops::dodge_and_burn_curves(doc, index).0;
+            });
+        }
         Command::NewCurves
         | Command::NewLevels
         | Command::NewHueSaturation
@@ -2602,6 +2610,20 @@ mod tests {
         assert!(editor.doc.layers.iter().all(|l| !l.clipped));
         editor.undo();
         assert!(editor.doc.layer(layer).unwrap().clipped);
+    }
+
+    #[test]
+    fn dodge_and_burn_curves_selects_the_dodge_mask() {
+        let ctx = egui::Context::default();
+        let mut editor = editor_with_selection();
+        run_on_editor(&mut editor, Command::DodgeAndBurnCurves, &ctx);
+        let names: Vec<_> = editor.doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Background", "Burn", "Dodge", "Dodge & Burn"]);
+        assert_eq!(editor.doc.layer(editor.active).unwrap().name, "Dodge");
+        assert_eq!(editor.target, Target::Mask);
+        assert_eq!(editor.undo_label(), Some("Dodge & Burn Curves"));
+        editor.undo();
+        assert_eq!(editor.doc.layers.len(), 1);
     }
 
     #[test]
