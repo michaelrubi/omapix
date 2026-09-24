@@ -100,6 +100,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Clipping masks: Ctrl+Alt+G, Alt+click between rows (and its cursor and line), the arrow and underline, and a Curves clipped to the dodge & burn layer
 - [x] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
+- [ ] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
 - [ ] Undo/redo after each of the above (done for everything checked)
@@ -168,7 +169,9 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - **GPU compositing:** move blend modes to the GPU for display, keeping the CPU path for export (see DESIGN.md).
   - Plan: upload each layer and mask at the pyramid level on screen (the shrunk layers from `reduced.rs` are that input), composite at screen resolution in a WGSL shader through egui's wgpu paint callback, bake each adjustment and the display colour transform into a 3D LUT on the CPU so the shader has one path for all of them, and build isolated groups in offscreen textures. The CPU composite stays for export, the pixel readout and eyedroppers. Costs about 190 MB of GPU memory per full-size 24 MP layer, far less zoomed out.
 - **Memory:** free display textures that have been off-screen for a while.
-- **Cache group results:** an isolated group (any mode but Pass Through) composites its contents into its own buffer for every tile on every render. Keep that result while nothing inside the group changes, so dragging a slider on a layer above a big group doesn't redo the whole group.
+- ~~**Cache group results**~~ (done): a group composited on its own (any mode but Pass Through, clipped, or with layers clipped to it) keeps what its contents composite to, tile by tile, while nothing in it changes. Dragging a slider on a layer above a big group, or painting above it, then just blends the kept result. Painting inside the group redoes only the tiles painted, and changing a setting inside it redoes the whole group. With four Soft Light layers in a Normal group at 24 MP, a render goes from about 340 ms to 170 ms; the bigger the group, the bigger the saving. The full-size render and the zoomed-out preview each keep their own.
+  - Each group's kept result costs up to as much memory as a 16-bit layer (transparent tiles cost nothing), plus a quarter of that or less for the preview while zoomed out.
+  - An isolated group's result is now rounded to 16 bits before it's blended, as it's stored, which can change a pixel by 1 in 65535.
 
 ## 7. The big one: AI-assisted retouching
 
