@@ -31,6 +31,25 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 - Later: choose the overlay's colour and opacity (Photoshop's Layer Mask Display Options).
 - Related, later: **Quick Mask** (`Q`), which paints a selection with the same red overlay and turns it back into a selection.
 
+### Cut, Copy and Paste
+
+**Problem:** there's no clipboard. Moving or duplicating part of a layer means duplicating the whole layer and masking it.
+
+**Plan:** Photoshop's shortcuts, working on the selection (or the whole layer without one):
+- Ctrl+C copies the selected pixels of the active layer; Ctrl+Shift+C (Copy Merged) copies what's visible from all layers.
+- Ctrl+X cuts: copies, then clears the selection to transparency (or to the background grey on a mask, like Delete).
+- Ctrl+V pastes as a new layer in the same place it was copied from, as in Photoshop.
+- Also paste images copied from other apps, and copy out to them, through the Wayland clipboard.
+
+### Marching ants for the marquees
+
+**Problem:** selections and the marquee or lasso being dragged show a dashed black-and-white outline, but it stands still, so it's easy to lose against a busy photo.
+
+**Plan:** animate the dashes so they march, as in Photoshop:
+- For the selection and for the marquee (rectangular or elliptical) or lasso shape while it's being dragged.
+- Repaint only while a selection is on screen, at a low rate, so an idle Omapix stays idle.
+- Later: Ctrl+H hides the selection edges (Photoshop's Show Extras) while keeping the selection.
+
 ## 2. Hand-testing checklist
 
 The UI has been tested through the same code paths with scripts
@@ -45,6 +64,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Active tool contrast styling and frameless toolbar icons
 - [ ] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
+- [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
@@ -53,7 +73,7 @@ The UI has been tested through the same code paths with scripts
 ## 3. Retouching and editing
 
 - **Layer groups:** folders in the Layers panel with their own blend mode, opacity and mask. OpenRaster supports groups (nested stacks).
-- **Elliptical marquee** (done), and Shift to constrain marquee shapes to a square or circle.
+- ~~**Elliptical marquee**~~ (done): Shift+M switches between the rectangular and elliptical marquees, and Shift constrains either to a square or circle.
 - **Live preview for Gaussian Blur**, like the frequency-separation preview.
 - **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.
 - **Tablet support:** pen pressure for size and opacity (and later tilt). Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol (`tablet-v2`) on the same Wayland connection. Tablet buttons (ExpressKeys, stylus buttons) are best mapped to keystrokes outside Omapix (Hyprland binds or OpenTabletDriver), so they work through custom hotkeys rather than needing pad support in Omapix.
