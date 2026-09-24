@@ -100,6 +100,33 @@ impl Selection {
                 .all(|r| (0..self.coverage.cols()).all(|c| self.coverage.tile(c, r).is_none()))
     }
 
+    /// The smallest rectangle holding everything selected, as `[x, y,
+    /// width, height]`, or `None` if nothing is.
+    pub fn bounds(&self) -> Option<[u32; 4]> {
+        let c = &self.coverage;
+        let (w, h) = (c.width(), c.height());
+        if c.fill() != 0 {
+            return Some([0, 0, w, h]);
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for row in 0..c.rows() {
+            for col in 0..c.cols() {
+                let Some(tile) = c.tile(col, row) else {
+                    continue;
+                };
+                for (i, _) in tile.iter().enumerate().filter(|&(_, &v)| v != 0) {
+                    let x = col * TILE + i as u32 % TILE;
+                    let y = row * TILE + i as u32 / TILE;
+                    if x < w && y < h {
+                        (x0, y0) = (x0.min(x), y0.min(y));
+                        (x1, y1) = (x1.max(x), y1.max(y));
+                    }
+                }
+            }
+        }
+        (x0 <= x1).then(|| [x0, y0, x1 - x0 + 1, y1 - y0 + 1])
+    }
+
     pub fn combine(&self, other: &Selection, how: Combine) -> Selection {
         let op = |a: u16, b: u16| -> u16 {
             let (a, b) = (f32::from(a) / MAX, f32::from(b) / MAX);
@@ -351,6 +378,22 @@ mod tests {
             .map(|i| (10.0 + i as f32 * 3.7, 5.0 + i as f32 * 2.9))
             .collect();
         assert!(Selection::polygon(100, 100, &line).is_empty());
+    }
+
+    #[test]
+    fn bounds_cover_just_what_is_selected() {
+        let s = Selection::rectangle(600, 400, (300.0, 10.0), (310.5, 290.0));
+        assert_eq!(s.bounds(), Some([300, 10, 11, 280]));
+        assert_eq!(Selection::all(600, 400).bounds(), Some([0, 0, 600, 400]));
+        assert_eq!(Selection::all(600, 400).invert().bounds(), None);
+        // Tile padding past the image edge doesn't count.
+        let mut coverage = Tiled::new(600, 400, 0);
+        coverage.tile_mut(2, 1).fill(u16::MAX);
+        let corner = Selection {
+            coverage,
+            outlines: Vec::new(),
+        };
+        assert_eq!(corner.bounds(), Some([512, 256, 88, 144]));
     }
 
     #[test]

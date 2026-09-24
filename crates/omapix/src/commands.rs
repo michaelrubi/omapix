@@ -13,6 +13,10 @@ pub enum Command {
     Quit,
     Undo,
     Redo,
+    Cut,
+    Copy,
+    CopyMerged,
+    Paste,
     NewLayer,
     DuplicateLayer,
     DeleteLayer,
@@ -68,6 +72,10 @@ impl Command {
         Command::Quit,
         Command::Undo,
         Command::Redo,
+        Command::Cut,
+        Command::Copy,
+        Command::CopyMerged,
+        Command::Paste,
         Command::NewLayer,
         Command::DuplicateLayer,
         Command::DeleteLayer,
@@ -114,11 +122,15 @@ impl Command {
         Command::InvertSelection,
         Command::SaveAs,
         Command::Redo,
+        Command::CopyMerged,
         Command::NewLayer,
         Command::Open,
         Command::Save,
         Command::Quit,
         Command::Undo,
+        Command::Cut,
+        Command::Copy,
+        Command::Paste,
         Command::DuplicateLayer,
         Command::MergeDown,
         Command::RaiseLayer,
@@ -151,6 +163,10 @@ impl Command {
             Command::Quit => "Quit",
             Command::Undo => "Undo",
             Command::Redo => "Redo",
+            Command::Cut => "Cut",
+            Command::Copy => "Copy",
+            Command::CopyMerged => "Copy Merged",
+            Command::Paste => "Paste",
             Command::NewLayer => "New Layer",
             Command::DuplicateLayer => "Duplicate Layer",
             Command::DeleteLayer => "Delete Layer",
@@ -194,6 +210,10 @@ impl Command {
             Command::Quit => s(CMD, Key::Q),
             Command::Undo => s(CMD, Key::Z),
             Command::Redo => s(CMD_SHIFT, Key::Z),
+            Command::Cut => s(CMD, Key::X),
+            Command::Copy => s(CMD, Key::C),
+            Command::CopyMerged => s(CMD_SHIFT, Key::C),
+            Command::Paste => s(CMD, Key::V),
             Command::NewLayer => s(CMD_SHIFT, Key::N),
             Command::DuplicateLayer => s(CMD, Key::J),
             Command::MergeDown => s(CMD, Key::E),
@@ -224,7 +244,8 @@ impl Command {
     }
 
     /// Commands whose shortcut was pressed this frame, consuming the keys.
-    pub fn pressed(ctx: &egui::Context) -> Vec<Command> {
+    /// `v_down` remembers between frames whether V is held.
+    pub fn pressed(ctx: &egui::Context, v_down: &mut bool) -> Vec<Command> {
         ctx.input_mut(|i| {
             let mut pressed: Vec<Command> = Self::KEYBOARD_ORDER
                 .iter()
@@ -235,6 +256,34 @@ impl Command {
             if i.consume_key(CMD, Key::Plus) {
                 pressed.push(Command::ZoomIn);
             }
+            // egui-winit turns Ctrl+C and Ctrl+X into Copy and Cut events
+            // instead of key presses. Ctrl+V becomes a Paste event only when
+            // the clipboard holds text, not an image, but its V is still
+            // released: a V released without being pressed was Ctrl+V.
+            for event in &i.events {
+                match event {
+                    egui::Event::Copy if i.modifiers.shift => pressed.push(Command::CopyMerged),
+                    egui::Event::Copy => pressed.push(Command::Copy),
+                    egui::Event::Cut => pressed.push(Command::Cut),
+                    egui::Event::Key {
+                        key: Key::V,
+                        pressed: down,
+                        ..
+                    } => {
+                        if !*down && !*v_down {
+                            pressed.push(Command::Paste);
+                        }
+                        *v_down = *down;
+                    }
+                    _ => {}
+                }
+            }
+            i.events.retain(|e| {
+                !matches!(
+                    e,
+                    egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
+                )
+            });
             pressed
         })
     }
@@ -263,6 +312,69 @@ mod tests {
         }
     }
 
+    /// Commands pressed in a frame with these events and modifiers held.
+    fn press(
+        ctx: &egui::Context,
+        v_down: &mut bool,
+        modifiers: Modifiers,
+        mut events: Vec<egui::Event>,
+    ) -> Vec<Command> {
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut pressed = Vec::new();
+        let mut output = ctx.run_ui(input, |ui| pressed = Command::pressed(ui.ctx(), v_down));
+        // There's no renderer to upload textures to.
+        output.textures_delta.clear();
+        pressed
+    }
+
+    fn v(down: bool, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key: Key::V,
+            physical_key: None,
+            pressed: down,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn clipboard_shortcuts_arrive_as_egui_winit_sends_them() {
+        let ctx = egui::Context::default();
+        let mut v_down = false;
+        let none = Modifiers::NONE;
+        let copy = vec![egui::Event::Copy];
+        assert_eq!(press(&ctx, &mut v_down, CMD, copy.clone()), [Command::Copy]);
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD_SHIFT, copy),
+            [Command::CopyMerged]
+        );
+        let cut = vec![egui::Event::Cut];
+        assert_eq!(press(&ctx, &mut v_down, CMD, cut), [Command::Cut]);
+
+        // Ctrl+V with an image on the clipboard: only the release arrives,
+        // even if Ctrl was let go first.
+        assert_eq!(press(&ctx, &mut v_down, CMD, vec![]), []);
+        assert_eq!(
+            press(&ctx, &mut v_down, none, vec![v(false, none)]),
+            [Command::Paste]
+        );
+        // With text on the clipboard, a Paste event comes first.
+        let paste = vec![egui::Event::Paste("text".into())];
+        assert_eq!(press(&ctx, &mut v_down, CMD, paste), []);
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD, vec![v(false, CMD)]),
+            [Command::Paste]
+        );
+        // V on its own isn't pasting, however long it's held.
+        assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);
+        assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);
+        assert_eq!(press(&ctx, &mut v_down, none, vec![v(false, none)]), []);
+    }
+
     #[test]
     fn more_specific_shortcuts_come_first() {
         let order = Command::KEYBOARD_ORDER;
@@ -271,5 +383,6 @@ mod tests {
         assert!(pos(Command::SaveAs) < pos(Command::Save));
         assert!(pos(Command::StampVisible) < pos(Command::MergeDown));
         assert!(pos(Command::InvertSelection) < pos(Command::Invert));
+        assert!(pos(Command::CopyMerged) < pos(Command::Copy));
     }
 }

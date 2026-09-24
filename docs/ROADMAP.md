@@ -38,15 +38,12 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 - Each nudge of a selection lifts and drops it again, so feathered edges fade slightly with repeated nudges. Photoshop keeps the pixels "floating" until you deselect.
 - Later: Auto-Select (Ctrl+click picks the layer under the pointer) and Free Transform (Ctrl+T).
 
-### Cut, Copy and Paste
+### ~~Cut, Copy and Paste~~ (done)
 
-**Problem:** there's no clipboard. Moving or duplicating part of a layer means duplicating the whole layer and masking it.
+Ctrl+C copies the selected pixels of the active layer (or the whole layer without a selection), and Ctrl+Shift+C (Copy Merged) copies what's visible from all layers. Partly selected pixels come out partly transparent, as in Photoshop. With a mask targeted, Ctrl+C copies the mask as grey. Ctrl+X copies, then clears like Delete: pixels to transparency, a mask to the background grey. Ctrl+V pastes as a new layer above the active one, in the same place it was copied from (centred if it doesn't fit there), and deselects. They're in the Edit menu too.
 
-**Plan:** Photoshop's shortcuts, working on the selection (or the whole layer without one):
-- Ctrl+C copies the selected pixels of the active layer; Ctrl+Shift+C (Copy Merged) copies what's visible from all layers.
-- Ctrl+X cuts: copies, then clears the selection to transparency (or to the background grey on a mask, like Delete).
-- Ctrl+V pastes as a new layer in the same place it was copied from, as in Photoshop.
-- Also paste images copied from other apps, and copy out to them, through the Wayland clipboard.
+Copies also go on the Wayland clipboard as an sRGB PNG (through `wl-copy`, so they stay pasteable after Omapix quits), and Ctrl+V pastes PNG or JPEG images copied in other apps, centred. While the clipboard still holds Omapix's own copy, pasting uses the full 16-bit original.
+- Later: Paste in Place and Paste Into (Ctrl+Shift+V, Ctrl+Alt+Shift+V), and centring pastes on the view rather than the canvas.
 
 ### Marching ants for the marquees
 
@@ -56,6 +53,18 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 - For the selection and for the marquee (rectangular or elliptical) or lasso shape while it's being dragged.
 - Repaint only while a selection is on screen, at a low rate, so an idle Omapix stays idle.
 - Later: Ctrl+H hides the selection edges (Photoshop's Show Extras) while keeping the selection.
+
+### One outline for combined selections
+
+**Problem:** adding marquees together with Shift draws every shape's own outline, including the parts now inside the selection, so overlapping shapes turn into a tangle of lines.
+
+**Plan:** draw only the edge of the combined selection, as Photoshop does. Trace the outline from the selection's coverage (where it crosses 50 %) after every change, instead of keeping each shape's outline. That also gives the right outline after subtracting, intersecting, inverting and feathering, and for the magic wand below, which has no shapes at all.
+
+### Selection tools grouped in the toolbar
+
+**Problem:** each selection tool gets its own toolbar button, and the list will grow with the magic wand and object selection.
+
+**Plan:** Photoshop's tool groups: one toolbar slot per group, showing the tool last used, with a small corner triangle. Right-clicking (or holding the mouse on) the slot opens a menu of the group's tools with their letters, and Shift+letter cycles through the group. Groups: Rectangular/Elliptical Marquee (`M`); Lasso (`L`); Object Selection/Magic Wand (`W`); and the same for Spot Healing/Healing (`J`).
 
 ## 2. Hand-testing checklist
 
@@ -73,6 +82,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
+- [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
@@ -82,6 +92,8 @@ The UI has been tested through the same code paths with scripts
 
 - **Layer groups:** folders in the Layers panel with their own blend mode, opacity and mask. OpenRaster supports groups (nested stacks).
 - ~~**Elliptical marquee**~~ (done): Shift+M switches between the rectangular and elliptical marquees, and Shift constrains either to a square or circle.
+- **Magic Wand** (`W`, grouped with Object Selection): click to select similar colours, with Tolerance, Contiguous and Sample All Layers in the options bar, and Shift/Alt to add and subtract as with the marquees. Anti-aliased edges, so it can feed Feather and masks directly.
+- **Object Selection** (Photoshop's "smart" select, `W`): drag a rough box or lasso around something (a person, a face, hair) and it selects just that object. Needs a local segmentation model such as SAM run through ONNX Runtime, so it shares groundwork with the AI retouching in section 7 and is best built alongside it.
 - **Live preview for Gaussian Blur**, like the frequency-separation preview.
 - **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.
 - **Tablet support:** pen pressure for size and opacity (and later tilt). Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol (`tablet-v2`) on the same Wayland connection. Tablet buttons (ExpressKeys, stylus buttons) are best mapped to keystrokes outside Omapix (Hyprland binds or OpenTabletDriver), so they work through custom hotkeys rather than needing pad support in Omapix.

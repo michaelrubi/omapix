@@ -1,14 +1,18 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use egui::{Align, Button, Layout, Pos2, RichText, Ui, Vec2};
+use omapix_engine::clip::{self, Clip};
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::selection::{Combine, Selection};
+use omapix_engine::tiled::Tiled;
 use omapix_engine::{Document, export, filters, ops, ora};
 
 use crate::canvas::ToolInput;
+use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
 use crate::layers_panel::LayersPanel;
@@ -169,6 +173,11 @@ pub struct App {
     /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
     /// the real UI without a mouse; see [`ScriptStep`].
     script: VecDeque<ScriptStep>,
+    clipboard: Clipboard,
+    /// An image being read from the system clipboard to paste.
+    pasting: Option<Receiver<Result<Clip, String>>>,
+    /// Whether V is held, for spotting Ctrl+V (see [`Command::pressed`]).
+    v_down: bool,
 }
 
 impl App {
@@ -211,6 +220,9 @@ impl App {
                     parsed
                 })
                 .collect(),
+            clipboard: Clipboard::new(std::env::var_os("WAYLAND_DISPLAY").is_some()),
+            pasting: None,
+            v_down: false,
         };
         if let Some(path) = path {
             app.open(path, ctx);
@@ -410,6 +422,20 @@ impl App {
                 Err(err) => self.message(format!("{label} failed: {err}"), true),
             }
         }
+        if let Some(rx) = &self.pasting
+            && self.editor.as_ref().is_some_and(|e| e.busy().is_none())
+            && let Ok(result) = rx.try_recv()
+        {
+            self.pasting = None;
+            match result {
+                Ok(clip) => {
+                    if let Some(editor) = &mut self.editor {
+                        paste(editor, Arc::new(clip), ctx);
+                    }
+                }
+                Err(err) => self.message(err, true),
+            }
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {
             if self.modified() {
@@ -458,9 +484,12 @@ impl App {
             Command::Deselect | Command::InvertSelection | Command::Feather => {
                 editor.doc.selection.is_some()
             }
-            Command::FillForeground | Command::FillBackground | Command::Clear => {
-                editor.target == Target::Mask || !is_adjustment
-            }
+            Command::FillForeground
+            | Command::FillBackground
+            | Command::Clear
+            | Command::Cut
+            | Command::Copy => editor.target == Target::Mask || !is_adjustment,
+            Command::Paste => self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
             Command::GaussianBlur => editor.target == Target::Pixels && !is_adjustment,
             Command::Invert => editor.target == Target::Mask || !is_adjustment,
@@ -509,7 +538,38 @@ impl App {
                 };
                 let background = self.tools.background;
                 if let Some(editor) = &mut self.editor {
-                    fill(editor, colour, background);
+                    let label = if colour.is_some() { "Fill" } else { "Clear" };
+                    fill(editor, label, colour, background);
+                }
+            }
+            Command::Cut | Command::Copy | Command::CopyMerged => {
+                let Some(editor) = &mut self.editor else {
+                    return;
+                };
+                let Some(clip) = copy(editor, cmd == Command::CopyMerged) else {
+                    self.message("Nothing to copy: the selected area is empty", true);
+                    return;
+                };
+                self.clipboard.set(clip);
+                if cmd == Command::Cut {
+                    fill(editor, "Cut", None, self.tools.background);
+                }
+            }
+            Command::Paste => {
+                let Some(editor) = &mut self.editor else {
+                    return;
+                };
+                match self.clipboard.current() {
+                    Some(clip) => paste(editor, clip, ctx),
+                    None => {
+                        let (tx, rx) = channel();
+                        let ctx = ctx.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::clipboard::read_system());
+                            ctx.request_repaint();
+                        });
+                        self.pasting = Some(rx);
+                    }
                 }
             }
             Command::FrequencySeparation => {
@@ -615,6 +675,11 @@ impl App {
                     .map(|l| format!("Redo {l}"));
                 self.menu_item(ui, Command::Undo, undo);
                 self.menu_item(ui, Command::Redo, redo);
+                ui.separator();
+                self.menu_item(ui, Command::Cut, None);
+                self.menu_item(ui, Command::Copy, None);
+                self.menu_item(ui, Command::CopyMerged, None);
+                self.menu_item(ui, Command::Paste, None);
                 ui.separator();
                 self.menu_item(ui, Command::FillForeground, None);
                 self.menu_item(ui, Command::FillBackground, None);
@@ -1160,13 +1225,13 @@ impl App {
 }
 
 /// Fill the active layer (or its mask) where selected, like Photoshop's
-/// Alt+Backspace. `None` clears instead (Delete): pixels to transparency,
-/// masks to the background colour's grey, as Photoshop does.
-fn fill(editor: &mut Editor, colour: Option<[u8; 3]>, background: [u8; 3]) {
+/// Alt+Backspace, as an undo step called `label`. `None` clears instead
+/// (Delete): pixels to transparency, masks to the background colour's grey,
+/// as Photoshop does.
+fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [u8; 3]) {
     let id = editor.active;
     let target = editor.target;
     let profile = editor.doc.profile.clone();
-    let label = if colour.is_some() { "Fill" } else { "Clear" };
     editor.edit(label, |doc, _| {
         let selection = doc.selection.clone();
         let Some(layer) = doc.layer_mut(id) else {
@@ -1186,6 +1251,41 @@ fn fill(editor: &mut Editor, colour: Option<[u8; 3]>, background: [u8; 3]) {
             }
         }
     });
+}
+
+/// Copy the selected part of the active layer (or its mask), or with
+/// `merged` of the whole visible image. `None` if that's empty.
+fn copy(editor: &Editor, merged: bool) -> Option<Clip> {
+    let doc = &editor.doc;
+    let selection = doc.selection.as_ref();
+    let clip = if merged {
+        Clip::copy(
+            &Tiled::from_raster(&doc.composite()),
+            selection,
+            &doc.profile,
+        )
+    } else {
+        let layer = doc.layer(editor.active)?;
+        match (editor.target, &layer.mask) {
+            (Target::Mask, Some(mask)) => Clip::copy_mask(&mask.pixels, selection, &doc.profile),
+            _ => Clip::copy(&layer.pixels, selection, &doc.profile),
+        }
+    }?;
+    (!clip.is_empty()).then_some(clip)
+}
+
+/// Paste `clip` as a new layer above the active one.
+fn paste(editor: &mut Editor, clip: Arc<Clip>, ctx: &egui::Context) {
+    let index = editor.active_index().unwrap_or(0);
+    editor.target = Target::Pixels;
+    editor.edit_in_background(
+        "Paste",
+        move |doc, active| match clip::paste(doc, &clip, index) {
+            Ok(id) => *active = id,
+            Err(e) => log::error!("paste failed: {e}"),
+        },
+        ctx,
+    );
 }
 
 /// Commands that only change the open document.
@@ -1382,7 +1482,7 @@ impl eframe::App for App {
         self.poll(ctx);
         // While a text field (layer rename) has focus, keys edit the text.
         if self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
-            for cmd in Command::pressed(ctx) {
+            for cmd in Command::pressed(ctx, &mut self.v_down) {
                 self.run(cmd, ctx);
             }
             if let Some(opacity) = self.tools.keys(ctx)
@@ -1582,6 +1682,67 @@ fn ellipse_points(a: Pos2, b: Pos2) -> Vec<Pos2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn editor_with_selection() -> Editor {
+        let (w, h) = (600, 400);
+        let image =
+            omapix_engine::Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
+        let doc = Document::from_image(
+            "t.tif".into(),
+            &image,
+            omapix_engine::ColorProfile::srgb(),
+            16,
+        );
+        let mut editor = Editor::new(doc).unwrap();
+        editor.edit("Rectangular Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(w, h, (100.0, 100.0), (200.0, 200.0)))
+        });
+        editor
+    }
+
+    #[test]
+    fn cut_and_paste_moves_the_selection_to_a_new_layer_in_place() {
+        let ctx = egui::Context::default();
+        let mut editor = editor_with_selection();
+        let clip = copy(&editor, false).unwrap();
+        fill(&mut editor, "Cut", None, [255, 255, 255]);
+        assert_eq!(editor.doc.layers[0].pixels.get(150, 150)[3], 0);
+        assert_eq!(editor.doc.layers[0].pixels.get(250, 150)[3], 65535);
+
+        paste(&mut editor, Arc::new(clip), &ctx);
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Paste"));
+        assert_eq!(editor.doc.layers.len(), 2);
+        let pasted = &editor.doc.layers[1];
+        assert_eq!(editor.active, pasted.id);
+        assert_eq!(pasted.pixels.get(150, 150), [30000, 30000, 30000, 65535]);
+        assert_eq!(pasted.pixels.get(250, 150)[3], 0);
+        assert!(editor.doc.selection.is_none());
+        // Together they look as they did before the cut.
+        assert_eq!(
+            editor.doc.composite().get(150, 150),
+            [30000, 30000, 30000, 65535]
+        );
+    }
+
+    #[test]
+    fn cutting_from_a_mask_copies_grey_and_clears_to_the_background() {
+        let mut editor = editor_with_selection();
+        editor.edit("Add Layer Mask", |doc, _| {
+            doc.layers[0].mask = Some(Mask::white(600, 400))
+        });
+        editor.target = Target::Mask;
+        let clip = copy(&editor, false).unwrap();
+        assert_eq!(clip.pixels.get(150, 150), [65535; 4]);
+        fill(&mut editor, "Cut", None, [0, 0, 0]);
+        let mask = &editor.doc.layers[0].mask.as_ref().unwrap().pixels;
+        assert_eq!((mask.get(150, 150), mask.get(250, 150)), (0, 65535));
+        // Copy Merged copies what's visible, which the mask now hides.
+        assert!(copy(&editor, true).is_none());
+    }
 
     #[test]
     fn constrain_square_makes_1_to_1() {

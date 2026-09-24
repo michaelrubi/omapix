@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader, Cursor, Seek};
 use std::path::Path;
 
 use image::{ImageDecoder, ImageReader};
@@ -89,6 +89,31 @@ fn load_other(path: &Path) -> Result<Document> {
             path: path.display().to_string(),
             source,
         })?;
+    let (raster, profile, source_bits) = decode(reader)?;
+    Ok(Document::from_image(
+        path.to_path_buf(),
+        &raster,
+        profile,
+        source_bits,
+    ))
+}
+
+/// Decode a PNG or JPEG held in memory, such as an image pasted from
+/// another app, with its colour space (sRGB if it has no profile).
+pub fn decode_image(bytes: &[u8]) -> Result<(Raster, ColorProfile)> {
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|source| Error::Read {
+            path: "image data".into(),
+            source,
+        })?;
+    let (raster, profile, _) = decode(reader)?;
+    Ok((raster, profile))
+}
+
+/// Decode an image with the `image` crate, returning it with its colour
+/// space and bits per channel.
+fn decode<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<(Raster, ColorProfile, u8)> {
     let mut decoder = reader.into_decoder()?;
     let icc = decoder.icc_profile()?;
     let source_bits =
@@ -100,12 +125,7 @@ fn load_other(path: &Path) -> Result<Document> {
         Some(icc) => ColorProfile::from_icc(icc)?,
         None => ColorProfile::srgb(),
     };
-    Ok(Document::from_image(
-        path.to_path_buf(),
-        &Raster::new(width, height, pixels),
-        profile,
-        source_bits,
-    ))
+    Ok((Raster::new(width, height, pixels), profile, source_bits))
 }
 
 /// Expand interleaved gray / gray+alpha / RGB / RGBA samples to RGBA pixels.
