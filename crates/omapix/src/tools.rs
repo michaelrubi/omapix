@@ -14,6 +14,7 @@ const CLONE_ICON: &str = "\u{f24d}";
 const HEAL_ICON: &str = "\u{f0fa}";
 const SPOT_ICON: &str = "\u{f0d0}";
 const MARQUEE_ICON: &str = "\u{f096}";
+const ELLIPSE_ICON: &str = "\u{f10c}";
 const LASSO_ICON: &str = "\u{f0c4}";
 
 const MIN_SIZE: f32 = 1.0;
@@ -27,6 +28,7 @@ pub enum Tool {
     SpotHealing,
     Healing,
     Marquee,
+    EllipticalMarquee,
     Lasso,
 }
 
@@ -39,13 +41,14 @@ impl Tool {
             Tool::SpotHealing => "Spot Healing Brush",
             Tool::Healing => "Healing Brush",
             Tool::Marquee => "Rectangular Marquee",
+            Tool::EllipticalMarquee => "Elliptical Marquee",
             Tool::Lasso => "Lasso",
         }
     }
 
     /// Tools that make selections rather than paint.
     pub fn selects(self) -> bool {
-        matches!(self, Tool::Marquee | Tool::Lasso)
+        matches!(self, Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso)
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -109,7 +112,7 @@ impl Default for Tools {
 impl Tools {
     pub fn settings(&self) -> BrushSettings {
         match self.tool {
-            Tool::Brush | Tool::Marquee | Tool::Lasso => self.brush,
+            Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => self.brush,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
             Tool::SpotHealing => self.spot,
@@ -127,7 +130,7 @@ impl Tools {
 
     fn settings_mut(&mut self) -> &mut BrushSettings {
         match self.tool {
-            Tool::Brush | Tool::Marquee | Tool::Lasso => &mut self.brush,
+            Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
             Tool::SpotHealing => &mut self.spot,
@@ -233,6 +236,15 @@ impl Tools {
             }
             if i.consume_key(Modifiers::NONE, Key::J) {
                 self.tool = Tool::SpotHealing;
+            }
+            // M is the Rectangular Marquee; Shift+M switches to the Elliptical
+            // Marquee (Photoshop cycles the M tools with Shift+M).
+            if i.consume_key(Modifiers::SHIFT, Key::M) {
+                self.tool = if self.tool == Tool::EllipticalMarquee {
+                    Tool::Marquee
+                } else {
+                    Tool::EllipticalMarquee
+                };
             }
             if i.consume_key(Modifiers::NONE, Key::M) {
                 self.tool = Tool::Marquee;
@@ -371,6 +383,7 @@ impl Tools {
                 (Tool::SpotHealing, SPOT_ICON, "Spot Healing Brush (J)"),
                 (Tool::Healing, HEAL_ICON, "Healing Brush (Shift+J)"),
                 (Tool::Marquee, MARQUEE_ICON, "Rectangular Marquee (M)"),
+                (Tool::EllipticalMarquee, ELLIPSE_ICON, "Elliptical Marquee (Shift+M)"),
                 (Tool::Lasso, LASSO_ICON, "Lasso (L)"),
             ] {
                 let active = self.tool == tool;
@@ -482,5 +495,53 @@ mod tests {
             tools.toolbar(ui, &theme);
         });
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn m_and_shift_m_switches_marquee_tools() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+
+        // M selects Marquee.
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::M,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Marquee);
+
+        // Shift+M toggles to EllipticalMarquee.
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::M,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::EllipticalMarquee);
+
+        // Shift+M toggles back to Marquee.
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::M,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Marquee);
     }
 }

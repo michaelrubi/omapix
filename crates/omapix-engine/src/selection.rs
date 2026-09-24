@@ -53,6 +53,33 @@ impl Selection {
         Self::polygon(width, height, &[(l, t), (r, t), (r, b), (l, b)])
     }
 
+    pub fn ellipse(width: u32, height: u32, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) -> Self {
+        let (l, r) = (x0.min(x1), x0.max(x1));
+        let (t, b) = (y0.min(y1), y0.max(y1));
+        let rx = (r - l) * 0.5;
+        let ry = (b - t) * 0.5;
+        if rx <= 0.0 || ry <= 0.0 {
+            return Self {
+                coverage: Tiled::new(width, height, 0),
+                outlines: Vec::new(),
+            };
+        }
+        let cx = l + rx;
+        let cy = t + ry;
+        let coverage = fill_ellipse(width, height, cx, cy, rx, ry);
+        let n = ((rx + ry) * 0.5).clamp(32.0, 256.0) as usize;
+        let outline: Vec<(f32, f32)> = (0..n)
+            .map(|i| {
+                let angle = i as f32 * std::f32::consts::TAU / n as f32;
+                (cx + rx * angle.cos(), cy + ry * angle.sin())
+            })
+            .collect();
+        Self {
+            coverage,
+            outlines: vec![outline],
+        }
+    }
+
     pub fn width(&self) -> u32 {
         self.coverage.width()
     }
@@ -205,6 +232,49 @@ fn fill_polygon(width: u32, height: u32, points: &[(f32, f32)]) -> Tiled<u16> {
     out
 }
 
+/// Rasterise an axis-aligned ellipse with smooth anti-aliased edges,
+/// using the same sub-row sampling as `fill_polygon`.
+fn fill_ellipse(width: u32, height: u32, cx: f32, cy: f32, rx: f32, ry: f32) -> Tiled<u16> {
+    let min_y = (cy - ry).floor().max(0.0) as u32;
+    let max_y = ((cy + ry).ceil() as u32).min(height);
+
+    let rows: Vec<(u32, Vec<f32>)> = (min_y..max_y)
+        .into_par_iter()
+        .map(|y| {
+            let mut row = vec![0f32; width as usize];
+            for s in 0..SUBSAMPLES {
+                let sy = y as f32 + (s as f32 + 0.5) / SUBSAMPLES as f32;
+                let dy = (sy - cy).abs();
+                if dy < ry {
+                    let dx = rx * (1.0 - (dy / ry).powi(2)).sqrt();
+                    let left = (cx - dx).max(0.0);
+                    let right = (cx + dx).min(width as f32);
+                    if left < right {
+                        let (ia, ib) = (left.floor() as usize, (right.ceil() as usize).min(width as usize));
+                        for (x, cell) in row.iter_mut().enumerate().take(ib).skip(ia) {
+                            let overlap = (right.min(x as f32 + 1.0) - left.max(x as f32)).clamp(0.0, 1.0);
+                            *cell += overlap / SUBSAMPLES as f32;
+                        }
+                    }
+                }
+            }
+            (y, row)
+        })
+        .collect();
+
+    let mut out = Tiled::new(width, height, 0u16);
+    for (y, row) in rows {
+        for (x, &v) in row.iter().enumerate() {
+            let value = (v.min(1.0) * MAX).round() as u16;
+            if value > 0 {
+                let tile = out.tile_mut(x as u32 / TILE, y / TILE);
+                tile[((y % TILE) * TILE + x as u32 % TILE) as usize] = value;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +286,26 @@ mod tests {
         assert_eq!(s.at(5, 5), 0.0);
         assert!((s.at(50, 20) - 0.5).abs() < 0.01, "{}", s.at(50, 20));
         assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn ellipse_selects_interior_with_soft_edges() {
+        // Circle centered at (50.5, 50.5) with radius 20 (bounding box 30.5 to 70.5).
+        let s = Selection::ellipse(100, 100, (30.5, 30.5), (70.5, 70.5));
+        assert_eq!(s.at(50, 50), 1.0);
+        assert_eq!(s.at(10, 10), 0.0);
+        assert_eq!(s.at(30, 30), 0.0); // Corner of bounding box is outside circle
+
+        // Top edge at y = 30.5 cuts through pixel row 30.
+        let edge = s.at(50, 30);
+        assert!(edge > 0.0 && edge < 1.0, "edge: {edge}");
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn degenerate_ellipse_is_empty() {
+        assert!(Selection::ellipse(100, 100, (20.0, 20.0), (20.0, 50.0)).is_empty());
+        assert!(Selection::ellipse(100, 100, (20.0, 20.0), (50.0, 20.0)).is_empty());
     }
 
     #[test]

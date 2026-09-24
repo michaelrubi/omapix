@@ -125,6 +125,9 @@ impl ScriptStep {
                 "Heal" => ScriptStep::Tool(crate::tools::Tool::Healing),
                 "SpotHeal" => ScriptStep::Tool(crate::tools::Tool::SpotHealing),
                 "Marquee" => ScriptStep::Tool(crate::tools::Tool::Marquee),
+                "EllipticalMarquee" | "Ellipse" => {
+                    ScriptStep::Tool(crate::tools::Tool::EllipticalMarquee)
+                }
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 _ => return None,
             },
@@ -940,7 +943,7 @@ impl App {
             ToolInput::StrokeMove(p) => {
                 if let Some((points, _)) = &mut self.drawing {
                     match self.tools.tool {
-                        crate::tools::Tool::Marquee => {
+                        crate::tools::Tool::Marquee | crate::tools::Tool::EllipticalMarquee => {
                             points.truncate(1);
                             points.push(p);
                         }
@@ -960,6 +963,17 @@ impl App {
                 let (w, h) = (editor.doc.width, editor.doc.height);
                 // A click without a real drag.
                 let tiny = points.iter().all(|q| q.distance(points[0]) < 2.0);
+                let p1 = if (self.tools.tool == crate::tools::Tool::Marquee
+                    || self.tools.tool == crate::tools::Tool::EllipticalMarquee)
+                    && modifiers.shift
+                    && points.len() >= 2
+                {
+                    constrain_square(points[0], points[1])
+                } else if points.len() >= 2 {
+                    points[1]
+                } else {
+                    points[0]
+                };
                 let shape = if tiny {
                     None
                 } else if self.tools.tool == crate::tools::Tool::Marquee {
@@ -967,16 +981,23 @@ impl App {
                         w,
                         h,
                         (points[0].x, points[0].y),
-                        (points[1].x, points[1].y),
+                        (p1.x, p1.y),
+                    ))
+                } else if self.tools.tool == crate::tools::Tool::EllipticalMarquee {
+                    Some(Selection::ellipse(
+                        w,
+                        h,
+                        (points[0].x, points[0].y),
+                        (p1.x, p1.y),
                     ))
                 } else {
                     let pts: Vec<(f32, f32)> = points.iter().map(|p| (p.x, p.y)).collect();
                     Some(Selection::polygon(w, h, &pts))
                 };
-                let label = if self.tools.tool == crate::tools::Tool::Marquee {
-                    "Rectangular Marquee"
-                } else {
-                    "Lasso"
+                let label = match self.tools.tool {
+                    crate::tools::Tool::Marquee => "Rectangular Marquee",
+                    crate::tools::Tool::EllipticalMarquee => "Elliptical Marquee",
+                    _ => "Lasso",
                 };
                 match (shape, how) {
                     // A click without dragging deselects, as in Photoshop.
@@ -1397,11 +1418,27 @@ impl eframe::App for App {
         let brush = self.tools.settings();
         let source = self.tools.source_marker();
         let tool = self.tools.tool;
+        let shift = ui.input(|i| i.modifiers.shift);
         let drawing: Option<Vec<Pos2>> = self.drawing.as_ref().map(|(points, _)| match tool {
-            // Show the marquee as its rectangle.
+            // Show the marquee as its rectangle (constrained to square with Shift).
             crate::tools::Tool::Marquee if points.len() == 2 => {
-                let (a, b) = (points[0], points[1]);
+                let a = points[0];
+                let b = if shift {
+                    constrain_square(a, points[1])
+                } else {
+                    points[1]
+                };
                 vec![a, egui::pos2(b.x, a.y), b, egui::pos2(a.x, b.y), a]
+            }
+            // Show the elliptical marquee as an ellipse (circle with Shift).
+            crate::tools::Tool::EllipticalMarquee if points.len() == 2 => {
+                let a = points[0];
+                let b = if shift {
+                    constrain_square(a, points[1])
+                } else {
+                    points[1]
+                };
+                ellipse_points(a, b)
             }
             _ => points.clone(),
         });
@@ -1434,5 +1471,69 @@ impl eframe::App for App {
         }
         let ctx = ui.ctx().clone();
         self.dialogs(&ctx);
+    }
+}
+
+/// Constrain a rectangular or elliptical drag from `p0` to `p1` to 1:1 aspect ratio.
+fn constrain_square(p0: Pos2, p1: Pos2) -> Pos2 {
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    let side = dx.abs().max(dy.abs());
+    let sx = if dx >= 0.0 { 1.0 } else { -1.0 };
+    let sy = if dy >= 0.0 { 1.0 } else { -1.0 };
+    egui::pos2(p0.x + side * sx, p0.y + side * sy)
+}
+
+/// Outline points for an ellipse bounded by `a` and `b`.
+fn ellipse_points(a: Pos2, b: Pos2) -> Vec<Pos2> {
+    let (l, r) = (a.x.min(b.x), a.x.max(b.x));
+    let (t, b_y) = (a.y.min(b.y), a.y.max(b.y));
+    let rx = (r - l) * 0.5;
+    let ry = (b_y - t) * 0.5;
+    if rx <= 0.0 || ry <= 0.0 {
+        return Vec::new();
+    }
+    let cx = l + rx;
+    let cy = t + ry;
+    let n = ((rx + ry) * 0.5).clamp(32.0, 128.0) as usize;
+    let mut pts: Vec<Pos2> = (0..n)
+        .map(|i| {
+            let angle = i as f32 * std::f32::consts::TAU / n as f32;
+            egui::pos2(cx + rx * angle.cos(), cy + ry * angle.sin())
+        })
+        .collect();
+    if let Some(&first) = pts.first() {
+        pts.push(first);
+    }
+    pts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constrain_square_makes_1_to_1() {
+        let p0 = egui::pos2(100.0, 100.0);
+        let p1 = egui::pos2(150.0, 120.0);
+        let c = constrain_square(p0, p1);
+        assert_eq!(c, egui::pos2(150.0, 150.0));
+
+        let p1_neg = egui::pos2(50.0, 80.0);
+        let c_neg = constrain_square(p0, p1_neg);
+        assert_eq!(c_neg, egui::pos2(50.0, 50.0));
+    }
+
+    #[test]
+    fn ellipse_points_produces_closed_loop() {
+        let pts = ellipse_points(egui::pos2(10.0, 20.0), egui::pos2(110.0, 120.0));
+        assert!(pts.len() >= 32);
+        assert_eq!(pts.first(), pts.last());
+    }
+
+    #[test]
+    fn degenerate_ellipse_points_is_empty() {
+        assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(10.0, 50.0)).is_empty());
+        assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(50.0, 10.0)).is_empty());
     }
 }
