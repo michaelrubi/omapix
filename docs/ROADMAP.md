@@ -48,7 +48,7 @@ Copies also go on the Wayland clipboard as an sRGB PNG (through `wl-copy`, so th
 ### ~~Marching ants for the marquees~~ (done)
 
 The selection, and the marquee (rectangular or elliptical) or lasso shape being dragged, are drawn with white dashes over a black line that march along the outline, as in Photoshop. Omapix repaints for them only while an outline is on screen, about 12 times a second, so an idle Omapix stays idle.
-- Later: Ctrl+H hides the selection edges (Photoshop's Show Extras) while keeping the selection.
+- Ctrl+H hides the selection edges (done; Photoshop's Show Extras) while keeping the selection.
 
 ### ~~One outline for combined selections~~ (done)
 
@@ -116,6 +116,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
 - [ ] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
 - [ ] Add Noise: dialog controls (Amount, Uniform/Gaussian, Monochromatic, Grain Size, Roughness, shadow/highlight falloff), live preview, and the new Grain layer in Overlay mode
+- [ ] Selection edges: Ctrl+H hides marching ants while keeping selection, status bar notes it, Omapix goes idle, and a new selection shows them again
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
