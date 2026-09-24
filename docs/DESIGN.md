@@ -73,9 +73,16 @@ unit tests, and leaves room to replace the UI toolkit later.
 ### Compositing and undo
 
 - Layers composite tile by tile on the CPU in parallel (`composite.rs`),
-  about 100 ms for four layers at 24 MP. The canvas shows the latest
-  composite; a whole-document render runs in the background after each
-  edit, and brush strokes recomposite only the tiles they touch, in place.
+  100–200 ms for four layers at 24 MP, depending on their modes. After
+  each edit a background render redraws the canvas's image and pyramid in
+  place: the tiles on screen first, nearest the middle, then the rest in
+  small batches. Once what's on screen is drawn, a newer edit stops it, so
+  slider drags skip states rather than queue them. Zoomed out, the part on
+  screen is first previewed at the level shown, composited from layers
+  shrunk to that size (`reduced.rs`): 4× less work per level, with shrunk
+  tiles kept until their layer's tiles change. The full-size render then
+  replaces the preview. Brush strokes recomposite only the tiles they
+  touch, in place.
 - Blend modes follow Photoshop's formulas (Soft Light included), plus
   GIMP/Krita's Grain Extract/Merge for frequency separation.
 - Layer groups keep the stack one flat list, as PSD files do: a group's

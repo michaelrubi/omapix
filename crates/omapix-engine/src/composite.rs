@@ -47,31 +47,23 @@ pub fn composite(layers: &[Layer], width: u32, height: u32) -> Raster {
 /// Recomposite only the given 256 px tiles (col, row) into an existing
 /// flattened image, e.g. the area a brush stroke just touched.
 pub fn composite_into(layers: &[Layer], image: &mut Raster, tiles: &[(u32, u32)]) {
+    for (&(col, row), tile) in tiles.iter().zip(composite_tiles(layers, tiles)) {
+        image.put_tile(col, row, &tile);
+    }
+}
+
+/// Composite the given 256 px tiles (col, row) in parallel, each returned
+/// as a whole tile of pixels, row-major, ready for [`Raster::put_tile`].
+pub fn composite_tiles(layers: &[Layer], tiles: &[(u32, u32)]) -> Vec<Vec<Pixel>> {
     let visible = prepare(layers);
-    type Blended = ((u32, u32), Vec<[f32; 4]>);
-    let results: Vec<Blended> = tiles
+    tiles
         .par_iter()
         .map(|&(col, row)| {
             let mut acc = vec![[0f32; 4]; TILE_PIXELS];
             blend_all(&mut acc, &visible, col, row);
-            ((col, row), acc)
+            acc.into_iter().map(to_u16).collect()
         })
-        .collect();
-    let (w, h) = (image.width(), image.height());
-    for ((col, row), acc) in results {
-        let (x0, y0) = (col * TILE, row * TILE);
-        if x0 >= w || y0 >= h {
-            continue;
-        }
-        let tw = TILE.min(w - x0) as usize;
-        for ty in 0..TILE.min(h - y0) {
-            let src = &acc[(ty * TILE) as usize..(ty * TILE) as usize + tw];
-            let line = &mut image.row_mut(y0 + ty)[x0 as usize..x0 as usize + tw];
-            for (dst, px) in line.iter_mut().zip(src) {
-                *dst = to_u16(*px);
-            }
-        }
-    }
+        .collect()
 }
 
 /// A visible layer ready to blend: its adjustment made ready to apply,

@@ -36,12 +36,20 @@ impl Pyramid {
 
     /// Recompute the part of every level that depends on the base image
     /// rectangle `[x0, x1) × [y0, y1)`, after the base changed there.
-    pub fn update_region(
+    pub fn update_region(&mut self, base: &Raster, region: (u32, u32, u32, u32)) {
+        self.update_from(base, 0, region);
+    }
+
+    /// Recompute the levels above `level` where they depend on its
+    /// rectangle `[x0, x1) × [y0, y1)` (in that level's pixels), after it
+    /// changed there.
+    pub fn update_from(
         &mut self,
         base: &Raster,
+        level: usize,
         (mut x0, mut y0, mut x1, mut y1): (u32, u32, u32, u32),
     ) {
-        for i in 0..self.reduced.len() {
+        for i in level..self.reduced.len() {
             let (before, rest) = self.reduced.split_at_mut(i);
             let src = before.last().unwrap_or(base);
             let dst = &mut rest[0];
@@ -55,6 +63,15 @@ impl Pyramid {
                     row[x as usize] = halved_pixel(src, x, y);
                 }
             }
+        }
+    }
+
+    /// A level to write into; follow with [`Self::update_from`].
+    pub fn level_mut<'a>(&'a mut self, base: &'a mut Raster, index: usize) -> &'a mut Raster {
+        if index == 0 {
+            base
+        } else {
+            &mut self.reduced[index - 1]
         }
     }
 
@@ -138,6 +155,28 @@ mod tests {
             assert_eq!(
                 p.level(&base, i).pixels(),
                 fresh.level(&base, i).pixels(),
+                "level {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn updates_from_a_level_reach_the_levels_above_it() {
+        let (w, h) = (700, 500);
+        let mut base = Raster::new(w, h, vec![[1000, 2000, 3000, 65535]; (w * h) as usize]);
+        let mut p = Pyramid::build(&base);
+        let level = p.level_mut(&mut base, 1);
+        for y in 50..90 {
+            for px in &mut level.row_mut(y)[166..201] {
+                *px = [60000, 100, 5000, 65535];
+            }
+        }
+        p.update_from(&base, 1, (166, 50, 201, 90));
+        let fresh = Pyramid::build(p.level(&base, 1));
+        for i in 2..p.len() {
+            assert_eq!(
+                p.level(&base, i).pixels(),
+                fresh.level(&base, i - 1).pixels(),
                 "level {i}"
             );
         }

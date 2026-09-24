@@ -1,3 +1,5 @@
+use crate::tiled::TILE;
+
 /// One RGBA pixel, 16 bits per channel, straight (not premultiplied) alpha.
 pub type Pixel = [u16; 4];
 
@@ -49,6 +51,20 @@ impl Raster {
 
     pub fn get(&self, x: u32, y: u32) -> Pixel {
         self.pixels[y as usize * self.width as usize + x as usize]
+    }
+
+    /// Copy a whole 256 px tile (row-major, as in [`crate::tiled::Tiled`])
+    /// into place at tile (col, row), leaving out what's past the edges.
+    pub fn put_tile(&mut self, col: u32, row: u32, tile: &[Pixel]) {
+        let (x0, y0) = (col * TILE, row * TILE);
+        if x0 >= self.width || y0 >= self.height {
+            return;
+        }
+        let tw = TILE.min(self.width - x0) as usize;
+        for ty in 0..TILE.min(self.height - y0) {
+            let src = &tile[(ty * TILE) as usize..(ty * TILE) as usize + tw];
+            self.row_mut(y0 + ty)[x0 as usize..x0 as usize + tw].copy_from_slice(src);
+        }
     }
 }
 
