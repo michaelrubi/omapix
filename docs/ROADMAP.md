@@ -74,6 +74,14 @@ Ctrl+click on a layer row adds it to the selected layers or takes it out, and Sh
 
 Alt+] and Alt+[ select the layer above or below (following the rows shown, so into open groups and past closed ones), and Ctrl+Shift+] and Ctrl+Shift+[ bring a layer to the front or send it to the back of its group. Keyboard-first, and cheap now that `raise_place`/`lower_place` exist.
 
+### Tool cursor modifier badges (`+` and `-`)
+
+When holding modifier keys over the canvas, show visual badges on the cursor to reflect active combination modes and operations:
+- **Selection tools** (Rectangular & Elliptical Marquee, Lasso, Magic Wand, Object Selection): small `+` badge in the lower-right corner when holding Shift (Add to selection), `-` badge when holding Alt (Subtract from selection), and an intersect badge (or `×`) when holding Shift+Alt.
+- **Move tool**: duplicate/split cursor badge when holding Alt (Alt+drag copy).
+- Provides immediate visual feedback under the pointer for Photoshop muscle memory without needing to glance down at the options bar or status line.
+
+
 ## 2. Hand-testing checklist
 
 The UI has been tested through the same code paths with scripts
@@ -115,7 +123,7 @@ The UI has been tested through the same code paths with scripts
 - **Retouching setups as groups:** now that groups exist, Frequency Separation can put its two layers in a "Frequency Separation" group (hide it to compare before and after), and a second, curves-based **Dodge & Burn** setup can make the pro workflow in one step: a group with a brightening and a darkening Curves layer, each with a black mask to paint on.
 - **Lock transparent pixels** (`/`): brushes and fills change only pixels that are already there, as in Photoshop. Handy for recolouring a pasted patch or a hair layer. Lock All later.
 - ~~**Elliptical marquee**~~ (done): Shift+M switches between the rectangular and elliptical marquees, and Shift constrains either to a square or circle.
-- **Magic Wand** (`W`, grouped with Object Selection): click to select similar colours, with Tolerance, Contiguous and Sample All Layers in the options bar, and Shift/Alt to add and subtract as with the marquees. Anti-aliased edges, so it can feed Feather and masks directly.
+- ~~**Magic Wand**~~ (done): `W` picks the Magic Wand (grouped with Object Selection). Click to select similar colours, with Tolerance (0–255), Anti-alias, Contiguous and Sample All Layers in the options bar, and Shift/Alt to add, subtract and intersect as with the marquees. Click outside the canvas deselects. Smooth anti-aliased edges feed Feather and layer masks directly.
 - **Object Selection** (Photoshop's "smart" select, `W`): drag a rough box or lasso around something (a person, a face, hair) and it selects just that object. Needs a local segmentation model such as SAM run through ONNX Runtime, so it shares groundwork with the AI retouching in section 7 and is best built alongside it.
 - ~~**Live preview for Gaussian Blur**~~ (done): updates the canvas live as the radius changes, with a Preview checkbox in the dialog, respecting layer masks, blend modes, adjustments and selections.
 - **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.

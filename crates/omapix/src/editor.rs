@@ -10,7 +10,7 @@ use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
 use omapix_engine::reduced::Reduced;
-use omapix_engine::selection::Selection;
+use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
 use omapix_engine::{
     BlendMode, DisplayTransform, Document, Pixel, Raster, composite, filters, ops,
@@ -717,6 +717,74 @@ impl Editor {
     pub fn end_move(&mut self) {
         self.apply_move();
         self.moving = None;
+    }
+
+    /// Magic Wand: click to select similar colours, combining with the
+    /// current selection using `how`.
+    pub fn magic_wand(
+        &mut self,
+        start: (u32, u32),
+        tolerance: u16,
+        contiguous: bool,
+        anti_alias: bool,
+        sample_all: bool,
+        how: Combine,
+    ) -> bool {
+        let (w, h) = (self.doc.width, self.doc.height);
+        if start.0 >= w || start.1 >= h {
+            if how == Combine::Replace && self.doc.selection.is_some() {
+                return self.edit("Deselect", |doc, _| doc.selection = None);
+            }
+            return false;
+        }
+
+        let selection = if sample_all {
+            self.canvas
+                .render()
+                .and_then(|r| {
+                    r.with_image(|img| {
+                        Selection::magic_wand_raster(img, start, tolerance, contiguous, anti_alias)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    let composite = self.doc.composite();
+                    Selection::magic_wand_raster(&composite, start, tolerance, contiguous, anti_alias)
+                })
+        } else if self.target == Target::Mask {
+            if let Some(mask) = self.doc.layer(self.active).and_then(|l| l.mask.as_ref()) {
+                Selection::magic_wand(
+                    w,
+                    h,
+                    start,
+                    tolerance,
+                    contiguous,
+                    anti_alias,
+                    |x, y| {
+                        let v = mask.pixels.get(x, y);
+                        [v, v, v, u16::MAX]
+                    },
+                )
+            } else {
+                Selection::from_coverage(Tiled::new(w, h, 0))
+            }
+        } else if let Some(layer) = self.doc.layer(self.active) {
+            if layer.has_pixels() {
+                Selection::magic_wand_tiled(&layer.pixels, start, tolerance, contiguous, anti_alias)
+            } else {
+                Selection::from_coverage(Tiled::new(w, h, 0))
+            }
+        } else {
+            Selection::from_coverage(Tiled::new(w, h, 0))
+        };
+
+        self.edit("Magic Wand", |doc, _| {
+            let combined = match (&doc.selection, how) {
+                (None, Combine::Subtract) => return,
+                (None, _) => selection,
+                (Some(current), _) => current.combine(&selection, how),
+            };
+            doc.selection = (!combined.is_empty()).then_some(combined);
+        })
     }
 
     /// Put the moving layer (or its selected part) at the offset asked for.
@@ -1848,5 +1916,25 @@ mod tests {
         e.end_move();
         assert_eq!(e.doc.layer(bottom).unwrap().pixels.get(50, 50), RED);
         assert_eq!(e.doc.layer(9).unwrap().pixels.get(200, 0), RED);
+    }
+
+    #[test]
+    fn magic_wand_selects_red_square_and_combines() {
+        let mut e = square_editor();
+        // Magic wand on the red square at (75, 75)
+        assert!(e.magic_wand((75, 75), 0, true, false, false, Combine::Replace));
+        assert!(e.doc.selection.is_some());
+        let sel = e.doc.selection.as_ref().unwrap();
+        assert_eq!(sel.at(75, 75), 1.0);
+        assert_eq!(sel.at(20, 20), 1.0);
+        assert_eq!(sel.at(150, 150), 0.0);
+
+        // Click outside image deselects
+        assert!(e.magic_wand((700, 700), 0, true, false, false, Combine::Replace));
+        assert!(e.doc.selection.is_none());
+
+        // Undo brings selection back
+        e.undo();
+        assert!(e.doc.selection.is_some());
     }
 }

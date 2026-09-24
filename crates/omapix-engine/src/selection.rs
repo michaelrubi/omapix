@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
+use crate::{Pixel, Raster};
 
 const MAX: f32 = u16::MAX as f32;
 
@@ -171,6 +172,237 @@ impl Selection {
             .map(|v| v[0].round().clamp(0.0, MAX) as u16)
             .collect();
         Selection::from_coverage(Tiled::from_slice(self.width(), self.height(), 0, &values))
+    }
+
+    /// Magic Wand: select similar colours starting from `start = (x, y)`.
+    /// `tolerance` is in 16-bit channel units (e.g. `widen(32)` for Photoshop's default 32).
+    /// If `contiguous`, only connected matching pixels are selected.
+    /// If `anti_alias`, the boundary pixels get smooth anti-aliased coverage.
+    pub fn magic_wand(
+        width: u32,
+        height: u32,
+        start: (u32, u32),
+        tolerance: u16,
+        contiguous: bool,
+        anti_alias: bool,
+        pixel_at: impl Fn(u32, u32) -> Pixel + Sync,
+    ) -> Self {
+        if width == 0 || height == 0 || start.0 >= width || start.1 >= height {
+            return Self::from_coverage(Tiled::new(width, height, 0));
+        }
+
+        let seed = pixel_at(start.0, start.1);
+        let matches = |x: u32, y: u32| -> bool {
+            let p = pixel_at(x, y);
+            if seed[3] == 0 && p[3] == 0 {
+                return true;
+            }
+            seed[0].abs_diff(p[0]) <= tolerance
+                && seed[1].abs_diff(p[1]) <= tolerance
+                && seed[2].abs_diff(p[2]) <= tolerance
+                && seed[3].abs_diff(p[3]) <= tolerance
+        };
+
+        let mut visited = vec![false; (width * height) as usize];
+        if contiguous {
+            let mut stack = Vec::new();
+            stack.push((start.0, start.1));
+
+            while let Some((x, y)) = stack.pop() {
+                let idx = (y * width + x) as usize;
+                if visited[idx] || !matches(x, y) {
+                    continue;
+                }
+                let mut x_left = x;
+                while x_left > 0 && !visited[(y * width + x_left - 1) as usize] && matches(x_left - 1, y) {
+                    x_left -= 1;
+                }
+                let mut x_right = x;
+                while x_right + 1 < width && !visited[(y * width + x_right + 1) as usize] && matches(x_right + 1, y) {
+                    x_right += 1;
+                }
+                for xi in x_left..=x_right {
+                    visited[(y * width + xi) as usize] = true;
+                }
+
+                if y > 0 {
+                    scan_row(y - 1, x_left, x_right, width, &visited, &matches, &mut stack);
+                }
+                if y + 1 < height {
+                    scan_row(y + 1, x_left, x_right, width, &visited, &matches, &mut stack);
+                }
+            }
+        } else {
+            visited
+                .par_chunks_mut(width as usize)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    for (x, v) in row.iter_mut().enumerate() {
+                        if matches(x as u32, y as u32) {
+                            *v = true;
+                        }
+                    }
+                });
+        }
+
+        // Bounding box of visited pixels.
+        let mut min_x = u32::MAX;
+        let mut max_x = 0;
+        let mut min_y = u32::MAX;
+        let mut max_y = 0;
+        let mut any = false;
+
+        for y in 0..height {
+            let row = &visited[(y * width) as usize..((y + 1) * width) as usize];
+            if let Some(first) = row.iter().position(|&v| v) {
+                any = true;
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+                min_x = min_x.min(first as u32);
+                let last = row.iter().rposition(|&v| v).unwrap();
+                max_x = max_x.max(last as u32);
+            }
+        }
+
+        if !any {
+            return Self::from_coverage(Tiled::new(width, height, 0));
+        }
+
+        let is_inside = |x: i32, y: i32| -> bool {
+            let cx = x.clamp(0, width as i32 - 1) as u32;
+            let cy = y.clamp(0, height as i32 - 1) as u32;
+            visited[(cy * width + cx) as usize]
+        };
+
+        let bbox_x0 = min_x.saturating_sub(1);
+        let bbox_y0 = min_y.saturating_sub(1);
+        let bbox_x1 = (max_x + 1).min(width - 1);
+        let bbox_y1 = (max_y + 1).min(height - 1);
+
+        let weights = [
+            [1, 2, 1],
+            [2, 4, 2],
+            [1, 2, 1],
+        ];
+
+        let coverage = Tiled::from_tiles(width, height, 0u16, |col, row| {
+            let x0 = col * TILE;
+            let y0 = row * TILE;
+            let x1 = (x0 + TILE).min(width);
+            let y1 = (y0 + TILE).min(height);
+
+            if x0 > bbox_x1 || x1 <= bbox_x0 || y0 > bbox_y1 || y1 <= bbox_y0 {
+                return None;
+            }
+
+            let mut tile = vec![0u16; TILE_PIXELS];
+            let mut has_non_zero = false;
+
+            for y in y0..y1 {
+                let ty = y - y0;
+                for x in x0..x1 {
+                    let tx = x - x0;
+                    let val = if !anti_alias {
+                        if visited[(y * width + x) as usize] {
+                            u16::MAX
+                        } else {
+                            0
+                        }
+                    } else {
+                        let center_inside = is_inside(x as i32, y as i32);
+                        let mut sum = 0u32;
+                        for dy in -1..=1 {
+                            for dx in -1..=1 {
+                                if is_inside(x as i32 + dx, y as i32 + dy) {
+                                    sum += weights[(dy + 1) as usize][(dx + 1) as usize];
+                                }
+                            }
+                        }
+                        if sum == 0 {
+                            0
+                        } else if sum == 16 {
+                            u16::MAX
+                        } else {
+                            let n = sum as f32 / 16.0;
+                            let c = if center_inside {
+                                0.5 + 0.5 * n
+                            } else {
+                                0.5 * n
+                            };
+                            (c * MAX).round() as u16
+                        }
+                    };
+
+                    if val > 0 {
+                        tile[(ty * TILE + tx) as usize] = val;
+                        has_non_zero = true;
+                    }
+                }
+            }
+
+            has_non_zero.then_some(tile)
+        });
+
+        Self::from_coverage(coverage)
+    }
+
+    pub fn magic_wand_raster(
+        raster: &Raster,
+        start: (u32, u32),
+        tolerance: u16,
+        contiguous: bool,
+        anti_alias: bool,
+    ) -> Self {
+        Self::magic_wand(
+            raster.width(),
+            raster.height(),
+            start,
+            tolerance,
+            contiguous,
+            anti_alias,
+            |x, y| raster.get(x, y),
+        )
+    }
+
+    pub fn magic_wand_tiled(
+        tiled: &Tiled<Pixel>,
+        start: (u32, u32),
+        tolerance: u16,
+        contiguous: bool,
+        anti_alias: bool,
+    ) -> Self {
+        Self::magic_wand(
+            tiled.width(),
+            tiled.height(),
+            start,
+            tolerance,
+            contiguous,
+            anti_alias,
+            |x, y| tiled.get(x, y),
+        )
+    }
+}
+
+fn scan_row(
+    y: u32,
+    x1: u32,
+    x2: u32,
+    width: u32,
+    visited: &[bool],
+    matches: &impl Fn(u32, u32) -> bool,
+    stack: &mut Vec<(u32, u32)>,
+) {
+    let mut in_run = false;
+    for x in x1..=x2 {
+        let idx = (y * width + x) as usize;
+        if !visited[idx] && matches(x, y) {
+            if !in_run {
+                stack.push((x, y));
+                in_run = true;
+            }
+        } else {
+            in_run = false;
+        }
     }
 }
 
@@ -673,5 +905,105 @@ mod tests {
         let s = Selection::polygon(100, 100, &[(10.0, 10.0), (90.0, 10.0), (50.0, 90.0)]);
         assert_eq!(s.at(50, 30), 1.0);
         assert_eq!(s.at(15, 80), 0.0);
+    }
+
+    #[test]
+    fn magic_wand_contiguous_stops_at_boundary() {
+        let (w, h) = (50, 50);
+        let red: Pixel = [65535, 0, 0, 65535];
+        let green: Pixel = [0, 65535, 0, 65535];
+        let mut pixels = vec![red; (w * h) as usize];
+        // Vertical divider at x = 25.
+        for y in 0..h {
+            pixels[(y * w + 25) as usize] = green;
+        }
+        let raster = Raster::new(w, h, pixels);
+
+        let sel = Selection::magic_wand_raster(&raster, (10, 10), 0, true, false);
+        assert!(!sel.is_empty());
+        assert_eq!(sel.at(10, 10), 1.0);
+        assert_eq!(sel.at(20, 20), 1.0);
+        assert_eq!(sel.at(25, 20), 0.0); // Divider not selected
+        assert_eq!(sel.at(30, 20), 0.0); // Other side not reached
+    }
+
+    #[test]
+    fn magic_wand_non_contiguous_selects_disconnected_islands() {
+        let (w, h) = (50, 50);
+        let red: Pixel = [65535, 0, 0, 65535];
+        let green: Pixel = [0, 65535, 0, 65535];
+        let mut pixels = vec![red; (w * h) as usize];
+        for y in 0..h {
+            pixels[(y * w + 25) as usize] = green;
+        }
+        let raster = Raster::new(w, h, pixels);
+
+        let sel = Selection::magic_wand_raster(&raster, (10, 10), 0, false, false);
+        assert!(!sel.is_empty());
+        assert_eq!(sel.at(10, 10), 1.0);
+        assert_eq!(sel.at(25, 20), 0.0); // Divider not selected
+        assert_eq!(sel.at(35, 20), 1.0); // Other side selected when contiguous = false
+    }
+
+    #[test]
+    fn magic_wand_tolerance_respects_threshold() {
+        let (w, h) = (3, 1);
+        let pixels: Vec<Pixel> = vec![
+            [10000, 10000, 10000, 65535],
+            [10500, 10000, 10000, 65535],
+            [12000, 10000, 10000, 65535],
+        ];
+        let raster = Raster::new(w, h, pixels);
+
+        let sel_narrow = Selection::magic_wand_raster(&raster, (0, 0), 100, true, false);
+        assert_eq!(sel_narrow.at(0, 0), 1.0);
+        assert_eq!(sel_narrow.at(1, 0), 0.0);
+        assert_eq!(sel_narrow.at(2, 0), 0.0);
+
+        let sel_mid = Selection::magic_wand_raster(&raster, (0, 0), 600, true, false);
+        assert_eq!(sel_mid.at(0, 0), 1.0);
+        assert_eq!(sel_mid.at(1, 0), 1.0);
+        assert_eq!(sel_mid.at(2, 0), 0.0);
+
+        let sel_wide = Selection::magic_wand_raster(&raster, (0, 0), 3000, true, false);
+        assert_eq!(sel_wide.at(0, 0), 1.0);
+        assert_eq!(sel_wide.at(1, 0), 1.0);
+        assert_eq!(sel_wide.at(2, 0), 1.0);
+    }
+
+    #[test]
+    fn magic_wand_anti_aliasing_softens_edges() {
+        let (w, h) = (20, 20);
+        let red: Pixel = [65535, 0, 0, 65535];
+        let blue: Pixel = [0, 0, 65535, 65535];
+        let mut pixels = vec![blue; (w * h) as usize];
+        // 10x10 square in centre
+        for y in 5..15 {
+            for x in 5..15 {
+                pixels[(y * w + x) as usize] = red;
+            }
+        }
+        let raster = Raster::new(w, h, pixels);
+
+        let aliased = Selection::magic_wand_raster(&raster, (10, 10), 0, true, false);
+        assert_eq!(aliased.at(10, 10), 1.0);
+        assert_eq!(aliased.at(5, 5), 1.0);
+        assert_eq!(aliased.at(4, 5), 0.0);
+
+        let aa = Selection::magic_wand_raster(&raster, (10, 10), 0, true, true);
+        assert_eq!(aa.at(10, 10), 1.0);
+        // On the edge, coverage is fractional
+        let edge_inside = aa.at(5, 10);
+        let edge_outside = aa.at(4, 10);
+        assert!(edge_inside > 0.5 && edge_inside < 1.0, "edge inside: {edge_inside}");
+        assert!(edge_outside > 0.0 && edge_outside < 0.5, "edge outside: {edge_outside}");
+        assert!(!aa.outlines.is_empty());
+    }
+
+    #[test]
+    fn magic_wand_out_of_bounds_is_empty() {
+        let raster = Raster::new(10, 10, vec![[0, 0, 0, 65535]; 100]);
+        let sel = Selection::magic_wand_raster(&raster, (20, 20), 0, true, false);
+        assert!(sel.is_empty());
     }
 }
