@@ -11,7 +11,9 @@ use omapix_engine::clip::{self, Clip};
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::Tiled;
-use omapix_engine::{Document, export, filters, ops, ora};
+use omapix_engine::{
+    Document, NoiseDistribution, NoiseOptions, export, filters, ops, ora,
+};
 
 use crate::canvas::ToolInput;
 use crate::clipboard::Clipboard;
@@ -61,6 +63,10 @@ enum Dialog {
         command: Command,
         radius: f32,
         preview: Option<bool>,
+    },
+    AddNoise {
+        options: NoiseOptions,
+        preview: bool,
     },
     UnsavedChanges {
         then: Then,
@@ -141,6 +147,17 @@ impl ScriptStep {
                     texture: false,
                 }),
                 ("blur", &[radius]) => ScriptStep::View(View::GaussianBlur { layer: 0, radius }),
+                ("noise", &[amount]) => ScriptStep::View(View::AddNoise {
+                    layer: 0,
+                    options: NoiseOptions {
+                        amount,
+                        ..Default::default()
+                    },
+                }),
+                ("noise", _) => ScriptStep::View(View::AddNoise {
+                    layer: 0,
+                    options: NoiseOptions::default(),
+                }),
                 _ => return None,
             },
             ("Tool", _) => match words.next()? {
@@ -188,6 +205,7 @@ pub struct App {
     feather_radius: f32,
     separation_radius: Option<f32>,
     high_pass_radius: f32,
+    noise_options: NoiseOptions,
     /// The user chose to discard changes, so the next close goes through.
     allow_close: bool,
     title: String,
@@ -236,6 +254,7 @@ impl App {
             high_pass_radius: 2.0,
             feather_radius: 10.0,
             separation_radius: None,
+            noise_options: NoiseOptions::default(),
             allow_close: false,
             title: String::new(),
             script: std::env::var("OMAPIX_SCRIPT")
@@ -593,6 +612,12 @@ impl App {
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
             Command::ExportTiff => self.pick(Purpose::ExportTiff, ctx),
             Command::ExportJpeg => self.pick(Purpose::ExportJpeg, ctx),
+            Command::AddNoise => {
+                self.dialog = Some(Dialog::AddNoise {
+                    options: self.noise_options,
+                    preview: true,
+                });
+            }
             Command::GaussianBlur => {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
@@ -692,6 +717,22 @@ impl App {
                 }
             }
         }
+    }
+
+    fn apply_add_noise(&mut self, options: NoiseOptions, ctx: &egui::Context) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        self.noise_options = options;
+        let index = editor.active_index().unwrap_or(0);
+        editor.target = Target::Pixels;
+        editor.edit_in_background(
+            "Add Noise",
+            move |doc, active| {
+                *active = ops::add_noise_layer(doc, index, &options);
+            },
+            ctx,
+        );
     }
 
     fn apply_radius(&mut self, command: Command, radius: f32, ctx: &egui::Context) {
@@ -920,6 +961,9 @@ impl App {
                 });
             });
             ui.menu_button("Filter", |ui| {
+                ui.menu_button("Noise", |ui| {
+                    self.menu_item(ui, Command::AddNoise, None);
+                });
                 self.menu_item(ui, Command::GaussianBlur, None);
                 self.menu_item(ui, Command::HighPass, None);
             });
@@ -1119,6 +1163,62 @@ impl App {
                         }
                     });
                 }
+                Dialog::AddNoise { options, preview } => {
+                    ui.heading("Add Noise");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Amount");
+                        ui.add(
+                            egui::Slider::new(&mut options.amount, 0.0..=100.0)
+                                .suffix(" %")
+                                .fixed_decimals(1),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Distribution:");
+                        ui.radio_value(&mut options.distribution, NoiseDistribution::Uniform, "Uniform");
+                        ui.radio_value(&mut options.distribution, NoiseDistribution::Gaussian, "Gaussian");
+                    });
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut options.monochromatic, "Monochromatic");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Grain Size");
+                        ui.add(
+                            egui::Slider::new(&mut options.grain_size, 1.0..=20.0)
+                                .suffix(" px")
+                                .fixed_decimals(1),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Roughness");
+                        ui.add(
+                            egui::Slider::new(&mut options.roughness, 0.0..=1.0)
+                                .fixed_decimals(2),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut options.tonal_falloff, "Shadow/highlight falloff");
+                    ui.add_space(8.0);
+                    ui.checkbox(preview, "Preview");
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let options = *options;
+                            action = Some(Box::new(move |app, ctx| {
+                                app.apply_add_noise(options, ctx);
+                            }));
+                            close = true;
+                        }
+                    });
+                }
                 Dialog::BlendingOptions(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
@@ -1134,7 +1234,7 @@ impl App {
                         if ui.button("Don't Save").clicked() {
                             action = Some(Box::new(move |app, ctx| {
                                 if let Some(e) = &mut app.editor {
-                                    e.modified = false;
+                                     e.modified = false;
                                 }
                                 app.proceed(then, ctx);
                             }));
@@ -1181,7 +1281,18 @@ impl App {
                     };
                     editor.set_view(view);
                 }
-                _ if matches!(editor.view(), View::Separation { .. } | View::GaussianBlur { .. }) => {
+                Some(Dialog::AddNoise { options, preview }) => {
+                    let view = if *preview {
+                        View::AddNoise {
+                            layer: editor.active,
+                            options: *options,
+                        }
+                    } else {
+                        View::Image
+                    };
+                    editor.set_view(view);
+                }
+                _ if matches!(editor.view(), View::Separation { .. } | View::GaussianBlur { .. } | View::AddNoise { .. }) => {
                     editor.set_view(View::Image)
                 }
                 _ => {}
@@ -1545,6 +1656,9 @@ impl App {
                 {
                     self.apply_radius(command, radius, ctx);
                 }
+                if let Some(Dialog::AddNoise { options, .. }) = self.dialog.take() {
+                    self.apply_add_noise(options, ctx);
+                }
             }
             ScriptStep::Stroke([x0, y0, x1, y1]) => {
                 self.tool_input(
@@ -1583,13 +1697,17 @@ impl App {
             }
             ScriptStep::View(view) => {
                 if let Some(editor) = &mut self.editor {
-                    // "mask", "overlay" and "blur" apply to the active layer.
+                    // "mask", "overlay", "blur" and "noise" apply to the active layer.
                     let view = match view {
                         View::Mask(_) => View::Mask(editor.active),
                         View::MaskOverlay(_) => View::MaskOverlay(editor.active),
                         View::GaussianBlur { radius, .. } => View::GaussianBlur {
                             layer: editor.active,
                             radius,
+                        },
+                        View::AddNoise { options, .. } => View::AddNoise {
+                            layer: editor.active,
+                            options,
                         },
                         view => view,
                     };
@@ -2405,6 +2523,7 @@ mod tests {
             high_pass_radius: 2.0,
             feather_radius: 5.0,
             separation_radius: None,
+            noise_options: NoiseOptions::default(),
             allow_close: false,
             title: String::new(),
             drawing: None,
@@ -2492,6 +2611,86 @@ mod tests {
     }
 
     #[test]
+    fn add_noise_dialog_shows_live_preview_and_applies() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active_id = app.editor.as_ref().unwrap().active;
+
+        app.run(Command::AddNoise, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::AddNoise { .. })));
+
+        // Running dialogs updates the editor view to View::AddNoise
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert!(matches!(
+            app.editor.as_ref().unwrap().view(),
+            View::AddNoise { layer, .. } if layer == active_id
+        ));
+
+        // Toggling preview off reverts to View::Image
+        if let Some(Dialog::AddNoise { preview, .. }) = &mut app.dialog {
+            *preview = false;
+        }
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.editor.as_ref().unwrap().view(), View::Image);
+
+        // Toggling preview back on updates to View::AddNoise with updated settings
+        if let Some(Dialog::AddNoise { preview, options }) = &mut app.dialog {
+            *preview = true;
+            options.amount = 35.0;
+        }
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert!(matches!(
+            app.editor.as_ref().unwrap().view(),
+            View::AddNoise { layer, options } if layer == active_id && (options.amount - 35.0).abs() < 1e-4
+        ));
+
+        // Enter submits the dialog
+        let enter = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(enter, |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert!(app.dialog.is_none());
+        assert_eq!(app.editor.as_ref().unwrap().view(), View::Image);
+
+        // Wait for background edit to complete
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            editor.update(&ctx);
+        }
+
+        // The Grain layer is added on top of active layer, in Overlay mode, with opacity 0.35
+        assert_eq!(editor.doc.layers.len(), 2);
+        let grain = editor.doc.layers.last().unwrap();
+        assert_eq!(grain.name, "Grain");
+        assert_eq!(grain.blend, omapix_engine::BlendMode::Overlay);
+        assert!((grain.opacity - 0.35).abs() < 1e-4);
+
+        // One undo step ("Add Noise") reverts it
+        editor.undo();
+        assert_eq!(editor.doc.layers.len(), 1);
+    }
+
+    #[test]
     fn previews_set_without_a_dialog_stay_up() {
         // Scripts (`View texture r`, `View blur r`) show previews with no
         // dialog open; the next frame mustn't take them down.
@@ -2506,6 +2705,10 @@ mod tests {
             View::GaussianBlur {
                 layer: active,
                 radius: 3.0,
+            },
+            View::AddNoise {
+                layer: active,
+                options: NoiseOptions::default(),
             },
         ] {
             app.editor.as_mut().unwrap().set_view(view);

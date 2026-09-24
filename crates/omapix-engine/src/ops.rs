@@ -3,7 +3,7 @@
 use crate::adjust::{Adjustment, Curve, Curves};
 use crate::blend::BlendMode;
 use crate::composite::composite;
-use crate::filters::{gaussian_blur, high_pass};
+use crate::filters::{self, NoiseOptions, gaussian_blur, high_pass};
 use crate::layer::Layer;
 use crate::tiled::Tiled;
 use crate::{Document, Raster};
@@ -217,6 +217,32 @@ pub fn dodge_and_burn_layer(doc: &mut Document, above: usize) -> u64 {
     layer.blend = BlendMode::SoftLight;
     doc.insert_above(above, layer);
     id
+}
+
+/// A new Grain layer filled with 50 % grey in Overlay mode carrying film grain,
+/// placed above layer index `above`. Layer opacity is set to Amount.
+pub fn add_noise_layer(doc: &mut Document, above: usize, options: &NoiseOptions) -> u64 {
+    let visible = doc.composite();
+    let base = Tiled::from_raster(&visible);
+    let id = doc.next_layer_id();
+    let layer = grain_layer(id, doc.width, doc.height, options, Some(&base));
+    doc.insert_above(above, layer);
+    id
+}
+
+/// Create a Grain layer filled with 50 % grey in Overlay mode carrying grain.
+pub fn grain_layer(
+    id: u64,
+    width: u32,
+    height: u32,
+    options: &NoiseOptions,
+    base: Option<&Tiled<crate::Pixel>>,
+) -> Layer {
+    let pixels = filters::generate_grain(width, height, options, base);
+    let mut layer = Layer::from_pixels(id, "Grain", pixels);
+    layer.blend = BlendMode::Overlay;
+    layer.opacity = (options.amount / 100.0).clamp(0.0, 1.0);
+    layer
 }
 
 /// The curves-based dodge & burn setup retouchers use: a "Dodge & Burn"
@@ -457,6 +483,34 @@ mod tests {
                 assert!(a[c].abs_diff(b[c]) <= 2);
             }
         }
+    }
+
+    #[test]
+    fn grain_layer_leaves_image_unchanged_at_amount_zero() {
+        let (w, h) = (300, 200);
+        let px: Vec<crate::Pixel> = (0..w * h)
+            .map(|i| {
+                [
+                    ((i * 17) % 65535) as u16,
+                    ((i * 31) % 65535) as u16,
+                    ((i * 53) % 65535) as u16,
+                    65535,
+                ]
+            })
+            .collect();
+        let mut doc = doc_with(px, w, h);
+        let before = doc.composite();
+
+        let opts = NoiseOptions {
+            amount: 0.0,
+            ..Default::default()
+        };
+        let layer_id = add_noise_layer(&mut doc, 0, &opts);
+        let after = doc.composite();
+
+        assert_eq!(doc.layer(layer_id).unwrap().blend, BlendMode::Overlay);
+        assert_eq!(doc.layer(layer_id).unwrap().opacity, 0.0);
+        assert_eq!(before.pixels(), after.pixels());
     }
 
     #[test]

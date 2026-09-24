@@ -27,8 +27,10 @@ pub mod tiles;
 pub use blend::BlendMode;
 pub use color::{ColorProfile, DisplayTransform};
 pub use document::Document;
+pub use filters::{generate_grain, NoiseDistribution, NoiseOptions};
 pub use histogram::Histogram;
 pub use layer::{Layer, Mask};
+pub use ops::{add_noise_layer, grain_layer};
 pub use raster::{Pixel, Raster};
 
 #[derive(Debug, thiserror::Error)]

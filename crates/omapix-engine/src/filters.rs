@@ -152,6 +152,168 @@ fn transpose(src: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NoiseDistribution {
+    Uniform,
+    Gaussian,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NoiseOptions {
+    pub amount: f32,
+    pub distribution: NoiseDistribution,
+    pub monochromatic: bool,
+    pub grain_size: f32,
+    pub roughness: f32,
+    pub tonal_falloff: bool,
+    pub seed: u64,
+}
+
+impl Default for NoiseOptions {
+    fn default() -> Self {
+        Self {
+            amount: 25.0,
+            distribution: NoiseDistribution::Uniform,
+            monochromatic: false,
+            grain_size: 1.0,
+            roughness: 0.5,
+            tonal_falloff: true,
+            seed: 1,
+        }
+    }
+}
+
+fn hash2d(x: u32, y: u32, ch: u32, seed: u64) -> u64 {
+    let mut h = seed.wrapping_add(0x9e3779b97f4a7c15);
+    h ^= (x as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = h.rotate_left(31).wrapping_add(y as u64);
+    h ^= (ch as u64).wrapping_mul(0x94d049bb133111eb);
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xbf58476d1ce4e5b9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94d049bb133111eb);
+    h ^= h >> 31;
+    h
+}
+
+fn sample_noise(x: u32, y: u32, ch: u32, seed: u64, dist: NoiseDistribution) -> f32 {
+    let h = hash2d(x, y, ch, seed);
+    match dist {
+        NoiseDistribution::Uniform => {
+            let u = (h >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
+            (u * 2.0 - 1.0) as f32
+        }
+        NoiseDistribution::Gaussian => {
+            let u1 = ((h >> 32) as u32 as f64 + 1.0) / 4294967297.0;
+            let u2 = ((h as u32) as f64 + 1.0) / 4294967297.0;
+            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            (z * 0.35).clamp(-1.0, 1.0) as f32
+        }
+    }
+}
+
+fn grain_sample(
+    x: u32,
+    y: u32,
+    ch: u32,
+    seed: u64,
+    size: f32,
+    roughness: f32,
+    dist: NoiseDistribution,
+) -> f32 {
+    let fine = sample_noise(x, y, ch, seed.wrapping_add(101), dist);
+    if size <= 1.001 {
+        return fine;
+    }
+    let u = x as f32 / size;
+    let v = y as f32 / size;
+    let x0 = u.floor() as u32;
+    let y0 = v.floor() as u32;
+    let fx = u - x0 as f32;
+    let fy = v - y0 as f32;
+    let sx = fx * fx * (3.0 - 2.0 * fx);
+    let sy = fy * fy * (3.0 - 2.0 * fy);
+
+    let c00 = sample_noise(x0, y0, ch, seed, dist);
+    let c10 = sample_noise(x0.wrapping_add(1), y0, ch, seed, dist);
+    let c01 = sample_noise(x0, y0.wrapping_add(1), ch, seed, dist);
+    let c11 = sample_noise(x0.wrapping_add(1), y0.wrapping_add(1), ch, seed, dist);
+
+    let base = (c00 + (c10 - c00) * sx) * (1.0 - sy) + (c01 + (c11 - c01) * sx) * sy;
+
+    let r = roughness.clamp(0.0, 1.0);
+    let w_base = 1.0 - r;
+    let w_fine = r;
+    let norm = (w_base * w_base + w_fine * w_fine).sqrt().max(1e-4);
+    (w_base * base + w_fine * fine) / norm
+}
+
+/// Generate a tiled raster filled with 50 % grey carrying noise according
+/// to `options`. If `options.tonal_falloff` is true and `base` is provided,
+/// grain amplitude decreases in deep shadows and bright highlights.
+pub fn generate_grain(
+    width: u32,
+    height: u32,
+    options: &NoiseOptions,
+    base: Option<&Tiled<Pixel>>,
+) -> Tiled<Pixel> {
+    const MID_GREY: Pixel = [32768, 32768, 32768, 65535];
+    if width == 0 || height == 0 || options.amount <= 0.0 {
+        return Tiled::new(width, height, MID_GREY);
+    }
+    let size = options.grain_size.max(1.0);
+    let roughness = options.roughness;
+    let dist = options.distribution;
+    let seed = options.seed;
+    let mono = options.monochromatic;
+    let falloff_active = options.tonal_falloff && base.is_some();
+
+    Tiled::from_tiles(width, height, MID_GREY, |col, row| {
+        let base_tile = base.and_then(|b| b.tile(col, row));
+        let base_fill = base.map(|b| b.fill());
+        let mut pixels = vec![MID_GREY; crate::tiled::TILE_PIXELS];
+
+        for dy in 0..crate::tiled::TILE {
+            let y = row * crate::tiled::TILE + dy;
+            if y >= height {
+                break;
+            }
+            let row_offset = (dy * crate::tiled::TILE) as usize;
+            for dx in 0..crate::tiled::TILE {
+                let x = col * crate::tiled::TILE + dx;
+                if x >= width {
+                    break;
+                }
+                let idx = row_offset + dx as usize;
+
+                let falloff = if falloff_active {
+                    let p = base_tile.map_or_else(|| base_fill.unwrap_or(MID_GREY), |t| t[idx]);
+                    let lum = (0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2])) / 65535.0;
+                    (std::f32::consts::PI * lum.clamp(0.0, 1.0)).sin()
+                } else {
+                    1.0
+                };
+
+                let to_u16 = |val: f32| -> u16 {
+                    let offset = (val * falloff * 32767.0).round();
+                    (32768.0 + offset).clamp(0.0, 65535.0) as u16
+                };
+
+                if mono {
+                    let v = to_u16(grain_sample(x, y, 0, seed, size, roughness, dist));
+                    pixels[idx] = [v, v, v, 65535];
+                } else {
+                    let r = to_u16(grain_sample(x, y, 0, seed, size, roughness, dist));
+                    let g = to_u16(grain_sample(x, y, 1, seed, size, roughness, dist));
+                    let b = to_u16(grain_sample(x, y, 2, seed, size, roughness, dist));
+                    pixels[idx] = [r, g, b, 65535];
+                }
+            }
+        }
+        Some(pixels)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +351,168 @@ mod tests {
     #[test]
     fn box_radii_grow_with_sigma() {
         assert!(box_radii(1.0).iter().sum::<usize>() < box_radii(10.0).iter().sum::<usize>());
+    }
+
+    #[test]
+    fn same_seed_gives_identical_output() {
+        let opts1 = NoiseOptions {
+            seed: 12345,
+            amount: 50.0,
+            ..Default::default()
+        };
+        let opts2 = NoiseOptions {
+            seed: 12345,
+            amount: 50.0,
+            ..Default::default()
+        };
+        let opts3 = NoiseOptions {
+            seed: 54321,
+            amount: 50.0,
+            ..Default::default()
+        };
+        let g1 = generate_grain(300, 300, &opts1, None);
+        let g2 = generate_grain(300, 300, &opts2, None);
+        let g3 = generate_grain(300, 300, &opts3, None);
+
+        assert_eq!(g1.tile(0, 0), g2.tile(0, 0));
+        assert_eq!(g1.tile(1, 1), g2.tile(1, 1));
+        assert_ne!(g1.tile(0, 0), g3.tile(0, 0));
+    }
+
+    #[test]
+    fn neighbouring_tiles_have_no_seam() {
+        let opts = NoiseOptions {
+            amount: 50.0,
+            grain_size: 1.0,
+            distribution: NoiseDistribution::Uniform,
+            monochromatic: true,
+            tonal_falloff: false,
+            ..Default::default()
+        };
+        let grain = generate_grain(512, 256, &opts, None);
+
+        let mut boundary_diff_sum = 0.0f64;
+        let mut interior_diff_sum = 0.0f64;
+        let mut col_255_sum = 0.0f64;
+        let mut col_256_sum = 0.0f64;
+
+        for y in 0..256 {
+            let p_254 = grain.get(254, y)[0] as f64;
+            let p_255 = grain.get(255, y)[0] as f64;
+            let p_256 = grain.get(256, y)[0] as f64;
+
+            interior_diff_sum += (p_255 - p_254).abs();
+            boundary_diff_sum += (p_256 - p_255).abs();
+            col_255_sum += p_255;
+            col_256_sum += p_256;
+        }
+
+        let mean_col_255 = col_255_sum / 256.0;
+        let mean_col_256 = col_256_sum / 256.0;
+        assert!((mean_col_255 - 32768.0).abs() < 1500.0);
+        assert!((mean_col_256 - 32768.0).abs() < 1500.0);
+
+        let avg_interior_diff = interior_diff_sum / 256.0;
+        let avg_boundary_diff = boundary_diff_sum / 256.0;
+        let ratio = avg_boundary_diff / avg_interior_diff;
+        assert!((ratio - 1.0).abs() < 0.15, "seam ratio across tile boundary was {ratio}");
+    }
+
+    #[test]
+    fn monochromatic_noise_has_equal_rgb_offsets() {
+        let opts = NoiseOptions {
+            amount: 50.0,
+            monochromatic: true,
+            ..Default::default()
+        };
+        let grain = generate_grain(100, 100, &opts, None);
+        for y in 0..100 {
+            for x in 0..100 {
+                let p = grain.get(x, y);
+                assert_eq!(p[0], p[1], "R != G at ({x}, {y})");
+                assert_eq!(p[1], p[2], "G != B at ({x}, {y})");
+                assert_eq!(p[3], 65535);
+            }
+        }
+
+        let color_opts = NoiseOptions {
+            amount: 50.0,
+            monochromatic: false,
+            ..Default::default()
+        };
+        let color_grain = generate_grain(100, 100, &color_opts, None);
+        let has_divergent = (0..100).any(|y| {
+            (0..100).any(|x| {
+                let p = color_grain.get(x, y);
+                p[0] != p[1] || p[1] != p[2]
+            })
+        });
+        assert!(has_divergent, "color noise should have divergent RGB channels");
+    }
+
+    #[test]
+    fn noise_mean_stays_approx_fifty_percent_grey() {
+        for dist in [NoiseDistribution::Uniform, NoiseDistribution::Gaussian] {
+            let opts = NoiseOptions {
+                amount: 100.0,
+                distribution: dist,
+                monochromatic: false,
+                tonal_falloff: false,
+                ..Default::default()
+            };
+            let (w, h) = (256, 256);
+            let grain = generate_grain(w, h, &opts, None);
+            let mut sum_r = 0.0;
+            let mut sum_g = 0.0;
+            let mut sum_b = 0.0;
+            for y in 0..h {
+                for x in 0..w {
+                    let p = grain.get(x, y);
+                    sum_r += p[0] as f64;
+                    sum_g += p[1] as f64;
+                    sum_b += p[2] as f64;
+                }
+            }
+            let n = (w * h) as f64;
+            let mean_r = sum_r / n;
+            let mean_g = sum_g / n;
+            let mean_b = sum_b / n;
+
+            assert!((mean_r - 32768.0).abs() < 250.0, "{dist:?} R mean: {mean_r}");
+            assert!((mean_g - 32768.0).abs() < 250.0, "{dist:?} G mean: {mean_g}");
+            assert!((mean_b - 32768.0).abs() < 250.0, "{dist:?} B mean: {mean_b}");
+        }
+    }
+
+    #[test]
+    fn tonal_falloff_reduces_grain_in_shadows_and_highlights() {
+        let (w, h) = (256, 100);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                let val = (x as f32 / (w - 1) as f32 * 65535.0).round() as u16;
+                [val, val, val, 65535]
+            })
+            .collect();
+        let base = Tiled::from_raster(&crate::Raster::new(w, h, px));
+
+        let opts = NoiseOptions {
+            amount: 100.0,
+            tonal_falloff: true,
+            monochromatic: true,
+            ..Default::default()
+        };
+        let grain = generate_grain(w, h, &opts, Some(&base));
+
+        let mut shadow_var = 0.0f64;
+        let mut midtone_var = 0.0f64;
+        let mut highlight_var = 0.0f64;
+        for y in 0..h {
+            shadow_var += (grain.get(0, y)[0] as f64 - 32768.0).abs();
+            midtone_var += (grain.get(128, y)[0] as f64 - 32768.0).abs();
+            highlight_var += (grain.get(255, y)[0] as f64 - 32768.0).abs();
+        }
+        assert!(midtone_var > shadow_var * 2.0, "midtone noise should exceed shadow noise");
+        assert!(midtone_var > highlight_var * 2.0, "midtone noise should exceed highlight noise");
     }
 }
