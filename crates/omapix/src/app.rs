@@ -538,6 +538,18 @@ impl App {
             }
             Command::RaiseLayer => doc.raise_place(editor.active).is_some(),
             Command::LowerLayer => doc.lower_place(editor.active).is_some(),
+            Command::BringToFront => if editor.several_selected() {
+                doc.front_place_layers(&editor.selected(), editor.active).is_some()
+            } else {
+                doc.front_place(editor.active).is_some()
+            },
+            Command::SendToBack => if editor.several_selected() {
+                doc.back_place_layers(&editor.selected(), editor.active).is_some()
+            } else {
+                doc.back_place(editor.active).is_some()
+            },
+            Command::SelectLayerAbove => self.layers.can_select_above(doc, editor.active),
+            Command::SelectLayerBelow => self.layers.can_select_below(doc, editor.active),
             Command::UngroupLayers => is_group,
             Command::ClippingMask => {
                 layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i))
@@ -657,6 +669,16 @@ impl App {
                     radius,
                     preview: Some(true),
                 });
+            }
+            Command::SelectLayerAbove => {
+                if let Some(editor) = &mut self.editor {
+                    self.layers.step_selection(editor, true);
+                }
+            }
+            Command::SelectLayerBelow => {
+                if let Some(editor) = &mut self.editor {
+                    self.layers.step_selection(editor, false);
+                }
             }
             _ => {
                 if let Some(editor) = &mut self.editor {
@@ -824,8 +846,10 @@ impl App {
                 self.menu_item(ui, Command::ToggleMask, None);
                 self.menu_item(ui, Command::DeleteMask, None);
                 ui.separator();
+                self.menu_item(ui, Command::BringToFront, None);
                 self.menu_item(ui, Command::RaiseLayer, None);
                 self.menu_item(ui, Command::LowerLayer, None);
+                self.menu_item(ui, Command::SendToBack, None);
                 ui.separator();
                 let merge = if several {
                     Some("Merge Layers".to_owned())
@@ -1601,17 +1625,43 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             });
             editor.fix_selection();
         }
-        Command::RaiseLayer | Command::LowerLayer => {
-            let (label, place) = if cmd == Command::RaiseLayer {
-                ("Bring Forward", editor.doc.raise_place(id))
-            } else {
-                ("Send Backward", editor.doc.lower_place(id))
+        Command::RaiseLayer | Command::LowerLayer | Command::BringToFront | Command::SendToBack => {
+            let (label, place) = match cmd {
+                Command::RaiseLayer => ("Bring Forward", editor.doc.raise_place(id)),
+                Command::LowerLayer => ("Send Backward", editor.doc.lower_place(id)),
+                Command::BringToFront => (
+                    "Bring to Front",
+                    if several {
+                        editor.doc.front_place_layers(&selected, id)
+                    } else {
+                        editor.doc.front_place(id)
+                    },
+                ),
+                Command::SendToBack => (
+                    "Send to Back",
+                    if several {
+                        editor.doc.back_place_layers(&selected, id)
+                    } else {
+                        editor.doc.back_place(id)
+                    },
+                ),
+                _ => unreachable!(),
             };
             if let Some(place) = place {
                 editor.edit(label, |doc, _| {
-                    doc.move_layer(id, place);
+                    if several {
+                        doc.move_layers(&selected, place);
+                    } else {
+                        doc.move_layer(id, place);
+                    }
                 });
             }
+        }
+        Command::SelectLayerAbove | Command::SelectLayerBelow => {
+            let up = cmd == Command::SelectLayerAbove;
+            let mut expanded = std::collections::HashSet::new();
+            expanded.extend(crate::layers_panel::ancestors(&editor.doc, id));
+            crate::layers_panel::step_layer_selection(editor, &expanded, up);
         }
         Command::NewGroup => {
             editor.edit("New Group", |doc, active| *active = doc.new_group(index));
@@ -2496,6 +2546,190 @@ mod tests {
         // Something must be left.
         editor.select_layers(two, vec![three]);
         assert!(!app.enabled(Command::DeleteLayer));
+    }
+
+    #[test]
+    fn bring_to_front_and_send_to_back_commands() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let names = |app: &App| -> Vec<String> {
+            let e = app.editor.as_ref().unwrap();
+            e.doc
+                .layers
+                .iter()
+                .map(|l| match l.parent.and_then(|p| e.doc.layer(p)) {
+                    Some(g) => format!("{}({})", l.name, g.name),
+                    None => l.name.clone(),
+                })
+                .collect()
+        };
+
+        // Create Layer 1, Layer 2, Layer 3
+        for _ in 0..3 {
+            app.run(Command::NewLayer, &ctx);
+        }
+        let editor = app.editor.as_mut().unwrap();
+        let [background, one, two, three] = [0, 1, 2, 3].map(|i| editor.doc.layers[i].id);
+        assert_eq!(names(&app), ["Background", "Layer 1", "Layer 2", "Layer 3"]);
+
+        // Layer 3 is active at the top of the root.
+        assert!(!app.enabled(Command::BringToFront));
+        assert!(app.enabled(Command::SendToBack));
+
+        // Send Layer 3 to back.
+        app.run(Command::SendToBack, &ctx);
+        assert_eq!(names(&app), ["Layer 3", "Background", "Layer 1", "Layer 2"]);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Send to Back"));
+        assert!(!app.enabled(Command::SendToBack));
+        assert!(app.enabled(Command::BringToFront));
+
+        // Undo brings it back to the top.
+        app.run(Command::Undo, &ctx);
+        assert_eq!(names(&app), ["Background", "Layer 1", "Layer 2", "Layer 3"]);
+
+        // Bring Layer 1 to front.
+        let editor = app.editor.as_mut().unwrap();
+        editor.active = one;
+        assert!(app.enabled(Command::BringToFront));
+        app.run(Command::BringToFront, &ctx);
+        assert_eq!(names(&app), ["Background", "Layer 2", "Layer 3", "Layer 1"]);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Bring to Front"));
+
+        // Inside a group:
+        // Group Layer 2 and Layer 3:
+        let editor = app.editor.as_mut().unwrap();
+        editor.select_layers(three, vec![two]);
+        app.run(Command::GroupLayers, &ctx);
+        assert_eq!(
+            names(&app),
+            ["Background", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Layer 1"]
+        );
+
+        // Active is Layer 2 inside Group 1.
+        let editor = app.editor.as_mut().unwrap();
+        editor.active = two;
+        assert!(app.enabled(Command::BringToFront));
+        assert!(!app.enabled(Command::SendToBack));
+
+        // Bring to Front brings Layer 2 to the top of Group 1 (not out of it!).
+        app.run(Command::BringToFront, &ctx);
+        assert_eq!(
+            names(&app),
+            ["Background", "Layer 3(Group 1)", "Layer 2(Group 1)", "Group 1", "Layer 1"]
+        );
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Bring to Front"));
+
+        // Send to Back sends Layer 2 back to the bottom of Group 1.
+        app.run(Command::SendToBack, &ctx);
+        assert_eq!(
+            names(&app),
+            ["Background", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Layer 1"]
+        );
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Send to Back"));
+
+        // Several selected layers:
+        // Select Layer 1 and Background:
+        let editor = app.editor.as_mut().unwrap();
+        editor.select_layers(background, vec![one]);
+        // Send to back moves both to the bottom:
+        app.run(Command::SendToBack, &ctx);
+        assert_eq!(
+            names(&app),
+            ["Background", "Layer 1", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1"]
+        );
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Send to Back"));
+        assert!(!app.enabled(Command::SendToBack));
+        assert!(app.enabled(Command::BringToFront));
+
+        // Bring to front moves both to the front of root:
+        app.run(Command::BringToFront, &ctx);
+        assert_eq!(
+            names(&app),
+            ["Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Background", "Layer 1"]
+        );
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Bring to Front"));
+    }
+
+    #[test]
+    fn select_layer_above_and_below_commands() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+
+        // Start with Background. Create Layer 1, Layer 2.
+        app.run(Command::NewLayer, &ctx);
+        app.run(Command::NewLayer, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        let [background, one, two] = [0, 1, 2].map(|i| editor.doc.layers[i].id);
+
+        // Group Layer 1:
+        editor.active = one;
+        app.run(Command::GroupLayers, &ctx);
+        let group = app.editor.as_ref().unwrap().active;
+        // Stack top first: Layer 2, Group 1, [Layer 1], Background
+        // By default, group starts closed.
+        app.layers.set_group_expanded(group, false);
+
+        // Set active to Background (bottom row).
+        let editor = app.editor.as_mut().unwrap();
+        editor.select_single(background);
+
+        assert!(!app.enabled(Command::SelectLayerBelow));
+        assert!(app.enabled(Command::SelectLayerAbove));
+
+        // Alt+[ at bottom does nothing (no wrap).
+        app.run(Command::SelectLayerBelow, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, background);
+
+        // Alt+] from Background: Group 1 is closed, so skips Layer 1 and selects Group 1!
+        app.run(Command::SelectLayerAbove, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, group);
+
+        // Alt+] from Group 1: selects Layer 2!
+        app.run(Command::SelectLayerAbove, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, two);
+        assert_eq!(app.editor.as_ref().unwrap().target, Target::Pixels);
+
+        // At top: Alt+] does nothing (no wrap).
+        assert!(!app.enabled(Command::SelectLayerAbove));
+        app.run(Command::SelectLayerAbove, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, two);
+
+        // Alt+[ from Layer 2: selects Group 1.
+        app.run(Command::SelectLayerBelow, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, group);
+
+        // Now open Group 1:
+        app.layers.set_group_expanded(group, true);
+
+        // Alt+[ steps into open group -> Layer 1!
+        app.run(Command::SelectLayerBelow, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, one);
+        assert_eq!(app.editor.as_ref().unwrap().target, Target::Pixels);
+
+        // Alt+[ from Layer 1 -> Background!
+        app.run(Command::SelectLayerBelow, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, background);
+
+        // Alt+] from Background -> Layer 1!
+        app.run(Command::SelectLayerAbove, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, one);
+
+        // Alt+] from Layer 1 -> Group 1!
+        app.run(Command::SelectLayerAbove, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, group);
+
+        // Alt+] from Group 1 -> Layer 2!
+        app.run(Command::SelectLayerAbove, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().active, two);
+
+        // Selecting this way clears multiple selection:
+        let editor = app.editor.as_mut().unwrap();
+        editor.select_layers(two, vec![background]);
+        assert_eq!(editor.selected().len(), 2);
+        app.run(Command::SelectLayerBelow, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.active, group);
+        assert_eq!(editor.selected(), [group], "selects just that one layer");
     }
 
     #[test]

@@ -234,6 +234,114 @@ impl Document {
         })
     }
 
+    /// Where Bring to Front (Ctrl+Shift+]) takes layer `id`: to the top of
+    /// its group (or root stack). `None` if it is already at the top.
+    pub fn front_place(&self, id: u64) -> Option<Place> {
+        self.front_place_layers(&[id], id)
+    }
+
+    /// Where Send to Back (Ctrl+Shift+[) takes layer `id`: to the bottom of
+    /// its group (or root stack). `None` if it is already at the bottom.
+    pub fn back_place(&self, id: u64) -> Option<Place> {
+        self.back_place_layers(&[id], id)
+    }
+
+    /// Where Bring to Front takes several layers: to the top of the group
+    /// containing `active`. `None` if all selected siblings are already at
+    /// the top.
+    pub fn front_place_layers(&self, ids: &[u64], active: u64) -> Option<Place> {
+        let parent = self.layer(active)?.parent;
+        let outermost = self.outermost(ids);
+        match parent {
+            Some(g) => {
+                let g_index = self.index_of(g)?;
+                let span = self.span(g_index);
+                let siblings: Vec<u64> = self.layers[span.start..g_index]
+                    .iter()
+                    .rev()
+                    .filter(|l| l.parent == Some(g))
+                    .map(|l| l.id)
+                    .collect();
+                let count = outermost.iter().filter(|id| siblings.contains(id)).count();
+                if count == 0 {
+                    return None;
+                }
+                let already_top = siblings.iter().take(count).all(|id| outermost.contains(id));
+                if already_top {
+                    None
+                } else {
+                    Some(Place::IntoTop(g))
+                }
+            }
+            None => {
+                let top = self.layers.last()?;
+                let roots: Vec<u64> = self.layers
+                    .iter()
+                    .rev()
+                    .filter(|l| l.parent.is_none())
+                    .map(|l| l.id)
+                    .collect();
+                let count = outermost.iter().filter(|id| roots.contains(id)).count();
+                if count == 0 {
+                    return None;
+                }
+                let already_top = roots.iter().take(count).all(|id| outermost.contains(id));
+                if already_top {
+                    None
+                } else {
+                    Some(Place::Above(top.id))
+                }
+            }
+        }
+    }
+
+    /// Where Send to Back takes several layers: to the bottom of the group
+    /// containing `active`. `None` if all selected siblings are already at
+    /// the bottom.
+    pub fn back_place_layers(&self, ids: &[u64], active: u64) -> Option<Place> {
+        let parent = self.layer(active)?.parent;
+        let outermost = self.outermost(ids);
+        match parent {
+            Some(g) => {
+                let g_index = self.index_of(g)?;
+                let span = self.span(g_index);
+                let siblings: Vec<u64> = self.layers[span.start..g_index]
+                    .iter()
+                    .filter(|l| l.parent == Some(g))
+                    .map(|l| l.id)
+                    .collect();
+                let count = outermost.iter().filter(|id| siblings.contains(id)).count();
+                if count == 0 {
+                    return None;
+                }
+                let already_bottom = siblings.iter().take(count).all(|id| outermost.contains(id));
+                if already_bottom {
+                    None
+                } else {
+                    Some(Place::IntoBottom(g))
+                }
+            }
+            None => {
+                let bottom = self.layers.iter().find(|l| l.parent.is_none())?;
+                let roots: Vec<u64> = self.layers
+                    .iter()
+                    .filter(|l| l.parent.is_none())
+                    .map(|l| l.id)
+                    .collect();
+                let count = outermost.iter().filter(|id| roots.contains(id)).count();
+                if count == 0 {
+                    return None;
+                }
+                let already_bottom = roots.iter().take(count).all(|id| outermost.contains(id));
+                if already_bottom {
+                    None
+                } else {
+                    Some(Place::Below(bottom.id))
+                }
+            }
+        }
+    }
+
     /// Remove the layer at `index` and everything in it.
     pub fn remove_layer(&mut self, index: usize) -> Vec<Layer> {
         let span = self.span(index);
@@ -542,6 +650,81 @@ mod tests {
         assert_eq!(doc.raise_place(id(&doc, "g")), None);
         assert_eq!(step(&mut doc, "a", false), ["c", "a", "b(g)", "bg(g)", "g"]);
         assert_eq!(doc.lower_place(id(&doc, "c")), None);
+    }
+
+    #[test]
+    fn bring_to_front_and_send_to_back_stay_within_group() {
+        let mut doc = grouped();
+        let c = id(&doc, "c");
+        let bg = id(&doc, "bg");
+        let g = id(&doc, "g");
+        let a = id(&doc, "a");
+        let b = id(&doc, "b");
+
+        assert_eq!(doc.front_place(c), None, "c is already at top of root");
+        assert_eq!(doc.back_place(bg), None, "bg is already at bottom of root");
+
+        // Send "c" to back of root.
+        assert_eq!(doc.back_place(c), Some(Place::Below(bg)));
+        assert!(doc.move_layer(c, doc.back_place(c).unwrap()));
+        check(&doc);
+        assert_eq!(names(&doc), ["c", "bg", "a(g)", "b(g)", "g"]);
+
+        // Bring "c" back to front of root.
+        assert_eq!(doc.front_place(c), Some(Place::Above(g)));
+        assert!(doc.move_layer(c, doc.front_place(c).unwrap()));
+        check(&doc);
+        assert_eq!(names(&doc), ["bg", "a(g)", "b(g)", "g", "c"]);
+
+        // Send "g" to back of root.
+        assert_eq!(doc.back_place(g), Some(Place::Below(bg)));
+        assert!(doc.move_layer(g, doc.back_place(g).unwrap()));
+        check(&doc);
+        assert_eq!(names(&doc), ["a(g)", "b(g)", "g", "bg", "c"]);
+
+        // Bring "g" to front of root.
+        assert_eq!(doc.front_place(g), Some(Place::Above(c)));
+        assert!(doc.move_layer(g, doc.front_place(g).unwrap()));
+        check(&doc);
+        assert_eq!(names(&doc), ["bg", "c", "a(g)", "b(g)", "g"]);
+
+        // Inside group "g":
+        // Currently inside "g": "a" (bottom), "b" (top).
+        assert_eq!(doc.front_place(b), None, "b is already at top of g");
+        assert_eq!(doc.back_place(a), None, "a is already at bottom of g");
+
+        // Bring "a" to front of group.
+        assert_eq!(doc.front_place(a), Some(Place::IntoTop(g)));
+        assert!(doc.move_layer(a, doc.front_place(a).unwrap()));
+        check(&doc);
+        assert_eq!(names(&doc), ["bg", "c", "b(g)", "a(g)", "g"]);
+
+        // Send "a" back to bottom of group.
+        assert_eq!(doc.back_place(a), Some(Place::IntoBottom(g)));
+        assert!(doc.move_layer(a, doc.back_place(a).unwrap()));
+        check(&doc);
+        assert_eq!(names(&doc), ["bg", "c", "a(g)", "b(g)", "g"]);
+
+        // Several layers:
+        // Move "g" back between "bg" and "c":
+        assert!(doc.move_layer(g, Place::Below(c)));
+        assert_eq!(names(&doc), ["bg", "a(g)", "b(g)", "g", "c"]);
+
+        // Several in root: select "bg" and "c", bring to front.
+        let place = doc.front_place_layers(&[bg, c], bg).unwrap();
+        assert_eq!(place, Place::Above(c));
+        assert!(doc.move_layers(&[bg, c], place));
+        check(&doc);
+        assert_eq!(names(&doc), ["a(g)", "b(g)", "g", "bg", "c"]);
+        assert_eq!(doc.front_place_layers(&[bg, c], bg), None);
+
+        // Send them both to back:
+        let place = doc.back_place_layers(&[bg, c], bg).unwrap();
+        assert_eq!(place, Place::Below(g));
+        assert!(doc.move_layers(&[bg, c], place));
+        check(&doc);
+        assert_eq!(names(&doc), ["bg", "c", "a(g)", "b(g)", "g"]);
+        assert_eq!(doc.back_place_layers(&[bg, c], bg), None);
     }
 
     #[test]

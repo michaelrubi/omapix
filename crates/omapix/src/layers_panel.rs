@@ -135,6 +135,50 @@ pub struct LayersPanel {
 }
 
 impl LayersPanel {
+    /// Return the visible rows in the order shown in the Layers panel (top to bottom).
+    pub fn visible_layers(&self, doc: &Document, active: u64) -> Vec<u64> {
+        let mut expanded = self.expanded.clone();
+        expanded.extend(ancestors(doc, active));
+        doc.layers
+            .iter()
+            .rev()
+            .filter(|l| ancestors(doc, l.id).all(|g| expanded.contains(&g)))
+            .map(|l| l.id)
+            .collect()
+    }
+
+    /// Whether a layer above the active one can be selected in the panel.
+    pub fn can_select_above(&self, doc: &Document, active: u64) -> bool {
+        let rows = self.visible_layers(doc, active);
+        rows.iter().position(|&id| id == active).is_some_and(|p| p > 0)
+    }
+
+    /// Whether a layer below the active one can be selected in the panel.
+    pub fn can_select_below(&self, doc: &Document, active: u64) -> bool {
+        let rows = self.visible_layers(doc, active);
+        rows.iter().position(|&id| id == active).is_some_and(|p| p + 1 < rows.len())
+    }
+
+    /// Select the layer above (`up = true`) or below (`up = false`), following
+    /// the rows shown in the Layers panel (stepping into open groups, skipping
+    /// closed ones). Stops at top/bottom without wrapping.
+    pub fn step_selection(&mut self, editor: &mut Editor, up: bool) {
+        if let Some(target_id) = step_layer_selection(editor, &self.expanded, up) {
+            self.anchor = Some(target_id);
+            self.expanded.extend(ancestors(&editor.doc, target_id));
+        }
+    }
+
+    /// Open or close group `id`.
+    #[cfg(test)]
+    pub fn set_group_expanded(&mut self, id: u64, expanded: bool) {
+        if expanded {
+            self.expanded.insert(id);
+        } else {
+            self.expanded.remove(&id);
+        }
+    }
+
     /// Draw the panel. Returns a command for buttons that act like menu items.
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> Option<Command> {
         let mut command = None;
@@ -988,7 +1032,7 @@ fn layer_context_menu(
 /// Select just this layer, as clicking its row does: paint on its pixels,
 /// or on its mask for an adjustment layer or a group (which have no pixels).
 fn select(editor: &mut Editor, id: u64) {
-    select_with(editor, id, Vec::new());
+    editor.select_single(id);
 }
 
 /// Make layer `id` the active one, with `others` selected along with it.
@@ -1004,9 +1048,38 @@ fn select_with(editor: &mut Editor, id: u64, others: Vec<u64>) {
 }
 
 /// The groups a layer is in, innermost first.
-fn ancestors(doc: &Document, id: u64) -> impl Iterator<Item = u64> + '_ {
+pub(crate) fn ancestors(doc: &Document, id: u64) -> impl Iterator<Item = u64> + '_ {
     let parent = |id: u64| doc.layer(id).and_then(|l| l.parent);
     std::iter::successors(parent(id), move |&g| parent(g))
+}
+
+/// Step the selected layer above or below, following visible rows given the
+/// expanded groups. Selects just that one layer and targets its pixels (or mask).
+pub(crate) fn step_layer_selection(
+    editor: &mut Editor,
+    expanded: &HashSet<u64>,
+    up: bool,
+) -> Option<u64> {
+    let mut expanded = expanded.clone();
+    expanded.extend(ancestors(&editor.doc, editor.active));
+    let rows: Vec<u64> = editor
+        .doc
+        .layers
+        .iter()
+        .rev()
+        .filter(|l| ancestors(&editor.doc, l.id).all(|g| expanded.contains(&g)))
+        .map(|l| l.id)
+        .collect();
+    let pos = rows.iter().position(|&id| id == editor.active)?;
+    let target = if up {
+        pos.checked_sub(1).map(|p| rows[p])
+    } else {
+        rows.get(pos + 1).copied()
+    };
+    if let Some(target_id) = target {
+        editor.select_single(target_id);
+    }
+    target
 }
 
 /// Where a dragged layer would land, and how to show it.
@@ -1659,5 +1732,85 @@ mod tests {
             layer_context_menu(ui, &mut h.editor, &mut command, &mut renaming, CURVES);
         });
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn layer_navigation_steps_through_rows_and_groups() {
+        let mut h = Harness::new();
+        let background = h.background();
+        // Stack top first: CURVES, MULTIPLY, background.
+        assert_eq!(h.editor.active, CURVES);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // At top: step up does nothing (no wrap).
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
+
+        // Step down to MULTIPLY (pixel layer: targets pixels).
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, MULTIPLY);
+        assert_eq!(h.editor.target, Target::Pixels);
+        assert_eq!(h.editor.selected(), [MULTIPLY]);
+
+        // Add a mask to CURVES. When stepping back up to it, target becomes Mask.
+        h.editor.doc.layer_mut(CURVES).unwrap().mask =
+            Some(omapix_engine::layer::Mask::white(60, 40));
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
+        assert_eq!(h.editor.target, Target::Mask);
+
+        // Step back down to MULTIPLY.
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, MULTIPLY);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // Step down to background.
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, background);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // At bottom: step down does nothing (no wrap).
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, background);
+
+        // Now group MULTIPLY into a new group.
+        h.editor.active = MULTIPLY;
+        let g = h.editor.doc.group_layer(1);
+        // Stack top first: CURVES, g, [MULTIPLY], background.
+        // Group starts closed.
+        h.panel.set_group_expanded(g, false);
+        h.editor.active = background;
+
+        // From background, stepping up should hit group `g`, skipping closed contents (MULTIPLY).
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, g);
+
+        // From group `g`, stepping up should hit CURVES.
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
+
+        // From CURVES, stepping down hits group `g`.
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, g);
+
+        // Now open the group `g`.
+        h.panel.set_group_expanded(g, true);
+
+        // From CURVES down: CURVES -> g -> MULTIPLY -> background.
+        h.editor.active = CURVES;
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, g);
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, MULTIPLY);
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, background);
+
+        // And back up: background -> MULTIPLY -> g -> CURVES.
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, MULTIPLY);
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, g);
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
     }
 }

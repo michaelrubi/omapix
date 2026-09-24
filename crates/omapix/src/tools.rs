@@ -410,21 +410,25 @@ impl Tools {
                 self.background = [255, 255, 255];
             }
             // Shift+[ / Shift+] change hardness in 25 % steps; [ / ] change size.
-            if i.consume_key(shift, Key::OpenBracket) {
-                let s = self.settings_mut();
-                s.hardness = ((s.hardness - 0.25) * 4.0).round().max(0.0) / 4.0;
-            }
-            if i.consume_key(shift, Key::CloseBracket) {
-                let s = self.settings_mut();
-                s.hardness = ((s.hardness + 0.25) * 4.0).round().min(4.0) / 4.0;
-            }
-            if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
-                let s = self.settings_mut();
-                s.size = step_size(s.size, false);
-            }
-            if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
-                let s = self.settings_mut();
-                s.size = step_size(s.size, true);
+            // Plain [ / ] and Shift+[ / ] only: Alt (layer navigation) and
+            // Ctrl+Shift (bring to front / send to back) must not touch the brush.
+            if !i.modifiers.alt && !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.mac_cmd {
+                if i.consume_key(shift, Key::OpenBracket) {
+                    let s = self.settings_mut();
+                    s.hardness = ((s.hardness - 0.25) * 4.0).round().max(0.0) / 4.0;
+                }
+                if i.consume_key(shift, Key::CloseBracket) {
+                    let s = self.settings_mut();
+                    s.hardness = ((s.hardness + 0.25) * 4.0).round().min(4.0) / 4.0;
+                }
+                if i.consume_key(Modifiers::NONE, Key::OpenBracket) {
+                    let s = self.settings_mut();
+                    s.size = step_size(s.size, false);
+                }
+                if i.consume_key(Modifiers::NONE, Key::CloseBracket) {
+                    let s = self.settings_mut();
+                    s.size = step_size(s.size, true);
+                }
             }
             // 1–9 set opacity to 10–90 %, 0 to 100 %.
             let digits = [
@@ -726,6 +730,44 @@ mod tests {
         assert_eq!(step_size(3.0, false), 2.0);
         assert_eq!(step_size(1.0, false), 1.0);
         assert_eq!(step_size(5000.0, true), 5000.0);
+    }
+
+    #[test]
+    fn brackets_with_alt_or_ctrl_do_not_change_brush() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+        let initial_size = tools.settings().size;
+        let initial_hardness = tools.settings().hardness;
+
+        // Alt+[ and Alt+] (layer navigation) do not change brush size or hardness.
+        press(&ctx, &[(Key::OpenBracket, Modifiers::ALT)]);
+        tools.keys(&ctx);
+        press(&ctx, &[(Key::CloseBracket, Modifiers::ALT)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.settings().size, initial_size);
+        assert_eq!(tools.settings().hardness, initial_hardness);
+
+        // Ctrl+Shift+[ and Ctrl+Shift+] (bring to front / send to back) do not change brush size or hardness.
+        let cmd_shift = Modifiers {
+            shift: true,
+            ..Modifiers::COMMAND
+        };
+        press(&ctx, &[(Key::OpenBracket, cmd_shift)]);
+        tools.keys(&ctx);
+        press(&ctx, &[(Key::CloseBracket, cmd_shift)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.settings().size, initial_size);
+        assert_eq!(tools.settings().hardness, initial_hardness);
+
+        // Plain [ and ] DO change size.
+        press(&ctx, &[(Key::CloseBracket, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_ne!(tools.settings().size, initial_size);
+
+        // Shift+[ and Shift+] DO change hardness (CloseBracket increases from 0.0).
+        press(&ctx, &[(Key::CloseBracket, Modifiers::SHIFT)]);
+        tools.keys(&ctx);
+        assert_ne!(tools.settings().hardness, initial_hardness);
     }
 
     #[test]

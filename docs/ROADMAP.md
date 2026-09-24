@@ -70,9 +70,9 @@ Ctrl+click on a layer row adds it to the selected layers or takes it out, and Sh
 - A layer inside a selected group goes with the group.
 - Later: the blend mode and opacity for all of them at once, and moving selected pixels on several layers.
 
-### Photoshop's layer navigation shortcuts
+### ~~Photoshop's layer navigation shortcuts~~ (done)
 
-Alt+] and Alt+[ select the layer above or below (following the rows shown, so into open groups and past closed ones), and Ctrl+Shift+] and Ctrl+Shift+[ bring a layer to the front or send it to the back of its group. Keyboard-first, and cheap now that `raise_place`/`lower_place` exist.
+Alt+] and Alt+[ select the layer above or below following the rows in the Layers panel (stepping into open groups, skipping closed ones, stopping at the ends without wrapping; single selection targeting pixels on pixel layers). Ctrl+Shift+] and Ctrl+Shift+[ bring the active layer (and other selected layers) to the front or send them to the back of their group, with undo/redo.
 
 ### Tool cursor modifier badges (`+` and `-`)
 
@@ -108,6 +108,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Clipping masks: Ctrl+Alt+G, Alt+click between rows (and its cursor and line), the arrow and underline, and a Curves clipped to the dodge & burn layer
 - [x] Open, Save As and Export file dialogs (xdg portal)
 - [x] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
+- [ ] Layer navigation shortcuts: Alt+] and Alt+[ select layer above or below (stepping into open groups, skipping closed ones, no wrap), and Ctrl+Shift+] and Ctrl+Shift+[ bring to front and send to back of group
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
