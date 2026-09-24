@@ -2,9 +2,12 @@
 //! the selected layer at the top, the stack (top layer first) in the
 //! middle, and layer buttons at the bottom.
 
+use std::collections::HashSet;
+
 use egui::{Align, Button, ComboBox, Layout, RichText, ScrollArea, Sense, Slider, TextEdit, Ui};
+use omapix_engine::groups::Place;
 use omapix_engine::tiled::Tiled;
-use omapix_engine::{BlendMode, DisplayTransform, Pixel};
+use omapix_engine::{BlendMode, DisplayTransform, Document, Pixel, ops};
 
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
@@ -18,6 +21,16 @@ const PLUS: &str = "\u{f067}";
 const COPY: &str = "\u{f0c5}";
 const TRASH: &str = "\u{f1f8}";
 const SLIDERS: &str = "\u{f1de}";
+const FOLDER: &str = "\u{f07b}";
+const FOLDER_OPEN: &str = "\u{f07c}";
+const CARET_RIGHT: &str = "\u{f0da}";
+const CARET_DOWN: &str = "\u{f0d7}";
+
+/// How far each level of group nesting is indented, in points.
+const INDENT: f32 = 14.0;
+
+/// Width of the show/hide column, in points.
+const EYE_WIDTH: f32 = 18.0;
 
 /// Thumbnail width (or height, for portrait images), in points.
 const THUMB: f32 = 40.0;
@@ -105,6 +118,9 @@ pub struct LayersPanel {
     thumbs: std::collections::HashMap<(u64, bool), Thumb>,
     /// Layer being dragged to a new place in the stack.
     dragging: Option<u64>,
+    /// Groups shown open. Groups start closed, and open to show the
+    /// selected layer.
+    expanded: HashSet<u64>,
     /// A command asked for from inside a row (double-click on the row or its
     /// thumbnail).
     command: Option<Command>,
@@ -125,21 +141,33 @@ impl LayersPanel {
             .auto_shrink([false, false])
             .max_height(ui.available_height() - footer_height)
             .show(ui, |ui| {
-                // Top of the stack first, as in Photoshop.
-                let ids: Vec<u64> = editor.doc.layers.iter().rev().map(|l| l.id).collect();
-                self.thumbs.retain(|(id, _), _| ids.contains(id));
+                let doc = &editor.doc;
+                self.thumbs.retain(|(id, _), _| doc.layer(*id).is_some());
+                self.expanded.retain(|id| doc.layer(*id).is_some_and(|l| l.is_group));
+                // Show the selected layer, wherever it is.
+                self.expanded.extend(ancestors(doc, editor.active));
+                // Top of the stack first, as in Photoshop, leaving out what's
+                // in closed groups.
+                let ids: Vec<u64> = doc
+                    .layers
+                    .iter()
+                    .rev()
+                    .filter(|l| ancestors(doc, l.id).all(|g| self.expanded.contains(&g)))
+                    .map(|l| l.id)
+                    .collect();
                 let mut rows = Vec::with_capacity(ids.len());
                 for &id in &ids {
                     let rect = self.row(ui, editor, theme, id);
                     rows.push((id, rect));
                 }
-                self.reorder(ui, editor, theme, &ids, &rows);
+                self.reorder(ui, editor, theme, &rows);
             });
 
         ui.separator();
         ui.horizontal(|ui| {
             let busy = editor.busy().is_some();
             let buttons = [
+                (FOLDER, Command::NewGroup, "New group (Ctrl+G groups the layer)"),
                 (PLUS, Command::NewLayer, "New layer (Ctrl+Shift+N)"),
                 (COPY, Command::DuplicateLayer, "Duplicate layer (Ctrl+J)"),
                 (MASK, Command::AddMask, "Add layer mask"),
@@ -165,12 +193,18 @@ impl LayersPanel {
         let mut blend = layer.blend;
         let mut opacity = layer.opacity * 100.0;
         let id = editor.active;
+        let is_group = layer.is_group;
 
         ComboBox::from_id_salt("blend-mode")
             .selected_text(blend.name())
             .width(ui.available_width())
             .height(600.0)
             .show_ui(ui, |ui| {
+                if is_group {
+                    let mode = BlendMode::PassThrough;
+                    ui.selectable_value(&mut blend, mode, mode.name());
+                    ui.separator();
+                }
                 for (i, group) in BlendMode::MENU.iter().enumerate() {
                     if i > 0 {
                         ui.separator();
@@ -209,7 +243,6 @@ impl LayersPanel {
         ui: &mut Ui,
         editor: &mut Editor,
         theme: &Theme,
-        ids: &[u64],
         rows: &[(u64, egui::Rect)],
     ) {
         let Some(dragged) = self.dragging else { return };
@@ -217,37 +250,43 @@ impl LayersPanel {
             return;
         };
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        // Slot k means "above the k-th row from the top".
-        let slot = rows
-            .iter()
-            .position(|(_, r)| pointer.y < r.center().y)
-            .unwrap_or(rows.len());
-        let y = match rows.get(slot) {
-            Some((_, r)) => r.top(),
-            None => rows.last().map_or(pointer.y, |(_, r)| r.bottom()),
-        };
-        if let Some((_, first)) = rows.first() {
-            ui.painter()
-                .hline(first.x_range(), y, egui::Stroke::new(2.0, theme.accent));
+        let target = drop_target(&editor.doc, rows, &self.expanded, pointer)
+            .filter(|d| can_drop(&editor.doc, dragged, d.place));
+        if let Some(Drop { marker, .. }) = &target {
+            let stroke = egui::Stroke::new(2.0, theme.accent);
+            match *marker {
+                Marker::Line { y, depth, left, right } => {
+                    // Indented to the level it would land at.
+                    let left = left + EYE_WIDTH + depth as f32 * INDENT;
+                    ui.painter().hline(left..=right, y, stroke);
+                }
+                Marker::Row(rect) => {
+                    ui.painter()
+                        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+                }
+            }
         }
         if ui.input(|i| i.pointer.any_down()) {
             return;
         }
         self.dragging = None;
-        let Some(order) = reordered(ids, dragged, slot) else {
+        let Some(Drop { place, .. }) = target else {
             return;
         };
-        editor.edit("Move Layer", |doc, _| {
-            // `order` is top first; the document stores bottom first.
-            let rank = |id: u64| {
-                order
-                    .iter()
-                    .rev()
-                    .position(|&o| o == id)
-                    .unwrap_or(usize::MAX)
-            };
-            doc.layers.sort_by_key(|l| rank(l.id));
-        });
+        if let Place::IntoTop(g) | Place::IntoBottom(g) = place {
+            self.expanded.insert(g);
+        }
+        // Dropping where it already is isn't an edit.
+        let mut moved = editor.doc.clone();
+        moved.move_layer(dragged, place);
+        let shape = |doc: &Document| -> Vec<(u64, Option<u64>)> {
+            doc.layers.iter().map(|l| (l.id, l.parent)).collect()
+        };
+        if shape(&moved) != shape(&editor.doc) {
+            editor.edit("Move Layer", |doc, _| {
+                doc.move_layer(dragged, place);
+            });
+        }
     }
 
     /// Draw one layer row; returns its rectangle.
@@ -256,13 +295,20 @@ impl LayersPanel {
             return egui::Rect::NOTHING;
         };
         let selected = editor.active == id;
-        let (visible, name, blend, mask, adjustment) = (
+        let (visible, name, blend, mask, adjustment, is_group) = (
             layer.visible,
             layer.name.clone(),
             layer.blend,
             layer.mask.as_ref().map(|m| m.enabled),
             layer.adjustment.is_some(),
+            layer.is_group,
         );
+        let depth = editor.doc.depth(id);
+        // Shown only if every group it's in is shown too.
+        let doc = &editor.doc;
+        let shown = visible && ancestors(doc, id).all(|g| doc.layer(g).is_some_and(|l| l.visible));
+        let expanded = self.expanded.contains(&id);
+        let has_groups = doc.layers.iter().any(|l| l.is_group);
         let fill = if selected {
             theme.selection
         } else {
@@ -284,13 +330,16 @@ impl LayersPanel {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         let eye = if visible { EYE } else { EYE_OFF };
-                        let eye_colour = if visible {
+                        let eye_colour = if shown {
                             theme.foreground
                         } else {
                             theme.dark_foreground
                         };
                         let eye_button = ui
-                            .add(Button::new(RichText::new(eye).color(eye_colour)).frame(false))
+                            .add_sized(
+                                [EYE_WIDTH, 18.0],
+                                Button::new(RichText::new(eye).color(eye_colour)).frame(false),
+                            )
                             .on_hover_text("Show/hide");
                         if eye_button.clicked() {
                             editor.edit(
@@ -303,9 +352,53 @@ impl LayersPanel {
                             );
                         }
 
-                        // Pixel thumbnail (or the adjustment icon), then the mask
-                        // thumbnail. Clicking one picks what painting applies to.
-                        let pixel_thumb = if adjustment {
+                        if depth > 0 {
+                            ui.add_space(depth as f32 * INDENT);
+                        }
+                        if is_group {
+                            let caret = if expanded { CARET_DOWN } else { CARET_RIGHT };
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(12.0, 18.0), Sense::hover());
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                caret,
+                                egui::TextStyle::Button.resolve(ui.style()),
+                                theme.dark_foreground,
+                            );
+                            let toggle = ui
+                                .interact(rect, caret_id(id), Sense::click())
+                                .on_hover_text(if expanded { "Close group" } else { "Open group" });
+                            if toggle.clicked() {
+                                if expanded {
+                                    self.expanded.remove(&id);
+                                    // Closing the group around the selected
+                                    // layer selects the group, as in Photoshop.
+                                    if editor.doc.is_inside(editor.active, id) {
+                                        select(editor, id);
+                                    }
+                                } else {
+                                    self.expanded.insert(id);
+                                }
+                            }
+                        } else if has_groups {
+                            // Line layers up with groups at the same level.
+                            ui.add_space(12.0 + ui.spacing().item_spacing.x);
+                        }
+
+                        // Pixel thumbnail (or the adjustment or folder icon),
+                        // then the mask thumbnail. Clicking one picks what
+                        // painting applies to.
+                        let pixel_thumb = if is_group {
+                            let folder = if expanded { FOLDER_OPEN } else { FOLDER };
+                            ui.add_sized(
+                                [THUMB, 24.0],
+                                egui::Label::new(RichText::new(folder).size(20.0).color(theme.accent))
+                                    .selectable(false),
+                            )
+                            .on_hover_text("Layer group");
+                            None
+                        } else if adjustment {
                             // Not selectable, so clicks fall through to the row.
                             ui.add(
                                 egui::Label::new(
@@ -386,7 +479,7 @@ impl LayersPanel {
 
                         let name_response =
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if blend != BlendMode::Normal {
+                                if blend != BlendMode::Normal && blend != BlendMode::PassThrough {
                                     ui.add(
                                         egui::Label::new(
                                             RichText::new(blend.name())
@@ -576,6 +669,10 @@ fn thumb_id(layer: u64, mask: bool) -> egui::Id {
     row_id(layer).with(("thumb", layer, mask))
 }
 
+fn caret_id(layer: u64) -> egui::Id {
+    row_id(layer).with(("caret", layer))
+}
+
 fn name_id(layer: u64) -> egui::Id {
     row_id(layer).with(("name", layer))
 }
@@ -676,10 +773,12 @@ fn layer_context_menu(
     };
     let has_mask = layer.mask.is_some();
     let mask_enabled = layer.mask.as_ref().is_some_and(|m| m.enabled);
-    let index = editor.doc.layers.iter().position(|l| l.id == id);
-    let can_merge_down =
-        index.is_some_and(|i| i > 0 && editor.doc.layers[i - 1].adjustment.is_none());
-    let can_delete = editor.doc.layers.len() > 1;
+    let is_group = layer.is_group;
+    let doc = &editor.doc;
+    let index = doc.index_of(id);
+    let can_merge = is_group || index.is_some_and(|i| ops::can_merge_down(doc, i));
+    let can_delete = index.is_some_and(|i| doc.span(i).len() < doc.layers.len());
+    let shortcut = |ui: &Ui, cmd: Command| cmd.shortcut().map(|s| ui.ctx().format_shortcut(&s));
 
     menu_item(ui, "Blending Options…", None, true, || {
         *command = Some(Command::BlendingOptions);
@@ -687,19 +786,16 @@ fn layer_context_menu(
 
     ui.separator();
 
-    menu_item(
-        ui,
-        "Duplicate Layer",
-        Command::DuplicateLayer
-            .shortcut()
-            .map(|s| ui.ctx().format_shortcut(&s)),
-        true,
-        || {
-            *command = Some(Command::DuplicateLayer);
-        },
-    );
+    let (duplicate, delete) = if is_group {
+        ("Duplicate Group", "Delete Group")
+    } else {
+        ("Duplicate Layer", "Delete Layer")
+    };
+    menu_item(ui, duplicate, shortcut(ui, Command::DuplicateLayer), true, || {
+        *command = Some(Command::DuplicateLayer);
+    });
 
-    menu_item(ui, "Delete Layer", None, can_delete, || {
+    menu_item(ui, delete, None, can_delete, || {
         *command = Some(Command::DeleteLayer);
     });
 
@@ -708,6 +804,17 @@ fn layer_context_menu(
             *renaming = Some(Rename::new(id, l.name.clone()));
         }
     });
+
+    ui.separator();
+
+    menu_item(ui, "Group Layers", shortcut(ui, Command::GroupLayers), true, || {
+        *command = Some(Command::GroupLayers);
+    });
+    if is_group {
+        menu_item(ui, "Ungroup Layers", shortcut(ui, Command::UngroupLayers), true, || {
+            *command = Some(Command::UngroupLayers);
+        });
+    }
 
     ui.separator();
 
@@ -721,44 +828,112 @@ fn layer_context_menu(
 
     ui.separator();
 
-    menu_item(
-        ui,
-        "Merge Down",
-        Command::MergeDown
-            .shortcut()
-            .map(|s| ui.ctx().format_shortcut(&s)),
-        can_merge_down,
-        || {
-            *command = Some(Command::MergeDown);
-        },
-    );
+    let merge = if is_group { "Merge Group" } else { "Merge Down" };
+    menu_item(ui, merge, shortcut(ui, Command::MergeDown), can_merge, || {
+        *command = Some(Command::MergeDown);
+    });
 }
 
 /// Select a layer as clicking its row does: paint on its pixels, or on its
-/// mask for an adjustment layer (which has no pixels).
+/// mask for an adjustment layer or a group (which have no pixels).
 fn select(editor: &mut Editor, id: u64) {
     editor.active = id;
-    let adjustment = editor.doc.layer(id).is_some_and(|l| l.adjustment.is_some());
-    editor.target = if adjustment {
+    let layer = editor.doc.layer(id);
+    let no_pixels = layer.is_some_and(|l| !l.has_pixels() && l.mask.is_some());
+    editor.target = if no_pixels {
         Target::Mask
     } else {
         Target::Pixels
     };
 }
 
-/// The top-first layer order after dropping `dragged` in `slot` (above the
-/// slot-th row; `ids.len()` is below the last). `None` if nothing moves.
-fn reordered(ids: &[u64], dragged: u64, slot: usize) -> Option<Vec<u64>> {
-    let from = ids.iter().position(|&i| i == dragged)?;
-    // Removing the row first shifts later slots up by one.
-    let to = if slot > from { slot - 1 } else { slot };
-    if to == from {
-        return None;
+/// The groups a layer is in, innermost first.
+fn ancestors(doc: &Document, id: u64) -> impl Iterator<Item = u64> + '_ {
+    let parent = |id: u64| doc.layer(id).and_then(|l| l.parent);
+    std::iter::successors(parent(id), move |&g| parent(g))
+}
+
+/// Where a dragged layer would land, and how to show it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Drop {
+    place: Place,
+    marker: Marker,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Marker {
+    /// A line between rows, across `left..right`, indented `depth` levels.
+    Line {
+        y: f32,
+        depth: usize,
+        left: f32,
+        right: f32,
+    },
+    /// A group row outlined: it lands at the top of that group.
+    Row(egui::Rect),
+}
+
+/// Where dropping a layer at `pointer` puts it, given the rows shown (top
+/// first). Over the top half of a row it goes above that row, over the
+/// bottom half below it, or at the top of the group if the row is an open
+/// group. Over the middle of a group's row, it goes into the group.
+fn drop_target(
+    doc: &Document,
+    rows: &[(u64, egui::Rect)],
+    expanded: &HashSet<u64>,
+    pointer: egui::Pos2,
+) -> Option<Drop> {
+    let (&(first, first_rect), &(last, last_rect)) = (rows.first()?, rows.last()?);
+    let line = |y: f32, depth: usize| Marker::Line {
+        y,
+        depth,
+        left: first_rect.left(),
+        right: first_rect.right(),
+    };
+    if pointer.y < first_rect.top() {
+        return Some(Drop {
+            place: Place::Above(first),
+            marker: line(first_rect.top(), 0),
+        });
     }
-    let mut order = ids.to_vec();
-    order.remove(from);
-    order.insert(to.min(order.len()), dragged);
-    Some(order)
+    let Some(&(id, rect)) = rows.iter().find(|(_, r)| pointer.y < r.bottom()) else {
+        // Below everything: the bottom of the stack.
+        let bottom = ancestors(doc, last).last().unwrap_or(last);
+        return Some(Drop {
+            place: Place::Below(bottom),
+            marker: line(last_rect.bottom(), 0),
+        });
+    };
+    let is_group = doc.layer(id)?.is_group;
+    let t = (pointer.y - rect.top()) / rect.height();
+    Some(if is_group && (0.25..0.75).contains(&t) {
+        Drop {
+            place: Place::IntoTop(id),
+            marker: Marker::Row(rect),
+        }
+    } else if t < 0.5 {
+        Drop {
+            place: Place::Above(id),
+            marker: line(rect.top(), doc.depth(id)),
+        }
+    } else if is_group && expanded.contains(&id) {
+        Drop {
+            place: Place::IntoTop(id),
+            marker: line(rect.bottom(), doc.depth(id) + 1),
+        }
+    } else {
+        Drop {
+            place: Place::Below(id),
+            marker: line(rect.bottom(), doc.depth(id)),
+        }
+    })
+}
+
+/// Whether `place` is somewhere layer `id` can go: not itself, nor inside
+/// itself.
+fn can_drop(doc: &Document, id: u64, place: Place) -> bool {
+    let (Place::Above(t) | Place::Below(t) | Place::IntoTop(t) | Place::IntoBottom(t)) = place;
+    t != id && !doc.is_inside(t, id)
 }
 
 #[cfg(test)]
@@ -854,6 +1029,14 @@ mod tests {
         fn click(&mut self, pos: egui::Pos2) -> Option<Command> {
             self.time += 1.0;
             self.button(pos, true).or(self.button(pos, false))
+        }
+
+        /// Whether a layer's row is drawn now. Two frames, since egui also
+        /// remembers widgets from the frame before last.
+        fn shown(&mut self, layer: u64) -> bool {
+            self.frame(vec![]);
+            self.frame(vec![]);
+            self.ctx.read_response(row_id(layer)).is_some()
         }
 
         fn name_point(&self, layer: u64) -> egui::Pos2 {
@@ -994,17 +1177,118 @@ mod tests {
     }
 
     #[test]
-    fn dropping_moves_layers_like_photoshop() {
-        let ids = [4, 3, 2, 1]; // top first
-        // Drag the top layer below the second.
-        assert_eq!(reordered(&ids, 4, 2), Some(vec![3, 4, 2, 1]));
-        // Drag the bottom layer to the very top.
-        assert_eq!(reordered(&ids, 1, 0), Some(vec![1, 4, 3, 2]));
-        // Drag to the very bottom.
-        assert_eq!(reordered(&ids, 3, 4), Some(vec![4, 2, 1, 3]));
-        // Dropping just above or below itself changes nothing.
-        assert_eq!(reordered(&ids, 3, 1), None);
-        assert_eq!(reordered(&ids, 3, 2), None);
+    fn drop_target_goes_around_and_into_groups() {
+        let mut h = Harness::new();
+        let background = h.background();
+        // Top first: Curves, then Multiply in a group, then the background.
+        let group = h.editor.doc.group_layer(1);
+        let rows: Vec<(u64, egui::Rect)> = [CURVES, group, MULTIPLY, background]
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let top = i as f32 * 20.0;
+                (id, egui::Rect::from_min_max(pos2(0.0, top), pos2(200.0, top + 20.0)))
+            })
+            .collect();
+        let doc = &h.editor.doc;
+        let open: HashSet<u64> = [group].into();
+        let at = |y: f32, open: &HashSet<u64>| {
+            let drop = drop_target(doc, &rows, open, pos2(50.0, y)).unwrap();
+            let depth = match drop.marker {
+                Marker::Line { depth, .. } => Some(depth),
+                Marker::Row(_) => None,
+            };
+            (drop.place, depth)
+        };
+        assert_eq!(at(-5.0, &open), (Place::Above(CURVES), Some(0)));
+        assert_eq!(at(15.0, &open), (Place::Below(CURVES), Some(0)));
+        // The group's row: above it, into it, or (open) into its top.
+        assert_eq!(at(22.0, &open), (Place::Above(group), Some(0)));
+        assert_eq!(at(30.0, &open), (Place::IntoTop(group), None));
+        assert_eq!(at(38.0, &open), (Place::IntoTop(group), Some(1)));
+        assert_eq!(at(38.0, &HashSet::new()), (Place::Below(group), Some(0)));
+        // Below the last layer in the group stays in it; above the next
+        // row is outside it.
+        assert_eq!(at(55.0, &open), (Place::Below(MULTIPLY), Some(1)));
+        assert_eq!(at(62.0, &open), (Place::Above(background), Some(0)));
+        assert_eq!(at(200.0, &open), (Place::Below(background), Some(0)));
+
+        // A group can't be dropped into itself.
+        assert!(!can_drop(doc, group, Place::Above(MULTIPLY)));
+        assert!(!can_drop(doc, group, Place::IntoTop(group)));
+        assert!(can_drop(doc, MULTIPLY, Place::Above(CURVES)));
+    }
+
+    #[test]
+    fn groups_open_and_close_and_rows_drag_in_and_out() {
+        let mut h = Harness::new();
+        h.editor.edit("Group Layers", |doc, active| {
+            *active = doc.group_layer(1);
+        });
+        let group = h.editor.active;
+        // Groups start closed.
+        assert!(!h.shown(MULTIPLY));
+        let caret = h.ctx.read_response(caret_id(group)).unwrap().rect.center();
+        h.click(caret);
+        assert!(h.shown(MULTIPLY));
+        let child = h.ctx.read_response(row_id(MULTIPLY)).unwrap().rect;
+        let parent = h.ctx.read_response(row_id(group)).unwrap().rect;
+        assert!(child.top() > parent.top());
+        let name = |id| h.ctx.read_response(name_id(id)).unwrap().rect.left();
+        assert!(name(MULTIPLY) > name(group) + INDENT - 1.0, "indented");
+        assert_eq!(h.editor.active, group, "the caret doesn't select");
+
+        // Selecting what's inside and closing the group selects the group.
+        h.click(h.row_point(MULTIPLY));
+        assert_eq!(h.editor.active, MULTIPLY);
+        h.click(caret);
+        assert_eq!(h.editor.active, group);
+        assert!(!h.shown(MULTIPLY));
+
+        // Drag the Curves layer onto the middle of the group's row: it
+        // goes in at the top, and the group opens.
+        let drag = |h: &mut Harness, from: egui::Pos2, to: egui::Pos2| {
+            h.button(from, true);
+            for i in 1..=5 {
+                let pos = from + (to - from) * (i as f32 / 5.0);
+                h.frame(vec![Event::PointerMoved(pos)]);
+            }
+            h.button(to, false);
+            h.frame(vec![]);
+        };
+        let to = h.ctx.read_response(row_id(group)).unwrap().rect.center();
+        let from = h.row_point(CURVES);
+        drag(&mut h, from, to);
+        let curves = h.editor.doc.layer(CURVES).unwrap();
+        assert_eq!(curves.parent, Some(group));
+        assert_eq!(h.editor.undo_label(), Some("Move Layer"));
+        assert!(h.shown(CURVES));
+
+        // And back out, above the group.
+        let top = h.ctx.read_response(row_id(group)).unwrap().rect.top();
+        let from = h.row_point(CURVES);
+        drag(&mut h, from, pos2(to.x, top + 2.0));
+        assert_eq!(h.editor.doc.layer(CURVES).unwrap().parent, None);
+        assert_eq!(h.top_first()[0], CURVES);
+    }
+
+    #[test]
+    fn clicking_a_group_selects_it_and_its_menu_renders() {
+        let mut h = Harness::new();
+        h.editor.edit("Group Layers", |doc, active| {
+            *active = doc.group_layer(1);
+        });
+        let group = h.editor.active;
+        h.frame(vec![]);
+        h.click(h.row_point(group));
+        // No mask and no pixels: nothing to paint, but it's selected.
+        assert_eq!((h.editor.active, h.editor.target), (group, Target::Pixels));
+        let mut command = None;
+        let mut renaming = None;
+        let mut out = h.ctx.run_ui(Default::default(), |ui| {
+            layer_context_menu(ui, &mut h.editor, &mut command, &mut renaming, group);
+        });
+        out.textures_delta.clear();
     }
 
     #[test]

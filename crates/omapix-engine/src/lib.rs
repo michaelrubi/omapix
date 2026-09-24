@@ -10,6 +10,7 @@ pub mod composite;
 pub mod document;
 pub mod export;
 pub mod filters;
+pub mod groups;
 pub mod io;
 pub mod layer;
 pub mod moving;

@@ -66,6 +66,8 @@ struct Moving {
     label: String,
     /// The layer being moved, as it was before the move.
     original: Layer,
+    /// For a group, the layers in it, which move with it.
+    contents: Vec<Layer>,
     /// The selection before the move, which moves with the pixels.
     selection: Option<Selection>,
     target: Target,
@@ -373,6 +375,8 @@ impl Editor {
             (Target::Mask, _) if copying => return false,
             (Target::Mask, Some(mask)) => Surface::Mask(mask.pixels.clone()),
             (Target::Mask, None) => return false,
+            // Groups and adjustment layers have no pixels to paint.
+            (Target::Pixels, _) if !layer.has_pixels() => return false,
             (Target::Pixels, _) => Surface::Pixels(layer.pixels.clone()),
         };
         let mut stroke = Stroke::new(settings, paint, surface);
@@ -499,21 +503,28 @@ impl Editor {
     /// Start moving the active layer with the Move tool: the whole layer
     /// and its mask, or with a selection, just the selected pixels (or mask
     /// values, when the mask is targeted) and the selection with them.
-    /// `copy` moves a copy (Alt+drag): of the whole layer as a new layer,
-    /// or of the selected pixels. `background` is the grey a mask is left
-    /// with where selected values move away. Nothing changes until
-    /// [`Self::move_to`] asks for a real move.
+    /// A group moves with everything in it, but has no pixels to move
+    /// within a selection. `copy` moves a copy (Alt+drag): of the whole
+    /// layer as a new layer, or of the selected pixels. `background` is the
+    /// grey a mask is left with where selected values move away. Nothing
+    /// changes until [`Self::move_to`] asks for a real move.
     pub fn begin_move(&mut self, label: &str, copy: bool, background: u16) -> bool {
         if self.job.is_some() {
             return false;
         }
         self.end_gesture();
-        let Some(layer) = self.doc.layer(self.active) else {
+        let Some(index) = self.active_index() else {
             return false;
         };
+        let layer = &self.doc.layers[index];
+        if layer.is_group && self.doc.selection.is_some() && self.target == Target::Pixels {
+            return false;
+        }
+        let contents = self.doc.layers[self.doc.span(index)].split_last().map(|(_, c)| c);
         self.moving = Some(Moving {
             label: label.to_owned(),
             original: layer.clone(),
+            contents: contents.unwrap_or_default().to_vec(),
             selection: self.doc.selection.clone(),
             target: self.target,
             copy,
@@ -579,26 +590,32 @@ impl Editor {
             });
             if moving.copy && moving.selection.is_none() {
                 let index = self.doc.index_of(moving.original.id).unwrap_or(0);
-                let id = self.doc.next_layer_id();
-                moving.original.id = id;
-                moving.original.name = format!("{} copy", moving.original.name);
-                self.doc.layers.insert(index + 1, moving.original.clone());
+                let id = self.doc.duplicate_layer(index);
+                let span = self.doc.span(self.doc.index_of(id).expect("just added"));
+                let (copy, contents) = self.doc.layers[span].split_last().expect("not empty");
+                moving.original = copy.clone();
+                moving.contents = contents.to_vec();
                 self.active = id;
             }
         }
         let moving = self.moving.as_mut().expect("still moving");
         moving.applied = (dx, dy);
+        if moving.lift.as_ref().expect("lifted").is_none() {
+            for from in std::iter::once(&moving.original).chain(&moving.contents) {
+                if let Some(layer) = self.doc.layer_mut(from.id) {
+                    layer.pixels = from.pixels.translated(dx, dy, from.pixels.fill());
+                    if let (Some(mask), Some(from)) = (&mut layer.mask, &from.mask) {
+                        mask.pixels = from.pixels.translated(dx, dy, from.pixels.fill());
+                    }
+                }
+            }
+        }
         let Some(layer) = self.doc.layer_mut(moving.original.id) else {
             return;
         };
         let original = &moving.original;
         match moving.lift.as_ref().expect("lifted") {
-            None => {
-                layer.pixels = original.pixels.translated(dx, dy, original.pixels.fill());
-                if let (Some(mask), Some(from)) = (&mut layer.mask, &original.mask) {
-                    mask.pixels = from.pixels.translated(dx, dy, from.pixels.fill());
-                }
-            }
+            None => {}
             // Put back where it was, it's the original (soft edges would
             // otherwise lose a little opacity).
             Some(_) if (dx, dy) == (0, 0) && !moving.copy => {
@@ -1187,5 +1204,41 @@ mod tests {
             Some(e.doc.composite().get(270, 260))
         );
         assert_eq!(e.canvas.sample(270, 260), Some([0, 0, 65535, 65535]));
+    }
+
+    #[test]
+    fn groups_move_with_their_contents_and_have_no_pixels_to_paint() {
+        let mut e = square_editor();
+        let layer = e.active;
+        e.edit("Group Layers", |doc, active| *active = doc.group_layer(0));
+        let group = e.active;
+        assert!(!e.begin_stroke(hard(40.0), Paint::Color(RED), false));
+
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(200, 100);
+        e.end_move();
+        let moved = e.doc.layer(layer).unwrap();
+        assert_eq!(moved.pixels.get(250, 150), RED);
+        assert_eq!(moved.mask.as_ref().unwrap().pixels.get(210, 110), 0);
+
+        // Alt+drag copies the group and everything in it.
+        assert!(e.begin_move("Move", true, 0));
+        e.move_to(0, 200);
+        e.end_move();
+        assert_eq!(e.doc.layers.len(), 4);
+        let copy = e.doc.layer(e.active).unwrap();
+        assert_eq!((copy.name.as_str(), copy.is_group), ("Group 1 copy", true));
+        let inside = &e.doc.layers[2];
+        assert_eq!(inside.parent, Some(e.active));
+        assert_eq!(inside.pixels.get(250, 350), RED);
+        assert_eq!(e.doc.layer(layer).unwrap().pixels.get(250, 150), RED);
+        assert_eq!(e.doc.layers[1].id, group);
+
+        // A group has no pixels to move within a selection.
+        e.active = group;
+        e.edit("Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (50.0, 100.0)))
+        });
+        assert!(!e.begin_move("Move", false, 0));
     }
 }

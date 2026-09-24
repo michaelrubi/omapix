@@ -34,6 +34,9 @@ pub enum BlendMode {
     Saturation,
     Color,
     Luminosity,
+    /// Groups only: what's in the group blends straight onto the layers
+    /// below, as if it weren't grouped (Photoshop's default for groups).
+    PassThrough,
 }
 
 impl BlendMode {
@@ -102,6 +105,7 @@ impl BlendMode {
             BlendMode::Saturation => "Saturation",
             BlendMode::Color => "Color",
             BlendMode::Luminosity => "Luminosity",
+            BlendMode::PassThrough => "Pass Through",
         }
     }
 
@@ -134,6 +138,8 @@ impl BlendMode {
             BlendMode::Saturation => "svg:saturation",
             BlendMode::Color => "svg:color",
             BlendMode::Luminosity => "svg:luminosity",
+            // Stored as a stack with `isolation="auto"`.
+            BlendMode::PassThrough => "svg:src-over",
         }
     }
 
@@ -153,7 +159,7 @@ impl BlendMode {
     pub fn apply(self, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
         let sep = |f: fn(f32, f32) -> f32| [f(cb[0], cs[0]), f(cb[1], cs[1]), f(cb[2], cs[2])];
         match self {
-            BlendMode::Normal => cs,
+            BlendMode::Normal | BlendMode::PassThrough => cs,
             BlendMode::Darken => sep(f32::min),
             BlendMode::Multiply => sep(|b, s| b * s),
             BlendMode::ColorBurn => sep(color_burn),

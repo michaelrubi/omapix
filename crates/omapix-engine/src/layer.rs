@@ -27,6 +27,12 @@ pub struct Layer {
     /// Photoshop's Blend If (Blending Options): hide this layer where it or
     /// the layers below are too dark or too light.
     pub blend_if: Option<BlendIf>,
+    /// A layer group (a folder in the Layers panel). What's in it sits
+    /// directly below it in the stack; its own pixels are unused (always
+    /// empty).
+    pub is_group: bool,
+    /// The group this layer is in, if any.
+    pub parent: Option<u64>,
 }
 
 /// Which values Blend If compares.
@@ -147,6 +153,14 @@ impl Layer {
         layer
     }
 
+    /// An empty layer group, in Pass Through mode as Photoshop creates them.
+    pub fn group(id: u64, name: impl Into<String>, width: u32, height: u32) -> Self {
+        let mut layer = Self::empty(id, name, width, height);
+        layer.is_group = true;
+        layer.blend = BlendMode::PassThrough;
+        layer
+    }
+
     pub fn from_raster(id: u64, name: impl Into<String>, raster: &Raster) -> Self {
         Self::from_pixels(id, name, Tiled::from_raster(raster))
     }
@@ -162,6 +176,14 @@ impl Layer {
             mask: None,
             adjustment: None,
             blend_if: None,
+            is_group: false,
+            parent: None,
         }
+    }
+
+    /// Whether this layer has pixels of its own to paint on, fill or
+    /// filter. Adjustment layers and groups don't.
+    pub fn has_pixels(&self) -> bool {
+        self.adjustment.is_none() && !self.is_group
     }
 }
