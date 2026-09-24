@@ -109,9 +109,9 @@ The UI has been tested through the same code paths with scripts
 - [x] Open, Save As and Export file dialogs (xdg portal)
 - [x] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
-- [ ] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
+- [ ] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
