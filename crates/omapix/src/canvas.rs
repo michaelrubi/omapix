@@ -16,11 +16,13 @@ use std::time::Duration;
 
 use egui::{
     Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
-    TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Ui, Vec2, pos2, vec2,
+    StrokeKind, TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Ui, Vec2, pos2, vec2,
 };
 use omapix_engine::pyramid::Pyramid;
 use omapix_engine::tiled::TILE;
 use omapix_engine::{DisplayTransform, Pixel, Raster, tiles};
+
+use crate::tools::CursorBadge;
 
 /// Photoshop's zoom presets, as fractions.
 const ZOOM_STEPS: [f32; 21] = [
@@ -194,6 +196,8 @@ pub struct Overlay<'a> {
     pub selection: &'a [Vec<(f32, f32)>],
     /// A shape being drawn (lasso path or marquee), image pixels.
     pub drawing: Option<&'a [Pos2]>,
+    /// Modifier badge (+, -, ×, copy) shown near the cursor.
+    pub badge: Option<CursorBadge>,
 }
 
 /// Pointer input meant for the active tool, in image pixels.
@@ -458,6 +462,7 @@ impl Canvas {
             source,
             selection,
             drawing,
+            badge,
         } = overlay;
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
@@ -495,6 +500,9 @@ impl Canvas {
                 Some(diameter) => self.brush_cursor(ui, pointer, diameter),
                 None if moves => ui.ctx().set_cursor_icon(CursorIcon::Move),
                 None => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
+            }
+            if let Some(badge) = badge {
+                self.cursor_badge(ui, pointer, badge);
             }
         }
         if let Some(marker) = source {
@@ -653,6 +661,48 @@ impl Canvas {
             ui.ctx().set_cursor_icon(CursorIcon::None);
         } else {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        }
+    }
+
+    /// Modifier badge (+, -, ×, copy) drawn near the cursor.
+    fn cursor_badge(&self, ui: &Ui, pointer: Pos2, badge: CursorBadge) {
+        let painter = ui.painter_at(self.rect);
+        let c = pointer + vec2(10.0, 10.0);
+        let draw_lines = |segments: &[[Pos2; 2]]| {
+            for (width, colour) in
+                [(3.0, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)]
+            {
+                let stroke = Stroke::new(width, colour);
+                for &seg in segments {
+                    painter.line_segment(seg, stroke);
+                }
+            }
+        };
+        match badge {
+            CursorBadge::Add => draw_lines(&[
+                [pos2(c.x, c.y - 3.5), pos2(c.x, c.y + 3.5)],
+                [pos2(c.x - 3.5, c.y), pos2(c.x + 3.5, c.y)],
+            ]),
+            CursorBadge::Subtract => draw_lines(&[[pos2(c.x - 3.5, c.y), pos2(c.x + 3.5, c.y)]]),
+            CursorBadge::Intersect => draw_lines(&[
+                [pos2(c.x - 2.5, c.y - 2.5), pos2(c.x + 2.5, c.y + 2.5)],
+                [pos2(c.x - 2.5, c.y + 2.5), pos2(c.x + 2.5, c.y - 2.5)],
+            ]),
+            CursorBadge::Copy => {
+                let back = Rect::from_min_size(c - vec2(3.5, 3.5), vec2(5.0, 5.0));
+                let front = Rect::from_min_size(c - vec2(1.0, 1.0), vec2(5.0, 5.0));
+                for (width, colour) in
+                    [(2.5, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)]
+                {
+                    painter.rect_stroke(back, 0.0, Stroke::new(width, colour), StrokeKind::Middle);
+                }
+                painter.rect_filled(front, 0.0, Color32::from_black_alpha(180));
+                for (width, colour) in
+                    [(2.5, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)]
+                {
+                    painter.rect_stroke(front, 0.0, Stroke::new(width, colour), StrokeKind::Middle);
+                }
+            }
         }
     }
 

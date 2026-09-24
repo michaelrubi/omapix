@@ -28,6 +28,17 @@ pub enum Combine {
     Intersect,
 }
 
+impl Combine {
+    pub fn from_modifiers(shift: bool, alt: bool) -> Self {
+        match (shift, alt) {
+            (true, true) => Self::Intersect,
+            (true, false) => Self::Add,
+            (false, true) => Self::Subtract,
+            (false, false) => Self::Replace,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Selection {
     pub coverage: Tiled<u16>,
@@ -1005,5 +1016,13 @@ mod tests {
         let raster = Raster::new(10, 10, vec![[0, 0, 0, 65535]; 100]);
         let sel = Selection::magic_wand_raster(&raster, (20, 20), 0, true, false);
         assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn combine_from_modifiers() {
+        assert_eq!(Combine::from_modifiers(false, false), Combine::Replace);
+        assert_eq!(Combine::from_modifiers(true, false), Combine::Add);
+        assert_eq!(Combine::from_modifiers(false, true), Combine::Subtract);
+        assert_eq!(Combine::from_modifiers(true, true), Combine::Intersect);
     }
 }

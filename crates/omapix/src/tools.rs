@@ -3,6 +3,7 @@
 
 use egui::{Button, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
+use omapix_engine::selection::Combine;
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
 
 use crate::editor::Target;
@@ -160,6 +161,30 @@ impl Tool {
     /// Tools that copy pixels from a source point set with Alt+click.
     pub fn copies(self) -> bool {
         matches!(self, Tool::CloneStamp | Tool::Healing)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorBadge {
+    Add,
+    Subtract,
+    Intersect,
+    Copy,
+}
+
+/// Badge shown at the cursor when modifier keys change what a click or drag does.
+pub fn cursor_badge(tool: Tool, modifiers: Modifiers) -> Option<CursorBadge> {
+    if tool.selects() {
+        match Combine::from_modifiers(modifiers.shift, modifiers.alt) {
+            Combine::Add => Some(CursorBadge::Add),
+            Combine::Subtract => Some(CursorBadge::Subtract),
+            Combine::Intersect => Some(CursorBadge::Intersect),
+            Combine::Replace => None,
+        }
+    } else if tool == Tool::Move && modifiers.alt {
+        Some(CursorBadge::Copy)
+    } else {
+        None
     }
 }
 
@@ -1157,5 +1182,56 @@ mod tests {
         out.textures_delta.clear();
 
         assert_eq!(tools.tool, Tool::Marquee);
+    }
+
+    #[test]
+    fn cursor_modifier_badges_choice() {
+        let none = Modifiers::NONE;
+        let shift = Modifiers::SHIFT;
+        let alt = Modifiers::ALT;
+        let shift_alt = Modifiers {
+            shift: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let ctrl = Modifiers::COMMAND;
+
+        // Selection tools: +, -, ×, or None
+        let selection_tools = [
+            Tool::Marquee,
+            Tool::EllipticalMarquee,
+            Tool::Lasso,
+            Tool::MagicWand,
+        ];
+        for tool in selection_tools {
+            assert_eq!(cursor_badge(tool, none), None);
+            assert_eq!(cursor_badge(tool, ctrl), None);
+            assert_eq!(cursor_badge(tool, shift), Some(CursorBadge::Add));
+            assert_eq!(cursor_badge(tool, alt), Some(CursorBadge::Subtract));
+            assert_eq!(cursor_badge(tool, shift_alt), Some(CursorBadge::Intersect));
+        }
+
+        // Move tool: Copy badge when Alt is held, None otherwise
+        assert_eq!(cursor_badge(Tool::Move, none), None);
+        assert_eq!(cursor_badge(Tool::Move, shift), None);
+        assert_eq!(cursor_badge(Tool::Move, ctrl), None);
+        assert_eq!(cursor_badge(Tool::Move, alt), Some(CursorBadge::Copy));
+        assert_eq!(cursor_badge(Tool::Move, shift_alt), Some(CursorBadge::Copy));
+
+        // Painting/editing tools never show selection/move badges
+        let other_tools = [
+            Tool::Brush,
+            Tool::Eraser,
+            Tool::CloneStamp,
+            Tool::SpotHealing,
+            Tool::Healing,
+        ];
+        for tool in other_tools {
+            assert_eq!(cursor_badge(tool, none), None);
+            assert_eq!(cursor_badge(tool, shift), None);
+            assert_eq!(cursor_badge(tool, alt), None);
+            assert_eq!(cursor_badge(tool, shift_alt), None);
+            assert_eq!(cursor_badge(tool, ctrl), None);
+        }
     }
 }

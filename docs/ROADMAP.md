@@ -74,12 +74,9 @@ Ctrl+click on a layer row adds it to the selected layers or takes it out, and Sh
 
 Alt+] and Alt+[ select the layer above or below following the rows in the Layers panel (stepping into open groups, skipping closed ones, stopping at the ends without wrapping; single selection targeting pixels on pixel layers). Ctrl+Shift+] and Ctrl+Shift+[ bring the active layer (and other selected layers) to the front or send them to the back of their group, with undo/redo.
 
-### Tool cursor modifier badges (`+` and `-`)
+### ~~Tool cursor modifier badges (`+` and `-`)~~ (done)
 
-When holding modifier keys over the canvas, show visual badges on the cursor to reflect active combination modes and operations:
-- **Selection tools** (Rectangular & Elliptical Marquee, Lasso, Magic Wand, Object Selection): small `+` badge in the lower-right corner when holding Shift (Add to selection), `-` badge when holding Alt (Subtract from selection), and an intersect badge (or `×`) when holding Shift+Alt.
-- **Move tool**: duplicate/split cursor badge when holding Alt (Alt+drag copy).
-- Provides immediate visual feedback under the pointer for Photoshop muscle memory without needing to glance down at the options bar or status line.
+Over the canvas, selection tools (Rectangular & Elliptical Marquee, Lasso, Magic Wand) show a small badge at the lower right of the crosshair: `+` while holding Shift (add), `-` while holding Alt (subtract), and `×` while holding Shift+Alt (intersect), matching the mode applied when clicking or dragging. The Move tool shows a copy badge while holding Alt (Alt+drag copy).
 
 
 ## 2. Hand-testing checklist
@@ -109,6 +106,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Open, Save As and Export file dialogs (xdg portal)
 - [x] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
 - [ ] Layer navigation shortcuts: Alt+] and Alt+[ select layer above or below (stepping into open groups, skipping closed ones, no wrap), and Ctrl+Shift+] and Ctrl+Shift+[ bring to front and send to back of group
+- [ ] Tool cursor modifier badges: Shift (+), Alt (-), and Shift+Alt (×) with selection tools, and Alt copy badge with the Move tool
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
