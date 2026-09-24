@@ -62,7 +62,9 @@ impl Document {
     }
 
     /// Insert a new layer above the one at `index`, or at the top of it if
-    /// it's a group, as Photoshop does. Returns where it went.
+    /// it's a group, as Photoshop does. Returns where it went. Inserted into
+    /// a clipping mask, just above or below a clipped layer, it's clipped
+    /// too.
     pub fn insert_above(&mut self, index: usize, mut layer: Layer) -> usize {
         let below = &self.layers[index];
         let at = if below.is_group {
@@ -73,7 +75,88 @@ impl Document {
             index + 1
         };
         self.layers.insert(at, layer);
+        let below = self.sibling_below(at).map(|i| &self.layers[i]);
+        let in_run = below.is_some_and(|l| l.clipped)
+            || (below.is_some() && self.sibling_above(at).is_some_and(|l| l.clipped));
+        if !self.layers[at].is_group && in_run {
+            self.layers[at].clipped = true;
+        }
         at
+    }
+
+    /// The next layer up in the same group as the one at `index`.
+    fn sibling_above(&self, index: usize) -> Option<&Layer> {
+        let parent = self.layers[index].parent;
+        self.layers[index + 1..]
+            .iter()
+            .take_while(|l| Some(l.id) != parent)
+            .find(|l| l.parent == parent)
+    }
+
+    /// The next layer down in the same group as the one at `index`.
+    fn sibling_below(&self, index: usize) -> Option<usize> {
+        let below = self.span(index).start.checked_sub(1)?;
+        (self.layers[below].parent == self.layers[index].parent).then_some(below)
+    }
+
+    /// Whether the layer at `index` can be clipped: there's a layer below it
+    /// in its group.
+    pub fn can_clip(&self, index: usize) -> bool {
+        self.sibling_below(index).is_some()
+    }
+
+    /// The layer that layer `id` is clipped to: the first unclipped layer
+    /// below it in its group. `None` if it isn't clipped, or has nothing to
+    /// clip to (it then shows as if it weren't clipped).
+    pub fn clip_base(&self, id: u64) -> Option<u64> {
+        let mut index = self.index_of(id)?;
+        if !self.layers[index].clipped {
+            return None;
+        }
+        loop {
+            index = self.sibling_below(index)?;
+            if !self.layers[index].clipped {
+                return Some(self.layers[index].id);
+            }
+        }
+    }
+
+    /// Whether layers are clipped to layer `id` (Photoshop underlines its
+    /// name).
+    pub fn is_clip_base(&self, id: u64) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        let above = self.sibling_above(index);
+        above.is_some_and(|l| self.clip_base(l.id) == Some(id))
+    }
+
+    /// Photoshop's Create/Release Clipping Mask (Ctrl+Alt+G) on layer `id`:
+    /// clip it to the layer below, or if it's clipped, release it and the
+    /// clipped layers above it. Returns false if there's nothing to clip to.
+    pub fn toggle_clipping(&mut self, id: u64) -> bool {
+        let Some(mut index) = self.index_of(id) else {
+            return false;
+        };
+        if !self.layers[index].clipped {
+            if !self.can_clip(index) {
+                return false;
+            }
+            self.layers[index].clipped = true;
+            return true;
+        }
+        loop {
+            self.layers[index].clipped = false;
+            let parent = self.layers[index].parent;
+            let above = self.layers[index + 1..]
+                .iter()
+                .take_while(|l| Some(l.id) != parent)
+                .position(|l| l.parent == parent);
+            match above.map(|p| index + 1 + p) {
+                Some(i) if self.layers[i].clipped => index = i,
+                _ => return true,
+            }
+        }
     }
 
     /// Move layer `id`, with everything in it, to `place`. Returns false if
@@ -394,5 +477,43 @@ mod tests {
         assert_eq!(names(&doc), ["bg", "a(Group 1)", "Group 1"]);
         assert!(doc.layer(g).unwrap().is_group);
         check(&doc);
+    }
+
+    #[test]
+    fn clipping_toggles_and_finds_its_base() {
+        let mut doc = plain(&["bg", "a", "b", "c"]);
+        let [bg, a, b, c] = ["bg", "a", "b", "c"].map(|n| id(&doc, n));
+        assert!(!doc.toggle_clipping(bg), "nothing below to clip to");
+        assert!(doc.toggle_clipping(b));
+        assert!(doc.toggle_clipping(c));
+        assert_eq!(doc.clip_base(c), Some(a));
+        assert_eq!(doc.clip_base(b), Some(a));
+        assert_eq!(doc.clip_base(a), None);
+        assert!(doc.is_clip_base(a) && !doc.is_clip_base(b) && !doc.is_clip_base(bg));
+
+        // A new layer inside the run is clipped too; below it, it isn't.
+        let b_index = doc.index_of(b).unwrap();
+        doc.insert_above(b_index, Layer::empty(50, "new", 4, 4));
+        assert_eq!(doc.clip_base(50), Some(a));
+        doc.insert_above(0, Layer::empty(51, "low", 4, 4));
+        assert!(!doc.layer(51).unwrap().clipped);
+
+        // Releasing one releases those above it, as in Photoshop.
+        assert!(doc.toggle_clipping(50));
+        assert!(doc.layer(b).unwrap().clipped);
+        assert!(!doc.layer(50).unwrap().clipped && !doc.layer(c).unwrap().clipped);
+    }
+
+    #[test]
+    fn clipping_stays_within_a_group() {
+        let mut doc = grouped();
+        let [a, b, g, c] = ["a", "b", "g", "c"].map(|n| id(&doc, n));
+        assert!(!doc.toggle_clipping(a), "bottom of its group");
+        assert!(doc.toggle_clipping(b));
+        assert_eq!(doc.clip_base(b), Some(a));
+        // Above a group, it clips to the group.
+        assert!(doc.toggle_clipping(c));
+        assert_eq!(doc.clip_base(c), Some(g));
+        assert!(doc.is_clip_base(g) && doc.is_clip_base(a));
     }
 }

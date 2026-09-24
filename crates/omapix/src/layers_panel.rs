@@ -25,6 +25,7 @@ const FOLDER: &str = "\u{f07b}";
 const FOLDER_OPEN: &str = "\u{f07c}";
 const CARET_RIGHT: &str = "\u{f0da}";
 const CARET_DOWN: &str = "\u{f0d7}";
+const CLIPPED: &str = "\u{f149}";
 
 /// How far each level of group nesting is indented, in points.
 const INDENT: f32 = 14.0;
@@ -124,6 +125,11 @@ pub struct LayersPanel {
     /// A command asked for from inside a row (double-click on the row or its
     /// thumbnail).
     command: Option<Command>,
+    /// The rows drawn last frame, top first, to find the line between two.
+    rows: Vec<(u64, egui::Rect)>,
+    /// The layer above the line between rows the pointer is on with Alt
+    /// held, where a click clips it to the layer below or releases it.
+    clip_line: Option<u64>,
 }
 
 impl LayersPanel {
@@ -155,12 +161,14 @@ impl LayersPanel {
                     .filter(|l| ancestors(doc, l.id).all(|g| self.expanded.contains(&g)))
                     .map(|l| l.id)
                     .collect();
+                self.clip_line(ui, editor, theme);
                 let mut rows = Vec::with_capacity(ids.len());
                 for &id in &ids {
                     let rect = self.row(ui, editor, theme, id);
                     rows.push((id, rect));
                 }
                 self.reorder(ui, editor, theme, &rows);
+                self.rows = rows;
             });
 
         ui.separator();
@@ -237,6 +245,47 @@ impl LayersPanel {
         });
     }
 
+    /// Alt over the line between two rows shows it can be clicked to clip
+    /// the upper layer to the lower one, or release it, as in Photoshop.
+    fn clip_line(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) {
+        self.clip_line = None;
+        if self.dragging.is_some() || editor.busy().is_some() {
+            return;
+        }
+        let (alt, pointer) = ui.input(|i| (i.modifiers.alt, i.pointer.hover_pos()));
+        let (true, Some(pointer)) = (alt, pointer) else {
+            return;
+        };
+        let doc = &editor.doc;
+        let line = self.rows.windows(2).find_map(|pair| {
+            let [(upper, above), (lower, below)] = pair else {
+                return None;
+            };
+            let y = (above.bottom() + below.top()) / 2.0;
+            let near = (pointer.y - y).abs() <= 4.0 && above.x_range().contains(pointer.x);
+            let parent = |id: &u64| doc.layer(*id).map(|l| l.parent);
+            (near && parent(upper) == parent(lower)).then_some((*upper, y, above.x_range()))
+        });
+        let Some((upper, y, x)) = line else {
+            return;
+        };
+        self.clip_line = Some(upper);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
+        ui.painter()
+            .hline(x, y, egui::Stroke::new(2.0, theme.accent));
+        if ui.input(|i| i.pointer.primary_clicked()) {
+            let clipped = doc.layer(upper).is_some_and(|l| l.clipped);
+            let label = if clipped {
+                "Release Clipping Mask"
+            } else {
+                "Create Clipping Mask"
+            };
+            editor.edit(label, |doc, _| {
+                doc.toggle_clipping(upper);
+            });
+        }
+    }
+
     /// While a row is dragged, show where it would land; on release, move it.
     fn reorder(
         &mut self,
@@ -304,6 +353,8 @@ impl LayersPanel {
             layer.is_group,
         );
         let depth = editor.doc.depth(id);
+        let clipped = editor.doc.clip_base(id).is_some();
+        let clip_base = editor.doc.is_clip_base(id);
         // Shown only if every group it's in is shown too.
         let doc = &editor.doc;
         let shown = visible && ancestors(doc, id).all(|g| doc.layer(g).is_some_and(|l| l.visible));
@@ -384,6 +435,17 @@ impl LayersPanel {
                         } else if has_groups {
                             // Line layers up with groups at the same level.
                             ui.add_space(12.0 + ui.spacing().item_spacing.x);
+                        }
+                        if clipped {
+                            // Indented, with an arrow down to what it's
+                            // clipped to, as in Photoshop.
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(CLIPPED).color(theme.dark_foreground),
+                                )
+                                .selectable(false),
+                            )
+                            .on_hover_text("Clipped to the layer below (Ctrl+Alt+G releases)");
                         }
 
                         // Pixel thumbnail (or the adjustment or folder icon),
@@ -490,7 +552,7 @@ impl LayersPanel {
                                     );
                                 }
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    self.name(ui, editor, id, &name, selected)
+                                    self.name(ui, editor, id, &name, selected, clip_base)
                                 })
                                 .inner
                             })
@@ -505,12 +567,14 @@ impl LayersPanel {
 
         let (pixel_thumb, name_response) = row.inner;
         let response = row.response;
-        if response.drag_started() && editor.busy().is_none() {
+        // A click on the line between rows with Alt held is for clipping.
+        let on_line = self.clip_line.is_some();
+        if response.drag_started() && editor.busy().is_none() && !on_line {
             self.dragging = Some(id);
         }
-        if response.double_clicked() {
+        if response.double_clicked() && !on_line {
             self.command = Some(Command::BlendingOptions);
-        } else if response.clicked() {
+        } else if response.clicked() && !on_line {
             select(editor, id);
         }
 
@@ -609,6 +673,7 @@ impl LayersPanel {
         id: u64,
         name: &str,
         selected: bool,
+        clip_base: bool,
     ) -> egui::Response {
         if let Some(rename) = &mut self.renaming
             && rename.id == id
@@ -641,11 +706,14 @@ impl LayersPanel {
             }
             return response;
         }
-        let text = if selected {
-            RichText::new(name).strong()
-        } else {
-            RichText::new(name)
-        };
+        let mut text = RichText::new(name);
+        if selected {
+            text = text.strong();
+        }
+        if clip_base {
+            // Photoshop underlines the layer others are clipped to.
+            text = text.underline();
+        }
         // Not selectable: selectable labels grab drags, which would stop the
         // row being dragged by its name.
         let label = egui::Label::new(text).truncate().selectable(false);
@@ -815,6 +883,14 @@ fn layer_context_menu(
             *command = Some(Command::UngroupLayers);
         });
     }
+    let (clip, can_clip) = if layer.clipped {
+        ("Release Clipping Mask", true)
+    } else {
+        ("Create Clipping Mask", index.is_some_and(|i| doc.can_clip(i)))
+    };
+    menu_item(ui, clip, shortcut(ui, Command::ClippingMask), can_clip, || {
+        *command = Some(Command::ClippingMask);
+    });
 
     ui.separator();
 
@@ -951,6 +1027,7 @@ mod tests {
         editor: Editor,
         theme: Theme,
         time: f64,
+        modifiers: egui::Modifiers,
     }
 
     /// Layer ids, top first: an adjustment, a Multiply layer, the background.
@@ -973,6 +1050,7 @@ mod tests {
                 editor: Editor::new(doc).unwrap(),
                 theme: Theme::default(),
                 time: 0.0,
+                modifiers: Default::default(),
             };
             harness.frame(vec![]);
             harness
@@ -994,7 +1072,7 @@ mod tests {
                     vec2(300.0, 600.0),
                 )),
                 time: Some(self.time),
-                events,
+                events: [vec![Event::ModifiersChanged(self.modifiers)], events].concat(),
                 ..Default::default()
             };
             let (panel, editor, theme) = (&mut self.panel, &mut self.editor, &self.theme);
@@ -1020,7 +1098,7 @@ mod tests {
                     pos,
                     button: PointerButton::Primary,
                     pressed,
-                    modifiers: Default::default(),
+                    modifiers: self.modifiers,
                 },
             ])
         }
@@ -1363,5 +1441,42 @@ mod tests {
         ]);
         assert_eq!(h.panel.renaming, None);
         assert_eq!(h.editor.doc.layer(MULTIPLY).unwrap().name, "Layer 1");
+    }
+
+    #[test]
+    fn alt_clicking_between_rows_clips_the_upper_layer() {
+        let mut h = Harness::new();
+        let background = h.background();
+        h.click(h.row_point(CURVES));
+        h.frame(vec![]);
+        let upper = h.ctx.read_response(row_id(MULTIPLY)).unwrap().rect;
+        let lower = h.ctx.read_response(row_id(background)).unwrap().rect;
+        let line = pos2(upper.center().x, (upper.bottom() + lower.top()) / 2.0);
+
+        // Without Alt, it's an ordinary click on a row.
+        h.click(line);
+        assert!(!h.editor.doc.layer(MULTIPLY).unwrap().clipped);
+
+        h.editor.active = CURVES;
+        h.modifiers = egui::Modifiers::ALT;
+        h.frame(vec![Event::PointerMoved(line)]);
+        h.click(line);
+        assert!(h.editor.doc.layer(MULTIPLY).unwrap().clipped);
+        assert_eq!(h.editor.undo_label(), Some("Create Clipping Mask"));
+        assert_eq!(h.editor.active, CURVES, "the click doesn't select");
+        assert_eq!(h.editor.doc.clip_base(MULTIPLY), Some(background));
+
+        // The clipped row gets its arrow, pushing its name right.
+        h.modifiers = Default::default();
+        let before = h.name_point(MULTIPLY).x;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(h.name_point(MULTIPLY).x > before, "indented");
+
+        // Again releases it.
+        h.modifiers = egui::Modifiers::ALT;
+        h.click(line);
+        assert!(!h.editor.doc.layer(MULTIPLY).unwrap().clipped);
+        assert_eq!(h.editor.undo_label(), Some("Release Clipping Mask"));
     }
 }

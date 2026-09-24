@@ -25,6 +25,7 @@ pub enum Command {
     NewGroup,
     GroupLayers,
     UngroupLayers,
+    ClippingMask,
     RaiseLayer,
     LowerLayer,
     BlendingOptions,
@@ -64,6 +65,10 @@ const CMD_SHIFT: Modifiers = Modifiers {
     shift: true,
     ..Modifiers::COMMAND
 };
+const CMD_ALT: Modifiers = Modifiers {
+    alt: true,
+    ..Modifiers::COMMAND
+};
 const CMD_ALT_SHIFT: Modifiers = Modifiers {
     shift: true,
     alt: true,
@@ -93,6 +98,7 @@ impl Command {
         Command::NewGroup,
         Command::GroupLayers,
         Command::UngroupLayers,
+        Command::ClippingMask,
         Command::RaiseLayer,
         Command::LowerLayer,
         Command::BlendingOptions,
@@ -142,6 +148,7 @@ impl Command {
         Command::StampVisible,
         Command::InvertSelection,
         Command::UngroupLayers,
+        Command::ClippingMask,
         Command::SaveAs,
         Command::Redo,
         Command::CopyMerged,
@@ -201,6 +208,7 @@ impl Command {
             Command::NewGroup => "New Group",
             Command::GroupLayers => "Group Layers",
             Command::UngroupLayers => "Ungroup Layers",
+            Command::ClippingMask => "Create Clipping Mask",
             Command::RaiseLayer => "Bring Forward",
             Command::LowerLayer => "Send Backward",
             Command::BlendingOptions => "Blending Options…",
@@ -255,6 +263,7 @@ impl Command {
             Command::StampVisible => s(CMD_ALT_SHIFT, Key::E),
             Command::GroupLayers => s(CMD, Key::G),
             Command::UngroupLayers => s(CMD_SHIFT, Key::G),
+            Command::ClippingMask => s(CMD_ALT, Key::G),
             Command::RaiseLayer => s(CMD, Key::CloseBracket),
             Command::LowerLayer => s(CMD, Key::OpenBracket),
             Command::Invert => s(CMD, Key::I),
@@ -424,5 +433,6 @@ mod tests {
         assert!(pos(Command::InvertSelection) < pos(Command::Invert));
         assert!(pos(Command::CopyMerged) < pos(Command::Copy));
         assert!(pos(Command::UngroupLayers) < pos(Command::GroupLayers));
+        assert!(pos(Command::ClippingMask) < pos(Command::GroupLayers));
     }
 }
