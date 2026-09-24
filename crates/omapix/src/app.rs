@@ -1310,12 +1310,7 @@ impl App {
         };
         match input {
             ToolInput::StrokeBegin(p) => {
-                let how = match (modifiers.shift, modifiers.alt) {
-                    (true, true) => Combine::Intersect,
-                    (true, false) => Combine::Add,
-                    (false, true) => Combine::Subtract,
-                    (false, false) => Combine::Replace,
-                };
+                let how = Combine::from_modifiers(modifiers.shift, modifiers.alt);
                 self.drawing = Some((vec![p], how));
             }
             ToolInput::StrokeMove(p) => {
@@ -2049,6 +2044,7 @@ impl eframe::App for App {
                     .selection
                     .as_ref()
                     .map_or(&[][..], |s| &s.outlines[..]);
+                let modifiers = ui.input(|i| i.modifiers);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
                     alt_samples: tool.paints(),
@@ -2057,6 +2053,7 @@ impl eframe::App for App {
                     source,
                     selection: outlines,
                     drawing: drawing.as_deref(),
+                    badge: idle.then(|| crate::tools::cursor_badge(tool, modifiers)).flatten(),
                 };
                 input = editor.canvas.show(ui, pasteboard, overlay);
             } else {
@@ -2459,6 +2456,7 @@ mod tests {
                     source: None,
                     selection: &[],
                     drawing: None,
+                    badge: None,
                 };
                 editor.canvas.show(ui, egui::Color32::BLACK, overlay);
             });
@@ -2866,6 +2864,7 @@ mod tests {
                     source: None,
                     selection: &[],
                     drawing: None,
+                    badge: None,
                 };
                 editor.canvas.show(ui, egui::Color32::BLACK, overlay);
             });
