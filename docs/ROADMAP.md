@@ -76,25 +76,26 @@ The UI has been tested through the same code paths with scripts
 (`OMAPIX_SCRIPT`) and unit tests, but not yet with a real mouse. These need checking by hand, and any bugs fixed:
 - [ ] Brush, eraser, clone, healing and spot healing with the mouse
 - [ ] Lasso and marquee drags, including Shift/Alt to add and subtract
-- [ ] Move tool: dragging layers and selected pixels, Alt+drag copies, Shift constraint, arrow-key nudges, and how smooth it is on a 24 MP image
+- [x] Move tool: dragging layers and selected pixels, Alt+drag copies, Shift constraint, arrow-key nudges, and how smooth it is on a 24 MP image
 - [ ] Dragging Curves points, and dragging one off the graph to delete it
 - [ ] Blend If handles, including Alt+drag to split
-- [ ] Dragging layers to reorder them, including by the name
-- [ ] Layer groups: Ctrl+G and Ctrl+Shift+G, opening and closing groups, dragging layers into, out of and between groups, and the Move tool on a group
-- [ ] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
+- [x] Dragging layers to reorder them, including by the name
+- [x] Layer groups: Ctrl+G and Ctrl+Shift+G, opening and closing groups, dragging layers into, out of and between groups, and the Move tool on a group
+- [x] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
 - [x] Right-clicking layer rows and mask thumbnails for context menus
 - [x] Active tool contrast styling and frameless toolbar icons
-- [ ] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
+- [x] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [ ] Marching ants move, and Omapix goes idle again once there's no selection
 - [ ] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
+  - Hand-tested: sliders work but the image could follow them faster; Move tool drags work but feel sluggish. Both are what GPU compositing should fix.
 - [ ] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
-- [ ] Undo/redo after each of the above
+- [ ] Undo/redo after each of the above (done for layer groups, reordering, clicking rows, renaming and the Move tool)
 
 ## 3. Retouching and editing
 
@@ -162,7 +163,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 
 ## 7. The big one: AI-assisted retouching
 
-The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription, for client and personal work alike. Design: [AI.md](AI.md) (proposal, with milestones and a couple of open questions).
+The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription, for client and personal work alike. Design: [AI.md](AI.md) (proposal, with milestones and the decisions made so far).
 - Object Selection (`W`) and Select › Subject, which prove the groundwork first.
 - Skin and face-part segmentation (skin, eyes, lips, teeth, hair) to make masks automatically, per face and per person.
 - Automatic blemish detection that feeds the Spot Healing Brush, onto its own layer.
