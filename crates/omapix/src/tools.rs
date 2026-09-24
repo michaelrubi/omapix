@@ -22,6 +22,53 @@ const MIN_SIZE: f32 = 1.0;
 const MAX_SIZE: f32 = 5000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolGroup {
+    Move,
+    Marquee,
+    Lasso,
+    Healing,
+    Brush,
+    CloneStamp,
+    Eraser,
+}
+
+impl ToolGroup {
+    pub const ALL: &[ToolGroup] = &[
+        ToolGroup::Move,
+        ToolGroup::Marquee,
+        ToolGroup::Lasso,
+        ToolGroup::Healing,
+        ToolGroup::Brush,
+        ToolGroup::CloneStamp,
+        ToolGroup::Eraser,
+    ];
+
+    pub fn tools(self) -> &'static [Tool] {
+        match self {
+            ToolGroup::Move => &[Tool::Move],
+            ToolGroup::Marquee => &[Tool::Marquee, Tool::EllipticalMarquee],
+            ToolGroup::Lasso => &[Tool::Lasso],
+            ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
+            ToolGroup::Brush => &[Tool::Brush],
+            ToolGroup::CloneStamp => &[Tool::CloneStamp],
+            ToolGroup::Eraser => &[Tool::Eraser],
+        }
+    }
+
+    pub fn key(self) -> Key {
+        match self {
+            ToolGroup::Move => Key::V,
+            ToolGroup::Marquee => Key::M,
+            ToolGroup::Lasso => Key::L,
+            ToolGroup::Healing => Key::J,
+            ToolGroup::Brush => Key::B,
+            ToolGroup::CloneStamp => Key::S,
+            ToolGroup::Eraser => Key::E,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Move,
     Brush,
@@ -35,7 +82,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Tool::Move => "Move",
             Tool::Brush => "Brush",
@@ -46,6 +93,44 @@ impl Tool {
             Tool::Marquee => "Rectangular Marquee",
             Tool::EllipticalMarquee => "Elliptical Marquee",
             Tool::Lasso => "Lasso",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Tool::Move => MOVE_ICON,
+            Tool::Brush => BRUSH_ICON,
+            Tool::Eraser => ERASER_ICON,
+            Tool::CloneStamp => CLONE_ICON,
+            Tool::SpotHealing => SPOT_ICON,
+            Tool::Healing => HEAL_ICON,
+            Tool::Marquee => MARQUEE_ICON,
+            Tool::EllipticalMarquee => ELLIPSE_ICON,
+            Tool::Lasso => LASSO_ICON,
+        }
+    }
+
+    pub fn shortcut_letter(self) -> &'static str {
+        match self {
+            Tool::Move => "V",
+            Tool::Brush => "B",
+            Tool::Eraser => "E",
+            Tool::CloneStamp => "S",
+            Tool::SpotHealing | Tool::Healing => "J",
+            Tool::Marquee | Tool::EllipticalMarquee => "M",
+            Tool::Lasso => "L",
+        }
+    }
+
+    pub fn group(self) -> ToolGroup {
+        match self {
+            Tool::Move => ToolGroup::Move,
+            Tool::Marquee | Tool::EllipticalMarquee => ToolGroup::Marquee,
+            Tool::Lasso => ToolGroup::Lasso,
+            Tool::SpotHealing | Tool::Healing => ToolGroup::Healing,
+            Tool::Brush => ToolGroup::Brush,
+            Tool::CloneStamp => ToolGroup::CloneStamp,
+            Tool::Eraser => ToolGroup::Eraser,
         }
     }
 
@@ -67,6 +152,8 @@ impl Tool {
 
 pub struct Tools {
     pub tool: Tool,
+    last_marquee: Tool,
+    last_healing: Tool,
     brush: BrushSettings,
     eraser: BrushSettings,
     clone: BrushSettings,
@@ -88,6 +175,8 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             tool: Tool::Brush,
+            last_marquee: Tool::Marquee,
+            last_healing: Tool::SpotHealing,
             brush: BrushSettings::default(),
             eraser: BrushSettings {
                 hardness: 0.5,
@@ -223,52 +312,65 @@ impl Tools {
         }
     }
 
+    /// Select a tool, remembering it as the last-used tool in its group.
+    pub fn select(&mut self, tool: Tool) {
+        self.tool = tool;
+        self.sync_last_used();
+    }
+
+    /// Keep last-used tools in sync with the current tool.
+    pub fn sync_last_used(&mut self) {
+        match self.tool {
+            Tool::Marquee | Tool::EllipticalMarquee => self.last_marquee = self.tool,
+            Tool::SpotHealing | Tool::Healing => self.last_healing = self.tool,
+            _ => {}
+        }
+    }
+
+    /// The tool to show or pick for a group (the tool last used from it).
+    pub fn group_tool(&self, group: ToolGroup) -> Tool {
+        if self.tool.group() == group {
+            return self.tool;
+        }
+        match group {
+            ToolGroup::Marquee => self.last_marquee,
+            ToolGroup::Healing => self.last_healing,
+            ToolGroup::Move => Tool::Move,
+            ToolGroup::Lasso => Tool::Lasso,
+            ToolGroup::Brush => Tool::Brush,
+            ToolGroup::CloneStamp => Tool::CloneStamp,
+            ToolGroup::Eraser => Tool::Eraser,
+        }
+    }
+
+    /// Shift+letter cycles forward through a tool group.
+    pub fn cycle_group(&mut self, group: ToolGroup) {
+        let tools = group.tools();
+        if tools.is_empty() {
+            return;
+        }
+        let current = self.group_tool(group);
+        let index = tools.iter().position(|&t| t == current).unwrap_or(0);
+        let next = tools[(index + 1) % tools.len()];
+        self.select(next);
+    }
+
     /// Photoshop's single-key shortcuts. Call only when no text field has
     /// keyboard focus. Returns a layer opacity typed with the Move tool,
     /// where Photoshop's number keys set the layer's opacity instead of the
     /// brush's.
     pub fn keys(&mut self, ctx: &egui::Context) -> Option<f32> {
+        self.sync_last_used();
         ctx.input_mut(|i| {
             let shift = Modifiers::SHIFT;
             let mut layer_opacity = None;
-            if i.consume_key(Modifiers::NONE, Key::V) {
-                self.tool = Tool::Move;
-            }
-            if i.consume_key(Modifiers::NONE, Key::B) {
-                self.tool = Tool::Brush;
-            }
-            if i.consume_key(Modifiers::NONE, Key::E) {
-                self.tool = Tool::Eraser;
-            }
-            if i.consume_key(Modifiers::NONE, Key::S) {
-                self.tool = Tool::CloneStamp;
-            }
-            // J is the Spot Healing Brush; Shift+J switches to the Healing
-            // Brush (Photoshop cycles the J tools with Shift+J).
-            if i.consume_key(Modifiers::SHIFT, Key::J) {
-                self.tool = if self.tool == Tool::Healing {
-                    Tool::SpotHealing
-                } else {
-                    Tool::Healing
-                };
-            }
-            if i.consume_key(Modifiers::NONE, Key::J) {
-                self.tool = Tool::SpotHealing;
-            }
-            // M is the Rectangular Marquee; Shift+M switches to the Elliptical
-            // Marquee (Photoshop cycles the M tools with Shift+M).
-            if i.consume_key(Modifiers::SHIFT, Key::M) {
-                self.tool = if self.tool == Tool::EllipticalMarquee {
-                    Tool::Marquee
-                } else {
-                    Tool::EllipticalMarquee
-                };
-            }
-            if i.consume_key(Modifiers::NONE, Key::M) {
-                self.tool = Tool::Marquee;
-            }
-            if i.consume_key(Modifiers::NONE, Key::L) {
-                self.tool = Tool::Lasso;
+            for &group in ToolGroup::ALL {
+                if i.consume_key(Modifiers::SHIFT, group.key()) {
+                    self.cycle_group(group);
+                }
+                if i.consume_key(Modifiers::NONE, group.key()) {
+                    self.select(self.group_tool(group));
+                }
             }
             if i.consume_key(Modifiers::NONE, Key::X) {
                 std::mem::swap(&mut self.foreground, &mut self.background);
@@ -427,31 +529,89 @@ impl Tools {
 
     /// The toolbar: tools and the foreground/background colours.
     pub fn toolbar(&mut self, ui: &mut Ui, theme: &Theme) {
+        self.sync_last_used();
         ui.vertical_centered(|ui| {
             ui.add_space(6.0);
-            for (tool, icon, tip) in [
-                (Tool::Move, MOVE_ICON, "Move (V)"),
-                (Tool::Brush, BRUSH_ICON, "Brush (B)"),
-                (Tool::Eraser, ERASER_ICON, "Eraser (E)"),
-                (Tool::CloneStamp, CLONE_ICON, "Clone Stamp (S)"),
-                (Tool::SpotHealing, SPOT_ICON, "Spot Healing Brush (J)"),
-                (Tool::Healing, HEAL_ICON, "Healing Brush (Shift+J)"),
-                (Tool::Marquee, MARQUEE_ICON, "Rectangular Marquee (M)"),
-                (Tool::EllipticalMarquee, ELLIPSE_ICON, "Elliptical Marquee (Shift+M)"),
-                (Tool::Lasso, LASSO_ICON, "Lasso (L)"),
-            ] {
-                let active = self.tool == tool;
+            for &group in ToolGroup::ALL {
+                let current_tool = self.group_tool(group);
+                let active = self.tool.group() == group;
                 let colour = if active {
                     theme.foreground
                 } else {
                     theme.dark_foreground
                 };
-                let button = Button::new(RichText::new(icon).size(18.0).color(colour))
-                    .frame(false)
-                    .min_size(Vec2::splat(28.0));
-                if ui.add(button).on_hover_text(tip).clicked() {
-                    self.tool = tool;
-                }
+                let icon = current_tool.icon();
+                let tip = format!("{} ({})", current_tool.name(), current_tool.shortcut_letter());
+
+                ui.push_id(group as usize, |ui| {
+                    let button = Button::new(RichText::new(icon).size(18.0).color(colour))
+                        .frame(false)
+                        .min_size(Vec2::splat(28.0));
+                    let response = ui.add(button).on_hover_text(tip);
+
+                    if group.tools().len() > 1 {
+                        let r = response.rect;
+                        let p1 = Pos2::new(r.max.x - 3.0, r.max.y - 7.0);
+                        let p2 = Pos2::new(r.max.x - 7.0, r.max.y - 3.0);
+                        let p3 = Pos2::new(r.max.x - 3.0, r.max.y - 3.0);
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![p1, p2, p3],
+                            colour,
+                            egui::Stroke::NONE,
+                        ));
+
+                        let mut repaint_after = None;
+                        let is_held = response.contains_pointer()
+                            && ui.input(|i| {
+                                if i.pointer.primary_down()
+                                    && let Some(start) = i.pointer.press_start_time()
+                                {
+                                    let elapsed = i.time - start;
+                                    if elapsed >= 0.35 {
+                                        return true;
+                                    }
+                                    let remaining = (0.35 - elapsed).max(0.0);
+                                    repaint_after =
+                                        Some(std::time::Duration::from_secs_f64(remaining));
+                                }
+                                false
+                            });
+                        if let Some(d) = repaint_after {
+                            ui.ctx().request_repaint_after(d);
+                        }
+
+                        let mut popup = egui::Popup::context_menu(&response);
+                        if is_held || response.secondary_clicked() {
+                            popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
+                        }
+                        let is_open = popup.is_open();
+                        popup.show(|ui| {
+                            for &tool in group.tools() {
+                                let item_active = self.tool == tool;
+                                let item_colour = if item_active {
+                                    theme.foreground
+                                } else {
+                                    theme.dark_foreground
+                                };
+                                let item_text =
+                                    RichText::new(format!("{}  {}", tool.icon(), tool.name()))
+                                        .color(item_colour);
+                                let item_button =
+                                    Button::new(item_text).shortcut_text(tool.shortcut_letter());
+                                if ui.add(item_button).clicked() {
+                                    self.select(tool);
+                                    ui.close();
+                                }
+                            }
+                        });
+
+                        if response.clicked() && !is_open && !is_held {
+                            self.select(current_tool);
+                        }
+                    } else if response.clicked() {
+                        self.select(current_tool);
+                    }
+                });
             }
             ui.add_space(12.0);
             ui.separator();
@@ -645,6 +805,261 @@ mod tests {
         let mut out = ctx.run_ui(raw, |_| {});
         out.textures_delta.clear();
         tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Marquee);
+    }
+
+    #[test]
+    fn groups_remember_last_used_tool_when_switching() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+
+        // M selects Marquee.
+        press(&ctx, &[(Key::M, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Marquee);
+
+        // Shift+M switches to EllipticalMarquee.
+        press(&ctx, &[(Key::M, Modifiers::SHIFT)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::EllipticalMarquee);
+
+        // Switch away to Brush.
+        press(&ctx, &[(Key::B, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Brush);
+
+        // Plain M switches back to the last-used Marquee tool (EllipticalMarquee).
+        press(&ctx, &[(Key::M, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::EllipticalMarquee);
+
+        // Plain J switches to SpotHealing.
+        press(&ctx, &[(Key::J, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::SpotHealing);
+
+        // Shift+J switches to Healing.
+        press(&ctx, &[(Key::J, Modifiers::SHIFT)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Healing);
+
+        // Switch to Move.
+        press(&ctx, &[(Key::V, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Move);
+
+        // Plain J restores Healing.
+        press(&ctx, &[(Key::J, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Healing);
+    }
+
+    #[test]
+    fn toolbar_groups_render_and_can_be_selected() {
+        let mut tools = Tools::default();
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+
+        // Default tool is Brush.
+        assert_eq!(tools.tool, Tool::Brush);
+        assert_eq!(tools.group_tool(ToolGroup::Marquee), Tool::Marquee);
+        assert_eq!(tools.group_tool(ToolGroup::Healing), Tool::SpotHealing);
+
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            tools.toolbar(ui, &theme);
+        });
+        output.textures_delta.clear();
+
+        // When a tool changes, the group's last-used tool updates.
+        tools.select(Tool::EllipticalMarquee);
+        assert_eq!(tools.group_tool(ToolGroup::Marquee), Tool::EllipticalMarquee);
+
+        tools.select(Tool::Healing);
+        assert_eq!(tools.group_tool(ToolGroup::Healing), Tool::Healing);
+
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            tools.toolbar(ui, &theme);
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn toolbar_right_click_and_hold_open_group_menu() {
+        use egui::{Event, PointerButton};
+
+        let mut tools = Tools::default();
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+
+        // Render first frame to lay out the toolbar.
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 500.0))),
+                ..Default::default()
+            },
+            |ui| {
+                tools.toolbar(ui, &theme);
+            },
+        );
+        out.textures_delta.clear();
+
+        let _ = egui::Popup::is_any_open(&ctx);
+        let center = Pos2::new(50.0, 51.0);
+
+        // Secondary click opens the menu.
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 500.0))),
+            events: vec![
+                Event::PointerMoved(center),
+                Event::PointerButton {
+                    pos: center,
+                    button: PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                Event::PointerButton {
+                    pos: center,
+                    button: PointerButton::Secondary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            tools.toolbar(ui, &theme);
+        });
+        out.textures_delta.clear();
+
+        // Context menu popup for the marquee button should now be open.
+        assert!(egui::Popup::is_any_open(&ctx));
+
+        // Close the popup by clicking outside.
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                events: vec![
+                    Event::PointerMoved(Pos2::new(90.0, 490.0)),
+                    Event::PointerButton {
+                        pos: Pos2::new(90.0, 490.0),
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    },
+                    Event::PointerButton {
+                        pos: Pos2::new(90.0, 490.0),
+                        button: PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                tools.toolbar(ui, &theme);
+            },
+        );
+        out.textures_delta.clear();
+        assert!(!egui::Popup::is_any_open(&ctx));
+
+        // Now test hold-to-open: press down at time 10.0, then advance time past 0.35s while holding.
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 500.0))),
+                time: Some(10.0),
+                events: vec![
+                    Event::PointerMoved(center),
+                    Event::PointerButton {
+                        pos: center,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                tools.toolbar(ui, &theme);
+            },
+        );
+        out.textures_delta.clear();
+
+        // Advance time to 10.4s (held for 0.4s) with pointer still at center.
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 500.0))),
+                time: Some(10.4),
+                events: vec![Event::PointerMoved(center)],
+                ..Default::default()
+            },
+            |ui| {
+                tools.toolbar(ui, &theme);
+            },
+        );
+        out.textures_delta.clear();
+
+        assert!(egui::Popup::is_any_open(&ctx));
+    }
+
+    #[test]
+    fn toolbar_click_slot_selects_tool() {
+        use egui::{Event, PointerButton};
+
+        let mut tools = Tools::default();
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+        let center = Pos2::new(50.0, 51.0); // Marquee button center
+
+        // Layout frame
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 500.0))),
+                time: Some(1.0),
+                ..Default::default()
+            },
+            |ui| tools.toolbar(ui, &theme),
+        );
+        out.textures_delta.clear();
+
+        // Press down
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 500.0))),
+                time: Some(2.0),
+                events: vec![
+                    Event::PointerMoved(center),
+                    Event::PointerButton {
+                        pos: center,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| tools.toolbar(ui, &theme),
+        );
+        out.textures_delta.clear();
+
+        // Release in next frame
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 500.0))),
+                time: Some(2.05),
+                events: vec![
+                    Event::PointerMoved(center),
+                    Event::PointerButton {
+                        pos: center,
+                        button: PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| tools.toolbar(ui, &theme),
+        );
+        out.textures_delta.clear();
+
         assert_eq!(tools.tool, Tool::Marquee);
     }
 }
