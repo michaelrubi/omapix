@@ -39,6 +39,34 @@ impl Combine {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    Red,
+    Green,
+    Blue,
+    Luminosity,
+}
+
+impl Channel {
+    /// Extract a channel's value (0–65535) from a pixel.
+    #[inline]
+    pub fn value(self, p: Pixel) -> u16 {
+        match self {
+            Channel::Red => p[0],
+            Channel::Green => p[1],
+            Channel::Blue => p[2],
+            Channel::Luminosity => {
+                // Luminance: 0.3 * R + 0.59 * G + 0.11 * B, matching the histogram.
+                ((19661 * u64::from(p[0])
+                    + 38666 * u64::from(p[1])
+                    + 7209 * u64::from(p[2])
+                    + 32768)
+                    >> 16) as u16
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Selection {
     pub coverage: Tiled<u16>,
@@ -51,6 +79,47 @@ impl Selection {
     pub fn from_coverage(coverage: Tiled<u16>) -> Self {
         let outlines = trace(&coverage);
         Self { coverage, outlines }
+    }
+
+    /// A selection from one channel of an image (e.g. the visible composite).
+    pub fn from_channel(raster: &Raster, channel: Channel) -> Self {
+        let (w, h) = (raster.width(), raster.height());
+        let coverage = Tiled::from_tiles(w, h, 0, |col, row| {
+            let mut tile = vec![0u16; TILE_PIXELS];
+            let x0 = col * TILE;
+            let y0 = row * TILE;
+            let tw = TILE.min(w.saturating_sub(x0));
+            let th = TILE.min(h.saturating_sub(y0));
+            for ty in 0..th {
+                let row_pixels = raster.row(y0 + ty);
+                let src = &row_pixels[x0 as usize..(x0 + tw) as usize];
+                let dst = &mut tile[(ty * TILE) as usize..(ty * TILE + tw) as usize];
+                for (d, &p) in dst.iter_mut().zip(src) {
+                    *d = channel.value(p);
+                }
+            }
+            tile.iter().any(|&v| v != 0).then_some(tile)
+        });
+        Self::from_coverage(coverage)
+    }
+
+    /// A selection from a layer's alpha (transparency).
+    pub fn from_alpha(pixels: &Tiled<Pixel>) -> Self {
+        let fill = pixels.fill()[3];
+        let coverage = Tiled::from_tiles(pixels.width(), pixels.height(), fill, |col, row| {
+            let tile = pixels.tile(col, row)?;
+            let mut alpha = vec![fill; TILE_PIXELS];
+            for (dst, px) in alpha.iter_mut().zip(tile.iter()) {
+                *dst = px[3];
+            }
+            alpha.iter().any(|&v| v != fill).then_some(alpha)
+        });
+        Self::from_coverage(coverage)
+    }
+
+    /// A selection from a layer mask.
+    pub fn from_mask(mask: &Tiled<u16>) -> Self {
+        Self::from_coverage(mask.clone())
     }
 
     pub fn all(width: u32, height: u32) -> Self {
@@ -1024,5 +1093,64 @@ mod tests {
         assert_eq!(Combine::from_modifiers(true, false), Combine::Add);
         assert_eq!(Combine::from_modifiers(false, true), Combine::Subtract);
         assert_eq!(Combine::from_modifiers(true, true), Combine::Intersect);
+    }
+
+    #[test]
+    fn from_channel_red_green_blue_luminosity() {
+        let (w, h) = (2, 2);
+        let pixels: Vec<Pixel> = vec![
+            [10000, 20000, 30000, 65535],
+            [65535, 0, 0, 65535],
+            [0, 65535, 0, 65535],
+            [0, 0, 65535, 65535],
+        ];
+        let raster = Raster::new(w, h, pixels);
+
+        let red = Selection::from_channel(&raster, Channel::Red);
+        assert_eq!(red.coverage.get(0, 0), 10000);
+        assert_eq!(red.coverage.get(1, 0), 65535);
+        assert_eq!(red.coverage.get(0, 1), 0);
+        assert_eq!(red.coverage.get(1, 1), 0);
+
+        let green = Selection::from_channel(&raster, Channel::Green);
+        assert_eq!(green.coverage.get(0, 0), 20000);
+        assert_eq!(green.coverage.get(1, 0), 0);
+        assert_eq!(green.coverage.get(0, 1), 65535);
+        assert_eq!(green.coverage.get(1, 1), 0);
+
+        let blue = Selection::from_channel(&raster, Channel::Blue);
+        assert_eq!(blue.coverage.get(0, 0), 30000);
+        assert_eq!(blue.coverage.get(1, 0), 0);
+        assert_eq!(blue.coverage.get(0, 1), 0);
+        assert_eq!(blue.coverage.get(1, 1), 65535);
+
+        let lum = Selection::from_channel(&raster, Channel::Luminosity);
+        assert_eq!(lum.coverage.get(1, 0), 19661);
+        assert_eq!(lum.coverage.get(0, 1), 38665);
+        assert_eq!(lum.coverage.get(1, 1), 7209);
+        let expected = ((19661u64 * 10000 + 38666 * 20000 + 7209 * 30000 + 32768) >> 16) as u16;
+        assert_eq!(lum.coverage.get(0, 0), expected);
+    }
+
+    #[test]
+    fn from_alpha_loads_layer_transparency() {
+        let (w, h) = (20, 20);
+        let mut pixels = Tiled::new(w, h, [0u16; 4]);
+        pixels.tile_mut(0, 0)[0] = [1000, 2000, 3000, 48000];
+        let sel = Selection::from_alpha(&pixels);
+        assert_eq!(sel.coverage.get(0, 0), 48000);
+        assert_eq!(sel.coverage.get(1, 0), 0);
+        assert!(!sel.is_empty());
+    }
+
+    #[test]
+    fn from_mask_loads_mask_coverage() {
+        let (w, h) = (20, 20);
+        let mut mask = Tiled::new(w, h, 0u16);
+        mask.tile_mut(0, 0)[0] = 52000;
+        let sel = Selection::from_mask(&mask);
+        assert_eq!(sel.coverage.get(0, 0), 52000);
+        assert_eq!(sel.coverage.get(1, 0), 0);
+        assert!(!sel.is_empty());
     }
 }

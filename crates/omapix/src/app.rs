@@ -10,7 +10,7 @@ use omapix_engine::brush::Paint;
 use omapix_engine::clip::{self, Clip};
 use omapix_engine::filters::LayerFilter;
 use omapix_engine::layer::{Layer, Mask};
-use omapix_engine::selection::{Combine, Selection};
+use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{
     Document, NoiseDistribution, NoiseOptions, export, ops, ora,
@@ -587,6 +587,8 @@ impl App {
             }
             Command::AddMask => !has_mask,
             Command::LockTransparent => !no_pixels,
+            Command::LoadSelectionTransparency => !no_pixels,
+            Command::LoadSelectionLayerMask => has_mask,
             Command::Deselect | Command::InvertSelection | Command::Feather => {
                 editor.doc.selection.is_some()
             }
@@ -748,7 +750,14 @@ impl App {
                     self.layers.step_selection(editor, false);
                 }
             }
-            Command::SelectAll | Command::InvertSelection => {
+            Command::SelectAll
+            | Command::InvertSelection
+            | Command::LoadSelectionRed
+            | Command::LoadSelectionGreen
+            | Command::LoadSelectionBlue
+            | Command::LoadSelectionLuminosity
+            | Command::LoadSelectionTransparency
+            | Command::LoadSelectionLayerMask => {
                 self.hide_selection_edges = false;
                 if let Some(editor) = &mut self.editor {
                     run_on_editor(editor, cmd, ctx);
@@ -991,6 +1000,16 @@ impl App {
                 self.menu_item(ui, Command::InvertSelection, None);
                 ui.separator();
                 self.menu_item(ui, Command::Feather, None);
+                ui.separator();
+                ui.menu_button("Load Selection", |ui| {
+                    self.menu_item(ui, Command::LoadSelectionRed, None);
+                    self.menu_item(ui, Command::LoadSelectionGreen, None);
+                    self.menu_item(ui, Command::LoadSelectionBlue, None);
+                    self.menu_item(ui, Command::LoadSelectionLuminosity, None);
+                    ui.separator();
+                    self.menu_item(ui, Command::LoadSelectionTransparency, None);
+                    self.menu_item(ui, Command::LoadSelectionLayerMask, None);
+                });
             });
             ui.menu_button("Image", |ui| {
                 ui.menu_button("Adjustments", |ui| {
@@ -2230,6 +2249,31 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 doc.selection = inverted.filter(|s| !s.is_empty());
             });
         }
+        Command::LoadSelectionRed
+        | Command::LoadSelectionGreen
+        | Command::LoadSelectionBlue
+        | Command::LoadSelectionLuminosity => {
+            let channel = match cmd {
+                Command::LoadSelectionRed => Channel::Red,
+                Command::LoadSelectionGreen => Channel::Green,
+                Command::LoadSelectionBlue => Channel::Blue,
+                _ => Channel::Luminosity,
+            };
+            let composite = editor.doc.composite();
+            editor.load_selection(Selection::from_channel(&composite, channel), Combine::Replace);
+        }
+        Command::LoadSelectionTransparency => {
+            if let Some(layer) = editor.doc.layer(editor.active)
+                && layer.has_pixels()
+            {
+                editor.load_selection(Selection::from_alpha(&layer.pixels), Combine::Replace);
+            }
+        }
+        Command::LoadSelectionLayerMask => {
+            if let Some(mask) = editor.doc.layer(editor.active).and_then(|l| l.mask.as_ref()) {
+                editor.load_selection(Selection::from_mask(&mask.pixels), Combine::Replace);
+            }
+        }
         Command::ZoomIn => editor.canvas.step_zoom(true),
         Command::ZoomOut => editor.canvas.step_zoom(false),
         Command::FitOnScreen => editor.canvas.fit(),
@@ -2390,6 +2434,10 @@ impl eframe::App for App {
         let mut input = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
+                if editor.reset_selection_edges {
+                    self.hide_selection_edges = false;
+                    editor.reset_selection_edges = false;
+                }
                 let idle = editor.busy().is_none();
                 let outlines = if self.hide_selection_edges {
                     &[][..]
@@ -4036,6 +4084,50 @@ mod tests {
             egui::Modifiers::ALT,
         );
         assert_ne!(app.tools.foreground, [12, 34, 56]);
+    }
+
+    #[test]
+    fn load_selection_command_and_undo() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+
+        // Deselect first so we start clean
+        app.run(Command::Deselect, &ctx);
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_none());
+
+        // Hide edges first with Ctrl+H
+        app.run(Command::SelectionEdges, &ctx);
+        assert!(app.hide_selection_edges);
+
+        // Run LoadSelectionTransparency on the background layer
+        app.run(Command::LoadSelectionTransparency, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.doc.selection.is_some());
+        assert_eq!(editor.undo_label(), Some("Load Selection"));
+        // Edges should show again even if Ctrl+H hid them previously
+        assert!(!app.hide_selection_edges);
+
+        // Undo reverts the selection
+        app.run(Command::Undo, &ctx);
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_none());
+
+        // Redo restores it
+        app.run(Command::Redo, &ctx);
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+
+        // Background has pixels, but no mask
+        assert!(app.enabled(Command::LoadSelectionTransparency));
+        assert!(!app.enabled(Command::LoadSelectionLayerMask));
+
+        // Add Curves adjustment layer (has mask, but no pixels)
+        app.run(Command::NewCurves, &ctx);
+        assert!(!app.enabled(Command::LoadSelectionTransparency));
+        assert!(app.enabled(Command::LoadSelectionLayerMask));
+
+        // Loading selection from channel (e.g. Red) works
+        app.run(Command::LoadSelectionRed, &ctx);
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Load Selection"));
     }
 }
 
