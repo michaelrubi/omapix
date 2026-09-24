@@ -122,10 +122,7 @@ impl ScriptStep {
                     radius,
                     texture: false,
                 }),
-                ("blur", &[radius]) => ScriptStep::View(View::GaussianBlur {
-                    layer: 0,
-                    radius,
-                }),
+                ("blur", &[radius]) => ScriptStep::View(View::GaussianBlur { layer: 0, radius }),
                 _ => return None,
             },
             ("Tool", _) => match words.next()? {
@@ -859,11 +856,6 @@ impl App {
             return;
         }
         let Some(dialog) = &mut self.dialog else {
-            if let Some(editor) = &mut self.editor
-                && matches!(editor.view(), View::Separation { .. } | View::GaussianBlur { .. })
-            {
-                editor.set_view(View::Image);
-            }
             return;
         };
         let mut close = false;
@@ -1997,13 +1989,49 @@ mod tests {
             }
         );
 
-        // Canceling (closing dialog) reverts view to View::Image
-        app.dialog = None;
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        // Esc cancels the dialog and returns to the image.
+        let escape = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(escape, |ctx| {
             app.dialogs(ctx);
         });
         output.textures_delta.clear();
+        assert!(app.dialog.is_none());
         assert_eq!(app.editor.as_ref().unwrap().view(), View::Image);
+    }
+
+    #[test]
+    fn previews_set_without_a_dialog_stay_up() {
+        // Scripts (`View texture r`, `View blur r`) show previews with no
+        // dialog open; the next frame mustn't take them down.
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active = app.editor.as_ref().unwrap().active;
+        for view in [
+            View::Separation {
+                radius: 5.0,
+                texture: true,
+            },
+            View::GaussianBlur {
+                layer: active,
+                radius: 3.0,
+            },
+        ] {
+            app.editor.as_mut().unwrap().set_view(view);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                app.dialogs(ctx);
+            });
+            output.textures_delta.clear();
+            assert_eq!(app.editor.as_ref().unwrap().view(), view);
+        }
     }
 
     #[test]
