@@ -186,6 +186,7 @@ pub struct App {
     blur_radius: f32,
     feather_radius: f32,
     separation_radius: Option<f32>,
+    high_pass_radius: f32,
     /// The user chose to discard changes, so the next close goes through.
     allow_close: bool,
     title: String,
@@ -231,6 +232,7 @@ impl App {
             dialog: None,
             status: None,
             blur_radius: 2.0,
+            high_pass_radius: 2.0,
             feather_radius: 10.0,
             separation_radius: None,
             allow_close: false,
@@ -559,7 +561,9 @@ impl App {
             | Command::Copy => editor.target == Target::Mask || !no_pixels,
             Command::Paste => self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
-            Command::GaussianBlur => editor.target == Target::Pixels && !no_pixels,
+            Command::GaussianBlur | Command::HighPass => {
+                editor.target == Target::Pixels && !no_pixels
+            }
             Command::Invert => editor.target == Target::Mask || !no_pixels,
             _ => true,
         }
@@ -652,6 +656,13 @@ impl App {
                     }
                 }
             }
+            Command::HighPass | Command::HighPassSharpening => {
+                self.dialog = Some(Dialog::Radius {
+                    command: cmd,
+                    radius: self.high_pass_radius,
+                    preview: None,
+                });
+            }
             Command::FrequencySeparation => {
                 let Some(editor) = &self.editor else { return };
                 // ~8.6 px on a 24 MP frame, scaling with resolution.
@@ -711,6 +722,31 @@ impl App {
                     move |doc, _| {
                         doc.selection = doc.selection.as_ref().map(|s| s.feather(radius));
                     },
+                    ctx,
+                );
+            }
+            Command::HighPass => {
+                self.high_pass_radius = radius;
+                let id = editor.active;
+                editor.edit_in_background(
+                    "High Pass",
+                    move |doc, _| {
+                        let selection = doc.selection.clone();
+                        if let Some(layer) = doc.layer_mut(id) {
+                            let filtered = filters::high_pass(&layer.pixels, radius);
+                            layer.pixels =
+                                ops::within_selection(&layer.pixels, filtered, selection.as_ref());
+                        }
+                    },
+                    ctx,
+                );
+            }
+            Command::HighPassSharpening => {
+                self.high_pass_radius = radius;
+                editor.target = Target::Pixels;
+                editor.edit_in_background(
+                    "High Pass Sharpening",
+                    move |doc, active| *active = ops::high_pass_sharpening(doc, index, radius),
                     ctx,
                 );
             }
@@ -884,11 +920,14 @@ impl App {
             });
             ui.menu_button("Filter", |ui| {
                 self.menu_item(ui, Command::GaussianBlur, None);
+                self.menu_item(ui, Command::HighPass, None);
             });
             ui.menu_button("Retouch", |ui| {
                 self.menu_item(ui, Command::FrequencySeparation, None);
                 self.menu_item(ui, Command::DodgeAndBurn, None);
                 self.menu_item(ui, Command::DodgeAndBurnCurves, None);
+                ui.separator();
+                self.menu_item(ui, Command::HighPassSharpening, None);
             });
             ui.menu_button("View", |ui| {
                 self.menu_item(ui, Command::ZoomIn, None);
@@ -1021,6 +1060,16 @@ impl App {
                 } => {
                     ui.heading(command.label().trim_end_matches('…'));
                     ui.add_space(8.0);
+                    if *command == Command::HighPassSharpening {
+                        ui.label(
+                            RichText::new(
+                                "A small radius (1–3 px) sharpens fine detail.\n\
+                                 The layer's opacity sets the strength.",
+                            )
+                            .color(hint),
+                        );
+                        ui.add_space(8.0);
+                    }
                     if *command == Command::FrequencySeparation {
                         ui.label(
                             RichText::new(
@@ -2306,6 +2355,7 @@ mod tests {
             dialog: None,
             status: None,
             blur_radius: 2.0,
+            high_pass_radius: 2.0,
             feather_radius: 5.0,
             separation_radius: None,
             allow_close: false,
@@ -2534,6 +2584,29 @@ mod tests {
         assert_eq!(names(&editor), ["Group 1", "Layer 1", "Layer 2"]);
         assert!(!editor.doc.layers[0].is_group);
         assert_eq!(editor.doc.layers[0].pixels.get(5, 5), [30000, 30000, 30000, 65535]);
+    }
+
+    #[test]
+    fn high_pass_sharpening_asks_for_a_radius_then_adds_its_layer() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::HighPassSharpening, &ctx);
+        let Some(Dialog::Radius {
+            command, radius, ..
+        }) = app.dialog.take()
+        else {
+            panic!("no radius dialog");
+        };
+        app.apply_radius(command, radius, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("High Pass Sharpening"));
+        let layer = editor.doc.layer(editor.active).unwrap();
+        assert_eq!(layer.name, "High Pass Sharpening");
+        assert_eq!(layer.blend, omapix_engine::blend::BlendMode::Overlay);
     }
 
     #[test]

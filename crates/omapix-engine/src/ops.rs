@@ -3,7 +3,7 @@
 use crate::adjust::{Adjustment, Curve, Curves};
 use crate::blend::BlendMode;
 use crate::composite::composite;
-use crate::filters::gaussian_blur;
+use crate::filters::{gaussian_blur, high_pass};
 use crate::layer::Layer;
 use crate::tiled::Tiled;
 use crate::{Document, Raster};
@@ -166,6 +166,30 @@ pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u
     let at = doc.insert_above(group, low);
     doc.insert_above(at, high);
     (low_id, high_id)
+}
+
+/// One-step High Pass sharpening: a "High Pass Sharpening" layer in
+/// Overlay mode above layer index `above`, holding the High Pass of the
+/// visible image's luminance, so it sharpens tone without colour fringes.
+/// Its opacity sets the strength and a mask keeps it off areas. Returns
+/// its id.
+pub fn high_pass_sharpening(doc: &mut Document, above: usize, radius: f32) -> u64 {
+    let visible = doc.composite();
+    let luminance: Vec<crate::Pixel> = visible
+        .pixels()
+        .iter()
+        .map(|p| {
+            let y = 0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2]);
+            let y = y.round() as u16;
+            [y, y, y, u16::MAX]
+        })
+        .collect();
+    let luminance = Tiled::from_slice(doc.width, doc.height, [0; 4], &luminance);
+    let id = doc.next_layer_id();
+    let mut layer = Layer::from_pixels(id, "High Pass Sharpening", high_pass(&luminance, radius));
+    layer.blend = BlendMode::Overlay;
+    doc.insert_above(above, layer);
+    id
 }
 
 /// A new Pass Through group above layer index `above`, for a retouching
@@ -381,6 +405,30 @@ mod tests {
         assert_eq!((mask.get(10, 10), mask.get(200, 10)), (0, u16::MAX));
         let everywhere = fill_pixels(pixels, Some([1, 2, 3, 65535]), None);
         assert_eq!(everywhere.get(299, 99), [1, 2, 3, 65535]);
+    }
+
+    #[test]
+    fn high_pass_sharpening_steepens_edges_and_leaves_flat_areas() {
+        // A soft vertical edge from dark to light grey.
+        let (w, h) = (60u32, 10u32);
+        let px = (0..w * h)
+            .map(|i| {
+                let v = (20000 + (i % w).saturating_sub(20).min(20) * 1000) as u16;
+                [v, v, v, 65535]
+            })
+            .collect();
+        let mut doc = doc_with(px, w, h);
+        let before = doc.composite();
+        let id = high_pass_sharpening(&mut doc, 0, 3.0);
+        assert_eq!(doc.layer(id).unwrap().blend, BlendMode::Overlay);
+        let after = doc.composite();
+        let at = |r: &Raster, x: u32| r.pixels()[(5 * w + x) as usize][0];
+        // Flat areas far from the edge stay (almost) the same.
+        assert!(at(&before, 2).abs_diff(at(&after, 2)) <= 2);
+        assert!(at(&before, 57).abs_diff(at(&after, 57)) <= 2);
+        // Either side of the edge moves apart: darker below, lighter above.
+        assert!(at(&after, 21) < at(&before, 21));
+        assert!(at(&after, 39) > at(&before, 39));
     }
 
     #[test]

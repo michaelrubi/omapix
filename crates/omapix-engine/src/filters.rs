@@ -49,6 +49,23 @@ pub fn gaussian_blur(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
     Tiled::from_slice(image.width(), image.height(), [0; 4], &pixels)
 }
 
+/// Photoshop's Filter › Other › High Pass: the detail a Gaussian blur of
+/// `radius` removes, around 50 % grey, so flat areas come out mid grey.
+/// Alpha is kept.
+pub fn high_pass(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
+    let blurred = gaussian_blur(image, radius).to_vec();
+    let pixels: Vec<Pixel> = image
+        .to_vec()
+        .into_par_iter()
+        .zip(blurred)
+        .map(|(p, b)| {
+            let c = |i: usize| (i32::from(p[i]) - i32::from(b[i]) + 32768).clamp(0, 65535) as u16;
+            [c(0), c(1), c(2), p[3]]
+        })
+        .collect();
+    Tiled::from_slice(image.width(), image.height(), [0; 4], &pixels)
+}
+
 /// Gaussian-blur a row-major buffer of four-channel values, `sigma` being
 /// the standard deviation in pixels.
 pub fn blur_buffer(mut buf: Vec<[f32; 4]>, w: usize, h: usize, sigma: f32) -> Vec<[f32; 4]> {
