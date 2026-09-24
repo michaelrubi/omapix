@@ -78,6 +78,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
+- [ ] Marching ants move, and Omapix goes idle again once there's no selection
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
