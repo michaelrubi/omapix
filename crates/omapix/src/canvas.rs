@@ -187,6 +187,8 @@ pub struct Overlay<'a> {
     /// Alt+click samples (eyedropper, clone source) rather than starting a
     /// stroke with Alt held (selection subtract).
     pub alt_samples: bool,
+    /// The Eyedropper tool samples on primary click or drag.
+    pub samples: bool,
     /// Brush diameter in image pixels, for its outline at the pointer.
     pub brush: Option<f32>,
     /// Show the Move tool's cursor rather than a crosshair (without a brush).
@@ -464,6 +466,7 @@ impl Canvas {
         let Overlay {
             tool,
             alt_samples,
+            samples,
             brush,
             moves,
             source,
@@ -486,7 +489,7 @@ impl Canvas {
         let input = if navigating || !tool {
             None
         } else {
-            self.tool_input(ui, &response, alt_samples)
+            self.tool_input(ui, &response, alt_samples, samples)
         };
 
         self.receive_tiles(ui.ctx());
@@ -616,11 +619,12 @@ impl Canvas {
         ui: &Ui,
         response: &egui::Response,
         alt_samples: bool,
+        samples: bool,
     ) -> Option<ToolInput> {
-        let alt = ui.input(|i| i.modifiers.alt) && alt_samples;
+        let alt = ui.input(|i| i.modifiers.alt);
         // Alt+right-drag: left and right change the size, up and down the
         // hardness (down is harder), with the outline staying put.
-        if alt && response.dragged_by(PointerButton::Secondary) {
+        if alt && alt_samples && response.dragged_by(PointerButton::Secondary) {
             let origin = ui.input(|i| i.pointer.press_origin());
             self.resizing = self.resizing.or(origin);
             let d = response.drag_delta();
@@ -633,7 +637,7 @@ impl Canvas {
         let pointer = ui
             .input(|i| i.pointer.interact_pos())
             .map(|p| self.to_image(p));
-        if alt {
+        if (alt && alt_samples) || samples {
             let sampling = response.clicked_by(PointerButton::Primary)
                 || response.dragged_by(PointerButton::Primary);
             return pointer.filter(|_| sampling).map(ToolInput::Sample);

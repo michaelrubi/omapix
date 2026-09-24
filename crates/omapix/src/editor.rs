@@ -17,6 +17,7 @@ use omapix_engine::{
 };
 
 use crate::canvas::{Canvas, Render};
+use crate::tools::SampleSize;
 
 /// Undo steps kept. Snapshots share unchanged tiles, so this mostly costs
 /// memory for pixels that edits actually replaced.
@@ -1040,6 +1041,58 @@ impl Editor {
             self.modified = false;
         }
     }
+
+    /// Sample a pixel value (Point, 3×3, 5×5, 11×11 average), either from
+    /// all layers composite or the active layer. Averaging ignores pixels
+    /// outside the image.
+    pub fn sample(&self, x: u32, y: u32, size: SampleSize, sample_all: bool) -> Option<Pixel> {
+        let (w, h) = (self.doc.width, self.doc.height);
+        if x >= w || y >= h {
+            return None;
+        }
+        let r = size.radius();
+        if r == 0 {
+            return if sample_all {
+                self.canvas.sample(x, y)
+            } else {
+                self.doc.layer(self.active).map(|l| l.pixels.get(x, y))
+            };
+        }
+        let (w, h) = (w as i32, h as i32);
+        let (cx, cy) = (x as i32, y as i32);
+        let mut sum = [0u64; 4];
+        let mut count = 0u64;
+        let active_layer = (!sample_all).then(|| self.doc.layer(self.active)).flatten();
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let px = cx + dx;
+                let py = cy + dy;
+                if px >= 0 && px < w && py >= 0 && py < h {
+                    let pixel = if sample_all {
+                        self.canvas.sample(px as u32, py as u32)
+                    } else {
+                        active_layer.map(|l| l.pixels.get(px as u32, py as u32))
+                    };
+                    if let Some(p) = pixel {
+                        sum[0] += p[0] as u64;
+                        sum[1] += p[1] as u64;
+                        sum[2] += p[2] as u64;
+                        sum[3] += p[3] as u64;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        Some([
+            ((sum[0] + count / 2) / count) as u16,
+            ((sum[1] + count / 2) / count) as u16,
+            ((sum[2] + count / 2) / count) as u16,
+            ((sum[3] + count / 2) / count) as u16,
+        ])
+    }
 }
 
 /// Layer `active` and the others that move with it: everything in the
@@ -1991,5 +2044,73 @@ mod tests {
         // Undo brings selection back
         e.undo();
         assert!(e.doc.selection.is_some());
+    }
+
+    #[test]
+    fn sample_averaging_and_image_edges() {
+        let (w, h) = (10, 10);
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                pixels.push([(x * 1000) as u16, (y * 1000) as u16, 0, 65535]);
+            }
+        }
+        let image = Raster::new(w, h, pixels);
+        let doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        let mut e = Editor::new(doc).unwrap();
+        let render = Arc::new(Render::new(e.doc.composite()));
+        e.canvas.set_render(Arc::clone(&render));
+
+        // 1. Point sample at (5, 5) returns exact pixel [5000, 5000, 0, 65535]
+        let point = e.sample(5, 5, SampleSize::Point, false).unwrap();
+        assert_eq!(point, [5000, 5000, 0, 65535]);
+
+        let point_all = e.sample(5, 5, SampleSize::Point, true).unwrap();
+        assert_eq!(point_all, [5000, 5000, 0, 65535]);
+
+        // 2. 3x3 sample centered at (5, 5): interior averages to 5000
+        let avg_3x3 = e.sample(5, 5, SampleSize::ThreeByThree, false).unwrap();
+        assert_eq!(avg_3x3, [5000, 5000, 0, 65535]);
+
+        // 3. Top-left corner (0, 0) with 3x3:
+        // Window extends to x: -1..=1, y: -1..=1. Out-of-bounds pixels are ignored.
+        // Valid: (0,0), (1,0), (0,1), (1,1). Count = 4.
+        // x values: 0, 1000, 0, 1000 -> avg = 500
+        // y values: 0, 0, 1000, 1000 -> avg = 500
+        let corner_3x3 = e.sample(0, 0, SampleSize::ThreeByThree, false).unwrap();
+        assert_eq!(corner_3x3, [500, 500, 0, 65535]);
+
+        // 4. Bottom-right corner (9, 9) with 3x3:
+        // Valid: (8,8), (9,8), (8,9), (9,9).
+        // x values: 8000, 9000, 8000, 9000 -> avg = 8500
+        // y values: 8000, 8000, 9000, 9000 -> avg = 8500
+        let corner_br = e.sample(9, 9, SampleSize::ThreeByThree, false).unwrap();
+        assert_eq!(corner_br, [8500, 8500, 0, 65535]);
+
+        // 5. Out of bounds returns None
+        assert!(e.sample(10, 10, SampleSize::Point, false).is_none());
+        assert!(e.sample(15, 0, SampleSize::ThreeByThree, false).is_none());
+
+        // 6. Current layer vs All layers
+        e.edit("Add layer", |doc, active| {
+            let mut top = Layer::empty(2, "top", w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    top.pixels.tile_mut(0, 0)[(y * 256 + x) as usize] = [65535, 65535, 0, 65535];
+                }
+            }
+            doc.layers.push(top);
+            *active = 2;
+        });
+        // Current layer samples yellow from active layer
+        assert_eq!(
+            e.sample(0, 0, SampleSize::Point, false),
+            Some([65535, 65535, 0, 65535])
+        );
+        // All layers samples from composite canvas
+        assert_eq!(
+            e.sample(0, 0, SampleSize::Point, true),
+            Some([0, 0, 0, 65535])
+        );
     }
 }
