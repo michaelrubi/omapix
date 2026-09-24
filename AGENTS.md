@@ -1,4 +1,4 @@
-# AGENT.md
+# AGENTS.md
 
 Omapix is a fast, keyboard-first raster photo editor for Omarchy, focused on portrait retouching (darktable base edit → Omapix retouch → export). It is designed to match Photoshop muscle memory and feel native to Omarchy.
 
