@@ -119,6 +119,8 @@ pub struct LayersPanel {
     thumbs: std::collections::HashMap<(u64, bool), Thumb>,
     /// Layer being dragged to a new place in the stack.
     dragging: Option<u64>,
+    /// The last layer clicked without Shift, where Shift+click selects from.
+    anchor: Option<u64>,
     /// Groups shown open. Groups start closed, and open to show the
     /// selected layer.
     expanded: HashSet<u64>,
@@ -299,8 +301,14 @@ impl LayersPanel {
             return;
         };
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        // Dragging one of several selected layers drags them all.
+        let moving = if editor.is_selected(dragged) {
+            editor.selected()
+        } else {
+            vec![dragged]
+        };
         let target = drop_target(&editor.doc, rows, &self.expanded, pointer)
-            .filter(|d| can_drop(&editor.doc, dragged, d.place));
+            .filter(|d| can_drop(&editor.doc, &moving, d.place));
         if let Some(Drop { marker, .. }) = &target {
             let stroke = egui::Stroke::new(2.0, theme.accent);
             match *marker {
@@ -327,13 +335,14 @@ impl LayersPanel {
         }
         // Dropping where it already is isn't an edit.
         let mut moved = editor.doc.clone();
-        moved.move_layer(dragged, place);
+        moved.move_layers(&moving, place);
         let shape = |doc: &Document| -> Vec<(u64, Option<u64>)> {
             doc.layers.iter().map(|l| (l.id, l.parent)).collect()
         };
         if shape(&moved) != shape(&editor.doc) {
-            editor.edit("Move Layer", |doc, _| {
-                doc.move_layer(dragged, place);
+            let label = if moving.len() > 1 { "Move Layers" } else { "Move Layer" };
+            editor.edit(label, |doc, _| {
+                doc.move_layers(&moving, place);
             });
         }
     }
@@ -343,7 +352,10 @@ impl LayersPanel {
         let Some(layer) = editor.doc.layer(id) else {
             return egui::Rect::NOTHING;
         };
+        // Every selected row is highlighted; the active one's name is bold
+        // and its thumbnail outlined.
         let selected = editor.active == id;
+        let highlighted = editor.is_selected(id);
         let (visible, name, blend, mask, adjustment, is_group) = (
             layer.visible,
             layer.name.clone(),
@@ -360,12 +372,14 @@ impl LayersPanel {
         let shown = visible && ancestors(doc, id).all(|g| doc.layer(g).is_some_and(|l| l.visible));
         let expanded = self.expanded.contains(&id);
         let has_groups = doc.layers.iter().any(|l| l.is_group);
-        let fill = if selected {
+        let fill = if highlighted {
             theme.selection
         } else {
             egui::Color32::TRANSPARENT
         };
-        let dimmed = self.dragging == Some(id);
+        let dimmed = self
+            .dragging
+            .is_some_and(|d| d == id || editor.is_selected(d) && highlighted);
         let frame = egui::Frame::new()
             .fill(fill)
             .inner_margin(egui::Margin::symmetric(4, 3))
@@ -473,11 +487,16 @@ impl LayersPanel {
                         } else {
                             let targeted = selected && editor.target == Target::Pixels;
                             let response = self.thumbnail(ui, editor, id, false, targeted, theme);
+                            let (command, shift) =
+                                ui.input(|i| (i.modifiers.command, i.modifiers.shift));
                             if response.double_clicked() {
                                 self.command = Some(Command::BlendingOptions);
+                            } else if response.clicked() && (command || shift) {
+                                self.click(ui, editor, id);
                             } else if response.clicked() {
-                                editor.active = id;
+                                select(editor, id);
                                 editor.target = Target::Pixels;
+                                self.anchor = Some(id);
                             }
                             Some(response)
                         };
@@ -575,14 +594,21 @@ impl LayersPanel {
         if response.double_clicked() && !on_line {
             self.command = Some(Command::BlendingOptions);
         } else if response.clicked() && !on_line {
-            select(editor, id);
+            self.click(ui, editor, id);
         }
 
         let row_secondary = response.secondary_clicked()
             || name_response.secondary_clicked()
             || pixel_thumb.as_ref().is_some_and(|r| r.secondary_clicked());
         if row_secondary {
-            select(editor, id);
+            // Right-clicking one of several selected layers keeps them all
+            // selected, for the menu to act on.
+            let others = if editor.is_selected(id) {
+                editor.selected()
+            } else {
+                Vec::new()
+            };
+            select_with(editor, id, others);
         }
         let mut popup = egui::Popup::context_menu(&response);
         if row_secondary {
@@ -722,9 +748,49 @@ impl LayersPanel {
         if response.double_clicked() {
             self.renaming = Some(Rename::new(id, name.to_owned()));
         } else if response.clicked() {
-            select(editor, id);
+            self.click(ui, editor, id);
         }
         response
+    }
+
+    /// Select a layer as clicking its row does. As in Photoshop, Ctrl+click
+    /// adds it to the selected layers or takes it out, and Shift+click
+    /// selects the rows from the last one clicked to it (Ctrl+Shift adds
+    /// them). The layer clicked becomes the active one.
+    fn click(&mut self, ui: &Ui, editor: &mut Editor, id: u64) {
+        let (command, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+        if shift {
+            let rows: Vec<u64> = self.rows.iter().map(|(id, _)| *id).collect();
+            let anchor = self.anchor.unwrap_or(editor.active);
+            let at = |id| rows.iter().position(|&r| r == id);
+            let (Some(a), Some(b)) = (at(anchor), at(id)) else {
+                select(editor, id);
+                return;
+            };
+            let mut ids = if command { editor.selected() } else { Vec::new() };
+            ids.extend_from_slice(&rows[a.min(b)..=a.max(b)]);
+            select_with(editor, id, ids);
+            return;
+        }
+        self.anchor = Some(id);
+        if !command {
+            select(editor, id);
+            return;
+        }
+        let mut ids = editor.selected();
+        if !editor.is_selected(id) {
+            ids.push(id);
+            select_with(editor, id, ids);
+        } else if ids.len() > 1 {
+            // Taking out the active layer makes the top one left active.
+            ids.retain(|&s| s != id);
+            let active = if id == editor.active {
+                *ids.last().expect("more than one")
+            } else {
+                editor.active
+            };
+            select_with(editor, active, ids);
+        }
     }
 }
 
@@ -844,8 +910,9 @@ fn layer_context_menu(
     let is_group = layer.is_group;
     let doc = &editor.doc;
     let index = doc.index_of(id);
-    let can_merge = is_group || index.is_some_and(|i| ops::can_merge_down(doc, i));
-    let can_delete = index.is_some_and(|i| doc.span(i).len() < doc.layers.len());
+    let several = editor.several_selected();
+    let can_merge = several || is_group || index.is_some_and(|i| ops::can_merge_down(doc, i));
+    let can_delete = doc.removed_count(&editor.selected()) < doc.layers.len();
     let shortcut = |ui: &Ui, cmd: Command| cmd.shortcut().map(|s| ui.ctx().format_shortcut(&s));
 
     menu_item(ui, "Blending Options…", None, true, || {
@@ -854,7 +921,9 @@ fn layer_context_menu(
 
     ui.separator();
 
-    let (duplicate, delete) = if is_group {
+    let (duplicate, delete) = if several {
+        ("Duplicate Layers", "Delete Layers")
+    } else if is_group {
         ("Duplicate Group", "Delete Group")
     } else {
         ("Duplicate Layer", "Delete Layer")
@@ -904,16 +973,27 @@ fn layer_context_menu(
 
     ui.separator();
 
-    let merge = if is_group { "Merge Group" } else { "Merge Down" };
+    let merge = if several {
+        "Merge Layers"
+    } else if is_group {
+        "Merge Group"
+    } else {
+        "Merge Down"
+    };
     menu_item(ui, merge, shortcut(ui, Command::MergeDown), can_merge, || {
         *command = Some(Command::MergeDown);
     });
 }
 
-/// Select a layer as clicking its row does: paint on its pixels, or on its
-/// mask for an adjustment layer or a group (which have no pixels).
+/// Select just this layer, as clicking its row does: paint on its pixels,
+/// or on its mask for an adjustment layer or a group (which have no pixels).
 fn select(editor: &mut Editor, id: u64) {
-    editor.active = id;
+    select_with(editor, id, Vec::new());
+}
+
+/// Make layer `id` the active one, with `others` selected along with it.
+fn select_with(editor: &mut Editor, id: u64, others: Vec<u64>) {
+    editor.select_layers(id, others);
     let layer = editor.doc.layer(id);
     let no_pixels = layer.is_some_and(|l| !l.has_pixels() && l.mask.is_some());
     editor.target = if no_pixels {
@@ -1005,11 +1085,13 @@ fn drop_target(
     })
 }
 
-/// Whether `place` is somewhere layer `id` can go: not itself, nor inside
-/// itself.
-fn can_drop(doc: &Document, id: u64, place: Place) -> bool {
+/// Whether `place` is somewhere layers `ids` can go: not inside one of
+/// them, nor next to the only one.
+fn can_drop(doc: &Document, ids: &[u64], place: Place) -> bool {
     let (Place::Above(t) | Place::Below(t) | Place::IntoTop(t) | Place::IntoBottom(t)) = place;
-    t != id && !doc.is_inside(t, id)
+    // Next to one of several, they gather around it.
+    let beside = matches!(place, Place::Above(_) | Place::Below(_)) && ids.len() > 1;
+    ids.iter().all(|&id| (t != id || beside) && !doc.is_inside(t, id))
 }
 
 #[cfg(test)]
@@ -1292,9 +1374,10 @@ mod tests {
         assert_eq!(at(200.0, &open), (Place::Below(background), Some(0)));
 
         // A group can't be dropped into itself.
-        assert!(!can_drop(doc, group, Place::Above(MULTIPLY)));
-        assert!(!can_drop(doc, group, Place::IntoTop(group)));
-        assert!(can_drop(doc, MULTIPLY, Place::Above(CURVES)));
+        assert!(!can_drop(doc, &[group], Place::Above(MULTIPLY)));
+        assert!(!can_drop(doc, &[group], Place::IntoTop(group)));
+        assert!(can_drop(doc, &[MULTIPLY], Place::Above(CURVES)));
+        assert!(!can_drop(doc, &[CURVES, group], Place::Above(MULTIPLY)));
     }
 
     #[test]
@@ -1478,5 +1561,103 @@ mod tests {
         h.click(line);
         assert!(!h.editor.doc.layer(MULTIPLY).unwrap().clipped);
         assert_eq!(h.editor.undo_label(), Some("Release Clipping Mask"));
+    }
+
+    #[test]
+    fn ctrl_and_shift_click_select_several_layers() {
+        let mut h = Harness::new();
+        let background = h.background();
+        h.click(h.row_point(background));
+
+        // Ctrl+click adds a layer, which becomes the active one.
+        h.modifiers = egui::Modifiers::COMMAND;
+        h.click(h.row_point(CURVES));
+        assert_eq!(h.editor.active, CURVES);
+        assert_eq!(h.editor.target, Target::Mask, "painting applies to it");
+        assert_eq!(h.editor.selected(), [background, CURVES]);
+        // By its name too; and again takes it out.
+        h.click(h.name_point(MULTIPLY));
+        assert_eq!(h.editor.selected(), [background, MULTIPLY, CURVES]);
+        h.click(h.row_point(MULTIPLY));
+        assert_eq!(h.editor.selected(), [background, CURVES]);
+        // Taking out the active one leaves the top one left active.
+        h.click(h.row_point(CURVES));
+        assert_eq!((h.editor.active, h.editor.selected()), (background, vec![background]));
+        // The last one can't be taken out.
+        h.click(h.row_point(background));
+        assert_eq!(h.editor.selected(), [background]);
+
+        // Shift+click selects the rows from the last one clicked.
+        h.modifiers = egui::Modifiers::SHIFT;
+        h.click(h.row_point(CURVES));
+        assert_eq!(h.editor.selected(), [background, MULTIPLY, CURVES]);
+        assert_eq!(h.editor.active, CURVES);
+        h.click(h.row_point(MULTIPLY));
+        assert_eq!(h.editor.selected(), [background, MULTIPLY]);
+
+        // A plain click selects just the one again, even the active one.
+        h.modifiers = Default::default();
+        h.click(h.row_point(MULTIPLY));
+        assert_eq!(h.editor.selected(), [MULTIPLY]);
+
+        // Selecting a layer any other way (a new layer, say) selects just it.
+        h.modifiers = egui::Modifiers::COMMAND;
+        h.click(h.row_point(CURVES));
+        assert_eq!(h.editor.selected().len(), 2);
+        h.editor.active = background;
+        assert_eq!(h.editor.selected(), [background]);
+    }
+
+    #[test]
+    fn several_selected_rows_drag_together_and_share_a_menu() {
+        let mut h = Harness::new();
+        let background = h.background();
+        h.click(h.row_point(background));
+        h.modifiers = egui::Modifiers::COMMAND;
+        h.click(h.row_point(CURVES));
+        h.modifiers = Default::default();
+
+        // Right-clicking one of them keeps both selected, and makes it
+        // active.
+        h.secondary_click(h.row_point(background));
+        assert_eq!(h.editor.active, background);
+        assert_eq!(h.editor.selected(), [background, CURVES]);
+        h.frame(vec![Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }]);
+
+        // Dragging the bottom one drags both, keeping their order, to the
+        // bottom of the stack.
+        let drag = |h: &mut Harness, to: egui::Pos2| {
+            h.time += 1.0;
+            let from = h.row_point(background);
+            h.button(from, true);
+            for i in 1..=5 {
+                let pos = from + (to - from) * (i as f32 / 5.0);
+                h.frame(vec![Event::PointerMoved(pos)]);
+            }
+            h.button(to, false);
+            h.frame(vec![]);
+        };
+        let bottom = h.row_point(background) + vec2(0.0, 30.0);
+        drag(&mut h, bottom);
+        assert_eq!(h.top_first(), [MULTIPLY, CURVES, background]);
+        assert_eq!(h.editor.undo_label(), Some("Move Layers"));
+        assert_eq!(h.editor.selected(), [background, CURVES], "still selected");
+        // And to the top.
+        let top = h.panel.rows[0].1.left_top() + vec2(50.0, -5.0);
+        drag(&mut h, top);
+        assert_eq!(h.top_first(), [CURVES, background, MULTIPLY]);
+
+        let mut command = None;
+        let mut renaming = None;
+        let mut out = h.ctx.run_ui(Default::default(), |ui| {
+            layer_context_menu(ui, &mut h.editor, &mut command, &mut renaming, CURVES);
+        });
+        out.textures_delta.clear();
     }
 }

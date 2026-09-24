@@ -97,8 +97,12 @@ struct Moving {
     label: String,
     /// The layer being moved, as it was before the move.
     original: Layer,
-    /// For a group, the layers in it, which move with it.
+    /// The other layers moving with it, as they were: those in it if it's
+    /// a group, and the other selected layers and what's in them.
     contents: Vec<Layer>,
+    /// The selected layers being moved, not counting those inside a
+    /// selected group.
+    roots: Vec<u64>,
     /// The selection before the move, which moves with the pixels.
     selection: Option<Selection>,
     target: Target,
@@ -120,9 +124,14 @@ struct Job {
 
 pub struct Editor {
     pub doc: Document,
-    /// Id of the selected layer.
+    /// Id of the selected layer: the one painting and adjustments apply
+    /// to (the last one clicked).
     pub active: u64,
     pub target: Target,
+    /// Layers selected along with the active one (Ctrl/Shift+click in the
+    /// Layers panel), and the active layer they go with. Selecting another
+    /// layer any other way leaves just that one selected.
+    selected: (u64, Vec<u64>),
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// Key of the continuous edit in progress (e.g. dragging the opacity
@@ -173,6 +182,7 @@ impl Editor {
             doc,
             active,
             target: Target::Pixels,
+            selected: (active, Vec::new()),
             undo: Vec::new(),
             redo: Vec::new(),
             live: None,
@@ -196,6 +206,35 @@ impl Editor {
 
     pub fn active_index(&self) -> Option<usize> {
         self.doc.index_of(self.active)
+    }
+
+    /// The selected layers that exist, bottom first, the active one
+    /// always among them.
+    pub fn selected(&self) -> Vec<u64> {
+        let (active, others) = &self.selected;
+        let mut ids = vec![self.active];
+        if *active == self.active {
+            ids.extend(others.iter().filter(|&&id| id != self.active));
+        }
+        ids.retain(|&id| self.doc.layer(id).is_some());
+        ids.sort_by_key(|&id| self.doc.index_of(id));
+        ids
+    }
+
+    pub fn is_selected(&self, id: u64) -> bool {
+        id == self.active || self.selected.0 == self.active && self.selected.1.contains(&id)
+    }
+
+    /// Select several layers, `active` among them.
+    pub fn select_layers(&mut self, active: u64, ids: Vec<u64>) {
+        self.active = active;
+        self.selected = (active, ids);
+    }
+
+    /// Whether more than one layer is selected, not counting those inside a
+    /// selected group.
+    pub fn several_selected(&self) -> bool {
+        self.doc.outermost(&self.selected()).len() > 1
     }
 
     pub fn busy(&self) -> Option<&str> {
@@ -606,13 +645,14 @@ impl Editor {
     }
 
     /// Start moving the active layer with the Move tool: the whole layer
-    /// and its mask, or with a selection, just the selected pixels (or mask
-    /// values, when the mask is targeted) and the selection with them.
-    /// A group moves with everything in it, but has no pixels to move
-    /// within a selection. `copy` moves a copy (Alt+drag): of the whole
-    /// layer as a new layer, or of the selected pixels. `background` is the
-    /// grey a mask is left with where selected values move away. Nothing
-    /// changes until [`Self::move_to`] asks for a real move.
+    /// and its mask, along with the other selected layers, or with a
+    /// selection, just the active layer's selected pixels (or mask values,
+    /// when the mask is targeted) and the selection with them. A group
+    /// moves with everything in it, but has no pixels to move within a
+    /// selection. `copy` moves a copy (Alt+drag): of the whole layers as
+    /// new layers, or of the selected pixels. `background` is the grey a
+    /// mask is left with where selected values move away. Nothing changes
+    /// until [`Self::move_to`] asks for a real move.
     pub fn begin_move(&mut self, label: &str, copy: bool, background: u16) -> bool {
         if self.job.is_some() {
             return false;
@@ -625,11 +665,17 @@ impl Editor {
         if layer.is_group && self.doc.selection.is_some() && self.target == Target::Pixels {
             return false;
         }
-        let contents = self.doc.layers[self.doc.span(index)].split_last().map(|(_, c)| c);
+        let roots = if self.doc.selection.is_some() {
+            vec![self.active]
+        } else {
+            self.doc.outermost(&self.selected())
+        };
+        let (original, contents) = moving_layers(&self.doc, self.active, &roots);
         self.moving = Some(Moving {
             label: label.to_owned(),
-            original: layer.clone(),
-            contents: contents.unwrap_or_default().to_vec(),
+            original,
+            contents,
+            roots,
             selection: self.doc.selection.clone(),
             target: self.target,
             copy,
@@ -694,13 +740,15 @@ impl Editor {
                 ))),
             });
             if moving.copy && moving.selection.is_none() {
-                let index = self.doc.index_of(moving.original.id).unwrap_or(0);
-                let id = self.doc.duplicate_layer(index);
-                let span = self.doc.span(self.doc.index_of(id).expect("just added"));
-                let (copy, contents) = self.doc.layers[span].split_last().expect("not empty");
-                moving.original = copy.clone();
-                moving.contents = contents.to_vec();
-                self.active = id;
+                let copies = self.doc.duplicate_layers(&moving.roots);
+                // The copy of the active layer, or if that's inside a
+                // selected group, of the top one.
+                let at = moving.roots.iter().position(|&id| id == self.active);
+                let active = at.or(copies.len().checked_sub(1)).map(|i| copies[i]);
+                let active = active.expect("something was copied");
+                (moving.original, moving.contents) = moving_layers(&self.doc, active, &copies);
+                moving.roots = copies.clone();
+                self.select_layers(active, copies);
             }
         }
         let moving = self.moving.as_mut().expect("still moving");
@@ -894,6 +942,24 @@ impl Editor {
             self.modified = false;
         }
     }
+}
+
+/// Layer `active` and the others that move with it: everything in the
+/// layers `roots`.
+fn moving_layers(doc: &Document, active: u64, roots: &[u64]) -> (Layer, Vec<Layer>) {
+    let mut others = Vec::new();
+    let mut original = None;
+    for index in roots.iter().filter_map(|&id| doc.index_of(id)) {
+        for layer in &doc.layers[doc.span(index)] {
+            if layer.id == active {
+                original = Some(layer.clone());
+            } else {
+                others.push(layer.clone());
+            }
+        }
+    }
+    let original = original.or_else(|| doc.layer(active).cloned());
+    (original.expect("the active layer exists"), others)
 }
 
 /// Render what `view` shows, with `colour` for the mask overlay. For
@@ -1716,5 +1782,46 @@ mod tests {
             doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (50.0, 100.0)))
         });
         assert!(!e.begin_move("Move", false, 0));
+    }
+
+    #[test]
+    fn several_selected_layers_move_together() {
+        let mut e = square_editor();
+        let bottom = e.active;
+        e.edit("Layer", |doc, active| {
+            let mut top = Layer::empty(9, "top", 600, 400);
+            top.pixels.tile_mut(0, 0)[0] = RED;
+            doc.layers.push(top);
+            *active = 9;
+        });
+        e.select_layers(9, vec![bottom]);
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(300, 200);
+        e.end_move();
+        assert_eq!(e.doc.layer(9).unwrap().pixels.get(300, 200), RED);
+        assert_eq!(e.doc.layer(bottom).unwrap().pixels.get(350, 250), RED);
+        e.undo();
+
+        // Alt+drag copies them all, and selects the copies.
+        assert!(e.begin_move("Move", true, 0));
+        e.move_to(0, 200);
+        e.end_move();
+        assert_eq!(e.doc.layers.len(), 4);
+        let copies = e.selected();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(e.doc.layer(e.active).unwrap().name, "top copy");
+        assert_eq!(e.doc.layer(copies[0]).unwrap().pixels.get(50, 250), RED);
+        assert_eq!(e.doc.layer(bottom).unwrap().pixels.get(50, 50), RED);
+
+        // With a selection, just the active layer's selected pixels move.
+        e.select_layers(9, vec![bottom]);
+        e.edit("Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (100.0, 100.0)))
+        });
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(200, 0);
+        e.end_move();
+        assert_eq!(e.doc.layer(bottom).unwrap().pixels.get(50, 50), RED);
+        assert_eq!(e.doc.layer(9).unwrap().pixels.get(200, 0), RED);
     }
 }
