@@ -358,6 +358,82 @@ impl Editor {
         }
     }
 
+    pub fn history_labels(&self) -> Vec<String> {
+        let initial = self
+            .doc
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Open".into());
+        let mut labels = Vec::with_capacity(1 + self.undo.len() + self.redo.len());
+        labels.push(initial);
+        for s in &self.undo {
+            labels.push(s.label.clone());
+        }
+        for s in self.redo.iter().rev() {
+            labels.push(s.label.clone());
+        }
+        labels
+    }
+
+    pub fn history_count(&self) -> usize {
+        1 + self.undo.len() + self.redo.len()
+    }
+
+    pub fn history_active_index(&self) -> usize {
+        self.undo.len()
+    }
+
+    pub fn jump_to_history(&mut self, target: usize) {
+        if self.job.is_some() || target >= self.history_count() {
+            return;
+        }
+        self.end_gesture();
+        self.live = None;
+        let current = self.undo.len();
+        if target == current {
+            return;
+        }
+        let saved_path = self.doc.saved_path.clone();
+        if target < current {
+            let count = current - target;
+            for _ in 0..count {
+                if let Some(prev) = self.undo.pop() {
+                    let cur = Snapshot {
+                        label: prev.label.clone(),
+                        doc: self.doc.clone(),
+                        active: self.active,
+                    };
+                    self.redo.push(cur);
+                    self.doc = prev.doc;
+                    self.active = prev.active;
+                }
+            }
+        } else {
+            let count = (target - current).min(self.redo.len());
+            for _ in 0..count {
+                if let Some(next) = self.redo.pop() {
+                    let cur = Snapshot {
+                        label: next.label.clone(),
+                        doc: self.doc.clone(),
+                        active: self.active,
+                    };
+                    self.undo.push(cur);
+                    self.doc = next.doc;
+                    self.active = next.active;
+                }
+            }
+        }
+        self.doc.saved_path = saved_path;
+        self.fix_selection();
+        self.changed();
+    }
+
+    pub fn clear_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
     fn restore(&mut self, snapshot: Snapshot) {
         // Keep the save location: undo shouldn't forget where the file lives.
         let saved_path = self.doc.saved_path.clone();
@@ -1423,6 +1499,56 @@ mod tests {
         assert_eq!(e.doc.layers[0].opacity, 1.0);
         // Cancelling leaves no trace in the history.
         assert_eq!((e.undo_label(), e.redo_label()), (None, None));
+    }
+
+    #[test]
+    fn history_jumps_back_and_forward_and_branches() {
+        let mut e = editor();
+        e.edit("Step 1", |doc, _| doc.layers[0].opacity = 0.8);
+        e.edit("Step 2", |doc, _| doc.layers[0].opacity = 0.6);
+        e.edit("Step 3", |doc, _| doc.layers[0].opacity = 0.4);
+
+        assert_eq!(e.history_count(), 4);
+        assert_eq!(e.history_active_index(), 3);
+        assert_eq!(
+            e.history_labels(),
+            ["t.tif", "Step 1", "Step 2", "Step 3"]
+        );
+        assert_eq!(e.doc.layers[0].opacity, 0.4);
+
+        // Jump back to Step 1 (index 1).
+        e.jump_to_history(1);
+        assert_eq!(e.history_active_index(), 1);
+        assert_eq!(e.doc.layers[0].opacity, 0.8);
+        assert_eq!(
+            e.history_labels(),
+            ["t.tif", "Step 1", "Step 2", "Step 3"]
+        );
+
+        // Jump all the way back to initial state (index 0).
+        e.jump_to_history(0);
+        assert_eq!(e.history_active_index(), 0);
+        assert_eq!(e.doc.layers[0].opacity, 1.0);
+
+        // Jump forward to Step 2 (index 2).
+        e.jump_to_history(2);
+        assert_eq!(e.history_active_index(), 2);
+        assert_eq!(e.doc.layers[0].opacity, 0.6);
+
+        // Branch history with a new edit while at Step 2: Step 3 is discarded.
+        e.edit("Step 2B", |doc, _| doc.layers[0].opacity = 0.2);
+        assert_eq!(e.history_count(), 4);
+        assert_eq!(e.history_active_index(), 3);
+        assert_eq!(
+            e.history_labels(),
+            ["t.tif", "Step 1", "Step 2", "Step 2B"]
+        );
+        assert_eq!(e.doc.layers[0].opacity, 0.2);
+
+        // Clear history resets to just current state.
+        e.clear_history();
+        assert_eq!(e.history_count(), 1);
+        assert_eq!(e.history_active_index(), 0);
     }
 
     #[test]

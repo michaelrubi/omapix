@@ -4,8 +4,10 @@ mod canvas;
 mod clipboard;
 mod commands;
 mod editor;
+mod history_panel;
 mod layers_panel;
 mod properties_panel;
+mod recent;
 mod theme;
 mod tools;
 

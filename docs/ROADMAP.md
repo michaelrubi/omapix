@@ -74,11 +74,11 @@ Alt+] and Alt+[ select the layer above or below (following the rows shown, so in
 
 The UI has been tested through the same code paths with scripts
 (`OMAPIX_SCRIPT`) and unit tests, but not yet with a real mouse. These need checking by hand, and any bugs fixed:
-- [ ] Brush, eraser, clone, healing and spot healing with the mouse
-- [ ] Lasso and marquee drags, including Shift/Alt to add and subtract
+- [x] Brush, eraser, clone, healing and spot healing with the mouse
+- [x] Lasso and marquee drags, including Shift/Alt to add and subtract
 - [x] Move tool: dragging layers and selected pixels, Alt+drag copies, Shift constraint, arrow-key nudges, and how smooth it is on a 24 MP image
-- [ ] Dragging Curves points, and dragging one off the graph to delete it
-- [ ] Blend If handles, including Alt+drag to split
+- [x] Dragging Curves points, and dragging one off the graph to delete it
+- [x] Blend If handles, including Alt+drag to split
 - [x] Dragging layers to reorder them, including by the name
 - [x] Layer groups: Ctrl+G and Ctrl+Shift+G, opening and closing groups, dragging layers into, out of and between groups, and the Move tool on a group
 - [x] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
@@ -87,15 +87,15 @@ The UI has been tested through the same code paths with scripts
 - [x] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
-- [ ] Marching ants move, and Omapix goes idle again once there's no selection
+- [x] Marching ants move, and Omapix goes idle again once there's no selection
 - [ ] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
   - Hand-tested: sliders work but the image could follow them faster; Move tool drags work but feel sluggish. Both are what GPU compositing should fix.
-- [ ] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
+- [x] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
-- [ ] Open, Save As and Export file dialogs (xdg portal)
+- [x] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
-- [ ] Undo/redo after each of the above (done for layer groups, reordering, clicking rows, renaming and the Move tool)
+- [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
 
@@ -146,9 +146,9 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 
 - **darktable round trip:** "Edit in Omapix" from darktable, and export back to a TIFF next to the raw file.
 - **Batch export:** apply a saved action (for example "resize, sharpen, JPEG") to many files.
-- **Recent files** and reopening the last document.
+- ~~**Recent files** and reopening the last document~~ (done).
 - **PSD import**, at least flattened and simple layers, for old Photoshop work.
-- **History panel:** a list of undo steps you can click back to.
+- ~~**History panel:** a list of undo steps you can click back to~~ (done).
 - **Custom hotkeys:** override any command's shortcut or tool letter from a TOML file in `~/.config/omapix/`, with Photoshop's shortcuts as the defaults. Warn about clashes at startup.
 
 ## 6. Performance
