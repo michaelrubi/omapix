@@ -234,8 +234,6 @@ pub struct App {
     pasting: Option<Receiver<Result<Clip, String>>>,
     /// Whether V is held, for spotting Ctrl+V (see [`Command::pressed`]).
     v_down: bool,
-    /// Hide marching ants round the selection (Ctrl+H).
-    hide_selection_edges: bool,
 }
 
 impl App {
@@ -287,7 +285,6 @@ impl App {
             clipboard: Clipboard::new(std::env::var_os("WAYLAND_DISPLAY").is_some()),
             pasting: None,
             v_down: false,
-            hide_selection_edges: false,
         };
         if let Some(path) = path {
             app.open(path, ctx);
@@ -750,21 +747,16 @@ impl App {
                     self.layers.step_selection(editor, false);
                 }
             }
-            Command::SelectAll
-            | Command::InvertSelection
-            | Command::LoadSelectionRed
-            | Command::LoadSelectionGreen
-            | Command::LoadSelectionBlue
-            | Command::LoadSelectionLuminosity
-            | Command::LoadSelectionTransparency
-            | Command::LoadSelectionLayerMask => {
-                self.hide_selection_edges = false;
+            Command::SelectAll | Command::InvertSelection => {
                 if let Some(editor) = &mut self.editor {
+                    editor.hide_selection_edges = false;
                     run_on_editor(editor, cmd, ctx);
                 }
             }
             Command::SelectionEdges => {
-                self.hide_selection_edges = !self.hide_selection_edges;
+                if let Some(editor) = &mut self.editor {
+                    editor.hide_selection_edges = !editor.hide_selection_edges;
+                }
             }
             _ => {
                 if let Some(editor) = &mut self.editor {
@@ -828,7 +820,7 @@ impl App {
         match command {
             Command::Feather => {
                 self.feather_radius = radius;
-                self.hide_selection_edges = false;
+                editor.hide_selection_edges = false;
                 editor.edit_in_background(
                     "Feather",
                     move |doc, _| {
@@ -1047,7 +1039,8 @@ impl App {
                 self.menu_item(ui, Command::FitOnScreen, None);
                 self.menu_item(ui, Command::ActualPixels, None);
                 ui.separator();
-                let edges_label = if self.hide_selection_edges {
+                let hidden = self.editor.as_ref().is_some_and(|e| e.hide_selection_edges);
+                let edges_label = if hidden {
                     "Show Selection Edges"
                 } else {
                     "Hide Selection Edges"
@@ -1088,7 +1081,7 @@ impl App {
                     ui.label(RichText::new(text).color(self.theme.accent));
                     ui.separator();
                 }
-                if self.hide_selection_edges && doc.selection.is_some() {
+                if editor.hide_selection_edges && doc.selection.is_some() {
                     ui.label(
                         RichText::new("Selection edges hidden — press Ctrl+H to show")
                             .color(self.theme.accent),
@@ -1658,7 +1651,7 @@ impl App {
                         self.tools.sample_all,
                         how,
                     ) {
-                        self.hide_selection_edges = false;
+                        editor.hide_selection_edges = false;
                     }
                     return;
                 }
@@ -1708,19 +1701,7 @@ impl App {
                         }
                     }
                     (None, _) => {}
-                    (Some(shape), how) => {
-                        self.hide_selection_edges = false;
-                        editor.edit(label, |doc, _| {
-                            let combined = match (&doc.selection, how) {
-                                (Some(current), how) if how != Combine::Replace => {
-                                    current.combine(&shape, how)
-                                }
-                                (None, Combine::Subtract | Combine::Intersect) => return,
-                                _ => shape,
-                            };
-                            doc.selection = (!combined.is_empty()).then_some(combined);
-                        });
-                    }
+                    (Some(shape), how) => editor.set_selection(label, shape, how),
                 }
             }
             ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
@@ -2260,18 +2241,18 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 _ => Channel::Luminosity,
             };
             let composite = editor.doc.composite();
-            editor.load_selection(Selection::from_channel(&composite, channel), Combine::Replace);
+            editor.set_selection("Load Selection", Selection::from_channel(&composite, channel), Combine::Replace);
         }
         Command::LoadSelectionTransparency => {
             if let Some(layer) = editor.doc.layer(editor.active)
                 && layer.has_pixels()
             {
-                editor.load_selection(Selection::from_alpha(&layer.pixels), Combine::Replace);
+                editor.set_selection("Load Selection", Selection::from_alpha(&layer.pixels), Combine::Replace);
             }
         }
         Command::LoadSelectionLayerMask => {
             if let Some(mask) = editor.doc.layer(editor.active).and_then(|l| l.mask.as_ref()) {
-                editor.load_selection(Selection::from_mask(&mask.pixels), Combine::Replace);
+                editor.set_selection("Load Selection", Selection::from_mask(&mask.pixels), Combine::Replace);
             }
         }
         Command::ZoomIn => editor.canvas.step_zoom(true),
@@ -2434,12 +2415,8 @@ impl eframe::App for App {
         let mut input = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
-                if editor.reset_selection_edges {
-                    self.hide_selection_edges = false;
-                    editor.reset_selection_edges = false;
-                }
                 let idle = editor.busy().is_none();
-                let outlines = if self.hide_selection_edges {
+                let outlines = if editor.hide_selection_edges {
                     &[][..]
                 } else {
                     editor
@@ -2727,7 +2704,6 @@ mod tests {
             clipboard: Clipboard::new(false),
             pasting: None,
             v_down: false,
-            hide_selection_edges: false,
         }
     }
 
@@ -3832,7 +3808,7 @@ mod tests {
     #[test]
     fn selection_edges_ctrl_h_toggles_and_updates_status_bar() {
         let mut h = SelectionEdgesHarness::new();
-        assert!(!h.app.hide_selection_edges);
+        assert!(!h.app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Initially visible: status bar does not have hidden message
         let out = h.frame(vec![]);
@@ -3840,7 +3816,7 @@ mod tests {
 
         // Press Ctrl+H to hide selection edges
         h.press_ctrl_h();
-        assert!(h.app.hide_selection_edges);
+        assert!(h.app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Status bar now displays the hidden message
         let out = h.frame(vec![]);
@@ -3848,7 +3824,7 @@ mod tests {
 
         // Press Ctrl+H again to show edges
         h.press_ctrl_h();
-        assert!(!h.app.hide_selection_edges);
+        assert!(!h.app.editor.as_ref().unwrap().hide_selection_edges);
 
         let out = h.frame(vec![]);
         assert!(!h.output_contains_text(&out, "Selection edges hidden"));
@@ -3878,21 +3854,21 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = test_app();
         app.run(Command::SelectionEdges, &ctx);
-        assert!(app.hide_selection_edges);
+        assert!(app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Select All resets hidden state
         app.run(Command::SelectAll, &ctx);
-        assert!(!app.hide_selection_edges);
+        assert!(!app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Hide edges again, then InvertSelection
         app.run(Command::SelectionEdges, &ctx);
-        assert!(app.hide_selection_edges);
+        assert!(app.editor.as_ref().unwrap().hide_selection_edges);
         app.run(Command::InvertSelection, &ctx);
-        assert!(!app.hide_selection_edges);
+        assert!(!app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Hide edges again, then draw a Marquee
         app.run(Command::SelectionEdges, &ctx);
-        assert!(app.hide_selection_edges);
+        assert!(app.editor.as_ref().unwrap().hide_selection_edges);
         app.tools.select(crate::tools::Tool::Marquee);
         app.tool_input(
             ToolInput::StrokeBegin(egui::pos2(10.0, 10.0)),
@@ -3903,25 +3879,25 @@ mod tests {
             egui::Modifiers::NONE,
         );
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
-        assert!(!app.hide_selection_edges);
+        assert!(!app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Hide edges again, then use Magic Wand
         app.run(Command::SelectionEdges, &ctx);
-        assert!(app.hide_selection_edges);
+        assert!(app.editor.as_ref().unwrap().hide_selection_edges);
         app.tools.select(crate::tools::Tool::MagicWand);
         app.tool_input(
             ToolInput::StrokeBegin(egui::pos2(20.0, 20.0)),
             egui::Modifiers::NONE,
         );
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
-        assert!(!app.hide_selection_edges);
+        assert!(!app.editor.as_ref().unwrap().hide_selection_edges);
     }
 
     #[test]
     fn selection_edges_deselect_keeps_hidden_state_irrelevant() {
         let mut h = SelectionEdgesHarness::new();
         h.press_ctrl_h();
-        assert!(h.app.hide_selection_edges);
+        assert!(h.app.editor.as_ref().unwrap().hide_selection_edges);
 
         // With edges hidden and selection active, status bar message is shown
         let out = h.frame(vec![]);
@@ -3964,7 +3940,7 @@ mod tests {
         // 1. Initially with edges visible, canvas requests repaint for marching ants
         let mut out = ctx.run_ui(input.clone(), |ui| {
             let editor = app.editor.as_mut().unwrap();
-            let outlines = if app.hide_selection_edges {
+            let outlines = if editor.hide_selection_edges {
                 &[][..]
             } else {
                 editor.doc.selection.as_ref().map_or(&[][..], |s| &s.outlines[..])
@@ -3980,10 +3956,10 @@ mod tests {
         assert!(out.viewport_output[&egui::ViewportId::ROOT].repaint_delay <= Duration::from_millis(100));
 
         // 2. Hide selection edges: canvas must go idle (no repaint requested)
-        app.hide_selection_edges = true;
+        app.editor.as_mut().unwrap().hide_selection_edges = true;
         let mut out = ctx.run_ui(input.clone(), |ui| {
             let editor = app.editor.as_mut().unwrap();
-            let outlines = if app.hide_selection_edges {
+            let outlines = if editor.hide_selection_edges {
                 &[][..]
             } else {
                 editor.doc.selection.as_ref().map_or(&[][..], |s| &s.outlines[..])
@@ -4002,7 +3978,7 @@ mod tests {
         let drag_shape = [egui::pos2(10.0, 10.0), egui::pos2(100.0, 100.0)];
         let mut out = ctx.run_ui(input, |ui| {
             let editor = app.editor.as_mut().unwrap();
-            let outlines = if app.hide_selection_edges {
+            let outlines = if editor.hide_selection_edges {
                 &[][..]
             } else {
                 editor.doc.selection.as_ref().map_or(&[][..], |s| &s.outlines[..])
@@ -4097,7 +4073,7 @@ mod tests {
 
         // Hide edges first with Ctrl+H
         app.run(Command::SelectionEdges, &ctx);
-        assert!(app.hide_selection_edges);
+        assert!(app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Run LoadSelectionTransparency on the background layer
         app.run(Command::LoadSelectionTransparency, &ctx);
@@ -4105,7 +4081,7 @@ mod tests {
         assert!(editor.doc.selection.is_some());
         assert_eq!(editor.undo_label(), Some("Load Selection"));
         // Edges should show again even if Ctrl+H hid them previously
-        assert!(!app.hide_selection_edges);
+        assert!(!app.editor.as_ref().unwrap().hide_selection_edges);
 
         // Undo reverts the selection
         app.run(Command::Undo, &ctx);

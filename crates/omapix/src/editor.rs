@@ -179,8 +179,9 @@ pub struct Editor {
     painted: u64,
     /// The mask overlay's red, in the document's colour space.
     overlay_colour: Pixel,
-    /// A new selection was loaded or created that should unhide selection edges.
-    pub reset_selection_edges: bool,
+    /// Ctrl+H: the selection's marching ants are hidden. A new selection
+    /// shows them again.
+    pub hide_selection_edges: bool,
 }
 
 impl Editor {
@@ -217,7 +218,7 @@ impl Editor {
             moving: None,
             painted: 0,
             overlay_colour,
-            reset_selection_edges: false,
+            hide_selection_edges: false,
         })
     }
 
@@ -802,9 +803,11 @@ impl Editor {
         })
     }
 
-    /// Load a selection from a source, combining it with any existing selection.
-    pub fn load_selection(&mut self, selection: Selection, how: Combine) {
-        if self.edit("Load Selection", |doc, _| {
+    /// Combine a new selection with the current one (a marquee, lasso or
+    /// Load Selection), as one undo step. Also shows the selection edges
+    /// again if Ctrl+H hid them.
+    pub fn set_selection(&mut self, label: &str, selection: Selection, how: Combine) {
+        if self.edit(label, |doc, _| {
             let combined = match (&doc.selection, how) {
                 (Some(current), how) if how != Combine::Replace => {
                     current.combine(&selection, how)
@@ -814,7 +817,7 @@ impl Editor {
             };
             doc.selection = (!combined.is_empty()).then_some(combined);
         }) {
-            self.reset_selection_edges = true;
+            self.hide_selection_edges = false;
         }
     }
 

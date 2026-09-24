@@ -572,10 +572,10 @@ impl LayersPanel {
                             if response.double_clicked() {
                                 self.command = Some(Command::BlendingOptions);
                             } else if response.clicked() && command {
-                                if let Some(layer) = editor.doc.layer(id) {
+                                if let Some(layer) = editor.doc.layer(id).filter(|l| l.has_pixels()) {
                                     let how = Combine::from_modifiers(shift, alt);
                                     let sel = Selection::from_alpha(&layer.pixels);
-                                    editor.load_selection(sel, how);
+                                    editor.set_selection("Load Selection", sel, how);
                                 }
                             } else if response.clicked() && shift {
                                 self.click(ui, editor, id);
@@ -608,7 +608,7 @@ impl LayersPanel {
                                     if let Some(mask) = editor.doc.layer(id).and_then(|l| l.mask.as_ref()) {
                                         let how = Combine::from_modifiers(shift, alt);
                                         let sel = Selection::from_mask(&mask.pixels);
-                                        editor.load_selection(sel, how);
+                                        editor.set_selection("Load Selection", sel, how);
                                     }
                                 } else if alt {
                                     // Alt+click shows the mask on its own, or goes back.
