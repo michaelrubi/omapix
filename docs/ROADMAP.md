@@ -17,6 +17,10 @@ Clicking anywhere on a row, including the blend-mode label and empty space, now 
 
 Right-clicking anywhere on a layer row opens a context menu with Blending Options…, Duplicate Layer, Delete Layer, Rename, Add/Delete Layer Mask, Disable/Enable Layer Mask, Invert Mask, View Mask (Alt+click), and Merge Down. Right-clicking the mask thumbnail shows just the mask commands, as in Photoshop.
 
+### ~~Layer rename submission and cancel~~ (done)
+
+Double-clicking a layer name or choosing Rename from the context menu focuses the input with the full text selected. Pressing Return or clicking anywhere off the text field commits the name, while Escape cancels back to the existing name.
+
 ### Mask overlay (Photoshop's red "rubylith")
 
 **Problem:** the only way to see a mask is mask view (Alt+click), which hides the photo. There's no way to see the mask and the image together.
@@ -38,7 +42,8 @@ The UI has been tested through the same code paths with scripts
 - [ ] Blend If handles, including Alt+drag to split
 - [ ] Dragging layers to reorder them, including by the name
 - [ ] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
-- [ ] Right-clicking layer rows and mask thumbnails for context menus
+- [x] Right-clicking layer rows and mask thumbnails for context menus
+- [ ] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
