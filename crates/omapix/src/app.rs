@@ -1497,6 +1497,10 @@ impl App {
     }
 
     fn tool_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        if let ToolInput::BrushDrag { size, hardness } = input {
+            self.tools.drag_brush(size, hardness);
+            return;
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1537,6 +1541,8 @@ impl App {
             }
             ToolInput::StrokeMove(p) => editor.stroke_to(p.x, p.y),
             ToolInput::StrokeEnd => editor.end_stroke(),
+            // Handled before the tools.
+            ToolInput::BrushDrag { .. } => {}
             ToolInput::Sample(p) if self.tools.tool.copies() => self.tools.set_source(p),
             ToolInput::Sample(p) => {
                 if p.x >= 0.0
@@ -1574,7 +1580,7 @@ impl App {
                 self.move_from = None;
                 editor.end_move();
             }
-            ToolInput::Sample(_) => {}
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
         }
     }
 
@@ -1691,7 +1697,7 @@ impl App {
                     }
                 }
             }
-            ToolInput::Sample(_) => {}
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
         }
     }
 

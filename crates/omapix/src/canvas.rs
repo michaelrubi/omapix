@@ -208,6 +208,9 @@ pub enum ToolInput {
     StrokeEnd,
     /// Alt+click or Alt+drag: sample the colour here.
     Sample(Pos2),
+    /// Alt+right-drag: change the brush's size (diameter, image pixels) and
+    /// hardness by these amounts, as in Photoshop.
+    BrushDrag { size: f32, hardness: f32 },
 }
 
 pub struct Canvas {
@@ -232,6 +235,9 @@ pub struct Canvas {
     checker: Option<TextureHandle>,
     /// A brush stroke is in progress.
     painting: bool,
+    /// Where an Alt+right-drag resizing the brush started (screen points),
+    /// to keep its outline there.
+    resizing: Option<Pos2>,
     /// Image pixel under the pointer, if any.
     pub hovered_pixel: Option<(u32, u32)>,
     /// Canvas area and scale from the last frame, for menu commands.
@@ -274,6 +280,7 @@ impl Canvas {
             rx,
             checker: None,
             painting: false,
+            resizing: None,
             hovered_pixel: None,
             rect: Rect::NOTHING,
             ppp: 1.0,
@@ -497,7 +504,7 @@ impl Canvas {
             && tool
         {
             match brush {
-                Some(diameter) => self.brush_cursor(ui, pointer, diameter),
+                Some(diameter) => self.brush_cursor(ui, self.resizing.unwrap_or(pointer), diameter),
                 None => self.drawn_cursor(ui, pointer, moves),
             }
             if let Some(badge) = badge {
@@ -611,6 +618,18 @@ impl Canvas {
         alt_samples: bool,
     ) -> Option<ToolInput> {
         let alt = ui.input(|i| i.modifiers.alt) && alt_samples;
+        // Alt+right-drag: left and right change the size, up and down the
+        // hardness (down is harder), with the outline staying put.
+        if alt && response.dragged_by(PointerButton::Secondary) {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            self.resizing = self.resizing.or(origin);
+            let d = response.drag_delta();
+            return Some(ToolInput::BrushDrag {
+                size: 2.0 * d.x * self.ppp / self.view.zoom,
+                hardness: d.y / 200.0,
+            });
+        }
+        self.resizing = None;
         let pointer = ui
             .input(|i| i.pointer.interact_pos())
             .map(|p| self.to_image(p));

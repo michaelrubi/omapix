@@ -365,6 +365,14 @@ impl Tools {
         }
     }
 
+    /// Change the active tool's brush size (diameter) and hardness by these
+    /// amounts, within their limits (Alt+right-drag).
+    pub fn drag_brush(&mut self, size: f32, hardness: f32) {
+        let s = self.settings_mut();
+        s.size = (s.size + size).clamp(MIN_SIZE, MAX_SIZE);
+        s.hardness = (s.hardness + hardness).clamp(0.0, 1.0);
+    }
+
     /// Select a tool, remembering it as the last-used tool in its group.
     pub fn select(&mut self, tool: Tool) {
         self.tool = tool;
@@ -793,6 +801,21 @@ mod tests {
         press(&ctx, &[(Key::CloseBracket, Modifiers::SHIFT)]);
         tools.keys(&ctx);
         assert_ne!(tools.settings().hardness, initial_hardness);
+    }
+
+    #[test]
+    fn dragging_changes_the_active_tools_brush_within_limits() {
+        let mut tools = Tools::default();
+        tools.select(Tool::Eraser);
+        let (size, brush) = (tools.settings().size, tools.brush);
+        tools.drag_brush(40.0, -2.0);
+        tools.drag_brush(0.0, 0.25);
+        assert_eq!(tools.settings().size, size + 40.0);
+        assert_eq!(tools.settings().hardness, 0.25);
+        assert_eq!(tools.brush, brush, "only the eraser's brush");
+        tools.drag_brush(-1e6, 5.0);
+        assert_eq!(tools.settings().size, MIN_SIZE);
+        assert_eq!(tools.settings().hardness, 1.0);
     }
 
     #[test]
