@@ -438,7 +438,27 @@ impl App {
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {
-            if self.modified() {
+            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cube")) {
+                if let Some(editor) = &mut self.editor {
+                    let mut lut = omapix_engine::adjust::ColorLookup::default();
+                    match lut.load_cube_file(&path) {
+                        Ok(()) => {
+                            let adj = omapix_engine::adjust::Adjustment::ColorLookup(lut);
+                            let label = format!("New {} Layer", adj.name());
+                            let (w, h) = (editor.doc.width, editor.doc.height);
+                            let index = editor.active_index().unwrap_or(0);
+                            editor.edit(&label, |doc, active| {
+                                let new = doc.next_layer_id();
+                                let insert_pos = (index + 1).min(doc.layers.len());
+                                doc.layers.insert(insert_pos, omapix_engine::Layer::adjustment(new, adj, w, h));
+                                *active = new;
+                            });
+                            editor.target = Target::Mask;
+                        }
+                        Err(err) => self.message(format!("Failed to load LUT: {err}"), true),
+                    }
+                }
+            } else if self.modified() {
                 self.message(
                     "Save or close the current image before opening another",
                     true,
@@ -717,6 +737,7 @@ impl App {
                     self.menu_item(ui, Command::NewColorBalance, None);
                     self.menu_item(ui, Command::NewSelectiveColor, None);
                     self.menu_item(ui, Command::NewChannelMixer, None);
+                    self.menu_item(ui, Command::NewColorLookup, None);
                     ui.separator();
                     self.menu_item(ui, Command::Invert, None);
                 });
@@ -1433,9 +1454,10 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         | Command::NewHueSaturation
         | Command::NewColorBalance
         | Command::NewSelectiveColor
-        | Command::NewChannelMixer => {
+        | Command::NewChannelMixer
+        | Command::NewColorLookup => {
             use omapix_engine::adjust::{
-                Adjustment, ChannelMixer, ColorBalance, Curves, HueSaturation, Levels,
+                Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curves, HueSaturation, Levels,
                 SelectiveColor,
             };
             let adjustment = match cmd {
@@ -1444,7 +1466,8 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 Command::NewHueSaturation => Adjustment::HueSaturation(HueSaturation::default()),
                 Command::NewColorBalance => Adjustment::ColorBalance(ColorBalance::default()),
                 Command::NewSelectiveColor => Adjustment::SelectiveColor(SelectiveColor::default()),
-                _ => Adjustment::ChannelMixer(ChannelMixer::default()),
+                Command::NewChannelMixer => Adjustment::ChannelMixer(ChannelMixer::default()),
+                _ => Adjustment::ColorLookup(ColorLookup::default()),
             };
             let label = format!("New {} Layer", adjustment.name());
             editor.edit(&label, |doc, active| {
@@ -1811,6 +1834,14 @@ mod tests {
         assert!(matches!(
             editor.doc.layers[2].adjustment,
             Some(omapix_engine::adjust::Adjustment::ChannelMixer(_))
+        ));
+        assert_eq!(editor.target, Target::Mask);
+
+        run_on_editor(&mut editor, Command::NewColorLookup, &ctx);
+        assert_eq!(editor.doc.layers.len(), 4);
+        assert!(matches!(
+            editor.doc.layers[3].adjustment,
+            Some(omapix_engine::adjust::Adjustment::ColorLookup(_))
         ));
         assert_eq!(editor.target, Target::Mask);
     }

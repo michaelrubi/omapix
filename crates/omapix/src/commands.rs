@@ -43,6 +43,7 @@ pub enum Command {
     NewColorBalance,
     NewSelectiveColor,
     NewChannelMixer,
+    NewColorLookup,
     GaussianBlur,
     FrequencySeparation,
     DodgeAndBurn,
@@ -104,6 +105,7 @@ impl Command {
         Command::NewColorBalance,
         Command::NewSelectiveColor,
         Command::NewChannelMixer,
+        Command::NewColorLookup,
         Command::GaussianBlur,
         Command::FrequencySeparation,
         Command::DodgeAndBurn,
@@ -115,6 +117,9 @@ impl Command {
 
     /// Look a command up by its name in code, e.g. "FrequencySeparation".
     pub fn from_name(name: &str) -> Option<Command> {
+        if name == "NewLut" {
+            return Some(Command::NewColorLookup);
+        }
         Self::ALL.iter().copied().find(|c| format!("{c:?}") == name)
     }
 
@@ -197,6 +202,7 @@ impl Command {
             Command::NewColorBalance => "Color Balance…",
             Command::NewSelectiveColor => "Selective Color…",
             Command::NewChannelMixer => "Channel Mixer…",
+            Command::NewColorLookup => "Color Lookup…",
             Command::GaussianBlur => "Gaussian Blur…",
             Command::FrequencySeparation => "Frequency Separation…",
             Command::DodgeAndBurn => "Dodge & Burn Layer",

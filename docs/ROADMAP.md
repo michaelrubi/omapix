@@ -101,7 +101,7 @@ The UI has been tested through the same code paths with scripts
 - **Histogram in Curves and Levels**, drawn behind the curve.
 - **Eyedroppers in Curves and Levels:** set black, grey and white points by clicking the image.
 - ~~**Selective Color** and **Channel Mixer** adjustment layers~~ (done).
-- **LUT adjustment layer:** load `.cube` files.
+- ~~**LUT adjustment layer:** load `.cube` files~~ (done).
 - **Monitor colour management:** read the display's ICC profile instead of assuming sRGB.
 - **Soft proofing** for print and web.
 

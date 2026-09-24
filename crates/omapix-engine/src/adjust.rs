@@ -5,6 +5,8 @@
 //! the document's space). [`Adjustment::prepare`] turns the settings into a
 //! fast form (lookup tables where possible) once per composite.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -15,6 +17,7 @@ pub enum Adjustment {
     ColorBalance(ColorBalance),
     SelectiveColor(SelectiveColor),
     ChannelMixer(ChannelMixer),
+    ColorLookup(ColorLookup),
 }
 
 impl Adjustment {
@@ -26,6 +29,7 @@ impl Adjustment {
             Adjustment::ColorBalance(_) => "Color Balance",
             Adjustment::SelectiveColor(_) => "Selective Color",
             Adjustment::ChannelMixer(_) => "Channel Mixer",
+            Adjustment::ColorLookup(_) => "Color Lookup",
         }
     }
 
@@ -44,6 +48,7 @@ impl Adjustment {
             Adjustment::ColorBalance(b) => Prepared::ColorBalance(b.clone()),
             Adjustment::SelectiveColor(s) => Prepared::SelectiveColor(s.prepare()),
             Adjustment::ChannelMixer(m) => Prepared::ChannelMixer(m.prepare()),
+            Adjustment::ColorLookup(lut) => Prepared::ColorLookup(lut.prepare()),
         }
     }
 
@@ -64,6 +69,7 @@ pub enum Prepared {
     ColorBalance(ColorBalance),
     SelectiveColor(PreparedSelectiveColor),
     ChannelMixer(PreparedChannelMixer),
+    ColorLookup(PreparedColorLookup),
 }
 
 impl Prepared {
@@ -75,6 +81,7 @@ impl Prepared {
             Prepared::ColorBalance(b) => b.apply(c),
             Prepared::SelectiveColor(s) => s.apply(c),
             Prepared::ChannelMixer(m) => m.apply(c),
+            Prepared::ColorLookup(lut) => lut.apply(c),
         }
     }
 }
@@ -530,6 +537,382 @@ impl PreparedChannelMixer {
     }
 }
 
+/// A 1D or 3D colour lookup table (LUT), loaded from a .cube file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColorLookup {
+    /// LUT name or title from the file or file stem.
+    pub title: String,
+    /// Input domain min (default [0, 0, 0]).
+    pub domain_min: [f32; 3],
+    /// Input domain max (default [1, 1, 1]).
+    pub domain_max: [f32; 3],
+    /// Grid size along each dimension (e.g. 33 for 33×33×33 3D LUT, or 1024 for 1D LUT).
+    pub size: usize,
+    /// True for 3D LUT, false for 1D LUT.
+    pub is_3d: bool,
+    /// Flattened table of RGB output values. Empty if no LUT is loaded.
+    pub table: Vec<[f32; 3]>,
+}
+
+impl Default for ColorLookup {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            domain_min: [0.0, 0.0, 0.0],
+            domain_max: [1.0, 1.0, 1.0],
+            size: 0,
+            is_3d: true,
+            table: Vec::new(),
+        }
+    }
+}
+
+impl ColorLookup {
+    pub fn is_empty(&self) -> bool {
+        self.size == 0 || self.table.is_empty()
+    }
+
+    /// Load a LUT from the contents of a .cube file.
+    pub fn load_cube_str(&mut self, content: &str, title_fallback: &str) -> Result<(), String> {
+        let parsed = parse_cube(content, title_fallback)?;
+        *self = parsed;
+        Ok(())
+    }
+
+    /// Load a LUT from a .cube file on disk.
+    pub fn load_cube_file<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<(), String> {
+        let path = path.as_ref();
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let fallback = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "LUT".into());
+        self.load_cube_str(&content, &fallback)
+    }
+
+    /// Parse a LUT from .cube file content.
+    pub fn from_cube_str(content: &str, title_fallback: &str) -> Result<Self, String> {
+        parse_cube(content, title_fallback)
+    }
+
+    pub fn prepare(&self) -> PreparedColorLookup {
+        if self.is_empty() {
+            return PreparedColorLookup::Identity;
+        }
+        let is_default_domain = self.domain_min == [0.0; 3] && self.domain_max == [1.0; 3];
+        let mut inv_domain = [1.0f32; 3];
+        for (i, inv) in inv_domain.iter_mut().enumerate() {
+            let range = self.domain_max[i] - self.domain_min[i];
+            *inv = if range.abs() > 1e-6 { 1.0 / range } else { 0.0 };
+        }
+        let table = Arc::new(self.table.clone());
+        if self.is_3d {
+            PreparedColorLookup::Lut3D {
+                size: self.size,
+                is_default_domain,
+                domain_min: self.domain_min,
+                inv_domain,
+                table,
+            }
+        } else {
+            PreparedColorLookup::Lut1D {
+                size: self.size,
+                is_default_domain,
+                domain_min: self.domain_min,
+                inv_domain,
+                table,
+            }
+        }
+    }
+}
+
+pub fn parse_cube(content: &str, title_fallback: &str) -> Result<ColorLookup, String> {
+    let mut title = None;
+    let mut size_1d = None;
+    let mut size_3d = None;
+    let mut domain_min = [0.0f32; 3];
+    let mut domain_max = [1.0f32; 3];
+    let mut table = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("TITLE") {
+            let t = rest.trim().trim_matches('"').trim();
+            if !t.is_empty() {
+                title = Some(t.to_string());
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("LUT_3D_SIZE") {
+            let s = rest
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| "LUT_3D_SIZE missing value".to_string())?
+                .parse::<usize>()
+                .map_err(|e| format!("Invalid LUT_3D_SIZE: {e}"))?;
+            if !(2..=256).contains(&s) {
+                return Err(format!("LUT_3D_SIZE {s} out of supported range (2..=256)"));
+            }
+            size_3d = Some(s);
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("LUT_1D_SIZE") {
+            let s = rest
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| "LUT_1D_SIZE missing value".to_string())?
+                .parse::<usize>()
+                .map_err(|e| format!("Invalid LUT_1D_SIZE: {e}"))?;
+            if !(2..=65536).contains(&s) {
+                return Err(format!("LUT_1D_SIZE {s} out of supported range (2..=65536)"));
+            }
+            size_1d = Some(s);
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("DOMAIN_MIN") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let r = parts[0].parse::<f32>().map_err(|e| format!("DOMAIN_MIN r: {e}"))?;
+                let g = parts[1].parse::<f32>().map_err(|e| format!("DOMAIN_MIN g: {e}"))?;
+                let b = parts[2].parse::<f32>().map_err(|e| format!("DOMAIN_MIN b: {e}"))?;
+                domain_min = [r, g, b];
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("DOMAIN_MAX") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let r = parts[0].parse::<f32>().map_err(|e| format!("DOMAIN_MAX r: {e}"))?;
+                let g = parts[1].parse::<f32>().map_err(|e| format!("DOMAIN_MAX g: {e}"))?;
+                let b = parts[2].parse::<f32>().map_err(|e| format!("DOMAIN_MAX b: {e}"))?;
+                domain_max = [r, g, b];
+            }
+            continue;
+        }
+
+        let mut tokens = line.split_whitespace();
+        let tok1 = match tokens.next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let first_char = tok1.chars().next().unwrap_or(' ');
+        if !first_char.is_ascii_digit() && first_char != '-' && first_char != '+' && first_char != '.' {
+            continue;
+        }
+
+        let r = match tok1.parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let tok2 = match tokens.next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let g = match tok2.parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let tok3 = match tokens.next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let b = match tok3.parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        table.push([r, g, b]);
+    }
+
+    let is_3d = match (size_3d, size_1d) {
+        (Some(s3), _) => {
+            let expected = s3 * s3 * s3;
+            if table.len() != expected {
+                return Err(format!(
+                    "Expected {expected} data points for 3D LUT of size {s3}, found {}",
+                    table.len()
+                ));
+            }
+            true
+        }
+        (None, Some(s1)) => {
+            if table.len() != s1 {
+                return Err(format!(
+                    "Expected {s1} data points for 1D LUT of size {s1}, found {}",
+                    table.len()
+                ));
+            }
+            false
+        }
+        (None, None) => {
+            let len = table.len();
+            let cbrt = (len as f64).cbrt().round() as usize;
+            if cbrt >= 2 && cbrt * cbrt * cbrt == len {
+                size_3d = Some(cbrt);
+                true
+            } else if len >= 2 {
+                size_1d = Some(len);
+                false
+            } else {
+                return Err("No LUT size specified in .cube file".to_string());
+            }
+        }
+    };
+
+    let size = if is_3d {
+        size_3d.unwrap()
+    } else {
+        size_1d.unwrap()
+    };
+
+    Ok(ColorLookup {
+        title: title.unwrap_or_else(|| title_fallback.to_string()),
+        domain_min,
+        domain_max,
+        size,
+        is_3d,
+        table,
+    })
+}
+
+#[derive(Clone)]
+pub enum PreparedColorLookup {
+    Identity,
+    Lut1D {
+        size: usize,
+        is_default_domain: bool,
+        domain_min: [f32; 3],
+        inv_domain: [f32; 3],
+        table: Arc<Vec<[f32; 3]>>,
+    },
+    Lut3D {
+        size: usize,
+        is_default_domain: bool,
+        domain_min: [f32; 3],
+        inv_domain: [f32; 3],
+        table: Arc<Vec<[f32; 3]>>,
+    },
+}
+
+impl PreparedColorLookup {
+    #[inline]
+    pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
+        match self {
+            Self::Identity => c,
+            Self::Lut1D {
+                size,
+                is_default_domain,
+                domain_min,
+                inv_domain,
+                table,
+            } => {
+                if *size < 2 || table.len() < *size {
+                    return c;
+                }
+                let norm = if *is_default_domain {
+                    c
+                } else {
+                    [
+                        ((c[0] - domain_min[0]) * inv_domain[0]).clamp(0.0, 1.0),
+                        ((c[1] - domain_min[1]) * inv_domain[1]).clamp(0.0, 1.0),
+                        ((c[2] - domain_min[2]) * inv_domain[2]).clamp(0.0, 1.0),
+                    ]
+                };
+                let n_minus_1 = (*size - 1) as f32;
+                let max_idx = *size - 2;
+                let mut out = [0.0f32; 3];
+                for ch in 0..3 {
+                    let pos = norm[ch].clamp(0.0, 1.0) * n_minus_1;
+                    let i = (pos as usize).min(max_idx);
+                    let t = pos - i as f32;
+                    let v0 = table[i][ch];
+                    let v1 = table[i + 1][ch];
+                    out[ch] = (v0 + (v1 - v0) * t).clamp(0.0, 1.0);
+                }
+                out
+            }
+            Self::Lut3D {
+                size,
+                is_default_domain,
+                domain_min,
+                inv_domain,
+                table,
+            } => {
+                let s = *size;
+                if s < 2 || table.len() < s * s * s {
+                    return c;
+                }
+                let norm = if *is_default_domain {
+                    c
+                } else {
+                    [
+                        ((c[0] - domain_min[0]) * inv_domain[0]).clamp(0.0, 1.0),
+                        ((c[1] - domain_min[1]) * inv_domain[1]).clamp(0.0, 1.0),
+                        ((c[2] - domain_min[2]) * inv_domain[2]).clamp(0.0, 1.0),
+                    ]
+                };
+                let n_minus_1 = (s - 1) as f32;
+                let x = norm[0].clamp(0.0, 1.0) * n_minus_1;
+                let y = norm[1].clamp(0.0, 1.0) * n_minus_1;
+                let z = norm[2].clamp(0.0, 1.0) * n_minus_1;
+
+                let max_idx = s - 2;
+                let i0 = (x as usize).min(max_idx);
+                let j0 = (y as usize).min(max_idx);
+                let k0 = (z as usize).min(max_idx);
+
+                let fx = x - i0 as f32;
+                let fy = y - j0 as f32;
+                let fz = z - k0 as f32;
+
+                let stride_g = s;
+                let stride_b = s * s;
+
+                let b0 = k0 * stride_b;
+                let b1 = (k0 + 1) * stride_b;
+
+                let g0_b0 = j0 * stride_g + b0;
+                let g1_b0 = (j0 + 1) * stride_g + b0;
+                let g0_b1 = j0 * stride_g + b1;
+                let g1_b1 = (j0 + 1) * stride_g + b1;
+
+                let i1 = i0 + 1;
+
+                let c000 = table[i0 + g0_b0];
+                let c100 = table[i1 + g0_b0];
+                let c010 = table[i0 + g1_b0];
+                let c110 = table[i1 + g1_b0];
+                let c001 = table[i0 + g0_b1];
+                let c101 = table[i1 + g0_b1];
+                let c011 = table[i0 + g1_b1];
+                let c111 = table[i1 + g1_b1];
+
+                let mut out = [0.0f32; 3];
+                for ch in 0..3 {
+                    let c00 = c000[ch] + (c100[ch] - c000[ch]) * fx;
+                    let c10 = c010[ch] + (c110[ch] - c010[ch]) * fx;
+                    let c01 = c001[ch] + (c101[ch] - c001[ch]) * fx;
+                    let c11 = c011[ch] + (c111[ch] - c011[ch]) * fx;
+
+                    let c0 = c00 + (c10 - c00) * fy;
+                    let c1 = c01 + (c11 - c01) * fy;
+
+                    out[ch] = (c0 + (c1 - c0) * fz).clamp(0.0, 1.0);
+                }
+                out
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +936,7 @@ mod tests {
             Adjustment::ColorBalance(ColorBalance::default()),
             Adjustment::SelectiveColor(SelectiveColor::default()),
             Adjustment::ChannelMixer(ChannelMixer::default()),
+            Adjustment::ColorLookup(ColorLookup::default()),
         ] {
             let p = adj.prepare();
             for c in samples {
@@ -734,5 +1118,91 @@ mod tests {
         };
         let adj_cm = Adjustment::ChannelMixer(cm);
         assert_eq!(Adjustment::from_json(&adj_cm.to_json()), Some(adj_cm));
+
+        let cube = "TITLE \"Test\"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+        let lut = ColorLookup::from_cube_str(cube, "fallback").unwrap();
+        let adj_lut = Adjustment::ColorLookup(lut);
+        assert_eq!(Adjustment::from_json(&adj_lut.to_json()), Some(adj_lut));
+    }
+
+    #[test]
+    fn color_lookup_3d_identity_and_grading() {
+        // Identity 2x2x2 cube
+        let id_cube = r#"
+            # Comment
+            TITLE "Identity 2x2x2"
+            LUT_3D_SIZE 2
+            DOMAIN_MIN 0.0 0.0 0.0
+            DOMAIN_MAX 1.0 1.0 1.0
+
+            0.0 0.0 0.0
+            1.0 0.0 0.0
+            0.0 1.0 0.0
+            1.0 1.0 0.0
+            0.0 0.0 1.0
+            1.0 0.0 1.0
+            0.0 1.0 1.0
+            1.0 1.0 1.0
+        "#;
+        let lut = ColorLookup::from_cube_str(id_cube, "fallback").unwrap();
+        assert_eq!(lut.title, "Identity 2x2x2");
+        assert_eq!(lut.size, 2);
+        assert!(lut.is_3d);
+        let p = Adjustment::ColorLookup(lut).prepare();
+
+        let samples = [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.25, 0.5, 0.75],
+            [0.1, 0.9, 0.3],
+        ];
+        for c in samples {
+            assert!(
+                close(p.apply(c), c, 1e-5),
+                "identity 3D LUT changed {c:?} to {:?}",
+                p.apply(c)
+            );
+        }
+
+        // Invert-red 2x2x2 cube
+        let invert_r_cube = r#"
+            LUT_3D_SIZE 2
+            1.0 0.0 0.0
+            0.0 0.0 0.0
+            1.0 1.0 0.0
+            0.0 1.0 0.0
+            1.0 0.0 1.0
+            0.0 0.0 1.0
+            1.0 1.0 1.0
+            0.0 1.0 1.0
+        "#;
+        let lut_inv = ColorLookup::from_cube_str(invert_r_cube, "my_lut").unwrap();
+        assert_eq!(lut_inv.title, "my_lut");
+        let p_inv = Adjustment::ColorLookup(lut_inv).prepare();
+        let out = p_inv.apply([0.2, 0.4, 0.8]);
+        assert!(close(out, [0.8, 0.4, 0.8], 1e-4), "expected [0.8, 0.4, 0.8], got {out:?}");
+    }
+
+    #[test]
+    fn color_lookup_1d_interpolation() {
+        let cube_1d = r#"
+            TITLE "Invert 1D"
+            LUT_1D_SIZE 2
+            1.0 1.0 1.0
+            0.0 0.0 0.0
+        "#;
+        let lut = ColorLookup::from_cube_str(cube_1d, "").unwrap();
+        assert!(!lut.is_3d);
+        assert_eq!(lut.size, 2);
+        let p = Adjustment::ColorLookup(lut).prepare();
+        let out = p.apply([0.25, 0.7, 1.0]);
+        assert!(close(out, [0.75, 0.3, 0.0], 1e-4));
+    }
+
+    #[test]
+    fn color_lookup_errors() {
+        assert!(ColorLookup::from_cube_str("LUT_3D_SIZE 2\n0 0 0\n", "").is_err());
+        assert!(ColorLookup::from_cube_str("LUT_1D_SIZE 3\n0 0 0\n1 1 1\n", "").is_err());
+        assert!(ColorLookup::from_cube_str("random text with no numbers", "").is_err());
     }
 }

@@ -128,9 +128,10 @@ Linux yet).
 
 ### 4. Adjustments (mostly done)
 
-Done: Curves, Levels, Hue/Saturation and Color Balance as adjustment
-layers with a live Properties panel, saved in OpenRaster. Next: LUT
-loading, histogram in Curves, Selective Color.
+Done: Curves, Levels, Hue/Saturation, Color Balance, Selective Color,
+Channel Mixer and Color Lookup (LUT) as adjustment layers with a live
+Properties panel, saved in OpenRaster. Next: histogram in Curves,
+eyedroppers in Curves and Levels.
 
 ### 5. Beyond
 

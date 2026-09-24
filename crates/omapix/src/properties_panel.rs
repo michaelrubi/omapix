@@ -1,9 +1,13 @@
 //! The Properties panel: settings of the selected adjustment layer, edited
 //! live, as in Photoshop's Properties panel.
 
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+
 use egui::{Color32, ComboBox, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, pos2, vec2};
 use omapix_engine::adjust::{
-    Adjustment, ChannelMixer, ColorBalance, Curve, Curves, HueSaturation, Levels, SelectiveColor,
+    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, HueSaturation, Levels,
+    SelectiveColor,
 };
 
 use crate::editor::Editor;
@@ -26,6 +30,10 @@ pub struct PropertiesPanel {
     selective_color_range: usize,
     /// Channel Mixer selected output channel: 0 = Red, 1 = Green, 2 = Blue.
     mixer_channel: usize,
+    /// Background thread receiver for picking a LUT file.
+    lut_picker: Option<Receiver<Option<PathBuf>>>,
+    /// Last error message from loading a LUT, if any.
+    lut_error: Option<String>,
 }
 
 impl PropertiesPanel {
@@ -57,6 +65,9 @@ impl PropertiesPanel {
                         Adjustment::ChannelMixer(_) => {
                             Adjustment::ChannelMixer(ChannelMixer::default())
                         }
+                        Adjustment::ColorLookup(_) => {
+                            Adjustment::ColorLookup(ColorLookup::default())
+                        }
                     };
                 }
             });
@@ -69,6 +80,7 @@ impl PropertiesPanel {
             Adjustment::ColorBalance(b) => self.color_balance(ui, b),
             Adjustment::SelectiveColor(s) => self.selective_color(ui, s),
             Adjustment::ChannelMixer(m) => self.channel_mixer(ui, m, theme),
+            Adjustment::ColorLookup(lut) => self.color_lookup(ui, lut, theme),
         }
         if adjustment != original {
             let label = format!("Adjust {}", adjustment.name());
@@ -292,6 +304,64 @@ impl PropertiesPanel {
         ui.add_space(4.0);
         ui.checkbox(&mut m.monochrome, "Monochrome");
     }
+
+    fn color_lookup(&mut self, ui: &mut Ui, lut: &mut ColorLookup, theme: &Theme) {
+        if let Some(file) = self.lut_picker.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.lut_picker = None;
+            if let Some(path) = file {
+                match lut.load_cube_file(&path) {
+                    Ok(()) => self.lut_error = None,
+                    Err(e) => self.lut_error = Some(e),
+                }
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("3D LUT:").small());
+            let name = if lut.is_empty() {
+                "(None)"
+            } else {
+                &lut.title
+            };
+            ui.label(RichText::new(name).strong());
+        });
+
+        if !lut.is_empty() {
+            let dim = if lut.is_3d {
+                format!("{}×{}×{} 3D LUT", lut.size, lut.size, lut.size)
+            } else {
+                format!("{} 1D LUT", lut.size)
+            };
+            ui.label(RichText::new(dim).small().color(theme.dark_foreground));
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("Load 3D LUT…").clicked() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let file = rfd::FileDialog::new()
+                        .set_title("Load LUT")
+                        .add_filter("Cube LUT (*.cube)", &["cube"])
+                        .pick_file();
+                    let _ = tx.send(file);
+                    ctx.request_repaint();
+                });
+                self.lut_picker = Some(rx);
+                self.lut_error = None;
+            }
+            if !lut.is_empty() && ui.button("Clear").clicked() {
+                *lut = ColorLookup::default();
+                self.lut_error = None;
+            }
+        });
+
+        if let Some(err) = &self.lut_error {
+            ui.add_space(4.0);
+            ui.colored_label(theme.red, format!("Error: {err}"));
+        }
+    }
 }
 
 /// Add a point at `p` between its neighbours; returns its index.
@@ -406,6 +476,9 @@ mod tests {
         let cm = Adjustment::ChannelMixer(ChannelMixer::default());
         doc.layers
             .push(omapix_engine::Layer::adjustment(102, cm, w, h));
+        let cl = Adjustment::ColorLookup(ColorLookup::default());
+        doc.layers
+            .push(omapix_engine::Layer::adjustment(103, cl, w, h));
 
         let mut editor = Editor::new(doc).unwrap();
         let mut panel = PropertiesPanel::default();
@@ -431,5 +504,15 @@ mod tests {
         });
         out.textures_delta.clear();
         assert!(shown, "panel should show for channel mixer adjustment");
+
+        // Target Color Lookup layer
+        editor.active = 103;
+        let mut shown = false;
+        let input = egui::RawInput::default();
+        let mut out = ctx.run_ui(input, |ui| {
+            shown = panel.show(ui, &mut editor, &theme);
+        });
+        out.textures_delta.clear();
+        assert!(shown, "panel should show for color lookup adjustment");
     }
 }
