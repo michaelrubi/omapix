@@ -1390,7 +1390,7 @@ impl App {
                 }
                 self.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
             }
-            ScriptStep::Tool(tool) => self.tools.tool = tool,
+            ScriptStep::Tool(tool) => self.tools.select(tool),
             ScriptStep::Size(n) => self.tools.set_size(n),
             ScriptStep::Opacity(o) => self.tools.set_opacity(o),
             ScriptStep::Color(c) => self.tools.foreground = c,
