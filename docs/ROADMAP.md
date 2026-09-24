@@ -5,9 +5,13 @@ covers the architecture and what's already built.
 
 Status: milestones 1–4 are largely done. Omapix can open a darktable TIFF, retouch it with layers, masks, healing and frequency separation, grade it with adjustment layers, and save or export it.
 
-## 1. Layers panel UX (next)
+## 1. Everyday UI and layers panel UX (next)
 
 These come from using the app for real, and they make everyday work smoother.
+
+### ~~Active tool contrast styling~~ (done)
+
+The active tool in the left toolbar is indicated cleanly via high contrast (`foreground`) against muted inactive tools (`dark_foreground`) using frameless buttons, replacing the text-cursor style selection box.
 
 ### ~~Clicking a layer selects it~~ (done)
 
@@ -43,6 +47,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Dragging layers to reorder them, including by the name
 - [ ] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
 - [x] Right-clicking layer rows and mask thumbnails for context menus
+- [x] Active tool contrast styling and frameless toolbar icons
 - [ ] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
