@@ -182,6 +182,16 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
         })
     }
 
+    /// True if tile (col, row) is the same shared tile in both images (or
+    /// empty in both), so it is known to be equal without comparing pixels.
+    pub fn same_tile(&self, other: &Self, col: u32, row: u32) -> bool {
+        match (self.tile(col, row), other.tile(col, row)) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::ptr::eq(a, b),
+            _ => false,
+        }
+    }
+
     /// True if two images share every tile, so they are known to be equal
     /// without comparing pixels.
     pub fn same_tiles(&self, other: &Self) -> bool {

@@ -19,6 +19,7 @@ pub mod ops;
 pub mod ora;
 pub mod pyramid;
 pub mod raster;
+pub mod reduced;
 pub mod selection;
 pub mod tiled;
 pub mod tiles;

@@ -88,6 +88,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [ ] Marching ants move, and Omapix goes idle again once there's no selection
+- [ ] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
 - [ ] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [ ] Open, Save As and Export file dialogs (xdg portal)
@@ -130,8 +131,11 @@ The UI has been tested through the same code paths with scripts
 
 ## 6. Performance
 
-- **Faster slider drags:** opacity and adjustment changes recomposite the whole image (about 100 ms at 24 MP). Recomposite only the visible area first, then the rest.
+- ~~**Faster slider drags**~~ (done): edits redraw the canvas in place, the part on screen first, then the rest in the background, which a newer edit cuts short. Zoomed out, what's on screen is first previewed from layers shrunk to the size shown (kept until they change), then replaced by the exact full-size result. With four layers at 24 MP, the screen follows a slider in about 60 ms at fit to screen (was about 300 ms), 20 ms at 25 % and 45 ms at 100 %. The Move tool's drags speed up the same way.
+  - Zoomed out, the preview blends shrunk layers rather than shrinking the blended image, so non-linear modes (Soft Light, Overlay…) can shift very slightly when the exact result lands.
+  - Shrunk layers cost a quarter of each layer's memory at 50 % (a sixteenth at 25 %) while zoomed out.
 - **GPU compositing:** move blend modes to the GPU for display, keeping the CPU path for export (see DESIGN.md).
+  - Plan: upload each layer and mask at the pyramid level on screen (the shrunk layers from `reduced.rs` are that input), composite at screen resolution in a WGSL shader through egui's wgpu paint callback, bake each adjustment and the display colour transform into a 3D LUT on the CPU so the shader has one path for all of them, and build isolated groups in offscreen textures. The CPU composite stays for export, the pixel readout and eyedroppers. Costs about 190 MB of GPU memory per full-size 24 MP layer, far less zoomed out.
 - **Memory:** free display textures that have been off-screen for a while.
 - **Cache group results:** an isolated group (any mode but Pass Through) composites its contents into its own buffer for every tile on every render. Keep that result while nothing inside the group changes, so dragging a slider on a layer above a big group doesn't redo the whole group.
 
