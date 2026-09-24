@@ -104,6 +104,8 @@ enum ScriptStep {
     History(usize),
     /// `BlendIf this|under black black_split white_split white` (0–255).
     BlendIf(bool, [f32; 4]),
+    /// Magic Wand tolerance (0–255).
+    Tolerance(u8),
 }
 
 impl ScriptStep {
@@ -115,6 +117,7 @@ impl ScriptStep {
             ("Stroke", &[x0, y0, x1, y1]) => ScriptStep::Stroke([x0, y0, x1, y1]),
             ("Size", &[n]) => ScriptStep::Size(n),
             ("Opacity", &[n]) => ScriptStep::Opacity(n / 100.0),
+            ("Tolerance", &[n]) => ScriptStep::Tolerance(n as u8),
             ("Color", &[r, g, b]) => ScriptStep::Color([r as u8, g as u8, b as u8]),
             ("Source", &[x, y]) => ScriptStep::Source(egui::pos2(x, y)),
             ("Look", &[x, y]) => ScriptStep::Look(egui::pos2(x, y)),
@@ -150,6 +153,7 @@ impl ScriptStep {
                     ScriptStep::Tool(crate::tools::Tool::EllipticalMarquee)
                 }
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
+                "Wand" | "MagicWand" => ScriptStep::Tool(crate::tools::Tool::MagicWand),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -1285,6 +1289,7 @@ impl App {
                             points.truncate(1);
                             points.push(p);
                         }
+                        crate::tools::Tool::MagicWand => {}
                         _ => {
                             // Skip points closer than a pixel to the last.
                             if points.last().is_none_or(|l| l.distance(p) >= 1.0) {
@@ -1299,6 +1304,24 @@ impl App {
                     return;
                 };
                 let (w, h) = (editor.doc.width, editor.doc.height);
+                if self.tools.tool == crate::tools::Tool::MagicWand {
+                    let p = points[0];
+                    if p.x < 0.0 || p.y < 0.0 || p.x >= w as f32 || p.y >= h as f32 {
+                        if how == Combine::Replace && editor.doc.selection.is_some() {
+                            editor.edit("Deselect", |doc, _| doc.selection = None);
+                        }
+                        return;
+                    }
+                    editor.magic_wand(
+                        (p.x as u32, p.y as u32),
+                        omapix_engine::raster::widen(self.tools.wand_tolerance),
+                        self.tools.wand_contiguous,
+                        self.tools.wand_anti_alias,
+                        self.tools.sample_all,
+                        how,
+                    );
+                    return;
+                }
                 // A click without a real drag.
                 let tiny = points.iter().all(|q| q.distance(points[0]) < 2.0);
                 let p1 = if (self.tools.tool == crate::tools::Tool::Marquee
@@ -1406,6 +1429,7 @@ impl App {
             ScriptStep::Tool(tool) => self.tools.select(tool),
             ScriptStep::Size(n) => self.tools.set_size(n),
             ScriptStep::Opacity(o) => self.tools.set_opacity(o),
+            ScriptStep::Tolerance(t) => self.tools.wand_tolerance = t,
             ScriptStep::Color(c) => self.tools.foreground = c,
             ScriptStep::Source(p) => self.tools.set_source(p),
             ScriptStep::BlendIf(under, range) => {
@@ -2578,5 +2602,31 @@ mod tests {
         assert!(editor.doc.layers.iter().all(|l| !l.clipped));
         editor.undo();
         assert!(editor.doc.layer(layer).unwrap().clipped);
+    }
+
+    #[test]
+    fn magic_wand_tool_selects_and_deselects() {
+        let mut app = test_app();
+        app.tools.select(crate::tools::Tool::MagicWand);
+        assert_eq!(app.tools.tool, crate::tools::Tool::MagicWand);
+
+        // Click at (50, 50)
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::NONE,
+        );
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+        let sel = app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap();
+        assert_eq!(sel.at(50, 50), 1.0);
+
+        // Click outside image deselects
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(700.0, 500.0)),
+            egui::Modifiers::NONE,
+        );
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_none());
     }
 }
