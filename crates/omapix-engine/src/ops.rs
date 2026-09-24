@@ -176,6 +176,19 @@ pub fn filtered(doc: &Document, id: u64, filter: &crate::filters::LayerFilter) -
     Some(within_selection(&layer.pixels, out, doc.selection.as_ref()))
 }
 
+/// Layer `id`'s mask after `filter`, which sees it as a grey image, within
+/// the selection if there is one. `None` if there's no such mask.
+pub fn filtered_mask(
+    doc: &Document,
+    id: u64,
+    filter: &crate::filters::LayerFilter,
+) -> Option<Tiled<u16>> {
+    let mask = &doc.layer(id)?.mask.as_ref()?.pixels;
+    let grey = mask.map(|v| [v, v, v, u16::MAX]);
+    let out = within_selection(&grey, filter.apply(&grey), doc.selection.as_ref());
+    Some(out.map(|p| p[0]))
+}
+
 /// One-step High Pass sharpening: a "High Pass Sharpening" layer in
 /// Overlay mode above layer index `above`, holding the High Pass of the
 /// visible image's luminance, so it sharpens tone without colour fringes.
@@ -463,6 +476,40 @@ mod tests {
         // Either side of the edge moves apart: darker below, lighter above.
         assert!(at(&after, 21) < at(&before, 21));
         assert!(at(&after, 39) > at(&before, 39));
+    }
+
+    #[test]
+    fn filters_work_on_masks_within_the_selection() {
+        use crate::filters::LayerFilter;
+        use crate::layer::Mask;
+        let mut doc = doc_with(vec![[30000, 30000, 30000, 65535]; 300 * 10], 300, 10);
+        // A hard-edged mask: hidden on the left, revealed on the right.
+        let mut mask = Mask::white(300, 10);
+        mask.pixels = Tiled::from_slice(300, 10, 0, &(0..3000).map(|i| if i % 300 < 150 { 0 } else { 65535 }).collect::<Vec<u16>>());
+        doc.layers[0].mask = Some(mask);
+        let id = doc.layers[0].id;
+        let blur = LayerFilter::GaussianBlur { radius: 4.0 };
+        let soft = filtered_mask(&doc, id, &blur).unwrap();
+        // The edge softens; far from it the mask is unchanged.
+        assert!(soft.get(148, 5) > 0 && soft.get(151, 5) < 65535);
+        assert_eq!((soft.get(10, 5), soft.get(290, 5)), (0, 65535));
+        // Only within the selection.
+        doc.selection = Some(crate::selection::Selection::rectangle(300, 10, (0.0, 0.0), (140.0, 10.0)));
+        let limited = filtered_mask(&doc, id, &blur).unwrap();
+        assert_eq!(limited.get(151, 5), 65535);
+        // Noise lands on a mid-grey mask.
+        let noise = LayerFilter::AddNoise(crate::filters::NoiseOptions {
+            amount: 50.0,
+            tonal_falloff: false,
+            ..Default::default()
+        });
+        doc.selection = None;
+        doc.layers[0].mask.as_mut().unwrap().pixels = Tiled::new(300, 10, 32768);
+        let noisy = filtered_mask(&doc, id, &noise).unwrap();
+        assert!((0..300).any(|x| noisy.get(x, 5).abs_diff(32768) > 2000));
+        // A layer without a mask has nothing to filter.
+        doc.layers[0].mask = None;
+        assert!(filtered_mask(&doc, id, &blur).is_none());
     }
 
     #[test]

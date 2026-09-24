@@ -155,6 +155,7 @@ impl ScriptStep {
                 ("blur", &[radius]) => ScriptStep::View(View::Filter {
                     layer: 0,
                     filter: LayerFilter::GaussianBlur { radius },
+                    mask: false,
                 }),
                 ("noise", &[amount]) => ScriptStep::View(View::AddNoise {
                     layer: 0,
@@ -596,8 +597,13 @@ impl App {
             Command::Paste => self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
             Command::GaussianBlur | Command::HighPass | Command::UnsharpMask => {
-                editor.target == Target::Pixels && !no_pixels
+                if editor.target == Target::Mask {
+                    has_mask
+                } else {
+                    !no_pixels
+                }
             }
+            Command::AddNoise => editor.target == Target::Pixels || has_mask,
             Command::Invert => editor.target == Target::Mask || !no_pixels,
             _ => true,
         }
@@ -626,6 +632,14 @@ impl App {
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
             Command::ExportTiff => self.pick(Purpose::ExportTiff, ctx),
             Command::ExportJpeg => self.pick(Purpose::ExportJpeg, ctx),
+            // On a mask, noise goes straight into it; on pixels, onto a
+            // Grain layer.
+            Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target == Target::Mask) => {
+                self.dialog = Some(Dialog::Filter {
+                    filter: LayerFilter::AddNoise(self.noise_options),
+                    preview: true,
+                });
+            }
             Command::AddNoise => {
                 self.dialog = Some(Dialog::AddNoise {
                     options: self.noise_options,
@@ -773,15 +787,22 @@ impl App {
             LayerFilter::GaussianBlur { radius } => self.blur_radius = radius,
             LayerFilter::HighPass { radius } => self.high_pass_radius = radius,
             LayerFilter::UnsharpMask { .. } => self.unsharp_mask = filter,
+            LayerFilter::AddNoise(options) => self.noise_options = options,
         }
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let id = editor.active;
+        let (id, mask) = (editor.active, editor.target == Target::Mask);
         editor.edit_in_background(
             filter.name(),
             move |doc, _| {
-                if let Some(pixels) = ops::filtered(doc, id, &filter) {
+                if mask {
+                    if let Some(pixels) = ops::filtered_mask(doc, id, &filter)
+                        && let Some(m) = &mut doc.layer_mut(id).expect("just filtered").mask
+                    {
+                        m.pixels = pixels;
+                    }
+                } else if let Some(pixels) = ops::filtered(doc, id, &filter) {
                     doc.layer_mut(id).expect("just filtered").pixels = pixels;
                 }
             },
@@ -1222,6 +1243,7 @@ impl App {
                                     .color(hint),
                             );
                         }
+                        LayerFilter::AddNoise(options) => noise_controls(ui, options),
                     }
                     ui.add_space(4.0);
                     ui.checkbox(preview, "Preview");
@@ -1242,41 +1264,7 @@ impl App {
                 Dialog::AddNoise { options, preview } => {
                     ui.heading("Add Noise");
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Amount");
-                        ui.add(
-                            egui::Slider::new(&mut options.amount, 0.0..=100.0)
-                                .suffix(" %")
-                                .fixed_decimals(1),
-                        );
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Distribution:");
-                        ui.radio_value(&mut options.distribution, NoiseDistribution::Uniform, "Uniform");
-                        ui.radio_value(&mut options.distribution, NoiseDistribution::Gaussian, "Gaussian");
-                    });
-                    ui.add_space(4.0);
-                    ui.checkbox(&mut options.monochromatic, "Monochromatic");
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Grain Size");
-                        ui.add(
-                            egui::Slider::new(&mut options.grain_size, 1.0..=20.0)
-                                .suffix(" px")
-                                .fixed_decimals(1),
-                        );
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Roughness");
-                        ui.add(
-                            egui::Slider::new(&mut options.roughness, 0.0..=1.0)
-                                .fixed_decimals(2),
-                        );
-                    });
-                    ui.add_space(4.0);
-                    ui.checkbox(&mut options.tonal_falloff, "Shadow/highlight falloff");
+                    noise_controls(ui, options);
                     ui.add_space(8.0);
                     ui.checkbox(preview, "Preview");
                     ui.add_space(12.0);
@@ -1348,6 +1336,7 @@ impl App {
                         View::Filter {
                             layer: editor.active,
                             filter: *filter,
+                            mask: editor.target == Target::Mask,
                         }
                     } else {
                         View::Image
@@ -1782,6 +1771,7 @@ impl App {
                         View::Filter { filter, .. } => View::Filter {
                             layer: editor.active,
                             filter,
+                            mask: editor.target == Target::Mask,
                         },
                         View::AddNoise { options, .. } => View::AddNoise {
                             layer: editor.active,
@@ -1829,6 +1819,45 @@ const DEFAULT_UNSHARP_MASK: LayerFilter = LayerFilter::UnsharpMask {
     radius: 1.5,
     threshold: 2.0,
 };
+
+/// Add Noise's settings, for its dialog and for noise on a mask.
+fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
+    ui.horizontal(|ui| {
+        ui.label("Amount");
+        ui.add(
+            egui::Slider::new(&mut options.amount, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(1),
+        );
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Distribution:");
+        ui.radio_value(&mut options.distribution, NoiseDistribution::Uniform, "Uniform");
+        ui.radio_value(&mut options.distribution, NoiseDistribution::Gaussian, "Gaussian");
+    });
+    ui.add_space(4.0);
+    ui.checkbox(&mut options.monochromatic, "Monochromatic");
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label("Grain Size");
+        ui.add(
+            egui::Slider::new(&mut options.grain_size, 1.0..=20.0)
+                .suffix(" px")
+                .fixed_decimals(1),
+        );
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Roughness");
+        ui.add(
+            egui::Slider::new(&mut options.roughness, 0.0..=1.0)
+                .fixed_decimals(2),
+        );
+    });
+    ui.add_space(4.0);
+    ui.checkbox(&mut options.tonal_falloff, "Shadow/highlight falloff");
+}
 
 /// A radius in pixels, for filter and radius dialogs.
 fn radius_field(ui: &mut Ui, radius: &mut f32) {
@@ -2660,7 +2689,14 @@ mod tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| app.dialogs(ctx));
         output.textures_delta.clear();
         let view = app.editor.as_ref().unwrap().view();
-        assert_eq!(view, View::Filter { layer: active, filter: stronger });
+        assert_eq!(
+            view,
+            View::Filter {
+                layer: active,
+                filter: stronger,
+                mask: false,
+            }
+        );
 
         app.dialog = None;
         app.apply_filter(stronger, &ctx);
@@ -2672,6 +2708,41 @@ mod tests {
         assert_eq!(editor.undo_label(), Some("Unsharp Mask"));
         app.run(Command::UnsharpMask, &ctx);
         assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == stronger));
+    }
+
+    #[test]
+    fn filters_on_a_targeted_mask_change_the_mask_not_the_pixels() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let editor = app.editor.as_mut().unwrap();
+        let id = editor.active;
+        let (w, h) = (editor.doc.width, editor.doc.height);
+        editor.doc.selection = None;
+        editor.doc.layer_mut(id).unwrap().mask = Some(Mask {
+            pixels: Tiled::new(w, h, 32768),
+            enabled: true,
+        });
+        editor.target = Target::Mask;
+        let pixels = editor.doc.layer(id).unwrap().pixels.to_vec();
+
+        // Add Noise on a mask goes straight into it, through the filter dialog.
+        app.run(Command::AddNoise, &ctx);
+        let Some(Dialog::Filter { filter, .. }) = app.dialog.take() else {
+            panic!("no filter dialog");
+        };
+        assert!(matches!(filter, LayerFilter::AddNoise(_)));
+        app.apply_filter(filter, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Add Noise"));
+        assert_eq!(editor.doc.layers.len(), 1, "no Grain layer");
+        let layer = editor.doc.layer(id).unwrap();
+        let mask = &layer.mask.as_ref().unwrap().pixels;
+        assert!((0..w).any(|x| mask.get(x, 10) != 32768));
+        assert_eq!(layer.pixels.to_vec(), pixels);
     }
 
     #[test]
@@ -2699,6 +2770,7 @@ mod tests {
             View::Filter {
                 layer: active_id,
                 filter: LayerFilter::GaussianBlur { radius: 2.0 },
+                mask: false,
             }
         );
 
@@ -2726,6 +2798,7 @@ mod tests {
             View::Filter {
                 layer: active_id,
                 filter: LayerFilter::GaussianBlur { radius: 4.5 },
+                mask: false,
             }
         );
 
@@ -2843,6 +2916,7 @@ mod tests {
             View::Filter {
                 layer: active,
                 filter: LayerFilter::GaussianBlur { radius: 3.0 },
+                mask: false,
             },
             View::AddNoise {
                 layer: active,
@@ -2910,6 +2984,7 @@ mod tests {
             View::Filter {
                 layer: active_id,
                 filter: LayerFilter::GaussianBlur { radius: 3.5 },
+                mask: false,
             }
         );
     }

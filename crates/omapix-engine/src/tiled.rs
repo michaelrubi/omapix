@@ -108,6 +108,13 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
         out
     }
 
+    /// Every value mapped by `f`, in parallel. Absent tiles stay absent.
+    pub fn map<U: Copy + PartialEq + Send + Sync>(&self, f: impl Fn(T) -> U + Sync) -> Tiled<U> {
+        Tiled::from_tiles(self.width, self.height, f(self.fill), |col, row| {
+            self.tile(col, row).map(|t| t.iter().map(|&v| f(v)).collect())
+        })
+    }
+
     /// Replace each tile with `f(col, row, tile)` in parallel. Tiles for
     /// which `f` returns `None` are left untouched (and stay shared).
     pub fn par_update(&mut self, f: impl Fn(u32, u32, Option<&[T]>) -> Option<Vec<T>> + Sync) {
