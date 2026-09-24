@@ -1324,6 +1324,7 @@ impl eframe::App for App {
             if let View::Mask(id) = editor.view() {
                 let gone = editor.doc.layer(id).is_none_or(|l| l.mask.is_none());
                 let escape = self.dialog.is_none()
+                    && !ctx.egui_wants_keyboard_input()
                     && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                 if gone || escape {
                     editor.set_view(View::Image);

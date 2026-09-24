@@ -80,10 +80,27 @@ struct Thumb {
     texture: egui::TextureHandle,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct Rename {
+    id: u64,
+    text: String,
+    needs_focus: bool,
+}
+
+impl Rename {
+    fn new(id: u64, text: String) -> Self {
+        Self {
+            id,
+            text,
+            needs_focus: true,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct LayersPanel {
     /// Layer being renamed, and the name typed so far.
-    renaming: Option<(u64, String)>,
+    renaming: Option<Rename>,
     /// Thumbnails by (layer id, is mask).
     thumbs: std::collections::HashMap<(u64, bool), Thumb>,
     /// Layer being dragged to a new place in the stack.
@@ -500,22 +517,33 @@ impl LayersPanel {
         name: &str,
         selected: bool,
     ) -> egui::Response {
-        if let Some((rename_id, text)) = &mut self.renaming
-            && *rename_id == id
+        if let Some(rename) = &mut self.renaming
+            && rename.id == id
         {
-            let response = ui.add(TextEdit::singleline(text).desired_width(ui.available_width()));
-            response.request_focus();
-            let done = response.lost_focus();
-            let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
-            if done || cancelled {
-                let new_name = text.trim().to_owned();
-                self.renaming = None;
-                if done && !cancelled && !new_name.is_empty() && new_name != name {
-                    editor.edit("Rename Layer", |doc, _| {
-                        if let Some(l) = doc.layer_mut(id) {
-                            l.name = new_name;
-                        }
-                    });
+            let response = ui.add(TextEdit::singleline(&mut rename.text).desired_width(ui.available_width()));
+            if rename.needs_focus {
+                response.request_focus();
+                let mut state = TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::default(),
+                    egui::text::CCursor::new(rename.text.chars().count()),
+                )));
+                TextEdit::store_state(ui.ctx(), response.id, state);
+                rename.needs_focus = false;
+            } else {
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let done = response.lost_focus() || enter;
+                let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if done || cancelled {
+                    let new_name = rename.text.trim().to_owned();
+                    self.renaming = None;
+                    if done && !cancelled && !new_name.is_empty() && new_name != name {
+                        editor.edit("Rename Layer", |doc, _| {
+                            if let Some(l) = doc.layer_mut(id) {
+                                l.name = new_name;
+                            }
+                        });
+                    }
                 }
             }
             return response;
@@ -531,7 +559,7 @@ impl LayersPanel {
         let resp = ui.add(label);
         let response = ui.interact(resp.rect, name_id(id), Sense::click());
         if response.double_clicked() {
-            self.renaming = Some((id, name.to_owned()));
+            self.renaming = Some(Rename::new(id, name.to_owned()));
         } else if response.clicked() {
             select(editor, id);
         }
@@ -630,7 +658,7 @@ fn layer_context_menu(
     ui: &mut Ui,
     editor: &mut Editor,
     command: &mut Option<Command>,
-    renaming: &mut Option<(u64, String)>,
+    renaming: &mut Option<Rename>,
     id: u64,
 ) {
     let Some(layer) = editor.doc.layer(id) else {
@@ -667,7 +695,7 @@ fn layer_context_menu(
 
     menu_item(ui, "Rename", None, true, || {
         if let Some(l) = editor.doc.layer(id) {
-            *renaming = Some((id, l.name.clone()));
+            *renaming = Some(Rename::new(id, l.name.clone()));
         }
     });
 
@@ -967,5 +995,79 @@ mod tests {
         // Dropping just above or below itself changes nothing.
         assert_eq!(reordered(&ids, 3, 1), None);
         assert_eq!(reordered(&ids, 3, 2), None);
+    }
+
+    #[test]
+    fn renaming_submits_on_enter() {
+        let mut h = Harness::new();
+        let name_pos = h.name_point(MULTIPLY);
+        h.double_click(name_pos);
+        assert!(h.panel.renaming.is_some());
+
+        // First frame: focus is requested.
+        h.frame(vec![]);
+        assert!(h.panel.renaming.is_some());
+
+        // Second frame: user types text and presses Enter.
+        h.frame(vec![
+            Event::Text("Shading".into()),
+            Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            },
+        ]);
+        assert_eq!(h.panel.renaming, None);
+        assert_eq!(h.editor.doc.layer(MULTIPLY).unwrap().name, "Shading");
+    }
+
+    #[test]
+    fn renaming_submits_on_click_off() {
+        let mut h = Harness::new();
+        let name_pos = h.name_point(MULTIPLY);
+        let bg_pos = h.row_point(h.background());
+        h.double_click(name_pos);
+        assert!(h.panel.renaming.is_some());
+
+        // First frame: focus is requested.
+        h.frame(vec![]);
+        assert!(h.panel.renaming.is_some());
+
+        // Second frame: user types text.
+        h.frame(vec![Event::Text("Shading".into())]);
+        assert!(h.panel.renaming.is_some());
+
+        // Click off on another row.
+        h.click(bg_pos);
+        assert_eq!(h.panel.renaming, None);
+        assert_eq!(h.editor.doc.layer(MULTIPLY).unwrap().name, "Shading");
+    }
+
+    #[test]
+    fn renaming_cancels_on_escape() {
+        let mut h = Harness::new();
+        let name_pos = h.name_point(MULTIPLY);
+        h.double_click(name_pos);
+        assert!(h.panel.renaming.is_some());
+
+        // First frame: focus is requested.
+        h.frame(vec![]);
+        assert!(h.panel.renaming.is_some());
+
+        // Second frame: user types text and presses Escape.
+        h.frame(vec![
+            Event::Text("Shading".into()),
+            Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            },
+        ]);
+        assert_eq!(h.panel.renaming, None);
+        assert_eq!(h.editor.doc.layer(MULTIPLY).unwrap().name, "Layer 1");
     }
 }
