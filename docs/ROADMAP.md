@@ -120,6 +120,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Alt+click on a group's triangle: opens or closes that group and every group inside it, and Alt+click between rows still clips
 - [x] Add Noise: dialog controls (Amount, Uniform/Gaussian, Monochromatic, Grain Size, Roughness, shadow/highlight falloff), live preview, and the new Grain layer in Overlay mode
 - [ ] Selection edges: Ctrl+H hides marching ants while keeping selection, status bar notes it, Omapix goes idle, and a new selection shows them again
+- [ ] Eyedropper tool: click or drag sets foreground colour live, Alt+click sets background, Sample Size averages across edges, and Current Layer vs All Layers
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -138,7 +139,7 @@ The UI has been tested through the same code paths with scripts
 - **Object Selection** (Photoshop's "smart" select, `W`): drag a rough box or lasso around something (a person, a face, hair) and it selects just that object. Needs a local segmentation model such as SAM run through ONNX Runtime, so it shares groundwork with the AI retouching in section 7 and is best built alongside it.
 - **Load selection from channels and masks:** Ctrl+click a layer's thumbnail to select its opaque pixels (Photoshop's "Load Selection" from transparency), and Ctrl+click a mask thumbnail to select the mask, with Ctrl+Shift to add, Ctrl+Alt to subtract and Ctrl+Shift+Alt to intersect. Select › Load Selection also offers the image's Red, Green, Blue and Luminosity channels (a quick luminosity mask for dodging, burning and grading highlights or shadows), the layer's transparency and its mask.
   - Later: Photoshop's **Select and Mask** workspace (refine edge, smooth, shift edge, decontaminate colours), and saving selections as channels (Select › Save Selection).
-- **Eyedropper tool** (`I`): click or drag on the image to set the foreground colour (Alt+click sets the background colour), with Sample Size (Point, 3×3, 5×5, 11×11 average) and Sample (Current Layer or All Layers) in the options bar. The painting tools' Alt+click keeps working as now.
+- ~~**Eyedropper tool**~~ (done): `I` selects the tool. Click or drag on the canvas sets the foreground colour live; Alt+click sets the background colour. Sample Size (Point, 3×3, 5×5, 11×11 average) and Sample (Current Layer or All Layers) in the options bar. Painting tools' Alt+click sampling uses the same sample size setting.
 - ~~**Filters on masks**~~ (done): with a mask targeted, Filter › Gaussian Blur, High Pass and Unsharp Mask work on the mask, previewed live and within the selection, as in Photoshop: blur a mask to soften its edge. Add Noise on a mask adds the noise straight into it (no Grain layer), which breaks up banding in a smooth gradient mask.
   - Later: previewing a filter on a mask while viewing the mask itself (Alt+click the mask thumbnail); the preview shows the image for now.
 - ~~**Live preview for Gaussian Blur**~~ (done): updates the canvas live as the radius changes, with a Preview checkbox in the dialog, respecting layer masks, blend modes, adjustments and selections.

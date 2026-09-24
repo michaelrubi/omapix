@@ -183,6 +183,7 @@ impl ScriptStep {
                 }
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 "Wand" | "MagicWand" => ScriptStep::Tool(crate::tools::Tool::MagicWand),
+                "Eyedropper" => ScriptStep::Tool(crate::tools::Tool::Eyedropper),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -1547,9 +1548,15 @@ impl App {
             ToolInput::Sample(p) => {
                 if p.x >= 0.0
                     && p.y >= 0.0
-                    && let Some(pixel) = editor.canvas.sample(p.x as u32, p.y as u32)
+                    && let Some(pixel) = editor.sample(
+                        p.x as u32,
+                        p.y as u32,
+                        self.tools.sample_size,
+                        self.tools.sample_all,
+                    )
                 {
-                    self.tools.sample(pixel, &editor.doc.profile);
+                    let is_bg = self.tools.tool == crate::tools::Tool::Eyedropper && modifiers.alt;
+                    self.tools.sample(pixel, &editor.doc.profile, is_bg);
                 }
             }
         }
@@ -2398,6 +2405,7 @@ impl eframe::App for App {
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
                     alt_samples: !eyedropper_armed && tool.paints(),
+                    samples: !eyedropper_armed && tool == crate::tools::Tool::Eyedropper,
                     brush: (!eyedropper_armed && tool.paints()).then_some(brush.size),
                     moves: !eyedropper_armed && tool == crate::tools::Tool::Move,
                     source,
@@ -2969,6 +2977,7 @@ mod tests {
                 let overlay = crate::canvas::Overlay {
                     tool: false,
                     alt_samples: false,
+                    samples: false,
                     brush: None,
                     moves: false,
                     source: None,
@@ -3401,6 +3410,7 @@ mod tests {
                 let overlay = crate::canvas::Overlay {
                     tool: false,
                     alt_samples: false,
+                    samples: false,
                     brush: None,
                     moves: false,
                     source: None,
@@ -3958,6 +3968,74 @@ mod tests {
         });
         out.textures_delta.clear();
         assert!(out.viewport_output[&egui::ViewportId::ROOT].repaint_delay <= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn eyedropper_tool_shortcut_and_selection() {
+        let mut app = test_app();
+        assert_ne!(app.tools.tool, crate::tools::Tool::Eyedropper);
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::I,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+        app.tools.keys(&ctx);
+        assert_eq!(app.tools.tool, crate::tools::Tool::Eyedropper);
+    }
+
+    #[test]
+    fn eyedropper_samples_foreground_and_background_with_click_and_drag() {
+        let mut app = test_app();
+        app.tools.select(crate::tools::Tool::Eyedropper);
+
+        let render = Arc::new(crate::canvas::Render::new(
+            app.editor.as_ref().unwrap().doc.composite(),
+        ));
+        app.editor.as_mut().unwrap().canvas.set_render(render);
+
+        app.tools.foreground = [0, 0, 0];
+        app.tools.background = [255, 255, 255];
+
+        // 1. Plain click samples foreground
+        app.tool_input(
+            crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_ne!(app.tools.foreground, [0, 0, 0]);
+        assert_eq!(app.tools.background, [255, 255, 255]);
+
+        // 2. Alt+click samples background
+        app.tools.background = [0, 0, 0];
+        app.tool_input(
+            crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::ALT,
+        );
+        assert_ne!(app.tools.background, [0, 0, 0]);
+
+        // 3. Dragging continues to sample live
+        let prev_fg = app.tools.foreground;
+        app.tool_input(
+            crate::canvas::ToolInput::Sample(egui::pos2(60.0, 60.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(app.tools.foreground, prev_fg);
+
+        // 4. Painting tool (Brush) Alt+click samples foreground using sample size
+        app.tools.select(crate::tools::Tool::Brush);
+        app.tools.foreground = [12, 34, 56];
+        app.tool_input(
+            crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::ALT,
+        );
+        assert_ne!(app.tools.foreground, [12, 34, 56]);
     }
 }
 

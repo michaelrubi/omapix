@@ -1,7 +1,7 @@
 //! Painting tools: the toolbar on the left, the options bar under the menus,
 //! and Photoshop's single-key tool shortcuts.
 
-use egui::{Button, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
+use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
 use omapix_engine::selection::Combine;
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
@@ -16,6 +16,7 @@ const CLONE_ICON: &str = "\u{f24d}";
 const HEAL_ICON: &str = "\u{f0fa}";
 const SPOT_ICON: &str = "\u{f462}";
 const WAND_ICON: &str = "\u{f0d0}";
+const EYEDROPPER_ICON: &str = "\u{f1fb}";
 const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
 const LASSO_ICON: &str = "\u{f0c4}";
@@ -29,6 +30,7 @@ pub enum ToolGroup {
     Marquee,
     Lasso,
     Wand,
+    Eyedropper,
     Healing,
     Brush,
     CloneStamp,
@@ -41,6 +43,7 @@ impl ToolGroup {
         ToolGroup::Marquee,
         ToolGroup::Lasso,
         ToolGroup::Wand,
+        ToolGroup::Eyedropper,
         ToolGroup::Healing,
         ToolGroup::Brush,
         ToolGroup::CloneStamp,
@@ -53,6 +56,7 @@ impl ToolGroup {
             ToolGroup::Marquee => &[Tool::Marquee, Tool::EllipticalMarquee],
             ToolGroup::Lasso => &[Tool::Lasso],
             ToolGroup::Wand => &[Tool::MagicWand],
+            ToolGroup::Eyedropper => &[Tool::Eyedropper],
             ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
             ToolGroup::Brush => &[Tool::Brush],
             ToolGroup::CloneStamp => &[Tool::CloneStamp],
@@ -66,6 +70,7 @@ impl ToolGroup {
             ToolGroup::Marquee => Key::M,
             ToolGroup::Lasso => Key::L,
             ToolGroup::Wand => Key::W,
+            ToolGroup::Eyedropper => Key::I,
             ToolGroup::Healing => Key::J,
             ToolGroup::Brush => Key::B,
             ToolGroup::CloneStamp => Key::S,
@@ -86,6 +91,7 @@ pub enum Tool {
     EllipticalMarquee,
     Lasso,
     MagicWand,
+    Eyedropper,
 }
 
 impl Tool {
@@ -101,6 +107,7 @@ impl Tool {
             Tool::EllipticalMarquee => "Elliptical Marquee",
             Tool::Lasso => "Lasso",
             Tool::MagicWand => "Magic Wand",
+            Tool::Eyedropper => "Eyedropper",
         }
     }
 
@@ -116,6 +123,7 @@ impl Tool {
             Tool::EllipticalMarquee => ELLIPSE_ICON,
             Tool::Lasso => LASSO_ICON,
             Tool::MagicWand => WAND_ICON,
+            Tool::Eyedropper => EYEDROPPER_ICON,
         }
     }
 
@@ -129,6 +137,7 @@ impl Tool {
             Tool::Marquee | Tool::EllipticalMarquee => "M",
             Tool::Lasso => "L",
             Tool::MagicWand => "W",
+            Tool::Eyedropper => "I",
         }
     }
 
@@ -138,6 +147,7 @@ impl Tool {
             Tool::Marquee | Tool::EllipticalMarquee => ToolGroup::Marquee,
             Tool::Lasso => ToolGroup::Lasso,
             Tool::MagicWand => ToolGroup::Wand,
+            Tool::Eyedropper => ToolGroup::Eyedropper,
             Tool::SpotHealing | Tool::Healing => ToolGroup::Healing,
             Tool::Brush => ToolGroup::Brush,
             Tool::CloneStamp => ToolGroup::CloneStamp,
@@ -155,12 +165,49 @@ impl Tool {
 
     /// Tools that paint with a brush, and so show its outline.
     pub fn paints(self) -> bool {
-        !self.selects() && self != Tool::Move
+        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper)
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
     pub fn copies(self) -> bool {
         matches!(self, Tool::CloneStamp | Tool::Healing)
+    }
+}
+
+/// Eyedropper sample size presets matching Photoshop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SampleSize {
+    #[default]
+    Point,
+    ThreeByThree,
+    FiveByFive,
+    ElevenByEleven,
+}
+
+impl SampleSize {
+    pub const ALL: [SampleSize; 4] = [
+        SampleSize::Point,
+        SampleSize::ThreeByThree,
+        SampleSize::FiveByFive,
+        SampleSize::ElevenByEleven,
+    ];
+
+    pub fn radius(self) -> u32 {
+        match self {
+            SampleSize::Point => 0,
+            SampleSize::ThreeByThree => 1,
+            SampleSize::FiveByFive => 2,
+            SampleSize::ElevenByEleven => 5,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SampleSize::Point => "Point",
+            SampleSize::ThreeByThree => "3×3 average",
+            SampleSize::FiveByFive => "5×5 average",
+            SampleSize::ElevenByEleven => "11×11 average",
+        }
     }
 }
 
@@ -205,6 +252,8 @@ pub struct Tools {
     offset: Option<Vec2>,
     /// Clone/heal from all visible layers rather than the active one.
     pub sample_all: bool,
+    /// Eyedropper sample size (Point, 3×3, 5×5, 11×11 average).
+    pub sample_size: SampleSize,
     /// Magic Wand settings matching Photoshop.
     pub wand_tolerance: u8,
     pub wand_contiguous: bool,
@@ -244,6 +293,7 @@ impl Default for Tools {
             source: None,
             offset: None,
             sample_all: true,
+            sample_size: SampleSize::default(),
             wand_tolerance: 32,
             wand_contiguous: true,
             wand_anti_alias: true,
@@ -261,7 +311,8 @@ impl Tools {
             | Tool::Marquee
             | Tool::EllipticalMarquee
             | Tool::Lasso
-            | Tool::MagicWand => self.brush,
+            | Tool::MagicWand
+            | Tool::Eyedropper => self.brush,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
             Tool::SpotHealing => self.spot,
@@ -284,7 +335,8 @@ impl Tools {
             | Tool::Marquee
             | Tool::EllipticalMarquee
             | Tool::Lasso
-            | Tool::MagicWand => &mut self.brush,
+            | Tool::MagicWand
+            | Tool::Eyedropper => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
             Tool::SpotHealing => &mut self.spot,
@@ -356,12 +408,17 @@ impl Tools {
         })
     }
 
-    /// Set the foreground colour from a document pixel (the eyedropper).
-    pub fn sample(&mut self, pixel: Pixel, profile: &ColorProfile) {
+    /// Set the foreground or background colour from a document pixel (the eyedropper).
+    pub fn sample(&mut self, pixel: Pixel, profile: &ColorProfile, background: bool) {
         if let Ok(transform) = DisplayTransform::to_srgb(profile) {
             let mut out = [[0u8; 4]];
             transform.convert(&[[pixel[0], pixel[1], pixel[2], u16::MAX]], &mut out);
-            self.foreground = [out[0][0], out[0][1], out[0][2]];
+            let srgb = [out[0][0], out[0][1], out[0][2]];
+            if background {
+                self.background = srgb;
+            } else {
+                self.foreground = srgb;
+            }
         }
     }
 
@@ -400,6 +457,7 @@ impl Tools {
             ToolGroup::Wand => self.last_wand,
             ToolGroup::Move => Tool::Move,
             ToolGroup::Lasso => Tool::Lasso,
+            ToolGroup::Eyedropper => Tool::Eyedropper,
             ToolGroup::Brush => Tool::Brush,
             ToolGroup::CloneStamp => Tool::CloneStamp,
             ToolGroup::Eraser => Tool::Eraser,
@@ -518,6 +576,24 @@ impl Tools {
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.tool.name()).strong());
             ui.separator();
+            if self.tool == Tool::Eyedropper {
+                ui.label("Sample Size");
+                ComboBox::from_id_salt("eyedropper-sample-size")
+                    .selected_text(self.sample_size.label())
+                    .show_ui(ui, |ui| {
+                        for size in SampleSize::ALL {
+                            ui.selectable_value(&mut self.sample_size, size, size.label());
+                        }
+                    });
+                ui.separator();
+                ui.label("Sample");
+                ui.selectable_value(&mut self.sample_all, false, "Current Layer");
+                ui.selectable_value(&mut self.sample_all, true, "All Layers");
+                ui.separator();
+                let hint = "Click or drag to sample foreground colour · Alt sets background";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
             if self.tool == Tool::MagicWand {
                 ui.label("Tolerance");
                 ui.add(
