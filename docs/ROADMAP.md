@@ -25,14 +25,9 @@ Right-clicking anywhere on a layer row opens a context menu with Blending Option
 
 Double-clicking a layer name or choosing Rename from the context menu focuses the input with the full text selected. Pressing Return or clicking anywhere off the text field commits the name, while Escape cancels back to the existing name.
 
-### Mask overlay (Photoshop's red "rubylith")
+### ~~Mask overlay (Photoshop's red "rubylith")~~ (done)
 
-**Problem:** the only way to see a mask is mask view (Alt+click), which hides the photo. There's no way to see the mask and the image together.
-
-**Plan:** Photoshop's `\` key toggles a translucent red overlay of the selected layer's mask on top of the image:
-- Red shows hidden (black) areas of the mask; revealed areas are clear.
-- It updates live while painting the mask.
-- The status bar says when it's on; `\` or Esc turns it off.
+`\` toggles a translucent red overlay of the selected layer's mask on top of the image, so the mask and the photo can be seen together. Hidden (black) areas of the mask are tinted 50 % red; revealed areas are clear. It updates live while painting the mask. The status bar says when it's on; `\` or Esc turns it off, and it goes away when another layer is selected or the mask is deleted, as in Photoshop. It's also in the View menu and the layer and mask context menus.
 - Later: choose the overlay's colour and opacity (Photoshop's Layer Mask Display Options).
 - Related, later: **Quick Mask** (`Q`), which paints a selection with the same red overlay and turns it back into a selection.
 
@@ -49,6 +44,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Right-clicking layer rows and mask thumbnails for context menus
 - [x] Active tool contrast styling and frameless toolbar icons
 - [ ] Renaming layers: double-click or context menu, typing, submitting on Return or click-off, and cancelling on Esc
+- [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
@@ -60,7 +56,7 @@ The UI has been tested through the same code paths with scripts
 - **Elliptical marquee**, and Shift to constrain marquee shapes to a square or circle.
 - **Live preview for Gaussian Blur**, like the frequency-separation preview.
 - **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.
-- **Pen pressure** for size and opacity. Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol.
+- **Tablet support:** pen pressure for size and opacity (and later tilt). Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol (`tablet-v2`) on the same Wayland connection. Tablet buttons (ExpressKeys, stylus buttons) are best mapped to keystrokes outside Omapix (Hyprland binds or OpenTabletDriver), so they work through custom hotkeys rather than needing pad support in Omapix.
 - **Liquify:** forward warp, push, bloat and pucker, with a mesh that can be edited again later.
 
 ## 4. Colour and adjustments
@@ -79,6 +75,7 @@ The UI has been tested through the same code paths with scripts
 - **Recent files** and reopening the last document.
 - **PSD import**, at least flattened and simple layers, for old Photoshop work.
 - **History panel:** a list of undo steps you can click back to.
+- **Custom hotkeys:** override any command's shortcut or tool letter from a TOML file in `~/.config/omapix/`, with Photoshop's shortcuts as the defaults. Warn about clashes at startup.
 
 ## 6. Performance
 
