@@ -1045,53 +1045,33 @@ impl Editor {
     /// Sample a pixel value (Point, 3×3, 5×5, 11×11 average), either from
     /// all layers composite or the active layer. Averaging ignores pixels
     /// outside the image.
+    /// The colour at (x, y) for the eyedropper: the average over `size`
+    /// (ignoring pixels outside the image) of the visible image, or with
+    /// `sample_all` false of the active layer. `None` outside the image.
     pub fn sample(&self, x: u32, y: u32, size: SampleSize, sample_all: bool) -> Option<Pixel> {
         let (w, h) = (self.doc.width, self.doc.height);
         if x >= w || y >= h {
             return None;
         }
         let r = size.radius();
-        if r == 0 {
-            return if sample_all {
+        let layer = self.doc.layer(self.active);
+        let at = |x: u32, y: u32| {
+            if sample_all {
                 self.canvas.sample(x, y)
             } else {
-                self.doc.layer(self.active).map(|l| l.pixels.get(x, y))
-            };
-        }
-        let (w, h) = (w as i32, h as i32);
-        let (cx, cy) = (x as i32, y as i32);
-        let mut sum = [0u64; 4];
-        let mut count = 0u64;
-        let active_layer = (!sample_all).then(|| self.doc.layer(self.active)).flatten();
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let px = cx + dx;
-                let py = cy + dy;
-                if px >= 0 && px < w && py >= 0 && py < h {
-                    let pixel = if sample_all {
-                        self.canvas.sample(px as u32, py as u32)
-                    } else {
-                        active_layer.map(|l| l.pixels.get(px as u32, py as u32))
-                    };
-                    if let Some(p) = pixel {
-                        sum[0] += p[0] as u64;
-                        sum[1] += p[1] as u64;
-                        sum[2] += p[2] as u64;
-                        sum[3] += p[3] as u64;
-                        count += 1;
-                    }
-                }
+                layer.map(|l| l.pixels.get(x, y))
             }
+        };
+        let (x0, x1) = (x.saturating_sub(r), (x + r).min(w - 1));
+        let (y0, y1) = (y.saturating_sub(r), (y + r).min(h - 1));
+        let (mut sum, mut count) = ([0u64; 4], 0u64);
+        for p in (y0..=y1).flat_map(|y| (x0..=x1).filter_map(move |x| at(x, y))) {
+            for c in 0..4 {
+                sum[c] += u64::from(p[c]);
+            }
+            count += 1;
         }
-        if count == 0 {
-            return None;
-        }
-        Some([
-            ((sum[0] + count / 2) / count) as u16,
-            ((sum[1] + count / 2) / count) as u16,
-            ((sum[2] + count / 2) / count) as u16,
-            ((sum[3] + count / 2) / count) as u16,
-        ])
+        (count > 0).then(|| sum.map(|v| ((v + count / 2) / count) as u16))
     }
 }
 

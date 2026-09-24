@@ -185,7 +185,14 @@ pub enum SampleSize {
 }
 
 impl SampleSize {
-    pub fn radius(self) -> i32 {
+    pub const ALL: [SampleSize; 4] = [
+        SampleSize::Point,
+        SampleSize::ThreeByThree,
+        SampleSize::FiveByFive,
+        SampleSize::ElevenByEleven,
+    ];
+
+    pub fn radius(self) -> u32 {
         match self {
             SampleSize::Point => 0,
             SampleSize::ThreeByThree => 1,
@@ -574,26 +581,9 @@ impl Tools {
                 ComboBox::from_id_salt("eyedropper-sample-size")
                     .selected_text(self.sample_size.label())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.sample_size,
-                            SampleSize::Point,
-                            SampleSize::Point.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.sample_size,
-                            SampleSize::ThreeByThree,
-                            SampleSize::ThreeByThree.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.sample_size,
-                            SampleSize::FiveByFive,
-                            SampleSize::FiveByFive.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.sample_size,
-                            SampleSize::ElevenByEleven,
-                            SampleSize::ElevenByEleven.label(),
-                        );
+                        for size in SampleSize::ALL {
+                            ui.selectable_value(&mut self.sample_size, size, size.label());
+                        }
                     });
                 ui.separator();
                 ui.label("Sample");
