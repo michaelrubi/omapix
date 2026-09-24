@@ -5,6 +5,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use egui::{Align, Align2, Button, Layout, Pos2, RichText, Sense, Ui, Vec2, pos2, vec2};
+use omapix_engine::adjust::Eyedropper;
 use omapix_engine::brush::Paint;
 use omapix_engine::clip::{self, Clip};
 use omapix_engine::layer::{Layer, Mask};
@@ -1279,10 +1280,80 @@ impl App {
         });
     }
 
+    fn apply_eyedropper(&mut self, eyedropper: Eyedropper, x: u32, y: u32) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let active_id = editor.active;
+        let Some(layer) = editor.doc.layer(active_id) else {
+            return;
+        };
+        let Some(adjustment) = &layer.adjustment else {
+            return;
+        };
+        let Some(sample_pixel) = editor.doc.sample_below(active_id, x, y) else {
+            return;
+        };
+        let sample = [
+            sample_pixel[0] as f32 / 65535.0,
+            sample_pixel[1] as f32 / 65535.0,
+            sample_pixel[2] as f32 / 65535.0,
+        ];
+        let new_adjustment = match adjustment {
+            omapix_engine::adjust::Adjustment::Curves(c) => {
+                let mut c = c.clone();
+                c.set_point(eyedropper, sample);
+                omapix_engine::adjust::Adjustment::Curves(c)
+            }
+            omapix_engine::adjust::Adjustment::Levels(l) => {
+                let mut l = l.clone();
+                l.set_point(eyedropper, sample);
+                omapix_engine::adjust::Adjustment::Levels(l)
+            }
+            _ => return,
+        };
+        editor.edit(eyedropper.label(), |doc, _| {
+            if let Some(layer) = doc.layer_mut(active_id) {
+                layer.adjustment = Some(new_adjustment);
+            }
+        });
+    }
+
+    fn check_escape(&mut self, ctx: &egui::Context) {
+        if let Some(editor) = &mut self.editor {
+            if let View::Mask(_) | View::MaskOverlay(_) = editor.view() {
+                let escape = self.dialog.is_none()
+                    && !ctx.egui_wants_keyboard_input()
+                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                if escape {
+                    editor.set_view(View::Image);
+                }
+            }
+            if self.properties.eyedropper.is_some() {
+                let escape = self.dialog.is_none()
+                    && !ctx.egui_wants_keyboard_input()
+                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                if escape {
+                    self.properties.eyedropper = None;
+                }
+            }
+        }
+    }
+
     fn tool_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
         let Some(editor) = &mut self.editor else {
             return;
         };
+        if let Some(eyedropper) = self.properties.eyedropper {
+            if let ToolInput::StrokeBegin(p) = input {
+                let (x, y) = editor
+                    .canvas
+                    .hovered_pixel
+                    .unwrap_or((p.x as u32, p.y as u32));
+                self.apply_eyedropper(eyedropper, x, y);
+            }
+            return;
+        }
         if self.tools.tool.selects() {
             self.selection_input(input, modifiers);
             return;
@@ -1962,19 +2033,10 @@ impl eframe::App for App {
                 }
             }
         }
+        self.check_escape(ctx);
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
                 editor.end_live();
-            }
-            // Leave mask view or the mask overlay with Esc (the editor
-            // leaves them itself when their mask goes away).
-            if let View::Mask(_) | View::MaskOverlay(_) = editor.view() {
-                let escape = self.dialog.is_none()
-                    && !ctx.egui_wants_keyboard_input()
-                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-                if escape {
-                    editor.set_view(View::Image);
-                }
             }
             editor.update(ctx);
         }
@@ -2094,15 +2156,18 @@ impl eframe::App for App {
                     .as_ref()
                     .map_or(&[][..], |s| &s.outlines[..]);
                 let modifiers = ui.input(|i| i.modifiers);
+                let eyedropper_armed = self.properties.eyedropper.is_some();
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
-                    alt_samples: tool.paints(),
-                    brush: tool.paints().then_some(brush.size),
-                    moves: tool == crate::tools::Tool::Move,
+                    alt_samples: !eyedropper_armed && tool.paints(),
+                    brush: (!eyedropper_armed && tool.paints()).then_some(brush.size),
+                    moves: !eyedropper_armed && tool == crate::tools::Tool::Move,
                     source,
                     selection: outlines,
-                    drawing: drawing.as_deref(),
-                    badge: idle.then(|| crate::tools::cursor_badge(tool, modifiers)).flatten(),
+                    drawing: (!eyedropper_armed).then_some(drawing.as_deref()).flatten(),
+                    badge: (idle && !eyedropper_armed)
+                        .then(|| crate::tools::cursor_badge(tool, modifiers))
+                        .flatten(),
                 };
                 input = editor.canvas.show(ui, pasteboard, overlay);
             } else {
@@ -3010,4 +3075,174 @@ mod tests {
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
         assert!(app.editor.as_ref().unwrap().doc.selection.is_none());
     }
+
+    #[test]
+    fn curves_eyedropper_canvas_click_sets_points_with_undo() {
+        use omapix_engine::adjust::{Adjustment, Curves, Eyedropper};
+
+        let mut app = test_app();
+        let (w, h) = (
+            app.editor.as_ref().unwrap().doc.width,
+            app.editor.as_ref().unwrap().doc.height,
+        );
+        let curves_layer = Layer::adjustment(200, Adjustment::Curves(Curves::default()), w, h);
+        app.editor.as_mut().unwrap().doc.layers.push(curves_layer);
+        app.editor.as_mut().unwrap().active = 200;
+
+        // Arm Black Point eyedropper and click canvas
+        app.properties.eyedropper = Some(Eyedropper::Black);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(
+            app.editor.as_ref().unwrap().undo_label(),
+            Some("Set Black Point")
+        );
+        if let Some(Adjustment::Curves(c)) = &app.editor.as_ref().unwrap().doc.layer(200).unwrap().adjustment {
+            assert!(c.red.points[0].0 > 0.0);
+        } else {
+            panic!("expected Curves adjustment");
+        }
+
+        // Arm White Point eyedropper and click canvas
+        app.properties.eyedropper = Some(Eyedropper::White);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(60.0, 60.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(
+            app.editor.as_ref().unwrap().undo_label(),
+            Some("Set White Point")
+        );
+
+        // Arm Gray Point eyedropper and click canvas
+        app.properties.eyedropper = Some(Eyedropper::Gray);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(70.0, 70.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(
+            app.editor.as_ref().unwrap().undo_label(),
+            Some("Set Gray Point")
+        );
+    }
+
+    #[test]
+    fn eyedropper_armed_prevents_painting_and_selection() {
+        use omapix_engine::adjust::{Adjustment, Curves, Eyedropper};
+
+        let mut app = test_app();
+        let (w, h) = (
+            app.editor.as_ref().unwrap().doc.width,
+            app.editor.as_ref().unwrap().doc.height,
+        );
+        let curves_layer = Layer::adjustment(200, Adjustment::Curves(Curves::default()), w, h);
+        app.editor.as_mut().unwrap().doc.layers.push(curves_layer);
+        app.editor.as_mut().unwrap().active = 200;
+
+        // Ensure no initial selection
+        app.editor.as_mut().unwrap().doc.selection = None;
+
+        // Select Marquee tool
+        app.tools.select(crate::tools::Tool::Marquee);
+        app.properties.eyedropper = Some(Eyedropper::Black);
+
+        // Click on canvas
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::NONE,
+        );
+        // Eyedropper handled the click, did not start a selection
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_none());
+        assert_eq!(
+            app.editor.as_ref().unwrap().undo_label(),
+            Some("Set Black Point")
+        );
+    }
+
+    #[test]
+    fn levels_eyedropper_canvas_click_sets_points_with_undo() {
+        use omapix_engine::adjust::{Adjustment, Eyedropper, Levels};
+
+        let mut app = test_app();
+        let (w, h) = (
+            app.editor.as_ref().unwrap().doc.width,
+            app.editor.as_ref().unwrap().doc.height,
+        );
+        let levels_layer = Layer::adjustment(201, Adjustment::Levels(Levels::default()), w, h);
+        app.editor.as_mut().unwrap().doc.layers.push(levels_layer);
+        app.editor.as_mut().unwrap().active = 201;
+
+        // Arm Black Point eyedropper and click canvas
+        app.properties.eyedropper = Some(Eyedropper::Black);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(
+            app.editor.as_ref().unwrap().undo_label(),
+            Some("Set Black Point")
+        );
+        if let Some(Adjustment::Levels(l)) = &app.editor.as_ref().unwrap().doc.layer(201).unwrap().adjustment {
+            assert!(l.in_black > 0.0);
+        } else {
+            panic!("expected Levels adjustment");
+        }
+
+        // Arm White Point eyedropper and click canvas
+        app.properties.eyedropper = Some(Eyedropper::White);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(60.0, 60.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(
+            app.editor.as_ref().unwrap().undo_label(),
+            Some("Set White Point")
+        );
+
+        // Arm Gray Point eyedropper and click canvas
+        app.properties.eyedropper = Some(Eyedropper::Gray);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(70.0, 70.0)),
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(
+            app.editor.as_ref().unwrap().undo_label(),
+            Some("Set Gray Point")
+        );
+    }
+
+    #[test]
+    fn eyedropper_escape_key_disarms() {
+        use omapix_engine::adjust::{Adjustment, Curves, Eyedropper};
+
+        let mut app = test_app();
+        let (w, h) = (
+            app.editor.as_ref().unwrap().doc.width,
+            app.editor.as_ref().unwrap().doc.height,
+        );
+        let curves_layer = Layer::adjustment(200, Adjustment::Curves(Curves::default()), w, h);
+        app.editor.as_mut().unwrap().doc.layers.push(curves_layer);
+        app.editor.as_mut().unwrap().active = 200;
+
+        app.properties.eyedropper = Some(Eyedropper::Black);
+        assert_eq!(app.properties.eyedropper, Some(Eyedropper::Black));
+
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(input, |ui| {
+            app.check_escape(ui.ctx());
+        });
+        out.textures_delta.clear();
+        assert_eq!(app.properties.eyedropper, None);
+    }
 }
+

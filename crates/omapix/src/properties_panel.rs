@@ -8,8 +8,8 @@ use egui::{
     Color32, ComboBox, Pos2, Rect, RichText, Sense, Shape, Slider, Stroke, Ui, pos2, vec2,
 };
 use omapix_engine::adjust::{
-    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, HueSaturation, Levels,
-    SelectiveColor,
+    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation,
+    Levels, SelectiveColor,
 };
 
 use crate::editor::Editor;
@@ -26,6 +26,8 @@ pub struct PropertiesPanel {
     channel: usize,
     /// Curve point being dragged.
     dragging: Option<usize>,
+    /// Armed eyedropper (Black, Gray, or White point).
+    pub eyedropper: Option<Eyedropper>,
     /// Color Balance tonal range: 0 = shadows, 1 = midtones, 2 = highlights.
     tone: usize,
     /// Selective Color selected range: 0..=8.
@@ -47,10 +49,17 @@ impl PropertiesPanel {
     /// Draw the panel for the active layer if it's an adjustment layer.
     /// Returns false (drawing nothing) otherwise.
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> bool {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.eyedropper = None;
+        }
         let id = editor.active;
         let Some(mut adjustment) = editor.doc.layer(id).and_then(|l| l.adjustment.clone()) else {
+            self.eyedropper = None;
             return false;
         };
+        if !matches!(adjustment, Adjustment::Curves(_) | Adjustment::Levels(_)) {
+            self.eyedropper = None;
+        }
         let original = adjustment.clone();
         let needs_histogram = matches!(adjustment, Adjustment::Curves(_) | Adjustment::Levels(_));
         if needs_histogram
@@ -113,7 +122,31 @@ impl PropertiesPanel {
         true
     }
 
+    fn eyedropper_buttons(&mut self, ui: &mut Ui) {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.eyedropper = None;
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (eyedropper, label) in [
+                (Eyedropper::Black, "Set Black Point"),
+                (Eyedropper::Gray, "Set Gray Point"),
+                (Eyedropper::White, "Set White Point"),
+            ] {
+                let active = self.eyedropper == Some(eyedropper);
+                if ui.add(egui::Button::new(label).selected(active)).clicked() {
+                    if active {
+                        self.eyedropper = None;
+                    } else {
+                        self.eyedropper = Some(eyedropper);
+                    }
+                }
+            }
+        });
+    }
+
     fn curves(&mut self, ui: &mut Ui, curves: &mut Curves, theme: &Theme) {
+        self.eyedropper_buttons(ui);
+        ui.add_space(4.0);
         let names = ["RGB", "Red", "Green", "Blue"];
         ComboBox::from_id_salt("curves-channel")
             .selected_text(names[self.channel])
@@ -387,6 +420,8 @@ impl PropertiesPanel {
     }
 
     fn levels(&mut self, ui: &mut Ui, l: &mut Levels, theme: &Theme) {
+        self.eyedropper_buttons(ui);
+        ui.add_space(4.0);
         let side = ui.available_width().min(300.0);
         let hist_height = 80.0;
         let (rect, _) = ui.allocate_exact_size(vec2(side, hist_height), Sense::hover());
@@ -704,4 +739,52 @@ mod tests {
         assert!(shown, "panel should show for levels adjustment");
         assert!(panel.histogram.is_some(), "histogram computed for levels");
     }
+
+    #[test]
+    fn eyedropper_buttons_arm_and_disarm() {
+        let (w, h) = (10, 10);
+        let image = omapix_engine::Raster::new(w, h, vec![[20000; 4]; (w * h) as usize]);
+        let mut doc = omapix_engine::Document::from_image(
+            "t.tif".into(),
+            &image,
+            omapix_engine::ColorProfile::srgb(),
+            16,
+        );
+        doc.layers.push(omapix_engine::Layer::adjustment(
+            101,
+            Adjustment::Curves(Curves::default()),
+            w,
+            h,
+        ));
+        let mut editor = Editor::new(doc).unwrap();
+        editor.active = 101;
+        let mut panel = PropertiesPanel::default();
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            panel.show(ui, &mut editor, &theme);
+        });
+        out.textures_delta.clear();
+
+        // Arm black eyedropper
+        panel.eyedropper = Some(Eyedropper::Black);
+        assert_eq!(panel.eyedropper, Some(Eyedropper::Black));
+
+        // Pressing Escape disarms
+        let mut esc_input = egui::RawInput::default();
+        esc_input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(esc_input, |ui| {
+            panel.show(ui, &mut editor, &theme);
+        });
+        out.textures_delta.clear();
+        assert_eq!(panel.eyedropper, None);
+    }
 }
+

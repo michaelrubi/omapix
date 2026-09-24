@@ -107,6 +107,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
 - [ ] Layer navigation shortcuts: Alt+] and Alt+[ select layer above or below (stepping into open groups, skipping closed ones, no wrap), and Ctrl+Shift+] and Ctrl+Shift+[ bring to front and send to back of group
 - [ ] Tool cursor modifier badges: Shift (+), Alt (-), and Shift+Alt (×) with selection tools, and Alt copy badge with the Move tool
+- [ ] Eyedroppers in Curves and Levels: set black, gray and white points with crosshair cursor, one undo step per click, and Esc to disarm
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
@@ -137,7 +138,7 @@ The UI has been tested through the same code paths with scripts
 ## 4. Colour and adjustments
 
 - ~~**Histogram in Curves and Levels**~~ (done): drawn behind the curve, and in Levels above the input controls.
-- **Eyedroppers in Curves and Levels:** set black, grey and white points by clicking the image.
+- ~~**Eyedroppers in Curves and Levels**~~ (done): set black, grey and white points by clicking the image (Curves adjusts red, green and blue curves to neutralise casts while preserving lightness; single-channel Levels sets master black/white and midtone gamma to map luminance to mid grey, with the limitation that Levels lacks per-channel data to neutralize colour casts).
 - ~~**Selective Color** and **Channel Mixer** adjustment layers~~ (done).
 - ~~**LUT adjustment layer:** load `.cube` files~~ (done).
 - **Monitor colour management:** read the display's ICC profile instead of assuming sRGB.

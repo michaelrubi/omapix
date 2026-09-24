@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::layer::Layer;
 use crate::selection::Selection;
-use crate::{ColorProfile, Raster};
+use crate::{ColorProfile, Pixel, Raster};
 
 /// An open image: a stack of layers in one colour space.
 ///
@@ -109,6 +109,20 @@ impl Document {
         crate::Histogram::from_layers(&self.layers[..idx], self.width, self.height)
     }
 
+    /// Flattened value of a pixel from the composite of all visible layers below `layer_id`.
+    pub fn sample_below(&self, layer_id: u64, x: u32, y: u32) -> Option<Pixel> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = self.index_of(layer_id)?;
+        let col = x / crate::tiled::TILE;
+        let row = y / crate::tiled::TILE;
+        let tiles = crate::composite::composite_tiles(&self.layers[..idx], &[(col, row)], None);
+        let tile = tiles.into_iter().next()?;
+        let offset = (y % crate::tiled::TILE) * crate::tiled::TILE + (x % crate::tiled::TILE);
+        tile.get(offset as usize).copied()
+    }
+
     /// A name like "Layer 3" that isn't already taken.
     pub fn unused_name(&self, base: &str) -> String {
         (1..)
@@ -117,3 +131,26 @@ impl Document {
             .expect("some number is free")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_below_samples_layers_below_layer_id() {
+        let (w, h) = (10, 10);
+        let image = Raster::new(w, h, vec![[10000, 20000, 30000, 65535]; (w * h) as usize]);
+        let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        let top_layer = Layer::empty(2, "Top", w, h);
+        doc.layers.push(top_layer);
+
+        let sampled = doc.sample_below(2, 5, 5);
+        assert_eq!(sampled, Some([10000, 20000, 30000, 65535]));
+
+        // Out of bounds returns None
+        assert_eq!(doc.sample_below(2, 10, 5), None);
+        // Non-existent layer returns None
+        assert_eq!(doc.sample_below(999, 5, 5), None);
+    }
+}
+
