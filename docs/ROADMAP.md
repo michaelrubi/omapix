@@ -50,11 +50,9 @@ Copies also go on the Wayland clipboard as an sRGB PNG (through `wl-copy`, so th
 The selection, and the marquee (rectangular or elliptical) or lasso shape being dragged, are drawn with white dashes over a black line that march along the outline, as in Photoshop. Omapix repaints for them only while an outline is on screen, about 12 times a second, so an idle Omapix stays idle.
 - Later: Ctrl+H hides the selection edges (Photoshop's Show Extras) while keeping the selection.
 
-### One outline for combined selections
+### ~~One outline for combined selections~~ (done)
 
-**Problem:** adding marquees together with Shift draws every shape's own outline, including the parts now inside the selection, so overlapping shapes turn into a tangle of lines.
-
-**Plan:** draw only the edge of the combined selection, as Photoshop does. Trace the outline from the selection's coverage (where it crosses 50 %) after every change, instead of keeping each shape's outline. That also gives the right outline after subtracting, intersecting, inverting and feathering, and for the magic wand below, which has no shapes at all.
+The marching ants follow the edge of the whole selection, traced from its coverage where it crosses 50 % after every change, as in Photoshop. Shapes added together with Shift share one outline, without lines through the overlap, and subtracting, intersecting, inverting, feathering and moving all show the right edge; a selection with a hole gets an outline round the hole. Outlines are cut off at the canvas edge. As in Photoshop, the outline follows the edges of the pixels that are more than half selected, so corners are square and curves are stepped when zoomed in. Tracing a 24 MP selection takes about 5 ms.
 
 ### Selection tools grouped in the toolbar
 
@@ -79,6 +77,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [ ] Marching ants move, and Omapix goes idle again once there's no selection
+- [ ] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [ ] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Dropping a file onto the window

@@ -1076,7 +1076,8 @@ mod tests {
         assert_eq!(layer.mask.as_ref().unwrap().pixels.get(25, 25), 0);
         let sel = e.doc.selection.as_ref().unwrap();
         assert_eq!((sel.at(25, 50), sel.at(225, 50)), (0.0, 1.0));
-        assert_eq!(sel.outlines[0][0], (200.0, 0.0));
+        let xs = sel.outlines.iter().flatten().map(|p| p.0);
+        assert_eq!(xs.fold((f32::MAX, 0f32), |(l, r), x| (l.min(x), r.max(x))), (200.0, 250.0));
 
         // With the mask targeted, the selected mask values move instead.
         e.target = Target::Mask;

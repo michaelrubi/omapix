@@ -529,7 +529,15 @@ impl Canvas {
         };
 
         for outline in selection {
-            draw_ants(outline.iter().map(|&p| self.to_screen(p)).collect(), true);
+            // Outlines traced from big selections have a point every pixel
+            // or so, far more than show when zoomed out.
+            let mut points: Vec<Pos2> = Vec::with_capacity(outline.len());
+            for p in outline.iter().map(|&p| self.to_screen(p)) {
+                if points.last().is_none_or(|last| last.distance_sq(p) >= 0.25) {
+                    points.push(p);
+                }
+            }
+            draw_ants(points, true);
         }
         if let Some(path) = drawing {
             draw_ants(

@@ -2,14 +2,19 @@
 //!
 //! A selection is a greyscale coverage image (0 = unselected, 65535 =
 //! fully selected), so feathered and anti-aliased edges are partial, as in
-//! Photoshop. It also keeps the outlines of the shapes that made it, for
-//! drawing "marching ants".
+//! Photoshop. It also keeps its outline, traced along the edges of the
+//! pixels more than half selected, for drawing "marching ants".
+
+use std::collections::HashMap;
 
 use rayon::prelude::*;
 
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 
 const MAX: f32 = u16::MAX as f32;
+
+/// Pixels with coverage above this are inside the outline.
+const HALF: f32 = MAX / 2.0;
 
 /// Vertical sub-samples per pixel row when filling shapes, for smooth edges.
 const SUBSAMPLES: usize = 4;
@@ -30,21 +35,19 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// A selection with the given coverage, and its outline traced.
+    pub fn from_coverage(coverage: Tiled<u16>) -> Self {
+        let outlines = trace(&coverage);
+        Self { coverage, outlines }
+    }
+
     pub fn all(width: u32, height: u32) -> Self {
-        let (w, h) = (width as f32, height as f32);
-        Self {
-            coverage: Tiled::new(width, height, u16::MAX),
-            outlines: vec![vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]],
-        }
+        Self::from_coverage(Tiled::new(width, height, u16::MAX))
     }
 
     /// A filled polygon (even-odd rule), with anti-aliased edges.
     pub fn polygon(width: u32, height: u32, points: &[(f32, f32)]) -> Self {
-        let coverage = fill_polygon(width, height, points);
-        Self {
-            coverage,
-            outlines: vec![points.to_vec()],
-        }
+        Self::from_coverage(fill_polygon(width, height, points))
     }
 
     pub fn rectangle(width: u32, height: u32, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) -> Self {
@@ -59,25 +62,9 @@ impl Selection {
         let rx = (r - l) * 0.5;
         let ry = (b - t) * 0.5;
         if rx <= 0.0 || ry <= 0.0 {
-            return Self {
-                coverage: Tiled::new(width, height, 0),
-                outlines: Vec::new(),
-            };
+            return Self::from_coverage(Tiled::new(width, height, 0));
         }
-        let cx = l + rx;
-        let cy = t + ry;
-        let coverage = fill_ellipse(width, height, cx, cy, rx, ry);
-        let n = ((rx + ry) * 0.5).clamp(32.0, 256.0) as usize;
-        let outline: Vec<(f32, f32)> = (0..n)
-            .map(|i| {
-                let angle = i as f32 * std::f32::consts::TAU / n as f32;
-                (cx + rx * angle.cos(), cy + ry * angle.sin())
-            })
-            .collect();
-        Self {
-            coverage,
-            outlines: vec![outline],
-        }
+        Self::from_coverage(fill_ellipse(width, height, l + rx, t + ry, rx, ry))
     }
 
     pub fn width(&self) -> u32 {
@@ -150,16 +137,7 @@ impl Selection {
                 .collect();
             tile.iter().any(|&v| v != fill).then_some(tile)
         });
-        let outlines = match how {
-            Combine::Replace => other.outlines.clone(),
-            _ => self
-                .outlines
-                .iter()
-                .chain(&other.outlines)
-                .cloned()
-                .collect(),
-        };
-        Selection { coverage, outlines }
+        Selection::from_coverage(coverage)
     }
 
     pub fn invert(&self) -> Selection {
@@ -168,24 +146,13 @@ impl Selection {
             c.tile(col, row)
                 .map(|t| t.iter().map(|v| u16::MAX - v).collect())
         });
-        let (w, h) = (self.width() as f32, self.height() as f32);
-        let mut outlines = self.outlines.clone();
-        outlines.push(vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]);
-        Selection { coverage, outlines }
+        Selection::from_coverage(coverage)
     }
 
     /// The same selection moved by (`dx`, `dy`) pixels, as when the Move
     /// tool moves selected pixels.
     pub fn translated(&self, dx: i32, dy: i32) -> Selection {
-        let (fx, fy) = (dx as f32, dy as f32);
-        Selection {
-            coverage: self.coverage.translated(dx, dy, 0),
-            outlines: self
-                .outlines
-                .iter()
-                .map(|o| o.iter().map(|&(x, y)| (x + fx, y + fy)).collect())
-                .collect(),
-        }
+        Selection::from_coverage(self.coverage.translated(dx, dy, 0))
     }
 
     /// Soften the edge (Photoshop's Select › Modify › Feather), `radius`
@@ -203,11 +170,201 @@ impl Selection {
             .into_par_iter()
             .map(|v| v[0].round().clamp(0.0, MAX) as u16)
             .collect();
-        Selection {
-            coverage: Tiled::from_slice(self.width(), self.height(), 0, &values),
-            outlines: self.outlines.clone(),
+        Selection::from_coverage(Tiled::from_slice(self.width(), self.height(), 0, &values))
+    }
+}
+
+/// The outlines round the pixels more than half selected, along the pixel
+/// edges as in Photoshop, by marching squares with cells centred on the
+/// pixel corners. Everything outside the image counts as unselected, so
+/// every outline closes. Only tiles that aren't all inside or all outside
+/// are searched in full.
+fn trace(coverage: &Tiled<u16>) -> Vec<Vec<(f32, f32)>> {
+    let (w, h) = (coverage.width() as i32, coverage.height() as i32);
+    let (cols, rows) = (coverage.cols(), coverage.rows());
+    let value = |x: i32, y: i32| -> f32 {
+        if x < 0 || y < 0 || x >= w || y >= h {
+            0.0
+        } else {
+            f32::from(coverage.get(x as u32, y as u32))
+        }
+    };
+
+    // Which side of the outline each tile's pixels are on: Some(inside)
+    // if all on one side, None if mixed.
+    let sides: Vec<Option<bool>> = (0..rows * cols)
+        .into_par_iter()
+        .map(|i| {
+            let (col, row) = (i % cols, i / cols);
+            let Some(tile) = coverage.tile(col, row) else {
+                return Some(f32::from(coverage.fill()) > HALF);
+            };
+            let tw = (w as u32 - col * TILE).min(TILE) as usize;
+            let th = (h as u32 - row * TILE).min(TILE) as usize;
+            let first = f32::from(tile[0]) > HALF;
+            (0..th)
+                .flat_map(|y| &tile[y * TILE as usize..][..tw])
+                .all(|&v| (f32::from(v) > HALF) == first)
+                .then_some(first)
+        })
+        .collect();
+    let side = |col: i64, row: i64| -> Option<bool> {
+        if col < 0 || row < 0 || col >= cols as i64 || row >= rows as i64 {
+            Some(false)
+        } else {
+            sides[(row * cols as i64 + col) as usize]
+        }
+    };
+
+    // Cells are named by their bottom-right pixel (bx, by), with bx in
+    // 0..=w and by in 0..=h. Tile (col, row) searches the cells whose
+    // bottom-right pixel it holds, and the last column and row of tiles
+    // also the cells along the right and bottom edges.
+    let segments: Vec<Segment> = (0..rows * cols)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let (col, row) = (i % cols, i / cols);
+            let (x0, y0) = ((col * TILE) as i32, (row * TILE) as i32);
+            let x1 = if col + 1 == cols { w + 1 } else { x0 + TILE as i32 };
+            let y1 = if row + 1 == rows { h + 1 } else { y0 + TILE as i32 };
+            let own = side(col as i64, row as i64);
+            let (c, r) = (col as i64, row as i64);
+            let mut around = [side(c - 1, r - 1), side(c, r - 1), side(c - 1, r)].into_iter();
+            let edge = (col + 1 == cols || row + 1 == rows).then_some(Some(false));
+            let mut segments = Vec::new();
+            if own.is_some() && around.all(|s| s == own) && edge.is_none_or(|s| s == own) {
+                return segments;
+            }
+            for by in y0..y1 {
+                // Inside a tile that's all on one side, only the cells
+                // reaching into other tiles or past the image can cross.
+                let whole_row = own.is_none() || by == y0 || by == h;
+                let xs: Vec<i32> = if whole_row {
+                    (x0..x1).collect()
+                } else if x1 > w {
+                    vec![x0, w]
+                } else {
+                    vec![x0]
+                };
+                for bx in xs {
+                    cell(bx, by, &value, &mut segments);
+                }
+            }
+            segments
+        })
+        .collect();
+
+    // Join the segments into closed outlines. Each crossing is the start
+    // of exactly one segment and the end of another.
+    let mut next: HashMap<u64, &Segment> = segments.iter().map(|s| (s.from, s)).collect();
+    let mut outlines = Vec::new();
+    for s in &segments {
+        let mut key = s.from;
+        let mut outline = Vec::new();
+        while let Some(s) = next.remove(&key) {
+            outline.extend([s.point, s.corner]);
+            key = s.to;
+        }
+        let outline = simplify(outline);
+        if outline.len() >= 3 {
+            outlines.push(outline);
         }
     }
+    outlines
+}
+
+/// A piece of outline across one cell, between two crossings named by the
+/// pixel edge they lie on, turning at the cell's middle (a pixel corner).
+/// `point` is where it starts.
+struct Segment {
+    from: u64,
+    to: u64,
+    point: (f32, f32),
+    corner: (f32, f32),
+}
+
+/// A crossing on the edge between pixel (x, y) and its right or lower
+/// neighbour.
+fn edge_key(x: i32, y: i32, down: bool) -> u64 {
+    ((x + 1) as u64) << 32 | ((y + 1) as u64) << 1 | u64::from(down)
+}
+
+/// Add the segments crossing the cell whose bottom-right pixel is (bx,
+/// by). They run with the selection on the same side, so neighbouring
+/// cells' segments join end to start.
+fn cell(bx: i32, by: i32, value: &impl Fn(i32, i32) -> f32, out: &mut Vec<Segment>) {
+    let (l, t) = (bx - 1, by - 1);
+    // Corners clockwise from the top left.
+    let v = [value(l, t), value(bx, t), value(bx, by), value(l, by)];
+    let inside = v.map(|v| v > HALF);
+    if inside.iter().all(|&i| i == inside[0]) {
+        return;
+    }
+    // The crossing between two neighbouring pixels, the first above or to
+    // the left of the second, at the middle of the edge they share.
+    let crossing = |x: i32, y: i32, down: bool| {
+        let point = if down {
+            (x as f32 + 0.5, y as f32 + 1.0)
+        } else {
+            (x as f32 + 1.0, y as f32 + 0.5)
+        };
+        (edge_key(x, y, down), point)
+    };
+    // Crossings clockwise round the cell, each marked if going clockwise
+    // enters the selection there.
+    let mut crossings = Vec::with_capacity(4);
+    if inside[0] != inside[1] {
+        crossings.push((crossing(l, t, false), inside[1]));
+    }
+    if inside[1] != inside[2] {
+        crossings.push((crossing(bx, t, true), inside[2]));
+    }
+    if inside[2] != inside[3] {
+        crossings.push((crossing(l, by, false), inside[3]));
+    }
+    if inside[3] != inside[0] {
+        crossings.push((crossing(l, t, true), inside[0]));
+    }
+    // With two pixels in on opposite corners, the average decides whether
+    // they join (the outline goes round the corners that are out) or not
+    // (it goes round the ones that are in).
+    let n = crossings.len();
+    let middle_in = v.iter().sum::<f32>() / 4.0 > HALF;
+    for (i, &((from, point), enters)) in crossings.iter().enumerate() {
+        if enters {
+            let j = if middle_in { (i + n - 1) % n } else { (i + 1) % n };
+            out.push(Segment {
+                from,
+                to: crossings[j].0.0,
+                point,
+                corner: (bx as f32, by as f32),
+            });
+        }
+    }
+}
+
+/// Drop points on the straight line from the last point kept to the next
+/// one, so straight edges are single lines.
+fn simplify(points: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+    let straight = |prev: (f32, f32), p: (f32, f32), next: (f32, f32)| {
+        let (dx, dy) = (next.0 - prev.0, next.1 - prev.1);
+        let cross = (p.0 - prev.0) * dy - (p.1 - prev.1) * dx;
+        let ahead = (p.0 - prev.0) * dx + (p.1 - prev.1) * dy > 0.0;
+        ahead && cross == 0.0
+    };
+    let n = points.len();
+    let mut out = Vec::with_capacity(n);
+    for (i, &p) in points.iter().enumerate() {
+        let next = points[(i + 1) % n];
+        if !out.last().is_some_and(|&prev| straight(prev, p, next)) {
+            out.push(p);
+        }
+    }
+    // The first point is always kept above, but may be on a straight edge.
+    if out.len() > 3 && straight(out[out.len() - 1], out[0], out[1]) {
+        out.remove(0);
+    }
+    out
 }
 
 /// Rasterise a polygon with the even-odd rule. Each pixel row is sampled
@@ -394,6 +551,121 @@ mod tests {
             outlines: Vec::new(),
         };
         assert_eq!(corner.bounds(), Some([512, 256, 88, 144]));
+    }
+
+    /// Check the outlines are the given polygons, in any order and
+    /// starting anywhere.
+    fn assert_traces(s: &Selection, polygons: &[&[(f32, f32)]]) {
+        assert_eq!(s.outlines.len(), polygons.len(), "{:?}", s.outlines);
+        for &poly in polygons {
+            assert!(
+                s.outlines
+                    .iter()
+                    .any(|o| o.len() == poly.len() && poly.iter().all(|c| o.contains(c))),
+                "no outline {poly:?} in {:?}",
+                s.outlines
+            );
+        }
+    }
+
+    #[test]
+    fn a_rectangle_has_one_outline_round_its_edge() {
+        let s = Selection::rectangle(100, 100, (10.0, 20.0), (60.0, 50.0));
+        assert_traces(&s, &[&[(10.0, 20.0), (60.0, 20.0), (60.0, 50.0), (10.0, 50.0)]]);
+        // Sub-pixel edges go round the pixels at least half selected.
+        let left = |x| {
+            let s = Selection::rectangle(100, 100, (x, 20.0), (60.0, 50.0));
+            s.outlines[0].iter().map(|p| p.0).fold(f32::MAX, f32::min)
+        };
+        assert_eq!((left(10.25), left(10.5), left(10.75)), (10.0, 10.0, 11.0));
+    }
+
+    #[test]
+    fn added_shapes_share_one_outline() {
+        let a = Selection::rectangle(100, 100, (10.0, 10.0), (60.0, 60.0));
+        let b = Selection::rectangle(100, 100, (40.0, 40.0), (90.0, 90.0));
+        assert_traces(
+            &a.combine(&b, Combine::Add),
+            &[&[
+                (10.0, 10.0),
+                (60.0, 10.0),
+                (60.0, 40.0),
+                (90.0, 40.0),
+                (90.0, 90.0),
+                (40.0, 90.0),
+                (40.0, 60.0),
+                (10.0, 60.0),
+            ]],
+        );
+        assert_traces(
+            &a.combine(&b, Combine::Subtract),
+            &[&[
+                (10.0, 10.0),
+                (60.0, 10.0),
+                (60.0, 40.0),
+                (40.0, 40.0),
+                (40.0, 60.0),
+                (10.0, 60.0),
+            ]],
+        );
+        assert_traces(
+            &a.combine(&b, Combine::Intersect),
+            &[&[(40.0, 40.0), (60.0, 40.0), (60.0, 60.0), (40.0, 60.0)]],
+        );
+        // Apart, they keep an outline each.
+        let c = Selection::rectangle(100, 100, (70.0, 10.0), (90.0, 20.0));
+        assert_eq!(a.combine(&c, Combine::Add).outlines.len(), 2);
+    }
+
+    #[test]
+    fn outlines_follow_the_image_edge_and_holes() {
+        let border: &[(f32, f32)] = &[(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)];
+        assert_traces(&Selection::all(100, 50), &[border]);
+        let hole = Selection::rectangle(100, 50, (10.0, 10.0), (20.0, 20.0)).invert();
+        assert_traces(
+            &hole,
+            &[border, &[(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)]],
+        );
+        assert!(Selection::all(100, 50).invert().outlines.is_empty());
+        // Across tiles, and cut off at the image edge.
+        let s = Selection::rectangle(600, 400, (200.0, 250.0), (700.0, 300.0));
+        assert_traces(&s, &[&[(200.0, 250.0), (600.0, 250.0), (600.0, 300.0), (200.0, 300.0)]]);
+    }
+
+    #[test]
+    fn pixels_touching_at_a_corner_get_an_outline_each() {
+        let mut coverage = Tiled::new(20, 20, 0);
+        coverage.tile_mut(0, 0)[5 * TILE as usize + 5] = u16::MAX;
+        coverage.tile_mut(0, 0)[6 * TILE as usize + 6] = u16::MAX;
+        assert_traces(
+            &Selection::from_coverage(coverage),
+            &[
+                &[(5.0, 5.0), (6.0, 5.0), (6.0, 6.0), (5.0, 6.0)],
+                &[(6.0, 6.0), (7.0, 6.0), (7.0, 7.0), (6.0, 7.0)],
+            ],
+        );
+    }
+
+    #[test]
+    fn an_ellipse_outline_follows_the_pixel_edges() {
+        let s = Selection::ellipse(300, 300, (50.0, 100.0), (250.0, 200.0));
+        assert_eq!(s.outlines.len(), 1);
+        for &(x, y) in &s.outlines[0] {
+            assert_eq!((x.fract(), y.fract()), (0.0, 0.0));
+            let r = ((x - 150.0) / 100.0).hypot((y - 150.0) / 50.0);
+            assert!((r - 1.0).abs() < 0.02, "({x}, {y}) is off the ellipse");
+        }
+    }
+
+    #[test]
+    fn feathering_rounds_the_outline() {
+        let s = Selection::rectangle(200, 200, (50.0, 50.0), (150.0, 150.0)).feather(10.0);
+        assert_eq!(s.outlines.len(), 1);
+        let near_corner = s.outlines[0]
+            .iter()
+            .map(|p| (p.0 - 50.0).hypot(p.1 - 50.0))
+            .fold(f32::MAX, f32::min);
+        assert!(near_corner > 2.0, "{near_corner}");
     }
 
     #[test]
