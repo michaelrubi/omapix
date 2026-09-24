@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use egui::{Align, Button, ComboBox, Layout, RichText, ScrollArea, Sense, Slider, TextEdit, Ui};
 use omapix_engine::groups::Place;
+use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{BlendMode, DisplayTransform, Document, Pixel, ops};
 
@@ -566,11 +567,17 @@ impl LayersPanel {
                         } else {
                             let targeted = selected && editor.target == Target::Pixels;
                             let response = self.thumbnail(ui, editor, id, false, targeted, theme);
-                            let (command, shift) =
-                                ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                            let (command, shift, alt) =
+                                ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
                             if response.double_clicked() {
                                 self.command = Some(Command::BlendingOptions);
-                            } else if response.clicked() && (command || shift) {
+                            } else if response.clicked() && command {
+                                if let Some(layer) = editor.doc.layer(id).filter(|l| l.has_pixels()) {
+                                    let how = Combine::from_modifiers(shift, alt);
+                                    let sel = Selection::from_alpha(&layer.pixels);
+                                    editor.set_selection("Load Selection", sel, how);
+                                }
+                            } else if response.clicked() && shift {
                                 self.click(ui, editor, id);
                             } else if response.clicked() {
                                 select(editor, id);
@@ -595,7 +602,15 @@ impl LayersPanel {
                                 mask_context_menu(ui, editor, &mut self.command, id, enabled);
                             });
                             if response.clicked() {
-                                if ui.input(|i| i.modifiers.alt) {
+                                let (command, shift, alt) =
+                                    ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
+                                if command {
+                                    if let Some(mask) = editor.doc.layer(id).and_then(|l| l.mask.as_ref()) {
+                                        let how = Combine::from_modifiers(shift, alt);
+                                        let sel = Selection::from_mask(&mask.pixels);
+                                        editor.set_selection("Load Selection", sel, how);
+                                    }
+                                } else if alt {
                                     // Alt+click shows the mask on its own, or goes back.
                                     editor.active = id;
                                     editor.target = Target::Mask;
@@ -605,7 +620,7 @@ impl LayersPanel {
                                         View::Mask(id)
                                     };
                                     editor.set_view(view);
-                                } else if ui.input(|i| i.modifiers.shift) {
+                                } else if shift {
                                     let label = if enabled {
                                         "Disable Layer Mask"
                                     } else {
@@ -676,12 +691,14 @@ impl LayersPanel {
         let response = row.response;
         // A click on the line between rows with Alt held is for clipping.
         let on_line = self.clip_line.is_some();
+        let thumb_clicked = pixel_thumb.as_ref().is_some_and(|r| r.clicked())
+            || ui.ctx().read_response(thumb_id(id, true)).is_some_and(|r| r.clicked());
         if response.drag_started() && editor.busy().is_none() && !on_line {
             self.dragging = Some(id);
         }
         if response.double_clicked() && !on_line {
             self.command = Some(Command::BlendingOptions);
-        } else if response.clicked() && !on_line {
+        } else if response.clicked() && !on_line && !thumb_clicked {
             self.click(ui, editor, id);
         }
 
@@ -1295,6 +1312,10 @@ mod tests {
             self.ctx.read_response(thumb_id(layer, true)).unwrap().rect.center()
         }
 
+        fn thumb_point(&self, layer: u64) -> egui::Pos2 {
+            self.ctx.read_response(thumb_id(layer, false)).unwrap().rect.center()
+        }
+
         fn secondary_button(&mut self, pos: egui::Pos2, pressed: bool) -> Option<Command> {
             self.frame(vec![
                 Event::PointerMoved(pos),
@@ -1694,6 +1715,40 @@ mod tests {
         assert_eq!(h.editor.selected().len(), 2);
         h.editor.active = background;
         assert_eq!(h.editor.selected(), [background]);
+    }
+
+    #[test]
+    fn ctrl_click_thumbnail_loads_selection_and_ctrl_click_name_toggles_multi_selection() {
+        let mut h = Harness::new();
+        let background = h.background();
+
+        // Plain click on background row selects it.
+        h.click(h.row_point(background));
+        assert_eq!(h.editor.selected(), [background]);
+        assert!(h.editor.doc.selection.is_none());
+
+        // Ctrl+click on thumbnail loads its transparency into selection.
+        h.modifiers = egui::Modifiers::COMMAND;
+        h.click(h.thumb_point(background));
+        assert!(h.editor.doc.selection.is_some());
+        assert_eq!(
+            h.editor.selected(),
+            [background],
+            "Ctrl+click on thumbnail must not toggle layer selection"
+        );
+
+        // Ctrl+click on name still toggles multi-selection!
+        h.click(h.name_point(MULTIPLY));
+        assert_eq!(
+            h.editor.selected(),
+            [background, MULTIPLY],
+            "Ctrl+click on name must toggle multi-selection"
+        );
+
+        // Ctrl+click on mask thumbnail loads mask into selection.
+        h.click(h.mask_point(CURVES));
+        assert!(h.editor.doc.selection.is_some());
+        assert_eq!(h.editor.selected(), [background, MULTIPLY]);
     }
 
     #[test]

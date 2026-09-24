@@ -32,6 +32,7 @@ pub use histogram::Histogram;
 pub use layer::{Layer, Mask};
 pub use ops::{add_noise_layer, grain_layer};
 pub use raster::{Pixel, Raster};
+pub use selection::{Channel, Combine, Selection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
