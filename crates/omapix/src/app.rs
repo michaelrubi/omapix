@@ -8,11 +8,12 @@ use egui::{Align, Align2, Button, Layout, Pos2, RichText, Sense, Ui, Vec2, pos2,
 use omapix_engine::adjust::Eyedropper;
 use omapix_engine::brush::Paint;
 use omapix_engine::clip::{self, Clip};
+use omapix_engine::filters::LayerFilter;
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{
-    Document, NoiseDistribution, NoiseOptions, export, filters, ops, ora,
+    Document, NoiseDistribution, NoiseOptions, export, ops, ora,
 };
 
 use crate::canvas::ToolInput;
@@ -66,6 +67,11 @@ enum Dialog {
     },
     AddNoise {
         options: NoiseOptions,
+        preview: bool,
+    },
+    /// A Filter menu filter's settings, previewed on the canvas.
+    Filter {
+        filter: LayerFilter,
         preview: bool,
     },
     UnsavedChanges {
@@ -146,7 +152,10 @@ impl ScriptStep {
                     radius,
                     texture: false,
                 }),
-                ("blur", &[radius]) => ScriptStep::View(View::GaussianBlur { layer: 0, radius }),
+                ("blur", &[radius]) => ScriptStep::View(View::Filter {
+                    layer: 0,
+                    filter: LayerFilter::GaussianBlur { radius },
+                }),
                 ("noise", &[amount]) => ScriptStep::View(View::AddNoise {
                     layer: 0,
                     options: NoiseOptions {
@@ -202,6 +211,7 @@ pub struct App {
     /// A transient message for the status bar, and whether it's an error.
     status: Option<(String, bool, Instant)>,
     blur_radius: f32,
+    unsharp_mask: LayerFilter,
     feather_radius: f32,
     separation_radius: Option<f32>,
     high_pass_radius: f32,
@@ -251,6 +261,7 @@ impl App {
             dialog: None,
             status: None,
             blur_radius: 2.0,
+            unsharp_mask: DEFAULT_UNSHARP_MASK,
             high_pass_radius: 2.0,
             feather_radius: 10.0,
             separation_radius: None,
@@ -581,7 +592,7 @@ impl App {
             | Command::Copy => editor.target == Target::Mask || !no_pixels,
             Command::Paste => self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
-            Command::GaussianBlur | Command::HighPass => {
+            Command::GaussianBlur | Command::HighPass | Command::UnsharpMask => {
                 editor.target == Target::Pixels && !no_pixels
             }
             Command::Invert => editor.target == Target::Mask || !no_pixels,
@@ -618,11 +629,19 @@ impl App {
                     preview: true,
                 });
             }
-            Command::GaussianBlur => {
-                self.dialog = Some(Dialog::Radius {
-                    command: cmd,
-                    radius: self.blur_radius,
-                    preview: Some(true),
+            Command::GaussianBlur | Command::HighPass | Command::UnsharpMask => {
+                let filter = match cmd {
+                    Command::GaussianBlur => LayerFilter::GaussianBlur {
+                        radius: self.blur_radius,
+                    },
+                    Command::HighPass => LayerFilter::HighPass {
+                        radius: self.high_pass_radius,
+                    },
+                    _ => self.unsharp_mask,
+                };
+                self.dialog = Some(Dialog::Filter {
+                    filter,
+                    preview: true,
                 });
             }
             Command::Feather => {
@@ -682,7 +701,7 @@ impl App {
                     }
                 }
             }
-            Command::HighPass | Command::HighPassSharpening => {
+            Command::HighPassSharpening => {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius: self.high_pass_radius,
@@ -735,50 +754,41 @@ impl App {
         );
     }
 
+    /// Apply a Filter menu filter to the active layer (within the
+    /// selection), remembering its settings for next time.
+    fn apply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
+        match filter {
+            LayerFilter::GaussianBlur { radius } => self.blur_radius = radius,
+            LayerFilter::HighPass { radius } => self.high_pass_radius = radius,
+            LayerFilter::UnsharpMask { .. } => self.unsharp_mask = filter,
+        }
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let id = editor.active;
+        editor.edit_in_background(
+            filter.name(),
+            move |doc, _| {
+                if let Some(pixels) = ops::filtered(doc, id, &filter) {
+                    doc.layer_mut(id).expect("just filtered").pixels = pixels;
+                }
+            },
+            ctx,
+        );
+    }
+
     fn apply_radius(&mut self, command: Command, radius: f32, ctx: &egui::Context) {
         let Some(editor) = &mut self.editor else {
             return;
         };
         let index = editor.active_index().unwrap_or(0);
         match command {
-            Command::GaussianBlur => {
-                self.blur_radius = radius;
-                let id = editor.active;
-                editor.edit_in_background(
-                    "Gaussian Blur",
-                    move |doc, _| {
-                        let selection = doc.selection.clone();
-                        if let Some(layer) = doc.layer_mut(id) {
-                            let blurred = filters::gaussian_blur(&layer.pixels, radius);
-                            layer.pixels =
-                                ops::within_selection(&layer.pixels, blurred, selection.as_ref());
-                        }
-                    },
-                    ctx,
-                );
-            }
             Command::Feather => {
                 self.feather_radius = radius;
                 editor.edit_in_background(
                     "Feather",
                     move |doc, _| {
                         doc.selection = doc.selection.as_ref().map(|s| s.feather(radius));
-                    },
-                    ctx,
-                );
-            }
-            Command::HighPass => {
-                self.high_pass_radius = radius;
-                let id = editor.active;
-                editor.edit_in_background(
-                    "High Pass",
-                    move |doc, _| {
-                        let selection = doc.selection.clone();
-                        if let Some(layer) = doc.layer_mut(id) {
-                            let filtered = filters::high_pass(&layer.pixels, radius);
-                            layer.pixels =
-                                ops::within_selection(&layer.pixels, filtered, selection.as_ref());
-                        }
                     },
                     ctx,
                 );
@@ -965,6 +975,9 @@ impl App {
                     self.menu_item(ui, Command::AddNoise, None);
                 });
                 self.menu_item(ui, Command::GaussianBlur, None);
+                ui.menu_button("Sharpen", |ui| {
+                    self.menu_item(ui, Command::UnsharpMask, None);
+                });
                 self.menu_item(ui, Command::HighPass, None);
             });
             ui.menu_button("Retouch", |ui| {
@@ -1132,21 +1145,7 @@ impl App {
                         });
                         ui.add_space(4.0);
                     }
-                    ui.horizontal(|ui| {
-                        ui.label("Radius");
-                        let value = egui::DragValue::new(radius)
-                            .range(0.1..=250.0)
-                            .speed(0.1)
-                            .suffix(" px")
-                            .fixed_decimals(1);
-                        ui.add(value);
-                    });
-                    if *command == Command::GaussianBlur
-                        && let Some(on) = preview
-                    {
-                        ui.add_space(4.0);
-                        ui.checkbox(on, "Preview");
-                    }
+                    radius_field(ui, radius);
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let ok = ui.button("OK").clicked()
@@ -1159,6 +1158,57 @@ impl App {
                             action = Some(Box::new(move |app, ctx| {
                                 app.apply_radius(command, radius, ctx)
                             }));
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::Filter { filter, preview } => {
+                    ui.heading(filter.name());
+                    ui.add_space(8.0);
+                    match filter {
+                        LayerFilter::GaussianBlur { radius } | LayerFilter::HighPass { radius } => {
+                            radius_field(ui, radius);
+                        }
+                        LayerFilter::UnsharpMask {
+                            amount,
+                            radius,
+                            threshold,
+                        } => {
+                            let mut percent = *amount * 100.0;
+                            ui.horizontal(|ui| {
+                                ui.label("Amount");
+                                let slider = egui::Slider::new(&mut percent, 1.0..=500.0)
+                                    .suffix(" %")
+                                    .fixed_decimals(0);
+                                ui.add(slider);
+                            });
+                            *amount = percent / 100.0;
+                            radius_field(ui, radius);
+                            ui.horizontal(|ui| {
+                                ui.label("Threshold");
+                                let slider = egui::Slider::new(threshold, 0.0..=255.0)
+                                    .suffix(" levels")
+                                    .fixed_decimals(0);
+                                ui.add(slider);
+                            });
+                            ui.label(
+                                RichText::new("Sharpens luminance only. Judge it at 100 %.")
+                                    .color(hint),
+                            );
+                        }
+                    }
+                    ui.add_space(4.0);
+                    ui.checkbox(preview, "Preview");
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let filter = *filter;
+                            action = Some(Box::new(move |app, ctx| app.apply_filter(filter, ctx)));
                             close = true;
                         }
                     });
@@ -1267,17 +1317,14 @@ impl App {
                     };
                     editor.set_view(view);
                 }
-                Some(Dialog::Radius {
-                    command: Command::GaussianBlur,
-                    radius,
-                    preview,
-                }) => {
-                    let view = match preview {
-                        Some(true) => View::GaussianBlur {
+                Some(Dialog::Filter { filter, preview }) => {
+                    let view = if *preview {
+                        View::Filter {
                             layer: editor.active,
-                            radius: *radius,
-                        },
-                        _ => View::Image,
+                            filter: *filter,
+                        }
+                    } else {
+                        View::Image
                     };
                     editor.set_view(view);
                 }
@@ -1292,7 +1339,7 @@ impl App {
                     };
                     editor.set_view(view);
                 }
-                _ if matches!(editor.view(), View::Separation { .. } | View::GaussianBlur { .. } | View::AddNoise { .. }) => {
+                _ if matches!(editor.view(), View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }) => {
                     editor.set_view(View::Image)
                 }
                 _ => {}
@@ -1656,8 +1703,10 @@ impl App {
                 {
                     self.apply_radius(command, radius, ctx);
                 }
-                if let Some(Dialog::AddNoise { options, .. }) = self.dialog.take() {
-                    self.apply_add_noise(options, ctx);
+                match self.dialog.take() {
+                    Some(Dialog::AddNoise { options, .. }) => self.apply_add_noise(options, ctx),
+                    Some(Dialog::Filter { filter, .. }) => self.apply_filter(filter, ctx),
+                    dialog => self.dialog = dialog,
                 }
             }
             ScriptStep::Stroke([x0, y0, x1, y1]) => {
@@ -1701,9 +1750,9 @@ impl App {
                     let view = match view {
                         View::Mask(_) => View::Mask(editor.active),
                         View::MaskOverlay(_) => View::MaskOverlay(editor.active),
-                        View::GaussianBlur { radius, .. } => View::GaussianBlur {
+                        View::Filter { filter, .. } => View::Filter {
                             layer: editor.active,
-                            radius,
+                            filter,
                         },
                         View::AddNoise { options, .. } => View::AddNoise {
                             layer: editor.active,
@@ -1742,6 +1791,27 @@ impl App {
             self.title = title;
         }
     }
+}
+
+/// Unsharp Mask's settings until it's first used: a moderate sharpening
+/// for a 24 MP portrait.
+const DEFAULT_UNSHARP_MASK: LayerFilter = LayerFilter::UnsharpMask {
+    amount: 0.8,
+    radius: 1.5,
+    threshold: 2.0,
+};
+
+/// A radius in pixels, for filter and radius dialogs.
+fn radius_field(ui: &mut Ui, radius: &mut f32) {
+    ui.horizontal(|ui| {
+        ui.label("Radius");
+        let value = egui::DragValue::new(radius)
+            .range(0.1..=250.0)
+            .speed(0.1)
+            .suffix(" px")
+            .fixed_decimals(1);
+        ui.add(value);
+    });
 }
 
 /// Fill the active layer (or its mask) where selected, like Photoshop's
@@ -2520,6 +2590,7 @@ mod tests {
             dialog: None,
             status: None,
             blur_radius: 2.0,
+            unsharp_mask: DEFAULT_UNSHARP_MASK,
             high_pass_radius: 2.0,
             feather_radius: 5.0,
             separation_radius: None,
@@ -2536,6 +2607,40 @@ mod tests {
     }
 
     #[test]
+    fn unsharp_mask_previews_then_applies_and_remembers_its_settings() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active = app.editor.as_ref().unwrap().active;
+        app.run(Command::UnsharpMask, &ctx);
+        let Some(Dialog::Filter { filter, preview }) = &mut app.dialog else {
+            panic!("no filter dialog");
+        };
+        assert!(*preview);
+        assert_eq!(*filter, DEFAULT_UNSHARP_MASK);
+        let stronger = LayerFilter::UnsharpMask {
+            amount: 2.0,
+            radius: 3.0,
+            threshold: 0.0,
+        };
+        *filter = stronger;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+        output.textures_delta.clear();
+        let view = app.editor.as_ref().unwrap().view();
+        assert_eq!(view, View::Filter { layer: active, filter: stronger });
+
+        app.dialog = None;
+        app.apply_filter(stronger, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Unsharp Mask"));
+        app.run(Command::UnsharpMask, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == stronger));
+    }
+
+    #[test]
     fn gaussian_blur_dialog_shows_live_preview_and_reverts_on_cancel() {
         let ctx = egui::Context::default();
         let mut app = test_app();
@@ -2544,29 +2649,28 @@ mod tests {
         app.run(Command::GaussianBlur, &ctx);
         assert!(matches!(
             app.dialog,
-            Some(Dialog::Radius {
-                command: Command::GaussianBlur,
-                radius: 2.0,
-                preview: Some(true),
+            Some(Dialog::Filter {
+                filter: LayerFilter::GaussianBlur { radius: 2.0 },
+                preview: true,
             })
         ));
 
-        // Running dialogs updates the editor view to View::GaussianBlur
+        // Running dialogs updates the editor view to View::Filter
         let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.dialogs(ctx);
         });
         output.textures_delta.clear();
         assert_eq!(
             app.editor.as_ref().unwrap().view(),
-            View::GaussianBlur {
+            View::Filter {
                 layer: active_id,
-                radius: 2.0,
+                filter: LayerFilter::GaussianBlur { radius: 2.0 },
             }
         );
 
         // Toggling preview off reverts to View::Image
-        if let Some(Dialog::Radius { preview, .. }) = &mut app.dialog {
-            *preview = Some(false);
+        if let Some(Dialog::Filter { preview, .. }) = &mut app.dialog {
+            *preview = false;
         }
         let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.dialogs(ctx);
@@ -2574,10 +2678,10 @@ mod tests {
         output.textures_delta.clear();
         assert_eq!(app.editor.as_ref().unwrap().view(), View::Image);
 
-        // Toggling preview back on updates to View::GaussianBlur
-        if let Some(Dialog::Radius { preview, radius, .. }) = &mut app.dialog {
-            *preview = Some(true);
-            *radius = 4.5;
+        // Toggling preview back on updates to View::Filter
+        if let Some(Dialog::Filter { preview, filter }) = &mut app.dialog {
+            *preview = true;
+            *filter = LayerFilter::GaussianBlur { radius: 4.5 };
         }
         let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.dialogs(ctx);
@@ -2585,9 +2689,9 @@ mod tests {
         output.textures_delta.clear();
         assert_eq!(
             app.editor.as_ref().unwrap().view(),
-            View::GaussianBlur {
+            View::Filter {
                 layer: active_id,
-                radius: 4.5,
+                filter: LayerFilter::GaussianBlur { radius: 4.5 },
             }
         );
 
@@ -2702,9 +2806,9 @@ mod tests {
                 radius: 5.0,
                 texture: true,
             },
-            View::GaussianBlur {
+            View::Filter {
                 layer: active,
-                radius: 3.0,
+                filter: LayerFilter::GaussianBlur { radius: 3.0 },
             },
             View::AddNoise {
                 layer: active,
@@ -2769,9 +2873,9 @@ mod tests {
 
         assert_eq!(
             app.editor.as_ref().unwrap().view(),
-            View::GaussianBlur {
+            View::Filter {
                 layer: active_id,
-                radius: 3.5,
+                filter: LayerFilter::GaussianBlur { radius: 3.5 },
             }
         );
     }

@@ -39,8 +39,11 @@ pub enum View {
     /// What frequency separation at `radius` would produce: the texture
     /// layer, or the colour/tone layer.
     Separation { radius: f32, texture: bool },
-    /// What Gaussian blur at `radius` on `layer` would produce.
-    GaussianBlur { layer: u64, radius: f32 },
+    /// What a Filter menu filter would do to `layer`.
+    Filter {
+        layer: u64,
+        filter: omapix_engine::filters::LayerFilter,
+    },
     /// What adding noise with `options` above `layer` would produce.
     AddNoise { layer: u64, options: NoiseOptions },
 }
@@ -636,7 +639,7 @@ impl Editor {
         let Some(render) = self.canvas.render() else {
             return;
         };
-        if matches!(self.view, View::Separation { .. } | View::GaussianBlur { .. } | View::AddNoise { .. }) {
+        if matches!(self.view, View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }) {
             return;
         }
         let data = draw_tiles(
@@ -902,7 +905,7 @@ impl Editor {
                 self.set_view(View::Image);
             }
         }
-        if let View::GaussianBlur { layer, .. } = self.view
+        if let View::Filter { layer, .. } = self.view
             && (self.doc.layer(layer).is_none() || layer != self.active)
         {
             self.set_view(View::Image);
@@ -974,7 +977,7 @@ impl Editor {
         let in_place = self
             .canvas
             .render()
-            .filter(|_| !matches!(view, View::Separation { .. } | View::GaussianBlur { .. } | View::AddNoise { .. }));
+            .filter(|_| !matches!(view, View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }));
         if let Some(render) = in_place {
             let job = InPlace {
                 doc,
@@ -1102,15 +1105,13 @@ pub(crate) fn render_view(
             };
             (Render::new(image), Some(base))
         }
-        View::GaussianBlur { layer, radius } => {
-            let Some(l) = doc.layer(layer) else {
+        View::Filter { layer, filter } => {
+            let Some(filtered) = ops::filtered(doc, layer, &filter) else {
                 return (Render::new(doc.composite()), None);
             };
-            let blurred = filters::gaussian_blur(&l.pixels, radius);
-            let blurred = ops::within_selection(&l.pixels, blurred, doc.selection.as_ref());
             let mut layers = doc.layers.clone();
             if let Some(target) = layers.iter_mut().find(|l| l.id == layer) {
-                target.pixels = blurred;
+                target.pixels = filtered;
             }
             let image = composite::composite(&layers, doc.width, doc.height);
             (Render::new(image), None)
@@ -1187,7 +1188,7 @@ fn draw_tiles(
         }
         View::Image
         | View::Separation { .. }
-        | View::GaussianBlur { .. }
+        | View::Filter { .. }
         | View::AddNoise { .. } => composite::composite_tiles(layers, tiles, groups),
     }
 }
@@ -1443,9 +1444,9 @@ mod tests {
         });
         let (blurred, _) = render_view(
             &e.doc,
-            View::GaussianBlur {
+            View::Filter {
                 layer: e.active,
-                radius: 5.0,
+                filter: omapix_engine::filters::LayerFilter::GaussianBlur { radius: 5.0 },
             },
             RED,
             None,

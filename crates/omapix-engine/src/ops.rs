@@ -168,6 +168,14 @@ pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u
     (low_id, high_id)
 }
 
+/// Layer `id`'s pixels after `filter`, within the selection if there is
+/// one. `None` if there's no such layer.
+pub fn filtered(doc: &Document, id: u64, filter: &crate::filters::LayerFilter) -> Option<Tiled<crate::Pixel>> {
+    let layer = doc.layer(id)?;
+    let out = filter.apply(&layer.pixels);
+    Some(within_selection(&layer.pixels, out, doc.selection.as_ref()))
+}
+
 /// One-step High Pass sharpening: a "High Pass Sharpening" layer in
 /// Overlay mode above layer index `above`, holding the High Pass of the
 /// visible image's luminance, so it sharpens tone without colour fringes.
