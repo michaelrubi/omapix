@@ -60,6 +60,16 @@ The marching ants follow the edge of the whole selection, traced from its covera
 
 **Plan:** Photoshop's tool groups: one toolbar slot per group, showing the tool last used, with a small corner triangle. Right-clicking (or holding the mouse on) the slot opens a menu of the group's tools with their letters, and Shift+letter cycles through the group. Groups: Rectangular/Elliptical Marquee (`M`); Lasso (`L`); Object Selection/Magic Wand (`W`); and the same for Spot Healing/Healing (`J`).
 
+### Selecting several layers
+
+**Problem:** only one layer can be selected, so grouping, moving, deleting or merging several layers means doing them one at a time.
+
+**Plan:** Photoshop's multiple selection: Ctrl+click adds or removes a layer, Shift+click selects a range of rows. Ctrl+G then groups them all in one new group (in stack order, where the topmost was), dragging moves them together, Delete and Ctrl+J act on all of them, and Ctrl+E merges them (Merge Layers). The Move tool moves all of them. Painting and adjustments still apply to the last one clicked, which stays the active layer. The engine's group operations already move whole spans, so this is mostly panel and editor work.
+
+### Photoshop's layer navigation shortcuts
+
+Alt+] and Alt+[ select the layer above or below (following the rows shown, so into open groups and past closed ones), and Ctrl+Shift+] and Ctrl+Shift+[ bring a layer to the front or send it to the back of its group. Keyboard-first, and cheap now that `raise_place`/`lower_place` exist.
+
 ## 2. Hand-testing checklist
 
 The UI has been tested through the same code paths with scripts
@@ -70,6 +80,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Dragging Curves points, and dragging one off the graph to delete it
 - [ ] Blend If handles, including Alt+drag to split
 - [ ] Dragging layers to reorder them, including by the name
+- [ ] Layer groups: Ctrl+G and Ctrl+Shift+G, opening and closing groups, dragging layers into, out of and between groups, and the Move tool on a group
 - [ ] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
 - [x] Right-clicking layer rows and mask thumbnails for context menus
 - [x] Active tool contrast styling and frameless toolbar icons
@@ -86,7 +97,11 @@ The UI has been tested through the same code paths with scripts
 
 ## 3. Retouching and editing
 
-- **Layer groups:** folders in the Layers panel with their own blend mode, opacity and mask. OpenRaster supports groups (nested stacks).
+- ~~**Layer groups**~~ (done): folders in the Layers panel with their own blend mode, opacity, mask and Blend If, nested to any depth. Groups are Pass Through by default, so what's in them blends onto the layers below as if ungrouped; any other mode composites the group on its own first, so adjustment layers inside it change only the group. Ctrl+G groups the selected layer and Ctrl+Shift+G ungroups; Layer › New Group and the folder button make an empty one. New layers go into the top of a selected group. Groups start closed; the triangle opens them, and they open by themselves to show the selected layer. Drag a layer onto a group's row to put it in, or between rows to place it; Ctrl+] and Ctrl+[ step into and out of groups. Duplicating, deleting and moving a group (including with the Move tool and Alt+drag) take everything in it, and Ctrl+E on a group merges it into one layer (Merge Group). Saved in OpenRaster as nested stacks, which Krita and GIMP read.
+  - Later: grouping several layers at once (see "Selecting several layers" above), and Alt+click on a triangle to open or close every group inside.
+- **Clipping masks** (Ctrl+Alt+G, or Alt+click the line between two rows): clip a layer to the one below, so it shows only where that layer does. The retouching staple: a Curves or Hue/Saturation layer that fixes just the dodge & burn layer, or colour on one pasted patch. Compositing already builds a tree for groups, so a clipped run can reuse the isolated-group path (composite the base and its clipped layers together, then blend as one). Saved in OpenRaster under an `omapix:` attribute (check what Krita writes for its "inherit alpha", to open the same way there).
+- **Retouching setups as groups:** now that groups exist, Frequency Separation can put its two layers in a "Frequency Separation" group (hide it to compare before and after), and a second, curves-based **Dodge & Burn** setup can make the pro workflow in one step: a group with a brightening and a darkening Curves layer, each with a black mask to paint on.
+- **Lock transparent pixels** (`/`): brushes and fills change only pixels that are already there, as in Photoshop. Handy for recolouring a pasted patch or a hair layer. Lock All later.
 - ~~**Elliptical marquee**~~ (done): Shift+M switches between the rectangular and elliptical marquees, and Shift constrains either to a square or circle.
 - **Magic Wand** (`W`, grouped with Object Selection): click to select similar colours, with Tolerance, Contiguous and Sample All Layers in the options bar, and Shift/Alt to add and subtract as with the marquees. Anti-aliased edges, so it can feed Feather and masks directly.
 - **Object Selection** (Photoshop's "smart" select, `W`): drag a rough box or lasso around something (a person, a face, hair) and it selects just that object. Needs a local segmentation model such as SAM run through ONNX Runtime, so it shares groundwork with the AI retouching in section 7 and is best built alongside it.
@@ -118,6 +133,7 @@ The UI has been tested through the same code paths with scripts
 - **Faster slider drags:** opacity and adjustment changes recomposite the whole image (about 100 ms at 24 MP). Recomposite only the visible area first, then the rest.
 - **GPU compositing:** move blend modes to the GPU for display, keeping the CPU path for export (see DESIGN.md).
 - **Memory:** free display textures that have been off-screen for a while.
+- **Cache group results:** an isolated group (any mode but Pass Through) composites its contents into its own buffer for every tile on every render. Keep that result while nothing inside the group changes, so dragging a slider on a layer above a big group doesn't redo the whole group.
 
 ## 7. The big one: AI-assisted retouching
 

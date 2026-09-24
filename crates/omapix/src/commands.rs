@@ -22,6 +22,9 @@ pub enum Command {
     DeleteLayer,
     MergeDown,
     StampVisible,
+    NewGroup,
+    GroupLayers,
+    UngroupLayers,
     RaiseLayer,
     LowerLayer,
     BlendingOptions,
@@ -84,6 +87,9 @@ impl Command {
         Command::DeleteLayer,
         Command::MergeDown,
         Command::StampVisible,
+        Command::NewGroup,
+        Command::GroupLayers,
+        Command::UngroupLayers,
         Command::RaiseLayer,
         Command::LowerLayer,
         Command::BlendingOptions,
@@ -129,6 +135,7 @@ impl Command {
     pub const KEYBOARD_ORDER: &[Command] = &[
         Command::StampVisible,
         Command::InvertSelection,
+        Command::UngroupLayers,
         Command::SaveAs,
         Command::Redo,
         Command::CopyMerged,
@@ -142,6 +149,7 @@ impl Command {
         Command::Paste,
         Command::DuplicateLayer,
         Command::MergeDown,
+        Command::GroupLayers,
         Command::RaiseLayer,
         Command::LowerLayer,
         Command::Invert,
@@ -181,6 +189,9 @@ impl Command {
             Command::DeleteLayer => "Delete Layer",
             Command::MergeDown => "Merge Down",
             Command::StampVisible => "Stamp Visible",
+            Command::NewGroup => "New Group",
+            Command::GroupLayers => "Group Layers",
+            Command::UngroupLayers => "Ungroup Layers",
             Command::RaiseLayer => "Bring Forward",
             Command::LowerLayer => "Send Backward",
             Command::BlendingOptions => "Blending Options…",
@@ -230,6 +241,8 @@ impl Command {
             Command::DuplicateLayer => s(CMD, Key::J),
             Command::MergeDown => s(CMD, Key::E),
             Command::StampVisible => s(CMD_ALT_SHIFT, Key::E),
+            Command::GroupLayers => s(CMD, Key::G),
+            Command::UngroupLayers => s(CMD_SHIFT, Key::G),
             Command::RaiseLayer => s(CMD, Key::CloseBracket),
             Command::LowerLayer => s(CMD, Key::OpenBracket),
             Command::Invert => s(CMD, Key::I),
@@ -396,5 +409,6 @@ mod tests {
         assert!(pos(Command::StampVisible) < pos(Command::MergeDown));
         assert!(pos(Command::InvertSelection) < pos(Command::Invert));
         assert!(pos(Command::CopyMerged) < pos(Command::Copy));
+        assert!(pos(Command::UngroupLayers) < pos(Command::GroupLayers));
     }
 }

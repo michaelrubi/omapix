@@ -449,8 +449,7 @@ impl App {
                             let index = editor.active_index().unwrap_or(0);
                             editor.edit(&label, |doc, active| {
                                 let new = doc.next_layer_id();
-                                let insert_pos = (index + 1).min(doc.layers.len());
-                                doc.layers.insert(insert_pos, omapix_engine::Layer::adjustment(new, adj, w, h));
+                                doc.insert_above(index, omapix_engine::Layer::adjustment(new, adj, w, h));
                                 *active = new;
                             });
                             editor.target = Target::Mask;
@@ -485,21 +484,24 @@ impl App {
         if editor.busy().is_some() && !view && !matches!(cmd, Command::Quit) {
             return false;
         }
+        let doc = &editor.doc;
         let index = editor.active_index();
-        let has_mask = editor
-            .doc
-            .layer(editor.active)
-            .is_some_and(|l| l.mask.is_some());
-        let is_adjustment = editor
-            .doc
-            .layer(editor.active)
-            .is_some_and(|l| l.adjustment.is_some());
+        let layer = doc.layer(editor.active);
+        let has_mask = layer.is_some_and(|l| l.mask.is_some());
+        let is_group = layer.is_some_and(|l| l.is_group);
+        // Adjustment layers and groups have no pixels to change.
+        let no_pixels = layer.is_some_and(|l| !l.has_pixels());
         match cmd {
             Command::Undo => editor.undo_label().is_some(),
             Command::Redo => editor.redo_label().is_some(),
-            Command::DeleteLayer => editor.doc.layers.len() > 1,
-            Command::MergeDown | Command::LowerLayer => index.is_some_and(|i| i > 0),
-            Command::RaiseLayer => index.is_some_and(|i| i + 1 < editor.doc.layers.len()),
+            // Something must be left.
+            Command::DeleteLayer => index.is_some_and(|i| doc.span(i).len() < doc.layers.len()),
+            Command::MergeDown => {
+                is_group || index.is_some_and(|i| ops::can_merge_down(doc, i))
+            }
+            Command::RaiseLayer => doc.raise_place(editor.active).is_some(),
+            Command::LowerLayer => doc.lower_place(editor.active).is_some(),
+            Command::UngroupLayers => is_group,
             Command::AddMask => !has_mask,
             Command::Deselect | Command::InvertSelection | Command::Feather => {
                 editor.doc.selection.is_some()
@@ -508,11 +510,11 @@ impl App {
             | Command::FillBackground
             | Command::Clear
             | Command::Cut
-            | Command::Copy => editor.target == Target::Mask || !is_adjustment,
+            | Command::Copy => editor.target == Target::Mask || !no_pixels,
             Command::Paste => self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
-            Command::GaussianBlur => editor.target == Target::Pixels && !is_adjustment,
-            Command::Invert => editor.target == Target::Mask || !is_adjustment,
+            Command::GaussianBlur => editor.target == Target::Pixels && !no_pixels,
+            Command::Invert => editor.target == Target::Mask || !no_pixels,
             _ => true,
         }
     }
@@ -660,6 +662,13 @@ impl App {
         }
     }
 
+    fn active_is_group(&self) -> bool {
+        self.editor
+            .as_ref()
+            .and_then(|e| e.doc.layer(e.active))
+            .is_some_and(|l| l.is_group)
+    }
+
     fn menu_item(&mut self, ui: &mut Ui, cmd: Command, label: Option<String>) {
         let text = label.unwrap_or_else(|| cmd.label().to_owned());
         let mut button = Button::new(text);
@@ -710,6 +719,10 @@ impl App {
                 self.menu_item(ui, Command::DuplicateLayer, None);
                 self.menu_item(ui, Command::DeleteLayer, None);
                 ui.separator();
+                self.menu_item(ui, Command::NewGroup, None);
+                self.menu_item(ui, Command::GroupLayers, None);
+                self.menu_item(ui, Command::UngroupLayers, None);
+                ui.separator();
                 self.menu_item(ui, Command::BlendingOptions, None);
                 ui.separator();
                 self.menu_item(ui, Command::AddMask, None);
@@ -719,7 +732,8 @@ impl App {
                 self.menu_item(ui, Command::RaiseLayer, None);
                 self.menu_item(ui, Command::LowerLayer, None);
                 ui.separator();
-                self.menu_item(ui, Command::MergeDown, None);
+                let merge = self.active_is_group().then(|| "Merge Group".to_owned());
+                self.menu_item(ui, Command::MergeDown, merge);
                 self.menu_item(ui, Command::StampVisible, None);
             });
             ui.menu_button("Select", |ui| {
@@ -1315,6 +1329,7 @@ fn paste(editor: &mut Editor, clip: Arc<Clip>, ctx: &egui::Context) {
 fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
     let index = editor.active_index().unwrap_or(0);
     let id = editor.active;
+    let is_group = editor.doc.layer(id).is_some_and(|l| l.is_group);
     let (w, h) = (editor.doc.width, editor.doc.height);
     match cmd {
         Command::Undo => editor.undo(),
@@ -1324,35 +1339,49 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.edit("New Layer", |doc, active| {
                 let new = doc.next_layer_id();
                 let name = doc.unused_name("Layer");
-                doc.layers.insert(index + 1, Layer::empty(new, name, w, h));
+                doc.insert_above(index, Layer::empty(new, name, w, h));
                 *active = new;
             });
         }
         Command::DuplicateLayer => {
-            editor.edit("Duplicate Layer", |doc, active| {
-                let new = doc.next_layer_id();
-                let mut copy = doc.layers[index].clone();
-                copy.id = new;
-                copy.name = format!("{} copy", copy.name);
-                doc.layers.insert(index + 1, copy);
-                *active = new;
-            });
+            let label = if is_group { "Duplicate Group" } else { "Duplicate Layer" };
+            editor.edit(label, |doc, active| *active = doc.duplicate_layer(index));
         }
         Command::DeleteLayer => {
-            if editor.view() == View::Mask(id) {
-                editor.set_view(View::Image);
-            }
             editor.edit("Delete Layer", |doc, active| {
-                doc.layers.remove(index);
-                *active = doc.layers[index.saturating_sub(1).min(doc.layers.len() - 1)].id;
+                let start = doc.span(index).start;
+                doc.remove_layer(index);
+                *active = doc.layers[start.saturating_sub(1).min(doc.layers.len() - 1)].id;
             });
             editor.fix_selection();
         }
-        Command::RaiseLayer => {
-            editor.edit("Bring Forward", |doc, _| doc.layers.swap(index, index + 1));
+        Command::RaiseLayer | Command::LowerLayer => {
+            let (label, place) = if cmd == Command::RaiseLayer {
+                ("Bring Forward", editor.doc.raise_place(id))
+            } else {
+                ("Send Backward", editor.doc.lower_place(id))
+            };
+            if let Some(place) = place {
+                editor.edit(label, |doc, _| {
+                    doc.move_layer(id, place);
+                });
+            }
         }
-        Command::LowerLayer => {
-            editor.edit("Send Backward", |doc, _| doc.layers.swap(index, index - 1));
+        Command::NewGroup => {
+            editor.edit("New Group", |doc, active| *active = doc.new_group(index));
+            editor.fix_selection();
+        }
+        Command::GroupLayers => {
+            editor.edit("Group Layers", |doc, active| *active = doc.group_layer(index));
+            editor.fix_selection();
+        }
+        Command::UngroupLayers => {
+            editor.edit("Ungroup Layers", |doc, active| {
+                if let Some(top) = doc.ungroup(index) {
+                    *active = top;
+                }
+            });
+            editor.fix_selection();
         }
         Command::AddMask => {
             // With a selection, the mask reveals just the selection.
@@ -1422,10 +1451,16 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             }
         }
         Command::MergeDown => {
+            editor.target = Target::Pixels;
             editor.edit_in_background(
-                "Merge Down",
+                if is_group { "Merge Group" } else { "Merge Down" },
                 move |doc, active| {
-                    if let Some(merged) = ops::merge_down(doc, index) {
+                    let merged = if is_group {
+                        ops::merge_group(doc, index)
+                    } else {
+                        ops::merge_down(doc, index)
+                    };
+                    if let Some(merged) = merged {
                         *active = merged;
                     }
                 },
@@ -1436,10 +1471,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.target = Target::Pixels;
             editor.edit_in_background(
                 "Stamp Visible",
-                move |doc, active| {
-                    let top = doc.layers.len() - 1;
-                    *active = ops::stamp_visible(doc, top);
-                },
+                move |doc, active| *active = ops::stamp_visible(doc),
                 ctx,
             );
         }
@@ -1472,8 +1504,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             let label = format!("New {} Layer", adjustment.name());
             editor.edit(&label, |doc, active| {
                 let new = doc.next_layer_id();
-                doc.layers
-                    .insert(index + 1, Layer::adjustment(new, adjustment, w, h));
+                doc.insert_above(index, Layer::adjustment(new, adjustment, w, h));
                 *active = new;
             });
             // Painting on an adjustment layer paints its mask.
@@ -1844,5 +1875,65 @@ mod tests {
             Some(omapix_engine::adjust::Adjustment::ColorLookup(_))
         ));
         assert_eq!(editor.target, Target::Mask);
+    }
+
+    #[test]
+    fn group_commands_build_and_take_apart_groups() {
+        let ctx = egui::Context::default();
+        let mut editor = editor_with_selection();
+        let background = editor.active;
+        let names = |e: &Editor| -> Vec<String> {
+            e.doc
+                .layers
+                .iter()
+                .map(|l| match l.parent.and_then(|p| e.doc.layer(p)) {
+                    Some(g) => format!("{}({})", l.name, g.name),
+                    None => l.name.clone(),
+                })
+                .collect()
+        };
+        run_on_editor(&mut editor, Command::NewLayer, &ctx);
+        run_on_editor(&mut editor, Command::GroupLayers, &ctx);
+        let group = editor.active;
+        assert_eq!(names(&editor), ["Background", "Layer 1(Group 1)", "Group 1"]);
+        assert_eq!(editor.undo_label(), Some("Group Layers"));
+
+        // With the group selected, new layers go in at its top.
+        run_on_editor(&mut editor, Command::NewLayer, &ctx);
+        assert_eq!(
+            names(&editor),
+            ["Background", "Layer 1(Group 1)", "Layer 2(Group 1)", "Group 1"]
+        );
+        // Bring Forward takes it out of the top of the group.
+        run_on_editor(&mut editor, Command::RaiseLayer, &ctx);
+        assert_eq!(
+            names(&editor),
+            ["Background", "Layer 1(Group 1)", "Group 1", "Layer 2"]
+        );
+
+        editor.active = group;
+        run_on_editor(&mut editor, Command::DuplicateLayer, &ctx);
+        assert_eq!(editor.doc.layer(editor.active).unwrap().name, "Group 1 copy");
+        assert_eq!(editor.doc.layers.len(), 6);
+        run_on_editor(&mut editor, Command::DeleteLayer, &ctx);
+        assert_eq!(editor.doc.layers.len(), 4, "the copy and what's in it");
+        assert_eq!(editor.active, group, "the layer below is selected");
+
+        run_on_editor(&mut editor, Command::UngroupLayers, &ctx);
+        assert_eq!(names(&editor), ["Background", "Layer 1", "Layer 2"]);
+        assert_eq!(editor.doc.layer(editor.active).unwrap().name, "Layer 1");
+
+        // Ctrl+E on a group merges the group.
+        editor.active = background;
+        run_on_editor(&mut editor, Command::GroupLayers, &ctx);
+        run_on_editor(&mut editor, Command::MergeDown, &ctx);
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Merge Group"));
+        assert_eq!(names(&editor), ["Group 1", "Layer 1", "Layer 2"]);
+        assert!(!editor.doc.layers[0].is_group);
+        assert_eq!(editor.doc.layers[0].pixels.get(5, 5), [30000, 30000, 30000, 65535]);
     }
 }
