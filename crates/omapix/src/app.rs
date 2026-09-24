@@ -538,18 +538,10 @@ impl App {
             }
             Command::RaiseLayer => doc.raise_place(editor.active).is_some(),
             Command::LowerLayer => doc.lower_place(editor.active).is_some(),
-            Command::BringToFront => if editor.several_selected() {
-                doc.front_place_layers(&editor.selected(), editor.active).is_some()
-            } else {
-                doc.front_place(editor.active).is_some()
-            },
-            Command::SendToBack => if editor.several_selected() {
-                doc.back_place_layers(&editor.selected(), editor.active).is_some()
-            } else {
-                doc.back_place(editor.active).is_some()
-            },
-            Command::SelectLayerAbove => self.layers.can_select_above(doc, editor.active),
-            Command::SelectLayerBelow => self.layers.can_select_below(doc, editor.active),
+            Command::BringToFront => doc.front_place(&editor.selected(), editor.active).is_some(),
+            Command::SendToBack => doc.back_place(&editor.selected(), editor.active).is_some(),
+            Command::SelectLayerAbove => self.layers.row_beside(doc, editor.active, true).is_some(),
+            Command::SelectLayerBelow => self.layers.row_beside(doc, editor.active, false).is_some(),
             Command::UngroupLayers => is_group,
             Command::ClippingMask => {
                 layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i))
@@ -1625,43 +1617,29 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             });
             editor.fix_selection();
         }
-        Command::RaiseLayer | Command::LowerLayer | Command::BringToFront | Command::SendToBack => {
-            let (label, place) = match cmd {
-                Command::RaiseLayer => ("Bring Forward", editor.doc.raise_place(id)),
-                Command::LowerLayer => ("Send Backward", editor.doc.lower_place(id)),
-                Command::BringToFront => (
-                    "Bring to Front",
-                    if several {
-                        editor.doc.front_place_layers(&selected, id)
-                    } else {
-                        editor.doc.front_place(id)
-                    },
-                ),
-                Command::SendToBack => (
-                    "Send to Back",
-                    if several {
-                        editor.doc.back_place_layers(&selected, id)
-                    } else {
-                        editor.doc.back_place(id)
-                    },
-                ),
-                _ => unreachable!(),
+        Command::RaiseLayer | Command::LowerLayer => {
+            let (label, place) = if cmd == Command::RaiseLayer {
+                ("Bring Forward", editor.doc.raise_place(id))
+            } else {
+                ("Send Backward", editor.doc.lower_place(id))
             };
             if let Some(place) = place {
                 editor.edit(label, |doc, _| {
-                    if several {
-                        doc.move_layers(&selected, place);
-                    } else {
-                        doc.move_layer(id, place);
-                    }
+                    doc.move_layer(id, place);
                 });
             }
         }
-        Command::SelectLayerAbove | Command::SelectLayerBelow => {
-            let up = cmd == Command::SelectLayerAbove;
-            let mut expanded = std::collections::HashSet::new();
-            expanded.extend(crate::layers_panel::ancestors(&editor.doc, id));
-            crate::layers_panel::step_layer_selection(editor, &expanded, up);
+        Command::BringToFront | Command::SendToBack => {
+            let (label, place) = if cmd == Command::BringToFront {
+                ("Bring to Front", editor.doc.front_place(&selected, id))
+            } else {
+                ("Send to Back", editor.doc.back_place(&selected, id))
+            };
+            if let Some(place) = place {
+                editor.edit(label, |doc, _| {
+                    doc.move_layers(&selected, place);
+                });
+            }
         }
         Command::NewGroup => {
             editor.edit("New Group", |doc, active| *active = doc.new_group(index));
@@ -2671,7 +2649,7 @@ mod tests {
 
         // Set active to Background (bottom row).
         let editor = app.editor.as_mut().unwrap();
-        editor.select_single(background);
+        editor.select_layers(background, Vec::new());
 
         assert!(!app.enabled(Command::SelectLayerBelow));
         assert!(app.enabled(Command::SelectLayerAbove));

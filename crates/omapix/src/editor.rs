@@ -237,19 +237,6 @@ impl Editor {
         self.selected = (active, ids);
     }
 
-    /// Select just this layer, as clicking its row does: paint on its pixels,
-    /// or on its mask for an adjustment layer or a group (which have no pixels).
-    pub fn select_single(&mut self, id: u64) {
-        self.select_layers(id, Vec::new());
-        let layer = self.doc.layer(id);
-        let no_pixels = layer.is_some_and(|l| !l.has_pixels() && l.mask.is_some());
-        self.target = if no_pixels {
-            Target::Mask
-        } else {
-            Target::Pixels
-        };
-    }
-
     /// Whether more than one layer is selected, not counting those inside a
     /// selected group.
     pub fn several_selected(&self) -> bool {

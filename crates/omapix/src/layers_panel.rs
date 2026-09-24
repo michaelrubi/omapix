@@ -135,37 +135,36 @@ pub struct LayersPanel {
 }
 
 impl LayersPanel {
-    /// Return the visible rows in the order shown in the Layers panel (top to bottom).
-    pub fn visible_layers(&self, doc: &Document, active: u64) -> Vec<u64> {
-        let mut expanded = self.expanded.clone();
-        expanded.extend(ancestors(doc, active));
+    /// The rows shown, top of the stack first as in Photoshop, leaving out
+    /// what's in closed groups. The groups the active layer is in count as
+    /// open, as the panel opens them to show it.
+    fn rows(&self, doc: &Document, active: u64) -> Vec<u64> {
+        let open: HashSet<u64> = ancestors(doc, active).collect();
         doc.layers
             .iter()
             .rev()
-            .filter(|l| ancestors(doc, l.id).all(|g| expanded.contains(&g)))
+            .filter(|l| ancestors(doc, l.id).all(|g| self.expanded.contains(&g) || open.contains(&g)))
             .map(|l| l.id)
             .collect()
     }
 
-    /// Whether a layer above the active one can be selected in the panel.
-    pub fn can_select_above(&self, doc: &Document, active: u64) -> bool {
-        let rows = self.visible_layers(doc, active);
-        rows.iter().position(|&id| id == active).is_some_and(|p| p > 0)
+    /// The layer on the row above (`up`) or below the active one's, if any.
+    pub fn row_beside(&self, doc: &Document, active: u64, up: bool) -> Option<u64> {
+        let rows = self.rows(doc, active);
+        let at = rows.iter().position(|&id| id == active)?;
+        if up {
+            at.checked_sub(1).map(|i| rows[i])
+        } else {
+            rows.get(at + 1).copied()
+        }
     }
 
-    /// Whether a layer below the active one can be selected in the panel.
-    pub fn can_select_below(&self, doc: &Document, active: u64) -> bool {
-        let rows = self.visible_layers(doc, active);
-        rows.iter().position(|&id| id == active).is_some_and(|p| p + 1 < rows.len())
-    }
-
-    /// Select the layer above (`up = true`) or below (`up = false`), following
-    /// the rows shown in the Layers panel (stepping into open groups, skipping
-    /// closed ones). Stops at top/bottom without wrapping.
+    /// Alt+] / Alt+[: select just the layer on the row above or below, as
+    /// clicking it does. Does nothing at the top or bottom.
     pub fn step_selection(&mut self, editor: &mut Editor, up: bool) {
-        if let Some(target_id) = step_layer_selection(editor, &self.expanded, up) {
-            self.anchor = Some(target_id);
-            self.expanded.extend(ancestors(&editor.doc, target_id));
+        if let Some(id) = self.row_beside(&editor.doc, editor.active, up) {
+            select(editor, id);
+            self.anchor = Some(id);
         }
     }
 
@@ -198,15 +197,7 @@ impl LayersPanel {
                 self.expanded.retain(|id| doc.layer(*id).is_some_and(|l| l.is_group));
                 // Show the selected layer, wherever it is.
                 self.expanded.extend(ancestors(doc, editor.active));
-                // Top of the stack first, as in Photoshop, leaving out what's
-                // in closed groups.
-                let ids: Vec<u64> = doc
-                    .layers
-                    .iter()
-                    .rev()
-                    .filter(|l| ancestors(doc, l.id).all(|g| self.expanded.contains(&g)))
-                    .map(|l| l.id)
-                    .collect();
+                let ids = self.rows(doc, editor.active);
                 self.clip_line(ui, editor, theme);
                 let mut rows = Vec::with_capacity(ids.len());
                 for &id in &ids {
@@ -1032,7 +1023,7 @@ fn layer_context_menu(
 /// Select just this layer, as clicking its row does: paint on its pixels,
 /// or on its mask for an adjustment layer or a group (which have no pixels).
 fn select(editor: &mut Editor, id: u64) {
-    editor.select_single(id);
+    select_with(editor, id, Vec::new());
 }
 
 /// Make layer `id` the active one, with `others` selected along with it.
@@ -1048,38 +1039,9 @@ fn select_with(editor: &mut Editor, id: u64, others: Vec<u64>) {
 }
 
 /// The groups a layer is in, innermost first.
-pub(crate) fn ancestors(doc: &Document, id: u64) -> impl Iterator<Item = u64> + '_ {
+fn ancestors(doc: &Document, id: u64) -> impl Iterator<Item = u64> + '_ {
     let parent = |id: u64| doc.layer(id).and_then(|l| l.parent);
     std::iter::successors(parent(id), move |&g| parent(g))
-}
-
-/// Step the selected layer above or below, following visible rows given the
-/// expanded groups. Selects just that one layer and targets its pixels (or mask).
-pub(crate) fn step_layer_selection(
-    editor: &mut Editor,
-    expanded: &HashSet<u64>,
-    up: bool,
-) -> Option<u64> {
-    let mut expanded = expanded.clone();
-    expanded.extend(ancestors(&editor.doc, editor.active));
-    let rows: Vec<u64> = editor
-        .doc
-        .layers
-        .iter()
-        .rev()
-        .filter(|l| ancestors(&editor.doc, l.id).all(|g| expanded.contains(&g)))
-        .map(|l| l.id)
-        .collect();
-    let pos = rows.iter().position(|&id| id == editor.active)?;
-    let target = if up {
-        pos.checked_sub(1).map(|p| rows[p])
-    } else {
-        rows.get(pos + 1).copied()
-    };
-    if let Some(target_id) = target {
-        editor.select_single(target_id);
-    }
-    target
 }
 
 /// Where a dragged layer would land, and how to show it.
