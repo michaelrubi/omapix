@@ -1,5 +1,6 @@
 //! Document edits that build or combine layers.
 
+use crate::adjust::{Adjustment, Curve, Curves};
 use crate::blend::BlendMode;
 use crate::composite::composite;
 use crate::filters::gaussian_blur;
@@ -120,7 +121,9 @@ pub fn stamp_visible(doc: &mut Document) -> u64 {
 
 /// Split the visible image into a blurred colour/tone layer and a texture
 /// layer that recombine exactly to the original (Grain Extract / Grain
-/// Merge), placed above layer index `above`. Returns (low id, high id).
+/// Merge), in a "Frequency Separation" group placed above layer index
+/// `above`, so hiding the group shows the image before. Returns (low id,
+/// high id).
 pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u64, u64) {
     let visible = doc.composite();
     let (w, h) = (doc.width, doc.height);
@@ -136,9 +139,20 @@ pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u
     let low = Layer::from_pixels(low_id, "Low - color/tone", low_pixels);
     let mut high = Layer::from_raster(high_id, "High - texture", &high_raster);
     high.blend = BlendMode::GrainMerge;
-    let at = doc.insert_above(above, low);
+    let group = new_setup_group(doc, above, "Frequency Separation");
+    let at = doc.insert_above(group, low);
     doc.insert_above(at, high);
     (low_id, high_id)
+}
+
+/// A new Pass Through group above layer index `above`, for a retouching
+/// setup to fill. Returns its index; layers inserted above it go in at the
+/// top of it.
+fn new_setup_group(doc: &mut Document, above: usize, name: &str) -> usize {
+    let id = doc.next_layer_id();
+    let group = Layer::group(id, name, doc.width, doc.height);
+    doc.insert_above(above, group);
+    doc.index_of(id).expect("just inserted")
 }
 
 /// Photoshop's dodge & burn setup: a layer filled with 50 % grey in Soft
@@ -156,6 +170,35 @@ pub fn dodge_and_burn_layer(doc: &mut Document, above: usize) -> u64 {
     layer.blend = BlendMode::SoftLight;
     doc.insert_above(above, layer);
     id
+}
+
+/// The curves-based dodge & burn setup retouchers use: a "Dodge & Burn"
+/// group holding a brightening and a darkening Curves layer, each with a
+/// black mask, so painting white on a mask lightens or darkens there.
+/// Placed above layer index `above`. Returns (dodge id, burn id).
+pub fn dodge_and_burn_curves(doc: &mut Document, above: usize) -> (u64, u64) {
+    let (w, h) = (doc.width, doc.height);
+    let mut curves = |name: &str, mid: f32| {
+        let adjustment = Adjustment::Curves(Curves {
+            master: Curve {
+                points: vec![(0.0, 0.0), (0.5, mid), (1.0, 1.0)],
+            },
+            ..Default::default()
+        });
+        let mut layer = Layer::adjustment(doc.next_layer_id(), adjustment, w, h);
+        layer.name = name.into();
+        if let Some(mask) = &mut layer.mask {
+            mask.invert();
+        }
+        layer
+    };
+    let burn = curves("Burn", 0.35);
+    let dodge = curves("Dodge", 0.65);
+    let (dodge_id, burn_id) = (dodge.id, burn.id);
+    let group = new_setup_group(doc, above, "Dodge & Burn");
+    let at = doc.insert_above(group, burn);
+    doc.insert_above(at, dodge);
+    (dodge_id, burn_id)
 }
 
 /// Whether the layer at `index` can be merged into the one below it: both
@@ -276,9 +319,15 @@ mod tests {
         let mut doc = doc_with(px, w, h);
         let before = doc.composite();
         let (low, high) = frequency_separation(&mut doc, 0, 6.0);
-        assert_eq!(doc.layers.len(), 3);
+        assert_eq!(doc.layers.len(), 4);
         assert_eq!(doc.layer(high).unwrap().blend, BlendMode::GrainMerge);
         assert!(doc.index_of(low).unwrap() < doc.index_of(high).unwrap());
+        // Both in one Pass Through group, on top.
+        let group = doc.layers.last().unwrap();
+        assert!(group.is_group && group.blend == BlendMode::PassThrough);
+        assert_eq!(group.name, "Frequency Separation");
+        assert_eq!(doc.layer(low).unwrap().parent, Some(group.id));
+        assert_eq!(doc.layer(high).unwrap().parent, Some(group.id));
         let after = doc.composite();
         let worst = before
             .pixels()
@@ -322,6 +371,32 @@ mod tests {
                 assert!(a[c].abs_diff(b[c]) <= 2);
             }
         }
+    }
+
+    #[test]
+    fn dodge_and_burn_curves_lighten_and_darken_where_painted() {
+        let grey = [30000, 30000, 30000, 65535];
+        let mut doc = doc_with(vec![grey; 100], 10, 10);
+        let (dodge, burn) = dodge_and_burn_curves(&mut doc, 0);
+        let group = doc.layers.last().unwrap();
+        assert!(group.is_group && group.blend == BlendMode::PassThrough);
+        assert_eq!(group.name, "Dodge & Burn");
+        assert_eq!(doc.layer(dodge).unwrap().parent, Some(group.id));
+        assert_eq!(doc.layer(burn).unwrap().parent, Some(group.id));
+        assert!(doc.index_of(burn).unwrap() < doc.index_of(dodge).unwrap());
+        // Black masks: no change until painted.
+        assert_eq!(doc.composite().pixels()[0], grey);
+        let paint = |doc: &mut Document, id| {
+            doc.layer_mut(id).unwrap().mask.as_mut().unwrap().pixels =
+                Tiled::new(10, 10, crate::layer::MASK_WHITE);
+        };
+        paint(&mut doc, dodge);
+        let lighter = doc.composite().pixels()[0][0];
+        assert!(lighter > grey[0] + 5000, "dodged to {lighter}");
+        doc.layer_mut(dodge).unwrap().visible = false;
+        paint(&mut doc, burn);
+        let darker = doc.composite().pixels()[0][0];
+        assert!(darker < grey[0] - 5000, "burned to {darker}");
     }
 
     #[test]
