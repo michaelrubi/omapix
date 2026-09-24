@@ -100,6 +100,15 @@ impl Document {
         crate::composite::composite(&self.layers, self.width, self.height)
     }
 
+    /// The tonal histogram of the composite of all visible layers below `layer_id`.
+    /// Used by adjustment layers (such as Curves and Levels) to show their input distribution.
+    pub fn histogram_below(&self, layer_id: u64) -> crate::Histogram {
+        let Some(idx) = self.index_of(layer_id) else {
+            return crate::Histogram::default();
+        };
+        crate::Histogram::from_layers(&self.layers[..idx], self.width, self.height)
+    }
+
     /// A name like "Layer 3" that isn't already taken.
     pub fn unused_name(&self, base: &str) -> String {
         (1..)
