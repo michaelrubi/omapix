@@ -582,15 +582,20 @@ From Michael, 24 September 2026:
    groups, and opacity, erasing and hiding are the review.
 5. **Training on your own retouches is optional**, opt-in and local only.
 
-## Open questions
+## Decisions
 
 1. **Reshape layers go stale** when the image below changes. Omapix layers
-   are pixels, so the design keeps the warp's settings and offers Update.
-   A truly live warp would mean smart-object-like layers, which is a much
-   bigger change. Is Update good enough?
-2. **Body reshaping and backgrounds.** Is it acceptable for body reshaping
-   to bend nearby background lines slightly (protection keeps it small),
-   with Liquify to fix what's left?
+   are pixels, so Reshape keeps the warp's settings and offers Update.
+   Decided (2026-09-24): Update first, the simplest version. Live,
+   smart-object-like layers can be planned later.
+2. **Body reshaping and backgrounds.** Warp-based reshaping (Photoshop
+   Liquify, PortraitPro Body, Facetune) bends what's behind the body; a
+   bent door frame is the classic sign of a reshaped photo. Protection
+   (Liquify's Freeze Mask, or fading moves out away from the person, as
+   here) keeps it small. Decided (2026-09-24): accept slight bending, with
+   protection and Liquify to fix what's left. Cutting the person out and
+   filling the background with inpainting, so nothing bends at all, is a
+   possible later upgrade.
 
 ## Sources
 

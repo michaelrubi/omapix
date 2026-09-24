@@ -88,13 +88,14 @@ The UI has been tested through the same code paths with scripts
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [x] Marching ants move, and Omapix goes idle again once there's no selection
-- [x] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
+- [ ] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
+  - Hand-tested: sliders work but the image could follow them faster; Move tool drags work but feel sluggish. Both are what GPU compositing should fix.
 - [x] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [x] Open, Save As and Export file dialogs (xdg portal)
-- [x] Dropping a file onto the window
-- [x] Switching the Omarchy theme while Omapix is open
-- [x] Undo/redo after each of the above
+- [ ] Dropping a file onto the window
+- [ ] Switching the Omarchy theme while Omapix is open
+- [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
 
@@ -162,7 +163,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 
 ## 7. The big one: AI-assisted retouching
 
-The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription, for client and personal work alike. Design: [AI.md](AI.md) (proposal, with milestones and a couple of open questions).
+The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription, for client and personal work alike. Design: [AI.md](AI.md) (proposal, with milestones and the decisions made so far).
 - Object Selection (`W`) and Select › Subject, which prove the groundwork first.
 - Skin and face-part segmentation (skin, eyes, lips, teeth, hair) to make masks automatically, per face and per person.
 - Automatic blemish detection that feeds the Spot Healing Brush, onto its own layer.
