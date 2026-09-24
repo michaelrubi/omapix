@@ -2,7 +2,9 @@
 //! live, as in Photoshop's Properties panel.
 
 use egui::{Color32, ComboBox, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, pos2, vec2};
-use omapix_engine::adjust::{Adjustment, ColorBalance, Curve, Curves, HueSaturation, Levels};
+use omapix_engine::adjust::{
+    Adjustment, ChannelMixer, ColorBalance, Curve, Curves, HueSaturation, Levels, SelectiveColor,
+};
 
 use crate::editor::Editor;
 use crate::theme::Theme;
@@ -20,6 +22,10 @@ pub struct PropertiesPanel {
     dragging: Option<usize>,
     /// Color Balance tonal range: 0 = shadows, 1 = midtones, 2 = highlights.
     tone: usize,
+    /// Selective Color selected range: 0..=8.
+    selective_color_range: usize,
+    /// Channel Mixer selected output channel: 0 = Red, 1 = Green, 2 = Blue.
+    mixer_channel: usize,
 }
 
 impl PropertiesPanel {
@@ -45,6 +51,12 @@ impl PropertiesPanel {
                         Adjustment::ColorBalance(_) => {
                             Adjustment::ColorBalance(ColorBalance::default())
                         }
+                        Adjustment::SelectiveColor(_) => {
+                            Adjustment::SelectiveColor(SelectiveColor::default())
+                        }
+                        Adjustment::ChannelMixer(_) => {
+                            Adjustment::ChannelMixer(ChannelMixer::default())
+                        }
                     };
                 }
             });
@@ -55,6 +67,8 @@ impl PropertiesPanel {
             Adjustment::Levels(l) => levels(ui, l),
             Adjustment::HueSaturation(h) => hue_saturation(ui, h),
             Adjustment::ColorBalance(b) => self.color_balance(ui, b),
+            Adjustment::SelectiveColor(s) => self.selective_color(ui, s),
+            Adjustment::ChannelMixer(m) => self.channel_mixer(ui, m, theme),
         }
         if adjustment != original {
             let label = format!("Adjust {}", adjustment.name());
@@ -206,6 +220,78 @@ impl PropertiesPanel {
         }
         ui.checkbox(&mut b.preserve_luminosity, "Preserve Luminosity");
     }
+
+    fn selective_color(&mut self, ui: &mut Ui, s: &mut SelectiveColor) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Colors:").small());
+            ComboBox::from_id_salt("selective-color-range")
+                .selected_text(SelectiveColor::RANGE_NAMES[self.selective_color_range])
+                .show_ui(ui, |ui| {
+                    for (i, name) in SelectiveColor::RANGE_NAMES.iter().enumerate() {
+                        ui.selectable_value(&mut self.selective_color_range, i, *name);
+                    }
+                });
+        });
+        ui.add_space(4.0);
+        let values = &mut s.ranges[self.selective_color_range];
+        for (value, label) in values.iter_mut().zip(["Cyan", "Magenta", "Yellow", "Black"]) {
+            ui.add(
+                Slider::new(value, -100.0..=100.0)
+                    .text(label)
+                    .fixed_decimals(0)
+                    .suffix("%"),
+            );
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut s.relative, true, "Relative");
+            ui.radio_value(&mut s.relative, false, "Absolute");
+        });
+    }
+
+    fn channel_mixer(&mut self, ui: &mut Ui, m: &mut ChannelMixer, theme: &Theme) {
+        if !m.monochrome {
+            let names = ["Red", "Green", "Blue"];
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Output Channel:").small());
+                ComboBox::from_id_salt("mixer-channel")
+                    .selected_text(names[self.mixer_channel.min(2)])
+                    .show_ui(ui, |ui| {
+                        for (i, name) in names.iter().enumerate() {
+                            ui.selectable_value(&mut self.mixer_channel, i, *name);
+                        }
+                    });
+            });
+        } else {
+            ui.label(RichText::new("Output Channel: Gray").small());
+        }
+        ui.add_space(4.0);
+        let values = if m.monochrome {
+            &mut m.gray
+        } else {
+            match self.mixer_channel {
+                0 => &mut m.red,
+                1 => &mut m.green,
+                _ => &mut m.blue,
+            }
+        };
+        for (value, label) in values.iter_mut().zip(["Red", "Green", "Blue", "Constant"]) {
+            ui.add(
+                Slider::new(value, -200.0..=200.0)
+                    .text(label)
+                    .fixed_decimals(0)
+                    .suffix("%"),
+            );
+        }
+        let total = values[0] + values[1] + values[2];
+        ui.label(
+            RichText::new(format!("Total: {:.0}%", total))
+                .small()
+                .color(theme.dark_foreground),
+        );
+        ui.add_space(4.0);
+        ui.checkbox(&mut m.monochrome, "Monochrome");
+    }
 }
 
 /// Add a point at `p` between its neighbours; returns its index.
@@ -298,5 +384,52 @@ mod tests {
         assert!(c.points[1].0 < c.points[2].0);
         move_point(&mut c, 1, (-1.0, 0.1));
         assert!(c.points[1].0 > c.points[0].0);
+    }
+
+    #[test]
+    fn properties_panel_renders_selective_color_and_channel_mixer() {
+        let (w, h) = (10, 10);
+        let image = omapix_engine::Raster::new(
+            w,
+            h,
+            vec![[30000, 30000, 30000, 65535]; (w * h) as usize],
+        );
+        let mut doc = omapix_engine::Document::from_image(
+            "t.tif".into(),
+            &image,
+            omapix_engine::ColorProfile::srgb(),
+            16,
+        );
+        let sc = Adjustment::SelectiveColor(SelectiveColor::default());
+        doc.layers
+            .push(omapix_engine::Layer::adjustment(101, sc, w, h));
+        let cm = Adjustment::ChannelMixer(ChannelMixer::default());
+        doc.layers
+            .push(omapix_engine::Layer::adjustment(102, cm, w, h));
+
+        let mut editor = Editor::new(doc).unwrap();
+        let mut panel = PropertiesPanel::default();
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+
+        // Target Selective Color layer
+        editor.active = 101;
+        let mut shown = false;
+        let input = egui::RawInput::default();
+        let mut out = ctx.run_ui(input, |ui| {
+            shown = panel.show(ui, &mut editor, &theme);
+        });
+        out.textures_delta.clear();
+        assert!(shown, "panel should show for selective color adjustment");
+
+        // Target Channel Mixer layer
+        editor.active = 102;
+        let mut shown = false;
+        let input = egui::RawInput::default();
+        let mut out = ctx.run_ui(input, |ui| {
+            shown = panel.show(ui, &mut editor, &theme);
+        });
+        out.textures_delta.clear();
+        assert!(shown, "panel should show for channel mixer adjustment");
     }
 }

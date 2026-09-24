@@ -715,6 +715,8 @@ impl App {
                     self.menu_item(ui, Command::NewLevels, None);
                     self.menu_item(ui, Command::NewHueSaturation, None);
                     self.menu_item(ui, Command::NewColorBalance, None);
+                    self.menu_item(ui, Command::NewSelectiveColor, None);
+                    self.menu_item(ui, Command::NewChannelMixer, None);
                     ui.separator();
                     self.menu_item(ui, Command::Invert, None);
                 });
@@ -1429,13 +1431,20 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         Command::NewCurves
         | Command::NewLevels
         | Command::NewHueSaturation
-        | Command::NewColorBalance => {
-            use omapix_engine::adjust::{Adjustment, ColorBalance, Curves, HueSaturation, Levels};
+        | Command::NewColorBalance
+        | Command::NewSelectiveColor
+        | Command::NewChannelMixer => {
+            use omapix_engine::adjust::{
+                Adjustment, ChannelMixer, ColorBalance, Curves, HueSaturation, Levels,
+                SelectiveColor,
+            };
             let adjustment = match cmd {
                 Command::NewCurves => Adjustment::Curves(Curves::default()),
                 Command::NewLevels => Adjustment::Levels(Levels::default()),
                 Command::NewHueSaturation => Adjustment::HueSaturation(HueSaturation::default()),
-                _ => Adjustment::ColorBalance(ColorBalance::default()),
+                Command::NewColorBalance => Adjustment::ColorBalance(ColorBalance::default()),
+                Command::NewSelectiveColor => Adjustment::SelectiveColor(SelectiveColor::default()),
+                _ => Adjustment::ChannelMixer(ChannelMixer::default()),
             };
             let label = format!("New {} Layer", adjustment.name());
             editor.edit(&label, |doc, active| {
@@ -1783,5 +1792,26 @@ mod tests {
     fn degenerate_ellipse_points_is_empty() {
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(10.0, 50.0)).is_empty());
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(50.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn new_selective_color_and_channel_mixer_create_adjustment_layers() {
+        let ctx = egui::Context::default();
+        let mut editor = editor_with_selection();
+        run_on_editor(&mut editor, Command::NewSelectiveColor, &ctx);
+        assert_eq!(editor.doc.layers.len(), 2);
+        assert!(matches!(
+            editor.doc.layers[1].adjustment,
+            Some(omapix_engine::adjust::Adjustment::SelectiveColor(_))
+        ));
+        assert_eq!(editor.target, Target::Mask);
+
+        run_on_editor(&mut editor, Command::NewChannelMixer, &ctx);
+        assert_eq!(editor.doc.layers.len(), 3);
+        assert!(matches!(
+            editor.doc.layers[2].adjustment,
+            Some(omapix_engine::adjust::Adjustment::ChannelMixer(_))
+        ));
+        assert_eq!(editor.target, Target::Mask);
     }
 }
