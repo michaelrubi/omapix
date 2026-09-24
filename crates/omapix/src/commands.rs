@@ -322,6 +322,19 @@ impl Command {
     /// `v_down` remembers between frames whether V is held.
     pub fn pressed(ctx: &egui::Context, v_down: &mut bool) -> Vec<Command> {
         ctx.input_mut(|i| {
+            // With Shift held, egui reports [ and ] as the { and } they
+            // type, so Ctrl+Shift+[ and Shift+[ (brush hardness, read
+            // after this) would never match. Treat them as the brackets.
+            for event in &mut i.events {
+                if let egui::Event::Key {
+                    key: key @ (Key::OpenCurlyBracket | Key::CloseCurlyBracket),
+                    physical_key: Some(physical @ (Key::OpenBracket | Key::CloseBracket)),
+                    ..
+                } = event
+                {
+                    *key = *physical;
+                }
+            }
             let mut pressed: Vec<Command> = Self::KEYBOARD_ORDER
                 .iter()
                 .copied()
@@ -448,6 +461,29 @@ mod tests {
         assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);
         assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);
         assert_eq!(press(&ctx, &mut v_down, none, vec![v(false, none)]), []);
+    }
+
+    #[test]
+    fn shifted_brackets_arrive_as_the_braces_they_type() {
+        let ctx = egui::Context::default();
+        let mut v_down = false;
+        let brace = |key, physical_key| egui::Event::Key {
+            key,
+            physical_key: Some(physical_key),
+            pressed: true,
+            repeat: false,
+            modifiers: CMD_SHIFT,
+        };
+        let front = vec![brace(Key::CloseCurlyBracket, Key::CloseBracket)];
+        let back = vec![brace(Key::OpenCurlyBracket, Key::OpenBracket)];
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD_SHIFT, front),
+            [Command::BringToFront]
+        );
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD_SHIFT, back),
+            [Command::SendToBack]
+        );
     }
 
     #[test]

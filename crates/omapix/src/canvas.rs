@@ -498,8 +498,7 @@ impl Canvas {
         {
             match brush {
                 Some(diameter) => self.brush_cursor(ui, pointer, diameter),
-                None if moves => ui.ctx().set_cursor_icon(CursorIcon::Move),
-                None => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
+                None => self.drawn_cursor(ui, pointer, moves),
             }
             if let Some(badge) = badge {
                 self.cursor_badge(ui, pointer, badge);
@@ -660,24 +659,37 @@ impl Canvas {
             );
             ui.ctx().set_cursor_icon(CursorIcon::None);
         } else {
-            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            self.drawn_cursor(ui, pointer, false);
         }
+    }
+
+    /// A crosshair, or with `arrows` the Move tool's four-way arrow, drawn
+    /// in place of the system cursor. Hyprland hides the system cursor on
+    /// any key press (`cursor:hide_on_key_press`), which would hide it
+    /// whenever Shift or Alt is pressed to add, subtract or copy.
+    fn drawn_cursor(&self, ui: &Ui, pointer: Pos2, arrows: bool) {
+        let c = pointer;
+        let (gap, arm) = if arrows { (0.0, 9.0) } else { (2.5, 8.0) };
+        let mut lines = Vec::new();
+        for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            let d = vec2(dx, dy);
+            let end = c + d * arm;
+            lines.push([c + d * gap, end]);
+            if arrows {
+                let side = vec2(-dy, dx) * 3.0;
+                lines.push([end, end - d * 3.0 + side]);
+                lines.push([end, end - d * 3.0 - side]);
+            }
+        }
+        outlined_lines(&ui.painter_at(self.rect), &lines);
+        ui.ctx().set_cursor_icon(CursorIcon::None);
     }
 
     /// Modifier badge (+, -, ×, copy) drawn near the cursor.
     fn cursor_badge(&self, ui: &Ui, pointer: Pos2, badge: CursorBadge) {
         let painter = ui.painter_at(self.rect);
         let c = pointer + vec2(10.0, 10.0);
-        let draw_lines = |segments: &[[Pos2; 2]]| {
-            for (width, colour) in
-                [(3.0, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)]
-            {
-                let stroke = Stroke::new(width, colour);
-                for &seg in segments {
-                    painter.line_segment(seg, stroke);
-                }
-            }
-        };
+        let draw_lines = |segments: &[[Pos2; 2]]| outlined_lines(&painter, segments);
         match badge {
             CursorBadge::Add => draw_lines(&[
                 [pos2(c.x, c.y - 3.5), pos2(c.x, c.y + 3.5)],
@@ -1011,6 +1023,16 @@ fn dashed_path(
                 drawing_dash = !drawing_dash;
                 dist_left = if drawing_dash { dash } else { gap };
             }
+        }
+    }
+}
+
+/// White lines with a dark outline, visible on any image.
+fn outlined_lines(painter: &egui::Painter, segments: &[[Pos2; 2]]) {
+    for (width, colour) in [(3.0, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)] {
+        let stroke = Stroke::new(width, colour);
+        for &seg in segments {
+            painter.line_segment(seg, stroke);
         }
     }
 }
