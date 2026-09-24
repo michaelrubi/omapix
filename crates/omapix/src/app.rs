@@ -1288,30 +1288,18 @@ impl App {
         let Some(layer) = editor.doc.layer(active_id) else {
             return;
         };
-        let Some(adjustment) = &layer.adjustment else {
+        let Some(mut new_adjustment) = layer.adjustment.clone() else {
             return;
         };
-        let Some(sample_pixel) = editor.doc.sample_below(active_id, x, y) else {
+        let Some(sample) = editor.doc.sample_below(active_id, x, y) else {
             return;
         };
-        let sample = [
-            sample_pixel[0] as f32 / 65535.0,
-            sample_pixel[1] as f32 / 65535.0,
-            sample_pixel[2] as f32 / 65535.0,
-        ];
-        let new_adjustment = match adjustment {
-            omapix_engine::adjust::Adjustment::Curves(c) => {
-                let mut c = c.clone();
-                c.set_point(eyedropper, sample);
-                omapix_engine::adjust::Adjustment::Curves(c)
-            }
-            omapix_engine::adjust::Adjustment::Levels(l) => {
-                let mut l = l.clone();
-                l.set_point(eyedropper, sample);
-                omapix_engine::adjust::Adjustment::Levels(l)
-            }
+        let sample = [0, 1, 2].map(|c| f32::from(sample[c]) / 65535.0);
+        match &mut new_adjustment {
+            omapix_engine::adjust::Adjustment::Curves(c) => c.set_point(eyedropper, sample),
+            omapix_engine::adjust::Adjustment::Levels(l) => l.set_point(eyedropper, sample),
             _ => return,
-        };
+        }
         editor.edit(eyedropper.label(), |doc, _| {
             if let Some(layer) = doc.layer_mut(active_id) {
                 layer.adjustment = Some(new_adjustment);
@@ -1319,24 +1307,19 @@ impl App {
         });
     }
 
+    /// Esc disarms an eyedropper, or leaves mask view or the mask overlay
+    /// (the editor leaves them itself when their mask goes away).
     fn check_escape(&mut self, ctx: &egui::Context) {
-        if let Some(editor) = &mut self.editor {
-            if let View::Mask(_) | View::MaskOverlay(_) = editor.view() {
-                let escape = self.dialog.is_none()
-                    && !ctx.egui_wants_keyboard_input()
-                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-                if escape {
-                    editor.set_view(View::Image);
-                }
-            }
-            if self.properties.eyedropper.is_some() {
-                let escape = self.dialog.is_none()
-                    && !ctx.egui_wants_keyboard_input()
-                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-                if escape {
-                    self.properties.eyedropper = None;
-                }
-            }
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let mask_view = matches!(editor.view(), View::Mask(_) | View::MaskOverlay(_));
+        let escape = (mask_view || self.properties.eyedropper.is_some())
+            && self.dialog.is_none()
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if escape && self.properties.eyedropper.take().is_none() {
+            editor.set_view(View::Image);
         }
     }
 
@@ -1345,12 +1328,11 @@ impl App {
             return;
         };
         if let Some(eyedropper) = self.properties.eyedropper {
-            if let ToolInput::StrokeBegin(p) = input {
-                let (x, y) = editor
-                    .canvas
-                    .hovered_pixel
-                    .unwrap_or((p.x as u32, p.y as u32));
-                self.apply_eyedropper(eyedropper, x, y);
+            if let ToolInput::StrokeBegin(p) = input
+                && p.x >= 0.0
+                && p.y >= 0.0
+            {
+                self.apply_eyedropper(eyedropper, p.x as u32, p.y as u32);
             }
             return;
         }

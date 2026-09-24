@@ -49,9 +49,6 @@ impl PropertiesPanel {
     /// Draw the panel for the active layer if it's an adjustment layer.
     /// Returns false (drawing nothing) otherwise.
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> bool {
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.eyedropper = None;
-        }
         let id = editor.active;
         let Some(mut adjustment) = editor.doc.layer(id).and_then(|l| l.adjustment.clone()) else {
             self.eyedropper = None;
@@ -122,18 +119,14 @@ impl PropertiesPanel {
         true
     }
 
+    /// Buttons that arm an eyedropper for the next click on the canvas
+    /// (Esc disarms it, see `App::check_escape`).
     fn eyedropper_buttons(&mut self, ui: &mut Ui) {
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.eyedropper = None;
-        }
         ui.horizontal_wrapped(|ui| {
-            for (eyedropper, label) in [
-                (Eyedropper::Black, "Set Black Point"),
-                (Eyedropper::Gray, "Set Gray Point"),
-                (Eyedropper::White, "Set White Point"),
-            ] {
+            for eyedropper in [Eyedropper::Black, Eyedropper::Gray, Eyedropper::White] {
                 let active = self.eyedropper == Some(eyedropper);
-                if ui.add(egui::Button::new(label).selected(active)).clicked() {
+                let button = egui::Button::new(eyedropper.label()).selected(active);
+                if ui.add(button).clicked() {
                     if active {
                         self.eyedropper = None;
                     } else {
@@ -738,53 +731,6 @@ mod tests {
         out.textures_delta.clear();
         assert!(shown, "panel should show for levels adjustment");
         assert!(panel.histogram.is_some(), "histogram computed for levels");
-    }
-
-    #[test]
-    fn eyedropper_buttons_arm_and_disarm() {
-        let (w, h) = (10, 10);
-        let image = omapix_engine::Raster::new(w, h, vec![[20000; 4]; (w * h) as usize]);
-        let mut doc = omapix_engine::Document::from_image(
-            "t.tif".into(),
-            &image,
-            omapix_engine::ColorProfile::srgb(),
-            16,
-        );
-        doc.layers.push(omapix_engine::Layer::adjustment(
-            101,
-            Adjustment::Curves(Curves::default()),
-            w,
-            h,
-        ));
-        let mut editor = Editor::new(doc).unwrap();
-        editor.active = 101;
-        let mut panel = PropertiesPanel::default();
-        let theme = Theme::default();
-        let ctx = egui::Context::default();
-
-        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            panel.show(ui, &mut editor, &theme);
-        });
-        out.textures_delta.clear();
-
-        // Arm black eyedropper
-        panel.eyedropper = Some(Eyedropper::Black);
-        assert_eq!(panel.eyedropper, Some(Eyedropper::Black));
-
-        // Pressing Escape disarms
-        let mut esc_input = egui::RawInput::default();
-        esc_input.events.push(egui::Event::Key {
-            key: egui::Key::Escape,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let mut out = ctx.run_ui(esc_input, |ui| {
-            panel.show(ui, &mut editor, &theme);
-        });
-        out.textures_delta.clear();
-        assert_eq!(panel.eyedropper, None);
     }
 }
 

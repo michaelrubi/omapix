@@ -206,7 +206,7 @@ pub struct Curves {
 }
 
 /// An eyedropper point to set from an image sample.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Eyedropper {
     Black,
     Gray,
@@ -281,19 +281,19 @@ impl Curves {
         }
     }
 
-    pub fn set_black_point(&mut self, sample: [f32; 3]) {
+    fn set_black_point(&mut self, sample: [f32; 3]) {
         set_curve_black(&mut self.red, sample[0]);
         set_curve_black(&mut self.green, sample[1]);
         set_curve_black(&mut self.blue, sample[2]);
     }
 
-    pub fn set_white_point(&mut self, sample: [f32; 3]) {
+    fn set_white_point(&mut self, sample: [f32; 3]) {
         set_curve_white(&mut self.red, sample[0]);
         set_curve_white(&mut self.green, sample[1]);
         set_curve_white(&mut self.blue, sample[2]);
     }
 
-    pub fn set_gray_point(&mut self, sample: [f32; 3]) {
+    fn set_gray_point(&mut self, sample: [f32; 3]) {
         let target = luminance(sample);
         set_curve_gray(&mut self.red, sample[0], target);
         set_curve_gray(&mut self.green, sample[1], target);
@@ -333,17 +333,17 @@ impl Levels {
         }
     }
 
-    pub fn set_black_point(&mut self, sample: [f32; 3]) {
+    fn set_black_point(&mut self, sample: [f32; 3]) {
         let lum = luminance(sample);
         self.in_black = lum.clamp(0.0, (self.in_white - 0.001).max(0.0));
     }
 
-    pub fn set_white_point(&mut self, sample: [f32; 3]) {
+    fn set_white_point(&mut self, sample: [f32; 3]) {
         let lum = luminance(sample);
         self.in_white = lum.clamp((self.in_black + 0.001).min(1.0), 1.0);
     }
 
-    pub fn set_gray_point(&mut self, sample: [f32; 3]) {
+    fn set_gray_point(&mut self, sample: [f32; 3]) {
         let lum = luminance(sample);
         let range = (self.in_white - self.in_black).max(1e-4);
         let v_in = ((lum - self.in_black) / range).clamp(1e-4, 1.0 - 1e-4);
