@@ -66,6 +66,72 @@ pub fn high_pass(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
     Tiled::from_slice(image.width(), image.height(), [0; 4], &pixels)
 }
 
+/// A filter from the Filter menu, applied to one layer's pixels, with its
+/// settings (so it can be previewed live, then applied).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LayerFilter {
+    GaussianBlur { radius: f32 },
+    HighPass { radius: f32 },
+    /// `amount` 1 = 100 %; `threshold` in levels (0–255), as in Photoshop.
+    UnsharpMask { amount: f32, radius: f32, threshold: f32 },
+}
+
+impl LayerFilter {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::GaussianBlur { .. } => "Gaussian Blur",
+            Self::HighPass { .. } => "High Pass",
+            Self::UnsharpMask { .. } => "Unsharp Mask",
+        }
+    }
+
+    pub fn apply(&self, image: &Tiled<Pixel>) -> Tiled<Pixel> {
+        match *self {
+            Self::GaussianBlur { radius } => gaussian_blur(image, radius),
+            Self::HighPass { radius } => high_pass(image, radius),
+            Self::UnsharpMask {
+                amount,
+                radius,
+                threshold,
+            } => unsharp_mask(image, amount, radius, threshold),
+        }
+    }
+}
+
+/// Photoshop's Unsharp Mask, on luminance only so edges don't get colour
+/// fringes: each pixel's brightness moves away from its Gaussian-blurred
+/// surroundings by `amount` (1 = 100 %) times the difference, where that
+/// difference is at least `threshold` levels (0–255). The same offset is
+/// added to red, green and blue, keeping colour. Alpha is kept.
+pub fn unsharp_mask(image: &Tiled<Pixel>, amount: f32, radius: f32, threshold: f32) -> Tiled<Pixel> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let pixels = image.to_vec();
+    let luma = |p: &Pixel| 0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2]);
+    // Luminance premultiplied by alpha, so transparent areas don't count.
+    let buf: Vec<[f32; 4]> = pixels
+        .par_iter()
+        .map(|p| {
+            let a = f32::from(p[3]) / MAX;
+            [luma(p) * a, a, 0.0, 0.0]
+        })
+        .collect();
+    let blurred = blur_buffer(buf, w, h, radius);
+    let threshold = threshold * MAX / 255.0;
+    let out: Vec<Pixel> = pixels
+        .into_par_iter()
+        .zip(blurred)
+        .map(|(p, [yb, a, _, _])| {
+            let diff = luma(&p) - if a > 1e-6 { yb / a } else { 0.0 };
+            if p[3] == 0 || diff.abs() < threshold {
+                return p;
+            }
+            let c = |v: u16| (f32::from(v) + amount * diff).round().clamp(0.0, MAX) as u16;
+            [c(p[0]), c(p[1]), c(p[2]), p[3]]
+        })
+        .collect();
+    Tiled::from_slice(image.width(), image.height(), [0; 4], &out)
+}
+
 /// Gaussian-blur a row-major buffer of four-channel values, `sigma` being
 /// the standard deviation in pixels.
 pub fn blur_buffer(mut buf: Vec<[f32; 4]>, w: usize, h: usize, sigma: f32) -> Vec<[f32; 4]> {
@@ -317,6 +383,28 @@ pub fn generate_grain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsharp_mask_steepens_edges_on_luminance_above_the_threshold() {
+        // A reddish half and a lighter reddish half, with a hard edge at x = 50.
+        let (w, h) = (100u32, 10u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| if i % w < 50 { [30000, 20000, 20000, 65535] } else { [40000, 30000, 30000, 65535] })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+        let out = unsharp_mask(&img, 1.0, 2.0, 0.0);
+        // Far from the edge nothing changes.
+        assert_eq!(out.get(5, 5), img.get(5, 5));
+        assert_eq!(out.get(95, 5), img.get(95, 5));
+        // Next to it, dark gets darker and light lighter, by the same
+        // amount in each channel, so the colour stays.
+        let (dark, light) = (out.get(49, 5), out.get(50, 5));
+        assert!(dark[0] < 30000 && light[0] > 40000, "{dark:?} {light:?}");
+        assert_eq!(30000 - dark[0], 20000 - dark[1]);
+        assert_eq!(light[0] - 40000, light[1] - 30000);
+        // A threshold above the edge's contrast leaves it alone.
+        assert_eq!(unsharp_mask(&img, 1.0, 2.0, 60.0).to_vec(), img.to_vec());
+    }
 
     #[test]
     fn flat_image_stays_flat() {
