@@ -72,7 +72,7 @@ struct FileJob {
 /// - `Tool Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
 ///   `Look x y` (centre the view on an image point at 100 %),
-///   `View image|mask|texture r|tone r` (what the canvas shows).
+///   `View image|mask|overlay|texture r|tone r` (what the canvas shows).
 #[derive(Debug)]
 enum ScriptStep {
     Command(Command),
@@ -107,6 +107,7 @@ impl ScriptStep {
             ("View", nums) => match (words.next()?, nums) {
                 ("image", _) => ScriptStep::View(View::Image),
                 ("mask", _) => ScriptStep::View(View::Mask(0)),
+                ("overlay", _) => ScriptStep::View(View::MaskOverlay(0)),
                 ("texture", &[radius]) => ScriptStep::View(View::Separation {
                     radius,
                     texture: true,
@@ -453,7 +454,7 @@ impl App {
             Command::FillForeground | Command::FillBackground | Command::Clear => {
                 editor.target == Target::Mask || !is_adjustment
             }
-            Command::DeleteMask | Command::ToggleMask => has_mask,
+            Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
             Command::GaussianBlur => editor.target == Target::Pixels && !is_adjustment,
             Command::Invert => editor.target == Target::Mask || !is_adjustment,
             _ => true,
@@ -658,6 +659,8 @@ impl App {
                 self.menu_item(ui, Command::ZoomOut, None);
                 self.menu_item(ui, Command::FitOnScreen, None);
                 self.menu_item(ui, Command::ActualPixels, None);
+                ui.separator();
+                self.menu_item(ui, Command::MaskOverlay, None);
             });
         });
     }
@@ -667,13 +670,15 @@ impl App {
         ui.horizontal(|ui| {
             if let Some(editor) = &self.editor {
                 let doc = &editor.doc;
-                if let View::Mask(_) = editor.view() {
-                    ui.label(
-                        RichText::new(
-                            "Viewing layer mask — Alt+click the mask or press Esc to return",
-                        )
-                        .color(self.theme.accent),
-                    );
+                let showing = match editor.view() {
+                    View::Mask(_) => {
+                        Some("Viewing layer mask — Alt+click the mask or press Esc to return")
+                    }
+                    View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
+                    _ => None,
+                };
+                if let Some(text) = showing {
+                    ui.label(RichText::new(text).color(self.theme.accent));
                     ui.separator();
                 }
                 ui.label(editor.canvas.zoom_label());
@@ -1062,11 +1067,11 @@ impl App {
             }
             ScriptStep::View(view) => {
                 if let Some(editor) = &mut self.editor {
-                    // "mask" means the active layer's mask.
-                    let view = if let View::Mask(_) = view {
-                        View::Mask(editor.active)
-                    } else {
-                        view
+                    // "mask" and "overlay" mean the active layer's mask.
+                    let view = match view {
+                        View::Mask(_) => View::Mask(editor.active),
+                        View::MaskOverlay(_) => View::MaskOverlay(editor.active),
+                        view => view,
                     };
                     editor.set_view(view);
                 }
@@ -1302,6 +1307,14 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         Command::ZoomOut => editor.canvas.step_zoom(false),
         Command::FitOnScreen => editor.canvas.fit(),
         Command::ActualPixels => editor.canvas.actual_pixels(),
+        Command::MaskOverlay => {
+            let showing = editor.view() == View::MaskOverlay(id);
+            editor.set_view(if showing {
+                View::Image
+            } else {
+                View::MaskOverlay(id)
+            });
+        }
         _ => {}
     }
 }
@@ -1320,13 +1333,13 @@ impl eframe::App for App {
             if !ctx.input(|i| i.pointer.any_down()) {
                 editor.end_live();
             }
-            // Leave mask view with Esc, or when its mask goes away.
-            if let View::Mask(id) = editor.view() {
-                let gone = editor.doc.layer(id).is_none_or(|l| l.mask.is_none());
+            // Leave mask view or the mask overlay with Esc (the editor
+            // leaves them itself when their mask goes away).
+            if let View::Mask(_) | View::MaskOverlay(_) = editor.view() {
                 let escape = self.dialog.is_none()
                     && !ctx.egui_wants_keyboard_input()
                     && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-                if gone || escape {
+                if escape {
                     editor.set_view(View::Image);
                 }
             }

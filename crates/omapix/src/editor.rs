@@ -15,6 +15,10 @@ use crate::canvas::{Canvas, Render};
 /// memory for pixels that edits actually replaced.
 const HISTORY_LIMIT: usize = 50;
 
+/// Opacity of the mask overlay where the mask hides everything (50 %, as
+/// in Photoshop), out of `u16::MAX`.
+const OVERLAY_OPACITY: u32 = 32768;
+
 /// What the canvas shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum View {
@@ -22,6 +26,9 @@ pub enum View {
     Image,
     /// One layer's mask, in greyscale (Photoshop's Alt+click on a mask).
     Mask(u64),
+    /// The finished image with one layer's mask over it in translucent red
+    /// where it hides (Photoshop's `\` "rubylith").
+    MaskOverlay(u64),
     /// What frequency separation at `radius` would produce: the texture
     /// layer, or the colour/tone layer.
     Separation { radius: f32, texture: bool },
@@ -86,6 +93,8 @@ pub struct Editor {
     /// Last revision drawn straight into the canvas by a brush stroke.
     /// Background renders of older revisions are thrown away.
     painted: u64,
+    /// The mask overlay's red, in the document's colour space.
+    overlay_colour: Pixel,
 }
 
 impl Editor {
@@ -93,6 +102,10 @@ impl Editor {
         let transform = DisplayTransform::to_srgb(&doc.profile).map_err(|e| e.to_string())?;
         let canvas = Canvas::new(doc.width, doc.height, transform);
         let active = doc.layers.last().map_or(0, |l| l.id);
+        let overlay_colour =
+            doc.profile
+                .from_srgb8([255, 0, 0])
+                .unwrap_or([u16::MAX, 0, 0, u16::MAX]);
         Ok(Self {
             doc,
             active,
@@ -112,6 +125,7 @@ impl Editor {
             canvas,
             stroke: None,
             painted: 0,
+            overlay_colour,
         })
     }
 
@@ -421,10 +435,14 @@ impl Editor {
         }
         let up_to_date = self.rendered == (self.revision, self.view_generation);
         self.changed();
-        let (layers, view) = (&self.doc.layers, self.view);
+        let (layers, view, colour) = (&self.doc.layers, self.view, self.overlay_colour);
         let updated = self.canvas.render().cloned().and_then(|render| match view {
             View::Image => render.update_tiles(&changed, |image, tiles| {
                 composite::composite_into(layers, image, tiles)
+            }),
+            View::MaskOverlay(id) => render.update_tiles(&changed, |image, tiles| {
+                composite::composite_into(layers, image, tiles);
+                draw_overlay(layers, id, colour, image, tiles);
             }),
             View::Mask(id) => {
                 render.update_tiles(&changed, |image, tiles| draw_mask(layers, id, image, tiles))
@@ -461,6 +479,16 @@ impl Editor {
             self.changed();
         }
 
+        // Leave mask view or the mask overlay when their mask goes away.
+        // The overlay also goes when another layer is selected, as in
+        // Photoshop.
+        if let View::Mask(id) | View::MaskOverlay(id) = self.view {
+            let gone = self.doc.layer(id).is_none_or(|l| l.mask.is_none());
+            if gone || self.view == View::MaskOverlay(id) && id != self.active {
+                self.set_view(View::Image);
+            }
+        }
+
         if let Some(((revision, generation), rx)) = &self.rendering
             && let Ok((render, base)) = rx.try_recv()
         {
@@ -484,6 +512,7 @@ impl Editor {
             let (tx, rx) = channel();
             let doc = self.doc.clone();
             let view = self.view;
+            let colour = self.overlay_colour;
             let base = self
                 .separation_base
                 .as_ref()
@@ -491,7 +520,7 @@ impl Editor {
                 .map(|(_, b)| Arc::clone(b));
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let rendered = render_view(&doc, view, base);
+                let rendered = render_view(&doc, view, colour, base);
                 let _ = tx.send(rendered);
                 ctx.request_repaint();
             });
@@ -526,9 +555,20 @@ impl Editor {
     }
 }
 
-/// Render what `view` shows. For separation previews, also return the
-/// flattened image used, so later radius changes can reuse it.
-fn render_view(doc: &Document, view: View, base: Option<Arc<Tiled<Pixel>>>) -> Rendered {
+/// Render what `view` shows, with `colour` for the mask overlay. For
+/// separation previews, also return the flattened image used, so later
+/// radius changes can reuse it.
+fn render_view(
+    doc: &Document,
+    view: View,
+    colour: Pixel,
+    base: Option<Arc<Tiled<Pixel>>>,
+) -> Rendered {
+    let all_tiles = || -> Vec<(u32, u32)> {
+        (0..doc.height.div_ceil(TILE))
+            .flat_map(|r| (0..doc.width.div_ceil(TILE)).map(move |c| (c, r)))
+            .collect()
+    };
     match view {
         View::Image => (Render::new(doc.composite()), None),
         View::Mask(id) => {
@@ -537,10 +577,12 @@ fn render_view(doc: &Document, view: View, base: Option<Arc<Tiled<Pixel>>>) -> R
                 doc.height,
                 vec![[0; 4]; doc.width as usize * doc.height as usize],
             );
-            let tiles: Vec<(u32, u32)> = (0..doc.height.div_ceil(TILE))
-                .flat_map(|r| (0..doc.width.div_ceil(TILE)).map(move |c| (c, r)))
-                .collect();
-            draw_mask(&doc.layers, id, &mut image, &tiles);
+            draw_mask(&doc.layers, id, &mut image, &all_tiles());
+            (Render::new(image), None)
+        }
+        View::MaskOverlay(id) => {
+            let mut image = doc.composite();
+            draw_overlay(&doc.layers, id, colour, &mut image, &all_tiles());
             (Render::new(image), None)
         }
         View::Separation { radius, texture } => {
@@ -565,6 +607,40 @@ fn render_view(doc: &Document, view: View, base: Option<Arc<Tiled<Pixel>>>) -> R
 
 /// Write a layer's mask as opaque grey into the given tiles of `image`.
 fn draw_mask(layers: &[Layer], id: u64, image: &mut Raster, tiles: &[(u32, u32)]) {
+    each_mask_value(layers, id, image, tiles, |pixel, v| {
+        *pixel = [v, v, v, u16::MAX]
+    });
+}
+
+/// Tint the given tiles of `image` with `colour` where a layer's mask
+/// hides, fading to clear where it reveals.
+fn draw_overlay(
+    layers: &[Layer],
+    id: u64,
+    colour: Pixel,
+    image: &mut Raster,
+    tiles: &[(u32, u32)],
+) {
+    const MAX: u32 = u16::MAX as u32;
+    each_mask_value(layers, id, image, tiles, |pixel, v| {
+        let a = (MAX - v as u32) * OVERLAY_OPACITY / MAX;
+        // Overlay opaque colour over the pixel, so it shows on transparent
+        // areas too.
+        for (c, k) in pixel.iter_mut().zip(colour) {
+            *c = ((*c as u32 * (MAX - a) + k as u32 * a) / MAX) as u16;
+        }
+    });
+}
+
+/// Call `f` with each pixel of the given tiles of `image` and the value of
+/// a layer's mask there.
+fn each_mask_value(
+    layers: &[Layer],
+    id: u64,
+    image: &mut Raster,
+    tiles: &[(u32, u32)],
+    f: impl Fn(&mut Pixel, u16),
+) {
     let Some(mask) = layers
         .iter()
         .find(|l| l.id == id)
@@ -580,7 +656,7 @@ fn draw_mask(layers: &[Layer], id: u64, image: &mut Raster, tiles: &[(u32, u32)]
             let line = image.row_mut(y);
             for tx in 0..TILE.min(w.saturating_sub(col * TILE)) {
                 let v = tile.map_or(mask.pixels.fill(), |t| t[(ty * TILE + tx) as usize]);
-                line[(col * TILE + tx) as usize] = [v, v, v, u16::MAX];
+                f(&mut line[(col * TILE + tx) as usize], v);
             }
         }
     }
@@ -591,6 +667,8 @@ mod tests {
     use super::*;
     use omapix_engine::layer::Mask;
     use omapix_engine::{ColorProfile, Raster, ops};
+
+    const RED: Pixel = [65535, 0, 0, 65535];
 
     fn editor() -> Editor {
         let (w, h) = (600, 400);
@@ -670,7 +748,7 @@ mod tests {
             mask.pixels.tile_mut(0, 0)[0] = 1234;
             doc.layer_mut(*active).unwrap().mask = Some(mask);
         });
-        let (render, _) = render_view(&e.doc, View::Mask(e.active), None);
+        let (render, _) = render_view(&e.doc, View::Mask(e.active), RED, None);
         let data = render.sample_for_test(0, 0);
         assert_eq!(data, [1234, 1234, 1234, 65535]);
 
@@ -682,6 +760,7 @@ mod tests {
                 radius: 5.0,
                 texture: true,
             },
+            RED,
             None,
         );
         assert!(texture.sample_for_test(300, 200)[0].abs_diff(32768) <= 2);
@@ -691,9 +770,87 @@ mod tests {
                 radius: 5.0,
                 texture: false,
             },
+            RED,
             base,
         );
         assert!(tone.sample_for_test(300, 200)[0].abs_diff(30000) <= 2);
+    }
+
+    /// An editor with a neutral dodge & burn layer on top, selected, whose
+    /// mask hides tile (0, 0), half hides tile (1, 0), and reveals the rest.
+    fn masked_editor() -> Editor {
+        let mut e = editor();
+        e.edit("D&B", |doc, active| {
+            *active = ops::dodge_and_burn_layer(doc, 0)
+        });
+        e.edit("Mask", |doc, active| {
+            let mut mask = Mask::white(600, 400);
+            mask.pixels.tile_mut(0, 0).fill(0);
+            mask.pixels.tile_mut(1, 0).fill(32768);
+            doc.layer_mut(*active).unwrap().mask = Some(mask);
+        });
+        e
+    }
+
+    #[test]
+    fn mask_overlay_tints_hidden_areas_red() {
+        let e = masked_editor();
+        let (render, _) = render_view(&e.doc, View::MaskOverlay(e.active), RED, None);
+        let near = |a: [u16; 4], b: [u16; 4]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 2);
+        // Hidden: half way to red.
+        let hidden = render.sample_for_test(100, 100);
+        assert!(near(hidden, [47767, 15000, 15000, 65535]), "{hidden:?}");
+        // Half hidden: a quarter of the way.
+        let half = render.sample_for_test(300, 100);
+        assert!(near(half, [38883, 22500, 22500, 65535]), "{half:?}");
+        // Revealed: the image as it is.
+        assert_eq!(
+            render.sample_for_test(300, 300),
+            [30000, 30000, 30000, 65535]
+        );
+    }
+
+    #[test]
+    fn mask_overlay_updates_in_place_while_painting_the_mask() {
+        let mut e = masked_editor();
+        e.target = Target::Mask;
+        e.set_view(View::MaskOverlay(e.active));
+        let (render, _) = render_view(&e.doc, e.view, e.overlay_colour, None);
+        e.canvas.set_render(Arc::new(render));
+        e.rendered = (e.revision, e.view_generation);
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), false));
+        e.stroke_to(300.0, 300.0);
+        e.stroke_to(500.0, 300.0);
+        e.end_stroke();
+        assert_eq!(e.rendered, (e.revision, e.view_generation));
+        let (full, _) = render_view(&e.doc, e.view, e.overlay_colour, None);
+        for (x, y) in [(400, 300), (400, 380), (100, 100)] {
+            assert_eq!(e.canvas.sample(x, y), Some(full.sample_for_test(x, y)));
+        }
+        assert_ne!(e.canvas.sample(400, 300), e.canvas.sample(400, 380));
+    }
+
+    #[test]
+    fn mask_overlay_goes_when_another_layer_is_selected() {
+        let ctx = egui::Context::default();
+        let mut e = masked_editor();
+        let top = e.active;
+        e.set_view(View::MaskOverlay(top));
+        e.update(&ctx);
+        assert_eq!(e.view(), View::MaskOverlay(top));
+        e.active = e.doc.layers[0].id;
+        e.update(&ctx);
+        assert_eq!(e.view(), View::Image);
+
+        // Mask view stays on other layers, but goes with its mask.
+        e.set_view(View::Mask(top));
+        e.update(&ctx);
+        assert_eq!(e.view(), View::Mask(top));
+        e.edit("Delete Layer Mask", |doc, _| {
+            doc.layer_mut(top).unwrap().mask = None
+        });
+        e.update(&ctx);
+        assert_eq!(e.view(), View::Image);
     }
 
     #[test]

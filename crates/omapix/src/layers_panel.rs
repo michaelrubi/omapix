@@ -642,6 +642,16 @@ fn mask_menu_items(
         editor.target = Target::Mask;
         editor.set_view(if viewing { View::Image } else { View::Mask(id) });
     });
+
+    let overlay_label = if editor.view() == View::MaskOverlay(id) {
+        "Hide Mask Overlay"
+    } else {
+        "Show Mask Overlay"
+    };
+    menu_item(ui, overlay_label, Some("\\".into()), true, || {
+        editor.active = id;
+        *command = Some(Command::MaskOverlay);
+    });
 }
 
 fn mask_context_menu(
