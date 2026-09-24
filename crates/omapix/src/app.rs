@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use egui::{Align, Button, Layout, Pos2, RichText, Ui};
+use egui::{Align, Button, Layout, Pos2, RichText, Ui, Vec2};
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::{Document, export, filters, ops, ora};
@@ -69,7 +69,7 @@ struct FileJob {
 ///   default radius);
 /// - `Stroke x0 y0 x1 y1`: a brush stroke with the current tool, in image
 ///   pixels, through the same path as mouse strokes;
-/// - `Tool Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
+/// - `Tool Move|Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
 ///   `Look x y` (centre the view on an image point at 100 %),
 ///   `View image|mask|overlay|texture r|tone r` (what the canvas shows).
@@ -119,6 +119,7 @@ impl ScriptStep {
                 _ => return None,
             },
             ("Tool", _) => match words.next()? {
+                "Move" => ScriptStep::Tool(crate::tools::Tool::Move),
                 "Brush" => ScriptStep::Tool(crate::tools::Tool::Brush),
                 "Eraser" => ScriptStep::Tool(crate::tools::Tool::Eraser),
                 "Clone" => ScriptStep::Tool(crate::tools::Tool::CloneStamp),
@@ -163,6 +164,8 @@ pub struct App {
     /// A selection being drawn: its points so far and how it will combine
     /// with the current selection.
     drawing: Option<(Vec<Pos2>, Combine)>,
+    /// Where a Move tool drag started, in image pixels.
+    move_from: Option<Pos2>,
     /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
     /// the real UI without a mouse; see [`ScriptStep`].
     script: VecDeque<ScriptStep>,
@@ -184,6 +187,7 @@ impl App {
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
             drawing: None,
+            move_from: None,
             tools: Tools::default(),
             opening: None,
             picking: None,
@@ -901,6 +905,10 @@ impl App {
             self.selection_input(input, modifiers);
             return;
         }
+        if self.tools.tool == crate::tools::Tool::Move {
+            self.move_input(input, modifiers);
+            return;
+        }
         match input {
             ToolInput::StrokeBegin(p) => {
                 let Some(paint) = self.tools.paint(editor.target, &editor.doc.profile, p) else {
@@ -922,6 +930,35 @@ impl App {
                     self.tools.sample(pixel, &editor.doc.profile);
                 }
             }
+        }
+    }
+
+    /// Dragging with the Move tool. Alt moves a copy; Shift keeps the move
+    /// horizontal, vertical or diagonal.
+    fn move_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let background = crate::tools::grey(self.tools.background);
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                if editor.begin_move("Move", modifiers.alt, background) {
+                    self.move_from = Some(p);
+                }
+            }
+            ToolInput::StrokeMove(p) => {
+                let Some(from) = self.move_from else {
+                    return;
+                };
+                let d = p - from;
+                let d = if modifiers.shift { constrain_45(d) } else { d };
+                editor.move_to(d.x.round() as i32, d.y.round() as i32);
+            }
+            ToolInput::StrokeEnd => {
+                self.move_from = None;
+                editor.end_move();
+            }
+            ToolInput::Sample(_) => {}
         }
     }
 
@@ -1348,7 +1385,25 @@ impl eframe::App for App {
             for cmd in Command::pressed(ctx) {
                 self.run(cmd, ctx);
             }
-            self.tools.keys(ctx);
+            if let Some(opacity) = self.tools.keys(ctx)
+                && let Some(editor) = &mut self.editor
+            {
+                let id = editor.active;
+                editor.edit("Opacity", |doc, _| {
+                    if let Some(l) = doc.layer_mut(id) {
+                        l.opacity = opacity;
+                    }
+                });
+            }
+            if let Some((dx, dy)) = self.tools.nudge(ctx) {
+                let background = crate::tools::grey(self.tools.background);
+                if let Some(editor) = &mut self.editor
+                    && editor.begin_move("Nudge", false, background)
+                {
+                    editor.move_to(dx, dy);
+                    editor.end_move();
+                }
+            }
         }
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
@@ -1453,8 +1508,9 @@ impl eframe::App for App {
                     .map_or(&[][..], |s| &s.outlines[..]);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
-                    alt_samples: !tool.selects(),
-                    brush: (!tool.selects()).then_some(brush.size),
+                    alt_samples: tool.paints(),
+                    brush: tool.paints().then_some(brush.size),
+                    moves: tool == crate::tools::Tool::Move,
                     source,
                     selection: outlines,
                     drawing: drawing.as_deref(),
@@ -1482,6 +1538,21 @@ fn constrain_square(p0: Pos2, p1: Pos2) -> Pos2 {
     let sx = if dx >= 0.0 { 1.0 } else { -1.0 };
     let sy = if dy >= 0.0 { 1.0 } else { -1.0 };
     egui::pos2(p0.x + side * sx, p0.y + side * sy)
+}
+
+/// Snap a move to the nearest multiple of 45°, as Shift does in Photoshop.
+fn constrain_45(d: Vec2) -> Vec2 {
+    let (ax, ay) = (d.x.abs(), d.y.abs());
+    // tan 22.5°: closer to an axis than to a diagonal.
+    let near = std::f32::consts::FRAC_PI_8.tan();
+    if ay <= ax * near {
+        egui::vec2(d.x, 0.0)
+    } else if ax <= ay * near {
+        egui::vec2(0.0, d.y)
+    } else {
+        let m = (ax + ay) * 0.5;
+        egui::vec2(m * d.x.signum(), m * d.y.signum())
+    }
 }
 
 /// Outline points for an ellipse bounded by `a` and `b`.
@@ -1522,6 +1593,22 @@ mod tests {
         let p1_neg = egui::pos2(50.0, 80.0);
         let c_neg = constrain_square(p0, p1_neg);
         assert_eq!(c_neg, egui::pos2(50.0, 50.0));
+    }
+
+    #[test]
+    fn constrain_45_snaps_to_axes_and_diagonals() {
+        assert_eq!(
+            constrain_45(egui::vec2(100.0, 20.0)),
+            egui::vec2(100.0, 0.0)
+        );
+        assert_eq!(
+            constrain_45(egui::vec2(-10.0, -90.0)),
+            egui::vec2(0.0, -90.0)
+        );
+        assert_eq!(
+            constrain_45(egui::vec2(-60.0, 40.0)),
+            egui::vec2(-50.0, 50.0)
+        );
     }
 
     #[test]

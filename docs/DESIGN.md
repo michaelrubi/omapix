@@ -121,7 +121,8 @@ Done: brush and eraser with Photoshop's size, hardness, opacity and flow;
 painting on masks; eyedropper; Clone Stamp and Healing Brush with aligned
 sources, sampling the current layer or all layers; selections (rectangular
 marquee, lasso, add/subtract/intersect, inverse, feather) that limit
-brushes, fills and filters; Spot Healing Brush that picks its own source.
+brushes, fills and filters; Spot Healing Brush that picks its own source;
+Move tool for layers and selected pixels.
 Next: elliptical marquee, pen pressure (winit has no tablet support on
 Linux yet).
 
@@ -153,6 +154,7 @@ All follow Photoshop.
 | Feather selection | Shift+F6 |
 | Fill foreground / background | Alt+Backspace / Ctrl+Backspace |
 | Clear | Delete |
+| Move / nudge | V / arrow keys (Shift: 10 px) |
 | Brush / Eraser / Clone | B / E / S |
 | Spot Healing / Healing Brush | J / Shift+J |
 | Marquee / Lasso | M / L (Shift adds, Alt subtracts) |
@@ -168,7 +170,8 @@ All follow Photoshop.
 
 Click a layer's mask thumbnail to paint on the mask; Alt+click shows the
 mask on its own (Alt+click again or Esc returns); Shift+click disables it.
-Drag layer rows to reorder them. Double-click a layer thumbnail (or Layer ›
+Drag layer rows to reorder them. With the Move tool, Alt+drag moves a
+copy and Shift keeps the drag straight or at 45°. Double-click a layer thumbnail (or Layer ›
 Blending Options…) for Blend If; Alt+drag a slider handle to split it.
 The Frequency Separation dialog previews the texture or colour/tone layer
 live while you set the radius.
@@ -184,7 +187,7 @@ OMAPIX_SCRIPT="DodgeAndBurn,Size 300,Opacity 70,Stroke 3000 1450 4000 1450" \
 ```
 
 Steps are command names (`FrequencySeparation`, `AddMask`, …), `Stroke x0
-y0 x1 y1`, `Tool Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
+y0 x1 y1`, `Tool Move|Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 `Color r g b`, `Source x y`, `Look x y`, `View image|mask|texture r|tone r`,
 `BlendIf black black_split white_split white [under]` (0–255).
 

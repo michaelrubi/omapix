@@ -8,6 +8,7 @@ use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
 use crate::editor::Target;
 use crate::theme::Theme;
 
+const MOVE_ICON: &str = "\u{f047}";
 const BRUSH_ICON: &str = "\u{f1fc}";
 const ERASER_ICON: &str = "\u{f12d}";
 const CLONE_ICON: &str = "\u{f24d}";
@@ -22,6 +23,7 @@ const MAX_SIZE: f32 = 5000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
+    Move,
     Brush,
     Eraser,
     CloneStamp,
@@ -35,6 +37,7 @@ pub enum Tool {
 impl Tool {
     fn name(self) -> &'static str {
         match self {
+            Tool::Move => "Move",
             Tool::Brush => "Brush",
             Tool::Eraser => "Eraser",
             Tool::CloneStamp => "Clone Stamp",
@@ -49,6 +52,11 @@ impl Tool {
     /// Tools that make selections rather than paint.
     pub fn selects(self) -> bool {
         matches!(self, Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso)
+    }
+
+    /// Tools that paint with a brush, and so show its outline.
+    pub fn paints(self) -> bool {
+        !self.selects() && self != Tool::Move
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -112,7 +120,9 @@ impl Default for Tools {
 impl Tools {
     pub fn settings(&self) -> BrushSettings {
         match self.tool {
-            Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => self.brush,
+            Tool::Move | Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => {
+                self.brush
+            }
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
             Tool::SpotHealing => self.spot,
@@ -130,7 +140,9 @@ impl Tools {
 
     fn settings_mut(&mut self) -> &mut BrushSettings {
         match self.tool {
-            Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => &mut self.brush,
+            Tool::Move | Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => {
+                &mut self.brush
+            }
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
             Tool::SpotHealing => &mut self.spot,
@@ -161,7 +173,7 @@ impl Tools {
     /// on. `None` for a clone or heal stroke with no source set yet, or on a
     /// mask (they only work on pixels).
     pub fn paint(&mut self, target: Target, profile: &ColorProfile, start: Pos2) -> Option<Paint> {
-        if self.tool.selects() {
+        if !self.tool.paints() {
             return None;
         }
         if self.tool == Tool::SpotHealing {
@@ -212,10 +224,16 @@ impl Tools {
     }
 
     /// Photoshop's single-key shortcuts. Call only when no text field has
-    /// keyboard focus.
-    pub fn keys(&mut self, ctx: &egui::Context) {
+    /// keyboard focus. Returns a layer opacity typed with the Move tool,
+    /// where Photoshop's number keys set the layer's opacity instead of the
+    /// brush's.
+    pub fn keys(&mut self, ctx: &egui::Context) -> Option<f32> {
         ctx.input_mut(|i| {
             let shift = Modifiers::SHIFT;
+            let mut layer_opacity = None;
+            if i.consume_key(Modifiers::NONE, Key::V) {
+                self.tool = Tool::Move;
+            }
             if i.consume_key(Modifiers::NONE, Key::B) {
                 self.tool = Tool::Brush;
             }
@@ -291,10 +309,39 @@ impl Tools {
             ];
             for (n, key) in digits.into_iter().enumerate() {
                 if i.consume_key(Modifiers::NONE, key) {
-                    self.settings_mut().opacity = if n == 0 { 1.0 } else { n as f32 / 10.0 };
+                    let opacity = if n == 0 { 1.0 } else { n as f32 / 10.0 };
+                    match self.tool {
+                        Tool::Move => layer_opacity = Some(opacity),
+                        _ => self.settings_mut().opacity = opacity,
+                    }
                 }
             }
-        });
+            layer_opacity
+        })
+    }
+
+    /// Arrow keys with the Move tool nudge by a pixel, or 10 with Shift, as
+    /// in Photoshop. Returns this frame's nudge, consuming the keys. Call
+    /// only when no text field has keyboard focus.
+    pub fn nudge(&self, ctx: &egui::Context) -> Option<(i32, i32)> {
+        if self.tool != Tool::Move {
+            return None;
+        }
+        ctx.input_mut(|i| {
+            let mut total = (0, 0);
+            for (key, (dx, dy)) in [
+                (Key::ArrowLeft, (-1, 0)),
+                (Key::ArrowRight, (1, 0)),
+                (Key::ArrowUp, (0, -1)),
+                (Key::ArrowDown, (0, 1)),
+            ] {
+                for (modifiers, step) in [(Modifiers::SHIFT, 10), (Modifiers::NONE, 1)] {
+                    let n = i.count_and_consume_key(modifiers, key) as i32 * step;
+                    total = (total.0 + dx * n, total.1 + dy * n);
+                }
+            }
+            (total != (0, 0)).then_some(total)
+        })
     }
 
     /// The options bar: settings for the current tool.
@@ -305,6 +352,12 @@ impl Tools {
             if self.tool.selects() {
                 let hint = "Drag to select · Shift adds · Alt subtracts · Shift+Alt intersects · \
                             click outside to deselect · Shift+F6 feathers";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
+            if self.tool == Tool::Move {
+                let hint = "Drag to move the layer, or the selected pixels · Alt+drag moves a \
+                            copy · Shift constrains to 45° · arrow keys nudge (Shift: 10 px)";
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
                 return;
             }
@@ -377,6 +430,7 @@ impl Tools {
         ui.vertical_centered(|ui| {
             ui.add_space(6.0);
             for (tool, icon, tip) in [
+                (Tool::Move, MOVE_ICON, "Move (V)"),
                 (Tool::Brush, BRUSH_ICON, "Brush (B)"),
                 (Tool::Eraser, ERASER_ICON, "Eraser (E)"),
                 (Tool::CloneStamp, CLONE_ICON, "Clone Stamp (S)"),
@@ -495,6 +549,55 @@ mod tests {
             tools.toolbar(ui, &theme);
         });
         output.textures_delta.clear();
+    }
+
+    /// Run one frame with these key presses.
+    fn press(ctx: &egui::Context, keys: &[(Key, Modifiers)]) {
+        let mut raw = egui::RawInput::default();
+        for &(key, modifiers) in keys {
+            raw.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+        }
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn v_selects_move_and_arrows_nudge() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+        // Arrows do nothing with other tools.
+        press(&ctx, &[(Key::ArrowLeft, Modifiers::NONE)]);
+        assert_eq!(tools.nudge(&ctx), None);
+
+        press(&ctx, &[(Key::V, Modifiers::NONE)]);
+        assert_eq!(tools.keys(&ctx), None);
+        assert_eq!(tools.tool, Tool::Move);
+        // Number keys set the layer's opacity, not the brush's.
+        press(&ctx, &[(Key::Num5, Modifiers::NONE)]);
+        assert_eq!(tools.keys(&ctx), Some(0.5));
+        assert_eq!(tools.settings().opacity, 1.0);
+        assert_eq!(
+            tools.paint(Target::Pixels, &ColorProfile::srgb(), Pos2::ZERO),
+            None
+        );
+
+        press(
+            &ctx,
+            &[
+                (Key::ArrowLeft, Modifiers::NONE),
+                (Key::ArrowDown, Modifiers::SHIFT),
+                (Key::ArrowLeft, Modifiers::NONE),
+            ],
+        );
+        assert_eq!(tools.nudge(&ctx), Some((-2, 10)));
+        // The keys were consumed.
+        assert_eq!(tools.nudge(&ctx), None);
     }
 
     #[test]

@@ -9,7 +9,7 @@ lightweight, and look native to your Omarchy theme.
 
 **Status:** early but usable for portrait retouching. It has 16-bit
 colour-managed editing; layers with Photoshop's blend modes and masks;
-undo; brush, eraser, clone stamp and healing brush; marquee and lasso
+undo; move tool; brush, eraser, clone stamp and healing brush; marquee and lasso
 selections with feathering; Curves, Levels, Hue/Saturation and Color
 Balance adjustment layers; one-click frequency separation and dodge & burn
 layers; and OpenRaster save with TIFF/JPEG export. See [docs/DESIGN.md](docs/DESIGN.md) for the design and shortcuts, and

@@ -31,6 +31,13 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 - Later: choose the overlay's colour and opacity (Photoshop's Layer Mask Display Options).
 - Related, later: **Quick Mask** (`Q`), which paints a selection with the same red overlay and turns it back into a selection.
 
+### ~~Move tool~~ (done)
+
+`V` picks the Move tool. Dragging moves the active layer, and its mask with it (Photoshop links them). With a selection, it moves just the selected pixels, or the selected part of the mask when the mask is targeted, and the selection moves with them. The hole left behind is transparent, or the background colour's grey on a mask, as with Delete. Alt+drag moves a copy: a new layer without a selection, or a copy of the selected pixels. Shift keeps the drag horizontal, vertical or at 45°. Arrow keys nudge by 1 px (Shift: 10 px). Number keys set the layer's opacity rather than the brush's. Each drag or nudge is one undo step. On large images the drag updates as fast as the image re-renders, skipping positions in between rather than falling behind.
+- Pixels moved past the edge of the canvas are cut off when the move ends. Photoshop keeps them in the layer, but Omapix layers are the size of the canvas.
+- Each nudge of a selection lifts and drops it again, so feathered edges fade slightly with repeated nudges. Photoshop keeps the pixels "floating" until you deselect.
+- Later: Auto-Select (Ctrl+click picks the layer under the pointer) and Free Transform (Ctrl+T).
+
 ### Cut, Copy and Paste
 
 **Problem:** there's no clipboard. Moving or duplicating part of a layer means duplicating the whole layer and masking it.
@@ -56,6 +63,7 @@ The UI has been tested through the same code paths with scripts
 (`OMAPIX_SCRIPT`) and unit tests, but not yet with a real mouse. These need checking by hand, and any bugs fixed:
 - [ ] Brush, eraser, clone, healing and spot healing with the mouse
 - [ ] Lasso and marquee drags, including Shift/Alt to add and subtract
+- [ ] Move tool: dragging layers and selected pixels, Alt+drag copies, Shift constraint, arrow-key nudges, and how smooth it is on a 24 MP image
 - [ ] Dragging Curves points, and dragging one off the graph to delete it
 - [ ] Blend If handles, including Alt+drag to split
 - [ ] Dragging layers to reorder them, including by the name

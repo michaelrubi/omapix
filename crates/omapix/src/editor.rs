@@ -6,6 +6,8 @@ use std::sync::mpsc::{Receiver, channel};
 
 use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
 use omapix_engine::layer::Layer;
+use omapix_engine::moving::Lifted;
+use omapix_engine::selection::Selection;
 use omapix_engine::tiled::{TILE, Tiled};
 use omapix_engine::{BlendMode, DisplayTransform, Document, Pixel, Raster, composite, filters};
 
@@ -53,6 +55,31 @@ struct Snapshot {
     active: u64,
 }
 
+/// Selected pixels or mask values lifted out by the Move tool.
+enum Lift {
+    Pixels(Lifted<Pixel>),
+    Mask(Lifted<u16>),
+}
+
+/// A Move tool drag (or arrow-key nudge) in progress.
+struct Moving {
+    label: String,
+    /// The layer being moved, as it was before the move.
+    original: Layer,
+    /// The selection before the move, which moves with the pixels.
+    selection: Option<Selection>,
+    target: Target,
+    /// Move a copy (Alt+drag).
+    copy: bool,
+    /// The background colour's grey, left behind on a mask.
+    background: u16,
+    /// Made on the first real move: the lifted selection, if any.
+    lift: Option<Option<Lift>>,
+    /// Offset showing in the document, and the latest one asked for.
+    applied: (i32, i32),
+    wanted: (i32, i32),
+}
+
 struct Job {
     label: String,
     rx: Receiver<(Document, u64)>,
@@ -90,6 +117,8 @@ pub struct Editor {
     pub canvas: Canvas,
     /// The brush stroke in progress, and the layer it paints on.
     stroke: Option<(Stroke, u64)>,
+    /// The Move tool drag in progress.
+    moving: Option<Moving>,
     /// Last revision drawn straight into the canvas by a brush stroke.
     /// Background renders of older revisions are thrown away.
     painted: u64,
@@ -124,6 +153,7 @@ impl Editor {
             modified: false,
             canvas,
             stroke: None,
+            moving: None,
             painted: 0,
             overlay_colour,
         })
@@ -172,7 +202,7 @@ impl Editor {
         if self.job.is_some() {
             return false;
         }
-        self.end_stroke();
+        self.end_gesture();
         self.live = None;
         let before = self.snapshot(label);
         f(&mut self.doc, &mut self.active);
@@ -187,7 +217,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
-        self.end_stroke();
+        self.end_gesture();
         let key = match &mut self.group {
             Some((label, changed)) => {
                 *changed = true;
@@ -214,7 +244,7 @@ impl Editor {
     /// Start gathering live edits into one undo step called `label`, for a
     /// dialog with OK and Cancel.
     pub fn begin_group(&mut self, label: &str) {
-        self.end_stroke();
+        self.end_gesture();
         self.live = None;
         self.group = Some((label.to_owned(), false));
     }
@@ -242,7 +272,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
-        self.end_stroke();
+        self.end_gesture();
         self.live = None;
         let (tx, rx) = channel();
         let mut doc = self.doc.clone();
@@ -263,7 +293,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
-        self.end_stroke();
+        self.end_gesture();
         self.live = None;
         if let Some(prev) = self.undo.pop() {
             let current = Snapshot {
@@ -280,7 +310,7 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
-        self.end_stroke();
+        self.end_gesture();
         self.live = None;
         if let Some(next) = self.redo.pop() {
             let current = Snapshot {
@@ -460,6 +490,134 @@ impl Editor {
         }
     }
 
+    /// Finish a brush stroke or move in progress, before another edit.
+    fn end_gesture(&mut self) {
+        self.end_stroke();
+        self.end_move();
+    }
+
+    /// Start moving the active layer with the Move tool: the whole layer
+    /// and its mask, or with a selection, just the selected pixels (or mask
+    /// values, when the mask is targeted) and the selection with them.
+    /// `copy` moves a copy (Alt+drag): of the whole layer as a new layer,
+    /// or of the selected pixels. `background` is the grey a mask is left
+    /// with where selected values move away. Nothing changes until
+    /// [`Self::move_to`] asks for a real move.
+    pub fn begin_move(&mut self, label: &str, copy: bool, background: u16) -> bool {
+        if self.job.is_some() {
+            return false;
+        }
+        self.end_gesture();
+        let Some(layer) = self.doc.layer(self.active) else {
+            return false;
+        };
+        self.moving = Some(Moving {
+            label: label.to_owned(),
+            original: layer.clone(),
+            selection: self.doc.selection.clone(),
+            target: self.target,
+            copy,
+            background,
+            lift: None,
+            applied: (0, 0),
+            wanted: (0, 0),
+        });
+        true
+    }
+
+    /// Move to an offset from where the move started, in image pixels.
+    /// Applied at once if the canvas is up to date, or else when the
+    /// render in progress finishes, so drags on large images skip
+    /// intermediate positions rather than falling behind.
+    pub fn move_to(&mut self, dx: i32, dy: i32) {
+        let Some(moving) = &mut self.moving else {
+            return;
+        };
+        moving.wanted = (dx, dy);
+        if self.rendering.is_none() {
+            self.apply_move();
+        }
+    }
+
+    /// Finish the move at the last offset asked for.
+    pub fn end_move(&mut self) {
+        self.apply_move();
+        self.moving = None;
+    }
+
+    /// Put the moving layer (or its selected part) at the offset asked for.
+    fn apply_move(&mut self) {
+        let Some(moving) = &self.moving else {
+            return;
+        };
+        let (dx, dy) = moving.wanted;
+        if moving.applied == (dx, dy) {
+            return;
+        }
+        if moving.lift.is_none() {
+            // The first real move: one undo step from here, taking the
+            // copy (a new layer, with no selection) if Alt was held.
+            let label = moving.label.clone();
+            self.live = None;
+            let before = self.snapshot(&label);
+            self.push_undo(before);
+            let moving = self.moving.as_mut().expect("still moving");
+            let original = &moving.original;
+            moving.lift = Some(match (&moving.selection, moving.target, &original.mask) {
+                (None, ..) => None,
+                (Some(sel), Target::Mask, Some(mask)) => Some(Lift::Mask(Lifted::mask(
+                    &mask.pixels,
+                    &sel.coverage,
+                    moving.copy,
+                    moving.background,
+                ))),
+                (Some(sel), ..) => Some(Lift::Pixels(Lifted::pixels(
+                    &original.pixels,
+                    &sel.coverage,
+                    moving.copy,
+                ))),
+            });
+            if moving.copy && moving.selection.is_none() {
+                let index = self.doc.index_of(moving.original.id).unwrap_or(0);
+                let id = self.doc.next_layer_id();
+                moving.original.id = id;
+                moving.original.name = format!("{} copy", moving.original.name);
+                self.doc.layers.insert(index + 1, moving.original.clone());
+                self.active = id;
+            }
+        }
+        let moving = self.moving.as_mut().expect("still moving");
+        moving.applied = (dx, dy);
+        let Some(layer) = self.doc.layer_mut(moving.original.id) else {
+            return;
+        };
+        let original = &moving.original;
+        match moving.lift.as_ref().expect("lifted") {
+            None => {
+                layer.pixels = original.pixels.translated(dx, dy, original.pixels.fill());
+                if let (Some(mask), Some(from)) = (&mut layer.mask, &original.mask) {
+                    mask.pixels = from.pixels.translated(dx, dy, from.pixels.fill());
+                }
+            }
+            // Put back where it was, it's the original (soft edges would
+            // otherwise lose a little opacity).
+            Some(_) if (dx, dy) == (0, 0) && !moving.copy => {
+                layer.pixels = original.pixels.clone();
+                layer.mask = original.mask.clone();
+            }
+            Some(Lift::Pixels(lifted)) => layer.pixels = lifted.drop_at(dx, dy),
+            Some(Lift::Mask(lifted)) => {
+                if let Some(mask) = &mut layer.mask {
+                    mask.pixels = lifted.drop_at(dx, dy);
+                }
+            }
+        }
+        if let Some(sel) = &moving.selection {
+            self.doc.selection = Some(sel.translated(dx, dy)).filter(|s| !s.is_empty());
+        }
+        self.changed();
+    }
+
     /// Pick up finished background work and start rendering if the document
     /// changed. Call once per frame.
     pub fn update(&mut self, ctx: &egui::Context) {
@@ -504,6 +662,8 @@ impl Editor {
                 self.rendered = (revision, generation);
                 self.canvas.set_render(Arc::new(render));
             }
+            // Catch up with a move dragged further while rendering.
+            self.apply_move();
         }
         // One render at a time; when it finishes, the latest state is
         // rendered next, so fast slider drags skip intermediate states.
@@ -851,6 +1011,138 @@ mod tests {
         });
         e.update(&ctx);
         assert_eq!(e.view(), View::Image);
+    }
+
+    /// An editor whose layer is red in the top-left 100 × 100 and
+    /// transparent elsewhere, with a mask hiding the top-left 50 × 50.
+    fn square_editor() -> Editor {
+        let mut e = editor();
+        e.edit("Setup", |doc, active| {
+            let layer = doc.layer_mut(*active).unwrap();
+            layer.pixels = Tiled::new(600, 400, [0; 4]);
+            let mut mask = Mask::white(600, 400);
+            for y in 0..100 {
+                for x in 0..100 {
+                    layer.pixels.tile_mut(0, 0)[y * 256 + x] = RED;
+                    if x < 50 && y < 50 {
+                        mask.pixels.tile_mut(0, 0)[y * 256 + x] = 0;
+                    }
+                }
+            }
+            layer.mask = Some(mask);
+        });
+        e
+    }
+
+    #[test]
+    fn move_carries_the_layer_and_its_mask_as_one_undo_step() {
+        let mut e = square_editor();
+        // A click without dragging changes nothing.
+        assert!(e.begin_move("Move", false, 0));
+        e.end_move();
+        assert_eq!(e.undo_label(), Some("Setup"));
+
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(100, 50);
+        e.move_to(300, 200);
+        e.end_move();
+        let layer = e.doc.layer(e.active).unwrap();
+        assert_eq!(layer.pixels.get(50, 50)[3], 0);
+        assert_eq!(layer.pixels.get(350, 250), RED);
+        let mask = &layer.mask.as_ref().unwrap().pixels;
+        assert_eq!((mask.get(310, 210), mask.get(360, 260)), (0, u16::MAX));
+        // Uncovered mask reads as the mask's fill (white).
+        assert_eq!(mask.get(10, 10), u16::MAX);
+        assert_eq!(e.undo_label(), Some("Move"));
+        e.undo();
+        assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(50, 50), RED);
+        assert_eq!(e.undo_label(), Some("Setup"));
+    }
+
+    #[test]
+    fn move_with_a_selection_moves_just_the_selected_pixels() {
+        let mut e = square_editor();
+        e.edit("Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (50.0, 100.0)))
+        });
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(200, 0);
+        e.end_move();
+        let layer = e.doc.layer(e.active).unwrap();
+        assert_eq!(layer.pixels.get(25, 50)[3], 0);
+        assert_eq!(layer.pixels.get(75, 50), RED);
+        assert_eq!(layer.pixels.get(225, 50), RED);
+        // The mask stays put, and the selection moves with the pixels.
+        assert_eq!(layer.mask.as_ref().unwrap().pixels.get(25, 25), 0);
+        let sel = e.doc.selection.as_ref().unwrap();
+        assert_eq!((sel.at(25, 50), sel.at(225, 50)), (0.0, 1.0));
+        assert_eq!(sel.outlines[0][0], (200.0, 0.0));
+
+        // With the mask targeted, the selected mask values move instead.
+        e.target = Target::Mask;
+        assert!(e.begin_move("Move", false, 1234));
+        e.move_to(-200, 0);
+        e.end_move();
+        let layer = e.doc.layer(e.active).unwrap();
+        let mask = &layer.mask.as_ref().unwrap().pixels;
+        assert_eq!((mask.get(25, 25), mask.get(225, 25)), (u16::MAX, 1234));
+        assert_eq!(layer.pixels.get(225, 50), RED);
+    }
+
+    #[test]
+    fn alt_move_copies_the_layer_or_the_selected_pixels() {
+        let mut e = square_editor();
+        let original = e.active;
+        assert!(e.begin_move("Move", true, 0));
+        e.move_to(0, 200);
+        e.end_move();
+        assert_eq!(e.doc.layers.len(), 2);
+        assert_ne!(e.active, original);
+        assert_eq!(e.doc.layer(e.active).unwrap().name, "Background copy");
+        assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(50, 250), RED);
+        assert_eq!(e.doc.layer(original).unwrap().pixels.get(50, 50), RED);
+        e.undo();
+        assert_eq!((e.doc.layers.len(), e.active), (1, original));
+
+        e.edit("Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (50.0, 100.0)))
+        });
+        assert!(e.begin_move("Move", true, 0));
+        e.move_to(300, 0);
+        e.end_move();
+        let layer = e.doc.layer(e.active).unwrap();
+        assert_eq!(
+            (layer.pixels.get(25, 50), layer.pixels.get(325, 50)),
+            (RED, RED)
+        );
+    }
+
+    #[test]
+    fn moves_wait_for_the_render_and_undo_finishes_them() {
+        let ctx = egui::Context::default();
+        let mut e = square_editor();
+        e.update(&ctx);
+        assert!(e.rendering.is_some());
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(10, 0);
+        e.move_to(20, 0);
+        // Still rendering: the document waits for the latest offset.
+        assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(5, 5), RED);
+        while e.rendering.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            e.update(&ctx);
+        }
+        let layer = e.doc.layer(e.active).unwrap();
+        assert_eq!(
+            (layer.pixels.get(19, 5)[3], layer.pixels.get(20, 5)),
+            (0, RED)
+        );
+        // Undo in the middle of a drag finishes it first, then undoes it.
+        e.move_to(40, 0);
+        e.undo();
+        e.move_to(80, 0);
+        assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(5, 5), RED);
+        assert_eq!(e.undo_label(), Some("Setup"));
     }
 
     #[test]
