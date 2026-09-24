@@ -11,6 +11,7 @@ pub mod export;
 pub mod filters;
 pub mod io;
 pub mod layer;
+pub mod moving;
 pub mod ops;
 pub mod ora;
 pub mod pyramid;

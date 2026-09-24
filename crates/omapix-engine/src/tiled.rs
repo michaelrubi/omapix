@@ -120,6 +120,68 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
         });
     }
 
+    /// A copy moved by (`dx`, `dy`) pixels. Areas the move uncovers read as
+    /// `uncovered`; whatever moves past the edges is lost.
+    pub fn translated(&self, dx: i32, dy: i32, uncovered: T) -> Self {
+        let fill = self.fill;
+        if dx == 0 && dy == 0 {
+            return self.clone();
+        }
+        let (w, h, t) = (
+            i64::from(self.width),
+            i64::from(self.height),
+            i64::from(TILE),
+        );
+        let (dx, dy) = (i64::from(dx), i64::from(dy));
+        Self::from_tiles(self.width, self.height, fill, |col, row| {
+            let (x0, y0) = (i64::from(col) * t, i64::from(row) * t);
+            let (x1, y1) = ((x0 + t).min(w), (y0 + t).min(h));
+            // The source area, clipped to the image. If it covers the whole
+            // tile and only unwritten tiles, this tile stays unwritten too.
+            let (sx0, sy0) = ((x0 - dx).max(0), (y0 - dy).max(0));
+            let (sx1, sy1) = ((x1 - dx).min(w), (y1 - dy).min(h));
+            let whole = sx1 - sx0 == x1 - x0 && sy1 - sy0 == y1 - y0;
+            let empty = sx0 >= sx1
+                || sy0 >= sy1
+                || (sy0 / t..=(sy1 - 1) / t).all(|r| {
+                    (sx0 / t..=(sx1 - 1) / t).all(|c| self.tile(c as u32, r as u32).is_none())
+                });
+            if empty && (whole || uncovered == fill) {
+                return None;
+            }
+            let mut tile = vec![fill; TILE_PIXELS];
+            for y in y0..y1 {
+                let line = &mut tile[((y - y0) * t) as usize..];
+                let sy = y - dy;
+                if sy < 0 || sy >= h {
+                    line[..(x1 - x0) as usize].fill(uncovered);
+                    continue;
+                }
+                // Copy runs that come from one source tile at a time.
+                let mut x = x0;
+                while x < x1 {
+                    let sx = x - dx;
+                    if sx < 0 || sx >= w {
+                        line[(x - x0) as usize] = uncovered;
+                        x += 1;
+                        continue;
+                    }
+                    let run = (t - sx % t).min(x1 - x).min(w - sx);
+                    let at = (x - x0) as usize..(x - x0 + run) as usize;
+                    match self.tile((sx / t) as u32, (sy / t) as u32) {
+                        Some(src) => {
+                            let from = ((sy % t) * t + sx % t) as usize;
+                            line[at].copy_from_slice(&src[from..from + run as usize]);
+                        }
+                        None => line[at].fill(fill),
+                    }
+                    x += run;
+                }
+            }
+            tile.iter().any(|&p| p != fill).then_some(tile)
+        })
+    }
+
     /// True if two images share every tile, so they are known to be equal
     /// without comparing pixels.
     pub fn same_tiles(&self, other: &Self) -> bool {

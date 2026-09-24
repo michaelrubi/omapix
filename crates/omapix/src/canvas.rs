@@ -162,6 +162,8 @@ pub struct Overlay<'a> {
     pub alt_samples: bool,
     /// Brush diameter in image pixels, for its outline at the pointer.
     pub brush: Option<f32>,
+    /// Show the Move tool's cursor rather than a crosshair (without a brush).
+    pub moves: bool,
     pub source: Option<SourceMarker>,
     /// Selection outlines, image pixels, drawn as marching ants.
     pub selection: &'a [Vec<(f32, f32)>],
@@ -397,6 +399,7 @@ impl Canvas {
             tool,
             alt_samples,
             brush,
+            moves,
             source,
             selection,
             drawing,
@@ -435,6 +438,7 @@ impl Canvas {
         {
             match brush {
                 Some(diameter) => self.brush_cursor(ui, pointer, diameter),
+                None if moves => ui.ctx().set_cursor_icon(CursorIcon::Move),
                 None => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
             }
         }

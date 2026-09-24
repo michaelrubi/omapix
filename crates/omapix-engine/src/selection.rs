@@ -147,6 +147,20 @@ impl Selection {
         Selection { coverage, outlines }
     }
 
+    /// The same selection moved by (`dx`, `dy`) pixels, as when the Move
+    /// tool moves selected pixels.
+    pub fn translated(&self, dx: i32, dy: i32) -> Selection {
+        let (fx, fy) = (dx as f32, dy as f32);
+        Selection {
+            coverage: self.coverage.translated(dx, dy, 0),
+            outlines: self
+                .outlines
+                .iter()
+                .map(|o| o.iter().map(|&(x, y)| (x + fx, y + fy)).collect())
+                .collect(),
+        }
+    }
+
     /// Soften the edge (Photoshop's Select › Modify › Feather), `radius`
     /// being the blur's standard deviation in pixels.
     pub fn feather(&self, radius: f32) -> Selection {
