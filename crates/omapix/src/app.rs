@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use egui::{Align, Button, Layout, Pos2, RichText, Ui, Vec2};
+use egui::{Align, Align2, Button, Layout, Pos2, RichText, Sense, Ui, Vec2, pos2, vec2};
 use omapix_engine::clip::{self, Clip};
 use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::selection::{Combine, Selection};
@@ -15,8 +15,10 @@ use crate::canvas::ToolInput;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
+use crate::history_panel::HistoryPanel;
 use crate::layers_panel::LayersPanel;
 use crate::properties_panel::PropertiesPanel;
+use crate::recent::RecentStore;
 use crate::theme::{self, Theme};
 use crate::tools::Tools;
 
@@ -33,10 +35,18 @@ enum Purpose {
 }
 
 /// Something to do once unsaved changes are dealt with.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Then {
     Quit,
     Open,
+    OpenFile(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum RightTab {
+    #[default]
+    Layers,
+    History,
 }
 
 enum Dialog {
@@ -90,6 +100,8 @@ enum ScriptStep {
     Source(Pos2),
     Look(Pos2),
     View(View),
+    /// Jump to a step in history: `History n`.
+    History(usize),
     /// `BlendIf this|under black black_split white_split white` (0–255).
     BlendIf(bool, [f32; 4]),
 }
@@ -106,6 +118,7 @@ impl ScriptStep {
             ("Color", &[r, g, b]) => ScriptStep::Color([r as u8, g as u8, b as u8]),
             ("Source", &[x, y]) => ScriptStep::Source(egui::pos2(x, y)),
             ("Look", &[x, y]) => ScriptStep::Look(egui::pos2(x, y)),
+            ("History", &[n]) => ScriptStep::History(n as usize),
             ("BlendIf", &[a, b, c, d]) => {
                 let under = step.split_whitespace().any(|w| w == "under");
                 ScriptStep::BlendIf(under, [a / 255.0, b / 255.0, c / 255.0, d / 255.0])
@@ -153,6 +166,9 @@ pub struct App {
     editor: Option<Editor>,
     layers: LayersPanel,
     properties: PropertiesPanel,
+    history: HistoryPanel,
+    recent: RecentStore,
+    right_tab: RightTab,
     tools: Tools,
     /// A file being opened in the background.
     opening: Option<(PathBuf, Receiver<Opened>)>,
@@ -198,6 +214,9 @@ impl App {
             editor: None,
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
+            history: HistoryPanel::default(),
+            recent: RecentStore::load(),
+            right_tab: RightTab::default(),
             drawing: None,
             move_from: None,
             tools: Tools::default(),
@@ -368,6 +387,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Then::Open => self.pick(Purpose::Open, ctx),
+            Then::OpenFile(path) => self.open(path, ctx),
         }
     }
 
@@ -397,6 +417,7 @@ impl App {
             self.opening = None;
             match result.and_then(|(doc, converted)| Ok((Editor::new(doc)?, converted))) {
                 Ok((editor, converted)) => {
+                    self.recent.add(&path);
                     if let Some(original) = converted {
                         let now = editor.doc.profile.description().to_owned();
                         self.message(format!("Converted {original} to {now} for editing"), false);
@@ -404,7 +425,10 @@ impl App {
                     self.editor = Some(editor);
                     self.separation_radius = None;
                 }
-                Err(err) => self.message(format!("Couldn't open {}: {err}", path.display()), true),
+                Err(err) => {
+                    self.recent.remove(&path);
+                    self.message(format!("Couldn't open {}: {err}", path.display()), true);
+                }
             }
         }
         if let Some(job) = &self.file_job
@@ -417,6 +441,7 @@ impl App {
                     if native && let Some(editor) = &mut self.editor {
                         editor.doc.saved_path = Some(path.clone());
                         editor.mark_saved(revision);
+                        self.recent.add(&path);
                     }
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     let verb = if native { "Saved" } else { "Exported" };
@@ -478,7 +503,8 @@ impl App {
 
     fn enabled(&self, cmd: Command) -> bool {
         let Some(editor) = &self.editor else {
-            return matches!(cmd, Command::Open | Command::Quit);
+            return matches!(cmd, Command::Open | Command::Quit)
+                || (cmd == Command::ReopenLast && self.recent.last().is_some());
         };
         let view = matches!(
             cmd,
@@ -495,6 +521,8 @@ impl App {
         // Adjustment layers and groups have no pixels to change.
         let no_pixels = layer.is_some_and(|l| !l.has_pixels());
         match cmd {
+            Command::ReopenLast => self.recent.last().is_some(),
+            Command::ShowLayers | Command::ShowHistory => true,
             Command::Undo => editor.undo_label().is_some(),
             Command::Redo => editor.redo_label().is_some(),
             // Something must be left.
@@ -528,6 +556,13 @@ impl App {
         }
         match cmd {
             Command::Open => self.guard(Then::Open, ctx),
+            Command::ReopenLast => {
+                if let Some(path) = self.recent.last().cloned() {
+                    self.guard(Then::OpenFile(path), ctx);
+                }
+            }
+            Command::ShowLayers => self.right_tab = RightTab::Layers,
+            Command::ShowHistory => self.right_tab = RightTab::History,
             Command::Quit => self.guard(Then::Quit, ctx),
             Command::Save => self.save(ctx),
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
@@ -688,6 +723,37 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 self.menu_item(ui, Command::Open, None);
+                ui.menu_button("Open Recent", |ui| {
+                    if self.recent.files().is_empty() {
+                        ui.add_enabled(false, Button::new("No Recent Files"));
+                    } else {
+                        let mut to_open = None;
+                        for path in self.recent.files() {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            let button = Button::new(name.as_ref());
+                            let parent = path.parent().map(|p| p.to_string_lossy());
+                            let item = if let Some(p) = parent {
+                                button.shortcut_text(p)
+                            } else {
+                                button
+                            };
+                            if ui.add(item).clicked() {
+                                to_open = Some(path.clone());
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear Recent Files").clicked() {
+                            self.recent.clear();
+                            ui.close();
+                        }
+                        if let Some(path) = to_open {
+                            let ctx = ui.ctx().clone();
+                            self.guard(Then::OpenFile(path), &ctx);
+                        }
+                    }
+                });
+                self.menu_item(ui, Command::ReopenLast, None);
                 ui.separator();
                 self.menu_item(ui, Command::Save, None);
                 self.menu_item(ui, Command::SaveAs, None);
@@ -773,6 +839,20 @@ impl App {
                 self.menu_item(ui, Command::ActualPixels, None);
                 ui.separator();
                 self.menu_item(ui, Command::MaskOverlay, None);
+            });
+            ui.menu_button("Window", |ui| {
+                let layers_label = if self.right_tab == RightTab::Layers {
+                    "✓ Layers"
+                } else {
+                    "   Layers"
+                };
+                let history_label = if self.right_tab == RightTab::History {
+                    "✓ History"
+                } else {
+                    "   History"
+                };
+                self.menu_item(ui, Command::ShowLayers, Some(layers_label.to_string()));
+                self.menu_item(ui, Command::ShowHistory, Some(history_label.to_string()));
             });
         });
     }
@@ -933,7 +1013,7 @@ impl App {
                 }
                 Dialog::BlendingOptions(_) => {}
                 Dialog::UnsavedChanges { then } => {
-                    let then = *then;
+                    let then = then.clone();
                     ui.heading("Unsaved changes");
                     ui.add_space(8.0);
                     ui.label(format!("Save changes to {name} before closing it?"));
@@ -1010,13 +1090,83 @@ impl App {
         let accent = self.theme.accent;
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.4);
+                let space = if self.recent.files().is_empty() {
+                    ui.available_height() * 0.4
+                } else {
+                    (ui.available_height() * 0.18).max(30.0)
+                };
+                ui.add_space(space);
                 ui.label(RichText::new("Omapix").size(28.0).color(accent));
                 ui.add_space(8.0);
                 ui.label(RichText::new("Open an image with Ctrl+O, or drop one here").color(hint));
                 ui.add_space(12.0);
-                if ui.button("Open…").clicked() {
-                    self.run(Command::Open, &ctx);
+                ui.horizontal(|ui| {
+                    let total_width = if self.recent.last().is_some() { 200.0 } else { 70.0 };
+                    let pad = (ui.available_width() - total_width).max(0.0) * 0.5;
+                    ui.add_space(pad);
+                    if ui.button("Open…").clicked() {
+                        self.run(Command::Open, &ctx);
+                    }
+                    if let Some(last) = self.recent.last() {
+                        let name = last.file_name().unwrap_or_default().to_string_lossy();
+                        if ui
+                            .button(format!("Reopen {name}"))
+                            .on_hover_text(last.to_string_lossy())
+                            .clicked()
+                        {
+                            self.run(Command::ReopenLast, &ctx);
+                        }
+                    }
+                });
+
+                if !self.recent.files().is_empty() {
+                    ui.add_space(20.0);
+                    ui.label(RichText::new("Recent files").strong().color(self.theme.foreground));
+                    ui.add_space(6.0);
+
+                    let mut to_open = None;
+                    egui::Frame::new()
+                        .fill(self.theme.dark_background)
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.set_max_width(450.0);
+                            for path in self.recent.files().iter().take(6) {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let parent = path
+                                    .parent()
+                                    .map(|p| p.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+
+                                let (rect, response) = ui.allocate_exact_size(
+                                    vec2(ui.available_width(), 26.0),
+                                    Sense::click(),
+                                );
+                                if response.hovered() {
+                                    ui.painter().rect_filled(rect, 2.0, self.theme.lighter_background);
+                                }
+                                ui.painter().text(
+                                    pos2(rect.left() + 6.0, rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    &name,
+                                    egui::FontId::proportional(13.0),
+                                    self.theme.foreground,
+                                );
+                                ui.painter().text(
+                                    pos2(rect.right() - 6.0, rect.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    &parent,
+                                    egui::FontId::proportional(11.0),
+                                    hint,
+                                );
+                                if response.clicked() {
+                                    to_open = Some(path.clone());
+                                }
+                            }
+                        });
+                    if let Some(path) = to_open {
+                        self.guard(Then::OpenFile(path), &ctx);
+                    }
                 }
             });
         });
@@ -1261,6 +1411,11 @@ impl App {
                         view => view,
                     };
                     editor.set_view(view);
+                }
+            }
+            ScriptStep::History(step) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.jump_to_history(step);
                 }
             }
             ScriptStep::Look(p) => {
@@ -1651,8 +1806,38 @@ impl eframe::App for App {
                 .default_size(280.0)
                 .resizable(true)
                 .show(ui, |ui| {
-                    self.properties.show(ui, editor, &self.theme);
-                    command = self.layers.show(ui, editor, &self.theme);
+                    ui.horizontal(|ui| {
+                        let layers_active = self.right_tab == RightTab::Layers;
+                        let history_active = self.right_tab == RightTab::History;
+
+                        let tab_btn = |ui: &mut Ui, label: &str, active: bool| {
+                            let text = if active {
+                                RichText::new(label).color(self.theme.foreground).strong()
+                            } else {
+                                RichText::new(label).color(self.theme.dark_foreground)
+                            };
+                            ui.add(Button::new(text).frame(false))
+                        };
+
+                        if tab_btn(ui, "Layers", layers_active).clicked() {
+                            self.right_tab = RightTab::Layers;
+                        }
+                        ui.add_space(8.0);
+                        if tab_btn(ui, "History", history_active).clicked() {
+                            self.right_tab = RightTab::History;
+                        }
+                    });
+                    ui.separator();
+
+                    match self.right_tab {
+                        RightTab::Layers => {
+                            self.properties.show(ui, editor, &self.theme);
+                            command = self.layers.show(ui, editor, &self.theme);
+                        }
+                        RightTab::History => {
+                            command = self.history.show(ui, editor, &self.theme);
+                        }
+                    }
                 });
             if let Some(cmd) = command {
                 let ctx = ui.ctx().clone();
@@ -1913,6 +2098,9 @@ mod tests {
             editor: Some(editor_with_selection()),
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
+            history: HistoryPanel::default(),
+            recent: RecentStore::default(),
+            right_tab: RightTab::default(),
             tools: Tools::default(),
             opening: None,
             picking: None,
@@ -2147,5 +2335,98 @@ mod tests {
         assert_eq!(names(&editor), ["Group 1", "Layer 1", "Layer 2"]);
         assert!(!editor.doc.layers[0].is_group);
         assert_eq!(editor.doc.layers[0].pixels.get(5, 5), [30000, 30000, 30000, 65535]);
+    }
+
+    #[test]
+    fn right_tab_switches_between_layers_and_history() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        assert_eq!(app.right_tab, RightTab::Layers);
+
+        app.run(Command::ShowHistory, &ctx);
+        assert_eq!(app.right_tab, RightTab::History);
+
+        app.run(Command::ShowLayers, &ctx);
+        assert_eq!(app.right_tab, RightTab::Layers);
+    }
+
+    #[test]
+    fn reopen_last_command_and_recent_files() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+
+        // Initially recent is empty, ReopenLast is disabled.
+        assert!(!app.enabled(Command::ReopenLast));
+
+        // Add a recent file.
+        let dir = std::env::temp_dir().join(format!("omapix_app_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_img.tif");
+        let _ = std::fs::write(&path, b"dummy");
+
+        app.recent.add(&path);
+        assert!(app.enabled(Command::ReopenLast));
+        assert_eq!(app.recent.last(), Some(&std::fs::canonicalize(&path).unwrap()));
+
+        // Run ReopenLast: triggers opening.
+        app.editor.as_mut().unwrap().modified = false;
+        app.run(Command::ReopenLast, &ctx);
+        assert!(app.opening.is_some());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn script_step_history_jumps_undo_states() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let editor = app.editor.as_mut().unwrap();
+        let base_index = editor.history_active_index();
+        editor.edit("Change 1", |doc, _| doc.layers[0].opacity = 0.7);
+        editor.edit("Change 2", |doc, _| doc.layers[0].opacity = 0.3);
+        assert_eq!(editor.history_active_index(), base_index + 2);
+        assert_eq!(editor.doc.layers[0].opacity, 0.3);
+
+        // Layout canvas so canvas.ready() returns true for run_script.
+        let (render, _) = render_view(
+            &app.editor.as_ref().unwrap().doc,
+            View::Image,
+            [0; 4],
+            None,
+        );
+        app.editor
+            .as_mut()
+            .unwrap()
+            .canvas
+            .set_render(Arc::new(render));
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ui.allocate_ui(egui::vec2(800.0, 600.0), |ui| {
+                let editor = app.editor.as_mut().unwrap();
+                let overlay = crate::canvas::Overlay {
+                    tool: false,
+                    alt_samples: false,
+                    brush: None,
+                    moves: false,
+                    source: None,
+                    selection: &[],
+                    drawing: None,
+                };
+                editor.canvas.show(ui, egui::Color32::BLACK, overlay);
+            });
+        });
+        output.textures_delta.clear();
+
+        app.script.push_back(ScriptStep::History(base_index + 1));
+        app.run_script(&ctx);
+        assert_eq!(app.editor.as_ref().unwrap().history_active_index(), base_index + 1);
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers[0].opacity, 0.7);
     }
 }

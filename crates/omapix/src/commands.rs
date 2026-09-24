@@ -54,6 +54,9 @@ pub enum Command {
     ZoomOut,
     FitOnScreen,
     ActualPixels,
+    ReopenLast,
+    ShowLayers,
+    ShowHistory,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -119,6 +122,9 @@ impl Command {
         Command::ZoomOut,
         Command::FitOnScreen,
         Command::ActualPixels,
+        Command::ReopenLast,
+        Command::ShowLayers,
+        Command::ShowHistory,
     ];
 
     /// Look a command up by its name in code, e.g. "FrequencySeparation".
@@ -140,6 +146,7 @@ impl Command {
         Command::Redo,
         Command::CopyMerged,
         Command::NewLayer,
+        Command::ReopenLast,
         Command::Open,
         Command::Save,
         Command::Quit,
@@ -160,6 +167,7 @@ impl Command {
         Command::FillBackground,
         Command::Clear,
         Command::MaskOverlay,
+        Command::ShowLayers,
         Command::NewCurves,
         Command::NewLevels,
         Command::NewHueSaturation,
@@ -173,6 +181,7 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Command::Open => "Open…",
+            Command::ReopenLast => "Reopen Last Document",
             Command::Save => "Save",
             Command::SaveAs => "Save As…",
             Command::ExportTiff => "Export as TIFF (16-bit)…",
@@ -221,6 +230,8 @@ impl Command {
             Command::ZoomOut => "Zoom Out",
             Command::FitOnScreen => "Fit on Screen",
             Command::ActualPixels => "100%",
+            Command::ShowLayers => "Layers",
+            Command::ShowHistory => "History",
         }
     }
 
@@ -228,6 +239,7 @@ impl Command {
         let s = |m, k| Some(KeyboardShortcut::new(m, k));
         match self {
             Command::Open => s(CMD, Key::O),
+            Command::ReopenLast => s(CMD_SHIFT, Key::O),
             Command::Save => s(CMD, Key::S),
             Command::SaveAs => s(CMD_SHIFT, Key::S),
             Command::Quit => s(CMD, Key::Q),
@@ -254,6 +266,7 @@ impl Command {
             Command::FillBackground => s(CMD, Key::Backspace),
             Command::Clear => s(Modifiers::NONE, Key::Delete),
             Command::MaskOverlay => s(Modifiers::NONE, Key::Backslash),
+            Command::ShowLayers => s(Modifiers::NONE, Key::F7),
             // Photoshop's shortcuts for these apply them destructively;
             // Omapix makes an adjustment layer instead.
             Command::NewCurves => s(CMD, Key::M),
@@ -406,6 +419,7 @@ mod tests {
         let pos = |c| order.iter().position(|&x| x == c).unwrap();
         assert!(pos(Command::Redo) < pos(Command::Undo));
         assert!(pos(Command::SaveAs) < pos(Command::Save));
+        assert!(pos(Command::ReopenLast) < pos(Command::Open));
         assert!(pos(Command::StampVisible) < pos(Command::MergeDown));
         assert!(pos(Command::InvertSelection) < pos(Command::Invert));
         assert!(pos(Command::CopyMerged) < pos(Command::Copy));
