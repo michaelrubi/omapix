@@ -89,6 +89,10 @@ impl Render {
         }
     }
 
+    pub fn with_image<R>(&self, f: impl FnOnce(&Raster) -> R) -> Option<R> {
+        self.data.read().ok().map(|d| f(&d.image))
+    }
+
     #[cfg(test)]
     pub fn sample_for_test(&self, x: u32, y: u32) -> Pixel {
         self.data.read().expect("render lock").image.get(x, y)

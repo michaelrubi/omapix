@@ -13,7 +13,8 @@ const BRUSH_ICON: &str = "\u{f1fc}";
 const ERASER_ICON: &str = "\u{f12d}";
 const CLONE_ICON: &str = "\u{f24d}";
 const HEAL_ICON: &str = "\u{f0fa}";
-const SPOT_ICON: &str = "\u{f0d0}";
+const SPOT_ICON: &str = "\u{f462}";
+const WAND_ICON: &str = "\u{f0d0}";
 const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
 const LASSO_ICON: &str = "\u{f0c4}";
@@ -26,6 +27,7 @@ pub enum ToolGroup {
     Move,
     Marquee,
     Lasso,
+    Wand,
     Healing,
     Brush,
     CloneStamp,
@@ -37,6 +39,7 @@ impl ToolGroup {
         ToolGroup::Move,
         ToolGroup::Marquee,
         ToolGroup::Lasso,
+        ToolGroup::Wand,
         ToolGroup::Healing,
         ToolGroup::Brush,
         ToolGroup::CloneStamp,
@@ -48,6 +51,7 @@ impl ToolGroup {
             ToolGroup::Move => &[Tool::Move],
             ToolGroup::Marquee => &[Tool::Marquee, Tool::EllipticalMarquee],
             ToolGroup::Lasso => &[Tool::Lasso],
+            ToolGroup::Wand => &[Tool::MagicWand],
             ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
             ToolGroup::Brush => &[Tool::Brush],
             ToolGroup::CloneStamp => &[Tool::CloneStamp],
@@ -60,6 +64,7 @@ impl ToolGroup {
             ToolGroup::Move => Key::V,
             ToolGroup::Marquee => Key::M,
             ToolGroup::Lasso => Key::L,
+            ToolGroup::Wand => Key::W,
             ToolGroup::Healing => Key::J,
             ToolGroup::Brush => Key::B,
             ToolGroup::CloneStamp => Key::S,
@@ -79,6 +84,7 @@ pub enum Tool {
     Marquee,
     EllipticalMarquee,
     Lasso,
+    MagicWand,
 }
 
 impl Tool {
@@ -93,6 +99,7 @@ impl Tool {
             Tool::Marquee => "Rectangular Marquee",
             Tool::EllipticalMarquee => "Elliptical Marquee",
             Tool::Lasso => "Lasso",
+            Tool::MagicWand => "Magic Wand",
         }
     }
 
@@ -107,6 +114,7 @@ impl Tool {
             Tool::Marquee => MARQUEE_ICON,
             Tool::EllipticalMarquee => ELLIPSE_ICON,
             Tool::Lasso => LASSO_ICON,
+            Tool::MagicWand => WAND_ICON,
         }
     }
 
@@ -119,6 +127,7 @@ impl Tool {
             Tool::SpotHealing | Tool::Healing => "J",
             Tool::Marquee | Tool::EllipticalMarquee => "M",
             Tool::Lasso => "L",
+            Tool::MagicWand => "W",
         }
     }
 
@@ -127,6 +136,7 @@ impl Tool {
             Tool::Move => ToolGroup::Move,
             Tool::Marquee | Tool::EllipticalMarquee => ToolGroup::Marquee,
             Tool::Lasso => ToolGroup::Lasso,
+            Tool::MagicWand => ToolGroup::Wand,
             Tool::SpotHealing | Tool::Healing => ToolGroup::Healing,
             Tool::Brush => ToolGroup::Brush,
             Tool::CloneStamp => ToolGroup::CloneStamp,
@@ -136,7 +146,10 @@ impl Tool {
 
     /// Tools that make selections rather than paint.
     pub fn selects(self) -> bool {
-        matches!(self, Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso)
+        matches!(
+            self,
+            Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso | Tool::MagicWand
+        )
     }
 
     /// Tools that paint with a brush, and so show its outline.
@@ -154,6 +167,7 @@ pub struct Tools {
     pub tool: Tool,
     last_marquee: Tool,
     last_healing: Tool,
+    last_wand: Tool,
     brush: BrushSettings,
     eraser: BrushSettings,
     clone: BrushSettings,
@@ -166,6 +180,10 @@ pub struct Tools {
     offset: Option<Vec2>,
     /// Clone/heal from all visible layers rather than the active one.
     pub sample_all: bool,
+    /// Magic Wand settings matching Photoshop.
+    pub wand_tolerance: u8,
+    pub wand_contiguous: bool,
+    pub wand_anti_alias: bool,
     /// Foreground and background colours, in sRGB as shown in the pickers.
     pub foreground: [u8; 3],
     pub background: [u8; 3],
@@ -177,6 +195,7 @@ impl Default for Tools {
             tool: Tool::Brush,
             last_marquee: Tool::Marquee,
             last_healing: Tool::SpotHealing,
+            last_wand: Tool::MagicWand,
             brush: BrushSettings::default(),
             eraser: BrushSettings {
                 hardness: 0.5,
@@ -200,6 +219,9 @@ impl Default for Tools {
             source: None,
             offset: None,
             sample_all: true,
+            wand_tolerance: 32,
+            wand_contiguous: true,
+            wand_anti_alias: true,
             foreground: [0, 0, 0],
             background: [255, 255, 255],
         }
@@ -209,9 +231,12 @@ impl Default for Tools {
 impl Tools {
     pub fn settings(&self) -> BrushSettings {
         match self.tool {
-            Tool::Move | Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => {
-                self.brush
-            }
+            Tool::Move
+            | Tool::Brush
+            | Tool::Marquee
+            | Tool::EllipticalMarquee
+            | Tool::Lasso
+            | Tool::MagicWand => self.brush,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
             Tool::SpotHealing => self.spot,
@@ -229,9 +254,12 @@ impl Tools {
 
     fn settings_mut(&mut self) -> &mut BrushSettings {
         match self.tool {
-            Tool::Move | Tool::Brush | Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso => {
-                &mut self.brush
-            }
+            Tool::Move
+            | Tool::Brush
+            | Tool::Marquee
+            | Tool::EllipticalMarquee
+            | Tool::Lasso
+            | Tool::MagicWand => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
             Tool::SpotHealing => &mut self.spot,
@@ -323,6 +351,7 @@ impl Tools {
         match self.tool {
             Tool::Marquee | Tool::EllipticalMarquee => self.last_marquee = self.tool,
             Tool::SpotHealing | Tool::Healing => self.last_healing = self.tool,
+            Tool::MagicWand => self.last_wand = self.tool,
             _ => {}
         }
     }
@@ -335,6 +364,7 @@ impl Tools {
         match group {
             ToolGroup::Marquee => self.last_marquee,
             ToolGroup::Healing => self.last_healing,
+            ToolGroup::Wand => self.last_wand,
             ToolGroup::Move => Tool::Move,
             ToolGroup::Lasso => Tool::Lasso,
             ToolGroup::Brush => Tool::Brush,
@@ -451,6 +481,21 @@ impl Tools {
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.tool.name()).strong());
             ui.separator();
+            if self.tool == Tool::MagicWand {
+                ui.label("Tolerance");
+                ui.add(
+                    egui::DragValue::new(&mut self.wand_tolerance)
+                        .range(0..=255)
+                        .speed(1.0),
+                );
+                ui.checkbox(&mut self.wand_anti_alias, "Anti-alias");
+                ui.checkbox(&mut self.wand_contiguous, "Contiguous");
+                ui.checkbox(&mut self.sample_all, "Sample All Layers");
+                ui.separator();
+                let hint = "Click to select similar colours · Shift adds · Alt subtracts · Shift+Alt intersects";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
             if self.tool.selects() {
                 let hint = "Drag to select · Shift adds · Alt subtracts · Shift+Alt intersects · \
                             click outside to deselect · Shift+F6 feathers";
@@ -806,6 +851,15 @@ mod tests {
         out.textures_delta.clear();
         tools.keys(&ctx);
         assert_eq!(tools.tool, Tool::Marquee);
+    }
+
+    #[test]
+    fn w_selects_magic_wand() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+        press(&ctx, &[(Key::W, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::MagicWand);
     }
 
     #[test]
