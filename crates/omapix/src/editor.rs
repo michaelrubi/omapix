@@ -13,7 +13,7 @@ use omapix_engine::reduced::Reduced;
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
 use omapix_engine::{
-    BlendMode, DisplayTransform, Document, Pixel, Raster, composite, filters, ops,
+    BlendMode, DisplayTransform, Document, NoiseOptions, Pixel, Raster, composite, filters, ops,
 };
 
 use crate::canvas::{Canvas, Render};
@@ -41,6 +41,8 @@ pub enum View {
     Separation { radius: f32, texture: bool },
     /// What Gaussian blur at `radius` on `layer` would produce.
     GaussianBlur { layer: u64, radius: f32 },
+    /// What adding noise with `options` above `layer` would produce.
+    AddNoise { layer: u64, options: NoiseOptions },
 }
 
 /// A whole new render, and for separation previews the flattened image it
@@ -634,7 +636,7 @@ impl Editor {
         let Some(render) = self.canvas.render() else {
             return;
         };
-        if matches!(self.view, View::Separation { .. } | View::GaussianBlur { .. }) {
+        if matches!(self.view, View::Separation { .. } | View::GaussianBlur { .. } | View::AddNoise { .. }) {
             return;
         }
         let data = draw_tiles(
@@ -905,6 +907,11 @@ impl Editor {
         {
             self.set_view(View::Image);
         }
+        if let View::AddNoise { layer, .. } = self.view
+            && (self.doc.layer(layer).is_none() || layer != self.active)
+        {
+            self.set_view(View::Image);
+        }
 
         if let Some(rendering) = &mut self.rendering {
             loop {
@@ -967,7 +974,7 @@ impl Editor {
         let in_place = self
             .canvas
             .render()
-            .filter(|_| !matches!(view, View::Separation { .. } | View::GaussianBlur { .. }));
+            .filter(|_| !matches!(view, View::Separation { .. } | View::GaussianBlur { .. } | View::AddNoise { .. }));
         if let Some(render) = in_place {
             let job = InPlace {
                 doc,
@@ -1108,6 +1115,21 @@ pub(crate) fn render_view(
             let image = composite::composite(&layers, doc.width, doc.height);
             (Render::new(image), None)
         }
+        View::AddNoise { layer, options } => {
+            let mut preview_doc = doc.clone();
+            let base_tiled = match base {
+                Some(b) => b,
+                None => Arc::new(Tiled::from_raster(&doc.composite())),
+            };
+            let grain = ops::grain_layer(0, doc.width, doc.height, &options, Some(&base_tiled));
+            let index = doc
+                .index_of(layer)
+                .unwrap_or(preview_doc.layers.len().saturating_sub(1));
+            preview_doc.insert_above(index, grain);
+            let image =
+                composite::composite(&preview_doc.layers, preview_doc.width, preview_doc.height);
+            (Render::new(image), Some(base_tiled))
+        }
     }
 }
 
@@ -1163,9 +1185,10 @@ fn draw_tiles(
             }
             out
         }
-        View::Image | View::Separation { .. } | View::GaussianBlur { .. } => {
-            composite::composite_tiles(layers, tiles, groups)
-        }
+        View::Image
+        | View::Separation { .. }
+        | View::GaussianBlur { .. }
+        | View::AddNoise { .. } => composite::composite_tiles(layers, tiles, groups),
     }
 }
 
@@ -1429,6 +1452,22 @@ mod tests {
         );
         // The dot was spread out: pixel at (100, 100) is no longer pure black.
         assert!(blurred.sample_for_test(100, 100)[0] > 0);
+
+        // Add Noise preview adds grain on top.
+        let (noise_render, _) = render_view(
+            &e.doc,
+            View::AddNoise {
+                layer: e.active,
+                options: omapix_engine::NoiseOptions {
+                    amount: 50.0,
+                    ..Default::default()
+                },
+            },
+            RED,
+            None,
+        );
+        let sample = noise_render.sample_for_test(300, 200);
+        assert_ne!(sample, [30000, 30000, 30000, 65535]);
     }
 
     /// An editor with a neutral dodge & burn layer on top, selected, whose

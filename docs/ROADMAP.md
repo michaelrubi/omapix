@@ -114,6 +114,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
 - [ ] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
+- [ ] Add Noise: dialog controls (Amount, Uniform/Gaussian, Monochromatic, Grain Size, Roughness, shadow/highlight falloff), live preview, and the new Grain layer in Overlay mode
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -158,11 +159,8 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - ~~A one-click **High Pass sharpening** setup~~ (done): Retouch › High Pass Sharpening… asks for a radius (1–3 px for fine detail) and adds a "High Pass Sharpening" layer in Overlay above the selected layer, holding the High Pass of the visible image's luminance, so it sharpens without colour fringes. Its opacity sets the strength and a mask keeps it off skin. Filter › Other › High Pass… applies the filter itself to a layer. No live preview yet for either.
   - Previewed at 100 % in the dialog (Photoshop's filter preview box), since sharpening can't be judged zoomed out.
   - Later, output sharpening for the export size, once exports can resize (see Batch export).
-- **Add Noise** (Filter › Noise › Add Noise…), the last step.
-  - Photoshop's controls (Amount, Uniform or Gaussian, Monochromatic), plus film-like grain: grain size, roughness, and less grain in deep shadows and bright highlights than in the midtones.
-  - Goes on a **Grain** layer by default: 50 % grey in Overlay carrying the grain, like the Dodge & Burn layer, so opacity is the amount.
-  - Seeded, so the same settings always give the same grain, without seams between tiles.
-  - Grain is measured in pixels, so an export at a smaller size loses it. Once exports can resize, grain should be added at the output size.
+- ~~**Add Noise**~~ (done): Filter › Noise › Add Noise… opens a dialog with Photoshop's controls (Amount, Uniform or Gaussian, Monochromatic) plus film-like Grain Size and Roughness, and tonal falloff in shadows/highlights. By default the result goes on a new Grain layer in Overlay mode carrying the grain, with live preview while the dialog is open.
+  - Later: grain added at output size once exports can resize.
 - Later, a **Finish** action that runs Sharpen then Add Noise with saved settings, which Batch export can reuse.
 
 ## 5. Workflow and files
