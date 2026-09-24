@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use egui::{Color32, ComboBox, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, pos2, vec2};
+use egui::{
+    Color32, ComboBox, Pos2, Rect, RichText, Sense, Shape, Slider, Stroke, Ui, pos2, vec2,
+};
 use omapix_engine::adjust::{
     Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, HueSaturation, Levels,
     SelectiveColor,
@@ -34,6 +36,11 @@ pub struct PropertiesPanel {
     lut_picker: Option<Receiver<Option<PathBuf>>>,
     /// Last error message from loading a LUT, if any.
     lut_error: Option<String>,
+    /// Cached histogram of the composite below the active adjustment layer.
+    histogram: Option<omapix_engine::Histogram>,
+    /// Active layer id and document revision for the cached histogram.
+    cached_layer_id: u64,
+    cached_revision: u64,
 }
 
 impl PropertiesPanel {
@@ -45,6 +52,17 @@ impl PropertiesPanel {
             return false;
         };
         let original = adjustment.clone();
+        let needs_histogram = matches!(adjustment, Adjustment::Curves(_) | Adjustment::Levels(_));
+        if needs_histogram
+            && (self.cached_layer_id != id
+                || self.cached_revision != editor.revision()
+                || self.histogram.is_none())
+        {
+            self.histogram = Some(editor.doc.histogram_below(id));
+            self.cached_layer_id = id;
+            self.cached_revision = editor.revision();
+        }
+
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Properties — {}", adjustment.name())).strong());
@@ -75,7 +93,7 @@ impl PropertiesPanel {
         ui.add_space(4.0);
         match &mut adjustment {
             Adjustment::Curves(c) => self.curves(ui, c, theme),
-            Adjustment::Levels(l) => levels(ui, l),
+            Adjustment::Levels(l) => self.levels(ui, l, theme),
             Adjustment::HueSaturation(h) => hue_saturation(ui, h),
             Adjustment::ColorBalance(b) => self.color_balance(ui, b),
             Adjustment::SelectiveColor(s) => self.selective_color(ui, s),
@@ -89,6 +107,7 @@ impl PropertiesPanel {
                     layer.adjustment = Some(adjustment);
                 }
             });
+            self.cached_revision = editor.revision();
         }
         ui.separator();
         true
@@ -165,6 +184,10 @@ impl PropertiesPanel {
 
         let painter = ui.painter_at(rect.expand(4.0));
         painter.rect_filled(rect, 0.0, theme.darker_background);
+        if let Some(hist) = &self.histogram {
+            let bins = hist.channel(self.channel);
+            draw_histogram(&painter, rect, bins, self.channel, theme);
+        }
         let grid = Stroke::new(1.0, theme.selection);
         for i in 1..4 {
             let t = i as f32 / 4.0;
@@ -362,6 +385,73 @@ impl PropertiesPanel {
             ui.colored_label(theme.red, format!("Error: {err}"));
         }
     }
+
+    fn levels(&mut self, ui: &mut Ui, l: &mut Levels, theme: &Theme) {
+        let side = ui.available_width().min(300.0);
+        let hist_height = 80.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(side, hist_height), Sense::hover());
+        let painter = ui.painter_at(rect.expand(4.0));
+        painter.rect_filled(rect, 0.0, theme.darker_background);
+        if let Some(hist) = &self.histogram {
+            let bins = hist.channel(0);
+            draw_histogram(&painter, rect, bins, 0, theme);
+        }
+        let bx = rect.left() + l.in_black.clamp(0.0, 1.0) * rect.width();
+        painter.line_segment(
+            [pos2(bx, rect.top()), pos2(bx, rect.bottom())],
+            Stroke::new(1.0, theme.dark_foreground),
+        );
+        let wx = rect.left() + l.in_white.clamp(0.0, 1.0) * rect.width();
+        painter.line_segment(
+            [pos2(wx, rect.top()), pos2(wx, rect.bottom())],
+            Stroke::new(1.0, theme.foreground),
+        );
+        let mid_t = 0.5f32.powf(l.gamma);
+        let mx = rect.left()
+            + (l.in_black + (l.in_white - l.in_black) * mid_t).clamp(0.0, 1.0) * rect.width();
+        painter.line_segment(
+            [pos2(mx, rect.top()), pos2(mx, rect.bottom())],
+            Stroke::new(1.0, theme.muted),
+        );
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, theme.selection),
+            egui::StrokeKind::Outside,
+        );
+
+        ui.add_space(4.0);
+
+        // Shown on Photoshop's 0–255 scale.
+        fn level(ui: &mut Ui, label: &str, value: &mut f32) {
+            let mut v = *value * 255.0;
+            if ui
+                .add(
+                    Slider::new(&mut v, 0.0..=255.0)
+                        .text(label)
+                        .fixed_decimals(0),
+                )
+                .changed()
+            {
+                *value = v / 255.0;
+            }
+        }
+        ui.label(RichText::new("Input").small());
+        level(ui, "Black", &mut l.in_black);
+        ui.add(
+            Slider::new(&mut l.gamma, 0.1..=9.99)
+                .text("Midtones")
+                .fixed_decimals(2)
+                .logarithmic(true),
+        );
+        level(ui, "White", &mut l.in_white);
+        ui.label(RichText::new("Output").small());
+        level(ui, "Black", &mut l.out_black);
+        level(ui, "White", &mut l.out_white);
+        if l.in_white <= l.in_black + 0.004 {
+            l.in_white = (l.in_black + 0.004).min(1.0);
+        }
+    }
 }
 
 /// Add a point at `p` between its neighbours; returns its index.
@@ -391,36 +481,82 @@ fn move_point(curve: &mut Curve, i: usize, (x, y): (f32, f32)) {
     curve.points[i] = (x.clamp(lo, hi.max(lo)), y);
 }
 
-fn levels(ui: &mut Ui, l: &mut Levels) {
-    // Shown on Photoshop's 0–255 scale.
-    fn level(ui: &mut Ui, label: &str, value: &mut f32) {
-        let mut v = *value * 255.0;
-        if ui
-            .add(
-                Slider::new(&mut v, 0.0..=255.0)
-                    .text(label)
-                    .fixed_decimals(0),
+fn draw_histogram(
+    painter: &egui::Painter,
+    rect: Rect,
+    bins: &[u32; 256],
+    channel: usize,
+    theme: &Theme,
+) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let max = *bins.iter().max().unwrap_or(&0);
+    if max == 0 {
+        return;
+    }
+    let interior_max = *bins[1..255].iter().max().unwrap_or(&0);
+    let scale_max = if interior_max > 0 {
+        max.min(interior_max * 3).max(interior_max)
+    } else {
+        max
+    } as f32;
+
+    if scale_max <= 0.0 {
+        return;
+    }
+
+    let (fill, stroke) = match channel {
+        1 => (
+            Color32::from_rgba_unmultiplied(230, 80, 80, 50),
+            Color32::from_rgba_unmultiplied(230, 80, 80, 140),
+        ),
+        2 => (
+            Color32::from_rgba_unmultiplied(80, 200, 100, 50),
+            Color32::from_rgba_unmultiplied(80, 200, 100, 140),
+        ),
+        3 => (
+            Color32::from_rgba_unmultiplied(90, 140, 240, 50),
+            Color32::from_rgba_unmultiplied(90, 140, 240, 140),
+        ),
+        _ => {
+            let fg = theme.foreground;
+            (
+                Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 40),
+                Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 110),
             )
-            .changed()
-        {
-            *value = v / 255.0;
         }
+    };
+
+    let mut mesh = egui::Mesh::default();
+    let bottom = rect.bottom();
+    let height = rect.height();
+    let width = rect.width();
+    let left = rect.left();
+
+    let mut outline = Vec::with_capacity(258);
+    outline.push(pos2(left, bottom));
+
+    for (i, &count) in bins.iter().enumerate() {
+        let x0 = left + (i as f32 / 256.0) * width;
+        let x1 = left + ((i + 1) as f32 / 256.0) * width;
+        let h = (count as f32 / scale_max).clamp(0.0, 1.0) * height;
+        let y = bottom - h;
+        let xm = (x0 + x1) * 0.5;
+        outline.push(pos2(xm, y));
+
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(pos2(x0, bottom), fill);
+        mesh.colored_vertex(pos2(x0, y), fill);
+        mesh.colored_vertex(pos2(x1, y), fill);
+        mesh.colored_vertex(pos2(x1, bottom), fill);
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
     }
-    ui.label(RichText::new("Input").small());
-    level(ui, "Black", &mut l.in_black);
-    ui.add(
-        Slider::new(&mut l.gamma, 0.1..=9.99)
-            .text("Midtones")
-            .fixed_decimals(2)
-            .logarithmic(true),
-    );
-    level(ui, "White", &mut l.in_white);
-    ui.label(RichText::new("Output").small());
-    level(ui, "Black", &mut l.out_black);
-    level(ui, "White", &mut l.out_white);
-    if l.in_white <= l.in_black + 0.004 {
-        l.in_white = (l.in_black + 0.004).min(1.0);
-    }
+    outline.push(pos2(rect.right(), bottom));
+
+    painter.add(Shape::mesh(mesh));
+    painter.add(Shape::line(outline, Stroke::new(1.0, stroke)));
 }
 
 fn hue_saturation(ui: &mut Ui, h: &mut HueSaturation) {
@@ -514,5 +650,58 @@ mod tests {
         });
         out.textures_delta.clear();
         assert!(shown, "panel should show for color lookup adjustment");
+    }
+
+    #[test]
+    fn properties_panel_renders_curves_and_levels_with_histogram() {
+        let (w, h) = (20, 20);
+        let image = omapix_engine::Raster::new(
+            w,
+            h,
+            vec![[40000, 20000, 10000, 65535]; (w * h) as usize],
+        );
+        let mut doc = omapix_engine::Document::from_image(
+            "t.tif".into(),
+            &image,
+            omapix_engine::ColorProfile::srgb(),
+            16,
+        );
+        let curves = Adjustment::Curves(Curves::default());
+        doc.layers
+            .push(omapix_engine::Layer::adjustment(101, curves, w, h));
+        let levels = Adjustment::Levels(Levels::default());
+        doc.layers
+            .push(omapix_engine::Layer::adjustment(102, levels, w, h));
+
+        let mut editor = Editor::new(doc).unwrap();
+        let mut panel = PropertiesPanel::default();
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+
+        // Target Curves layer
+        editor.active = 101;
+        let mut shown = false;
+        let input = egui::RawInput::default();
+        let mut out = ctx.run_ui(input, |ui| {
+            shown = panel.show(ui, &mut editor, &theme);
+        });
+        out.textures_delta.clear();
+        assert!(shown, "panel should show for curves adjustment");
+        let hist = panel.histogram.as_ref().expect("histogram computed for curves");
+        assert!(!hist.is_empty(), "histogram should not be empty");
+        assert_eq!(hist.red[40000 >> 8], (w * h) as u32);
+        assert_eq!(hist.green[20000 >> 8], (w * h) as u32);
+        assert_eq!(hist.blue[10000 >> 8], (w * h) as u32);
+
+        // Target Levels layer
+        editor.active = 102;
+        let mut shown = false;
+        let input = egui::RawInput::default();
+        let mut out = ctx.run_ui(input, |ui| {
+            shown = panel.show(ui, &mut editor, &theme);
+        });
+        out.textures_delta.clear();
+        assert!(shown, "panel should show for levels adjustment");
+        assert!(panel.histogram.is_some(), "histogram computed for levels");
     }
 }

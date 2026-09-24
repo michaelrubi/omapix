@@ -11,6 +11,7 @@ pub mod document;
 pub mod export;
 pub mod filters;
 pub mod groups;
+pub mod histogram;
 pub mod io;
 pub mod layer;
 pub mod moving;
@@ -25,6 +26,7 @@ pub mod tiles;
 pub use blend::BlendMode;
 pub use color::{ColorProfile, DisplayTransform};
 pub use document::Document;
+pub use histogram::Histogram;
 pub use layer::{Layer, Mask};
 pub use raster::{Pixel, Raster};
 

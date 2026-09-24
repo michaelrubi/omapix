@@ -112,7 +112,7 @@ The UI has been tested through the same code paths with scripts
 
 ## 4. Colour and adjustments
 
-- **Histogram in Curves and Levels**, drawn behind the curve.
+- ~~**Histogram in Curves and Levels**~~ (done): drawn behind the curve, and in Levels above the input controls.
 - **Eyedroppers in Curves and Levels:** set black, grey and white points by clicking the image.
 - ~~**Selective Color** and **Channel Mixer** adjustment layers~~ (done).
 - ~~**LUT adjustment layer:** load `.cube` files~~ (done).
