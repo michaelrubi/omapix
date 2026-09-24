@@ -205,6 +205,102 @@ pub struct Curves {
     pub blue: Curve,
 }
 
+/// An eyedropper point to set from an image sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Eyedropper {
+    Black,
+    Gray,
+    White,
+}
+
+impl Eyedropper {
+    pub fn label(self) -> &'static str {
+        match self {
+            Eyedropper::Black => "Set Black Point",
+            Eyedropper::Gray => "Set Gray Point",
+            Eyedropper::White => "Set White Point",
+        }
+    }
+}
+
+/// Luminance of an RGB colour (0.3 R + 0.59 G + 0.11 B), matching the histogram.
+pub fn luminance([r, g, b]: [f32; 3]) -> f32 {
+    0.3 * r + 0.59 * g + 0.11 * b
+}
+
+fn set_curve_black(curve: &mut Curve, in_val: f32) {
+    let (_, y_last) = curve.points.last().copied().unwrap_or((1.0, 1.0));
+    let x_last = curve.points.last().map_or(1.0, |p| p.0);
+    let x = in_val.clamp(0.0, (x_last - 0.001).max(0.0));
+    let mut remaining: Vec<(f32, f32)> = curve
+        .points
+        .iter()
+        .copied()
+        .filter(|&(px, _)| px > x && px < x_last)
+        .collect();
+    let mut new_points = Vec::with_capacity(remaining.len() + 2);
+    new_points.push((x, 0.0));
+    new_points.append(&mut remaining);
+    new_points.push((x_last, y_last));
+    curve.points = new_points;
+}
+
+fn set_curve_white(curve: &mut Curve, in_val: f32) {
+    let (x_first, y_first) = curve.points.first().copied().unwrap_or((0.0, 0.0));
+    let x = in_val.clamp((x_first + 0.001).min(1.0), 1.0);
+    let mut remaining: Vec<(f32, f32)> = curve
+        .points
+        .iter()
+        .copied()
+        .filter(|&(px, _)| px > x_first && px < x)
+        .collect();
+    let mut new_points = Vec::with_capacity(remaining.len() + 2);
+    new_points.push((x_first, y_first));
+    new_points.append(&mut remaining);
+    new_points.push((x, 1.0));
+    curve.points = new_points;
+}
+
+fn set_curve_gray(curve: &mut Curve, in_val: f32, target: f32) {
+    let (x_first, y_first) = curve.points.first().copied().unwrap_or((0.0, 0.0));
+    let (x_last, y_last) = curve.points.last().copied().unwrap_or((1.0, 1.0));
+    let x = in_val.clamp(
+        (x_first + 0.001).min(1.0),
+        (x_last - 0.001).max(x_first + 0.001),
+    );
+    let y = target.clamp(0.0, 1.0);
+    curve.points = vec![(x_first, y_first), (x, y), (x_last, y_last)];
+}
+
+impl Curves {
+    pub fn set_point(&mut self, eyedropper: Eyedropper, sample: [f32; 3]) {
+        match eyedropper {
+            Eyedropper::Black => self.set_black_point(sample),
+            Eyedropper::Gray => self.set_gray_point(sample),
+            Eyedropper::White => self.set_white_point(sample),
+        }
+    }
+
+    fn set_black_point(&mut self, sample: [f32; 3]) {
+        set_curve_black(&mut self.red, sample[0]);
+        set_curve_black(&mut self.green, sample[1]);
+        set_curve_black(&mut self.blue, sample[2]);
+    }
+
+    fn set_white_point(&mut self, sample: [f32; 3]) {
+        set_curve_white(&mut self.red, sample[0]);
+        set_curve_white(&mut self.green, sample[1]);
+        set_curve_white(&mut self.blue, sample[2]);
+    }
+
+    fn set_gray_point(&mut self, sample: [f32; 3]) {
+        let target = luminance(sample);
+        set_curve_gray(&mut self.red, sample[0], target);
+        set_curve_gray(&mut self.green, sample[1], target);
+        set_curve_gray(&mut self.blue, sample[2], target);
+    }
+}
+
 /// Photoshop's Levels: input black/white points and midtone gamma, then
 /// output range. All 0–1 except gamma (1 = unchanged).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -229,6 +325,31 @@ impl Default for Levels {
 }
 
 impl Levels {
+    pub fn set_point(&mut self, eyedropper: Eyedropper, sample: [f32; 3]) {
+        match eyedropper {
+            Eyedropper::Black => self.set_black_point(sample),
+            Eyedropper::Gray => self.set_gray_point(sample),
+            Eyedropper::White => self.set_white_point(sample),
+        }
+    }
+
+    fn set_black_point(&mut self, sample: [f32; 3]) {
+        let lum = luminance(sample);
+        self.in_black = lum.clamp(0.0, (self.in_white - 0.001).max(0.0));
+    }
+
+    fn set_white_point(&mut self, sample: [f32; 3]) {
+        let lum = luminance(sample);
+        self.in_white = lum.clamp((self.in_black + 0.001).min(1.0), 1.0);
+    }
+
+    fn set_gray_point(&mut self, sample: [f32; 3]) {
+        let lum = luminance(sample);
+        let range = (self.in_white - self.in_black).max(1e-4);
+        let v_in = ((lum - self.in_black) / range).clamp(1e-4, 1.0 - 1e-4);
+        self.gamma = (v_in.ln() / 0.5f32.ln()).clamp(0.1, 9.99);
+    }
+
     fn eval(&self, x: f32) -> f32 {
         let range = (self.in_white - self.in_black).max(1e-4);
         let v = ((x - self.in_black) / range).clamp(0.0, 1.0);
@@ -1205,4 +1326,51 @@ mod tests {
         assert!(ColorLookup::from_cube_str("LUT_1D_SIZE 3\n0 0 0\n1 1 1\n", "").is_err());
         assert!(ColorLookup::from_cube_str("random text with no numbers", "").is_err());
     }
+
+    #[test]
+    fn curves_eyedroppers_set_black_white_gray() {
+        let mut curves = Curves::default();
+        let black_sample = [0.15, 0.12, 0.18];
+        curves.set_black_point(black_sample);
+        let p = Adjustment::Curves(curves.clone()).prepare();
+        assert!(close(p.apply(black_sample), [0.0, 0.0, 0.0], 2e-3));
+
+        let white_sample = [0.85, 0.90, 0.88];
+        curves.set_white_point(white_sample);
+        let p = Adjustment::Curves(curves.clone()).prepare();
+        assert!(close(p.apply(white_sample), [1.0, 1.0, 1.0], 2e-3));
+        assert!(close(p.apply(black_sample), [0.0, 0.0, 0.0], 2e-3));
+
+        let gray_sample = [0.55, 0.48, 0.52];
+        curves.set_gray_point(gray_sample);
+        let p = Adjustment::Curves(curves.clone()).prepare();
+        let res = p.apply(gray_sample);
+        let lum = luminance(gray_sample);
+        assert!(close(res, [lum, lum, lum], 2e-3));
+        assert!(close(p.apply(black_sample), [0.0, 0.0, 0.0], 2e-3));
+        assert!(close(p.apply(white_sample), [1.0, 1.0, 1.0], 2e-3));
+    }
+
+    #[test]
+    fn levels_eyedroppers_set_black_white_gray() {
+        let mut levels = Levels::default();
+        let black_sample = [0.12, 0.12, 0.12];
+        levels.set_black_point(black_sample);
+        let p = Adjustment::Levels(levels.clone()).prepare();
+        assert!(close(p.apply(black_sample), [0.0, 0.0, 0.0], 2e-3));
+
+        let white_sample = [0.88, 0.88, 0.88];
+        levels.set_white_point(white_sample);
+        let p = Adjustment::Levels(levels.clone()).prepare();
+        assert!(close(p.apply(white_sample), [1.0, 1.0, 1.0], 2e-3));
+        assert!(close(p.apply(black_sample), [0.0, 0.0, 0.0], 2e-3));
+
+        let gray_sample = [0.45, 0.45, 0.45];
+        levels.set_gray_point(gray_sample);
+        let p = Adjustment::Levels(levels.clone()).prepare();
+        assert!(close(p.apply(gray_sample), [0.5, 0.5, 0.5], 2e-3));
+        assert!(close(p.apply(black_sample), [0.0, 0.0, 0.0], 2e-3));
+        assert!(close(p.apply(white_sample), [1.0, 1.0, 1.0], 2e-3));
+    }
 }
+

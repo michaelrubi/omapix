@@ -8,8 +8,8 @@ use egui::{
     Color32, ComboBox, Pos2, Rect, RichText, Sense, Shape, Slider, Stroke, Ui, pos2, vec2,
 };
 use omapix_engine::adjust::{
-    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, HueSaturation, Levels,
-    SelectiveColor,
+    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation,
+    Levels, SelectiveColor,
 };
 
 use crate::editor::Editor;
@@ -26,6 +26,8 @@ pub struct PropertiesPanel {
     channel: usize,
     /// Curve point being dragged.
     dragging: Option<usize>,
+    /// Armed eyedropper (Black, Gray, or White point).
+    pub eyedropper: Option<Eyedropper>,
     /// Color Balance tonal range: 0 = shadows, 1 = midtones, 2 = highlights.
     tone: usize,
     /// Selective Color selected range: 0..=8.
@@ -49,8 +51,12 @@ impl PropertiesPanel {
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> bool {
         let id = editor.active;
         let Some(mut adjustment) = editor.doc.layer(id).and_then(|l| l.adjustment.clone()) else {
+            self.eyedropper = None;
             return false;
         };
+        if !matches!(adjustment, Adjustment::Curves(_) | Adjustment::Levels(_)) {
+            self.eyedropper = None;
+        }
         let original = adjustment.clone();
         let needs_histogram = matches!(adjustment, Adjustment::Curves(_) | Adjustment::Levels(_));
         if needs_histogram
@@ -113,7 +119,27 @@ impl PropertiesPanel {
         true
     }
 
+    /// Buttons that arm an eyedropper for the next click on the canvas
+    /// (Esc disarms it, see `App::check_escape`).
+    fn eyedropper_buttons(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for eyedropper in [Eyedropper::Black, Eyedropper::Gray, Eyedropper::White] {
+                let active = self.eyedropper == Some(eyedropper);
+                let button = egui::Button::new(eyedropper.label()).selected(active);
+                if ui.add(button).clicked() {
+                    if active {
+                        self.eyedropper = None;
+                    } else {
+                        self.eyedropper = Some(eyedropper);
+                    }
+                }
+            }
+        });
+    }
+
     fn curves(&mut self, ui: &mut Ui, curves: &mut Curves, theme: &Theme) {
+        self.eyedropper_buttons(ui);
+        ui.add_space(4.0);
         let names = ["RGB", "Red", "Green", "Blue"];
         ComboBox::from_id_salt("curves-channel")
             .selected_text(names[self.channel])
@@ -387,6 +413,8 @@ impl PropertiesPanel {
     }
 
     fn levels(&mut self, ui: &mut Ui, l: &mut Levels, theme: &Theme) {
+        self.eyedropper_buttons(ui);
+        ui.add_space(4.0);
         let side = ui.available_width().min(300.0);
         let hist_height = 80.0;
         let (rect, _) = ui.allocate_exact_size(vec2(side, hist_height), Sense::hover());
@@ -705,3 +733,4 @@ mod tests {
         assert!(panel.histogram.is_some(), "histogram computed for levels");
     }
 }
+
