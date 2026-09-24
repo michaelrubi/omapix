@@ -172,6 +172,9 @@ fn write_stack(xml: &mut String, doc: &Document, encoded: &[Encoded], parent: Op
         if layer.clipped {
             xml.push_str(" omapix:clipped=\"true\"");
         }
+        if layer.lock_alpha {
+            xml.push_str(" omapix:lock-alpha=\"true\"");
+        }
         if let Some(blend_if) = layer.blend_if.filter(|b| !b.is_neutral()) {
             let json = serde_json::to_string(&blend_if).expect("blend-if always serialises");
             xml.push_str(&format!(" omapix:blend-if=\"{}\"", xml_escape(&json)));
@@ -327,6 +330,7 @@ struct LayerEntry {
     adjustment: Option<crate::adjust::Adjustment>,
     blend_if: Option<crate::layer::BlendIf>,
     clipped: bool,
+    lock_alpha: bool,
     /// The entry of the group it's in.
     parent: Option<usize>,
 }
@@ -416,6 +420,7 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
                 .get("omapix:blend-if")
                 .and_then(|json| serde_json::from_str(json).ok()),
             clipped: attrs.get("omapix:clipped").is_some_and(|v| v == "true"),
+            lock_alpha: attrs.get("omapix:lock-alpha").is_some_and(|v| v == "true"),
             parent: open.last().copied().flatten(),
         });
         if is_group && has_children {
@@ -513,6 +518,7 @@ pub fn load(path: &Path) -> Result<Document> {
                 layer.adjustment = e.adjustment.clone();
                 layer.blend_if = e.blend_if;
                 layer.clipped = e.clipped;
+                layer.lock_alpha = e.lock_alpha;
                 if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
                     let (mw, mh, samples, _) = decode_png(mask_png, false)?;
                     let area = (
@@ -590,6 +596,7 @@ mod tests {
             h,
         ));
         doc.layers.last_mut().unwrap().clipped = true;
+        doc.layers[1].lock_alpha = true;
         // A small, empty-ish layer to exercise cropping and empty layers.
         let id = doc.next_layer_id();
         doc.layers.push(Layer::empty(id, "Empty", w, h));
@@ -612,6 +619,7 @@ mod tests {
             assert_eq!(a.mask.is_some(), b.mask.is_some());
             assert_eq!(a.adjustment, b.adjustment);
             assert_eq!(a.blend_if, b.blend_if);
+            assert_eq!(a.lock_alpha, b.lock_alpha);
             assert_eq!(a.clipped, b.clipped);
             if let (Some(ma), Some(mb)) = (&a.mask, &b.mask) {
                 assert_eq!(ma.enabled, mb.enabled);

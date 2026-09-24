@@ -79,6 +79,29 @@ pub fn fill_pixels(
     within_selection(pixels, filled, selection)
 }
 
+/// `edited` with the alpha of `original`, for layers with Lock Transparent
+/// Pixels: only the colour changes.
+pub fn keep_alpha(
+    original: &Tiled<crate::Pixel>,
+    mut edited: Tiled<crate::Pixel>,
+) -> Tiled<crate::Pixel> {
+    let (fill, alpha_fill) = (edited.fill(), original.fill()[3]);
+    edited.par_update(|col, row, tile| {
+        let alpha = original.tile(col, row);
+        if tile.is_none() && alpha.is_none() && fill[3] == alpha_fill {
+            return None;
+        }
+        let tile = tile.map_or_else(|| vec![fill; crate::tiled::TILE_PIXELS], <[_]>::to_vec);
+        Some(
+            tile.into_iter()
+                .enumerate()
+                .map(|(i, [r, g, b, _])| [r, g, b, alpha.map_or(alpha_fill, |t| t[i][3])])
+                .collect(),
+        )
+    });
+    edited
+}
+
 /// Fill a mask with a grey level where selected.
 pub fn fill_mask(
     mask: &Tiled<u16>,
@@ -358,6 +381,21 @@ mod tests {
         assert_eq!((mask.get(10, 10), mask.get(200, 10)), (0, u16::MAX));
         let everywhere = fill_pixels(pixels, Some([1, 2, 3, 65535]), None);
         assert_eq!(everywhere.get(299, 99), [1, 2, 3, 65535]);
+    }
+
+    #[test]
+    fn keep_alpha_fills_only_what_is_there() {
+        let (w, h) = (300, 10);
+        // Opaque on the left, transparent on the right (a whole empty tile).
+        let px = (0..w * h)
+            .map(|i| if i % w < 100 { [65535; 4] } else { [0; 4] })
+            .collect();
+        let pixels = doc_with(px, w, h).layers.remove(0).pixels;
+        let filled = fill_pixels(&pixels, Some([0, 0, 0, 65535]), None);
+        let locked = keep_alpha(&pixels, filled);
+        assert_eq!(locked.get(10, 5), [0, 0, 0, 65535]);
+        assert_eq!(locked.get(150, 5)[3], 0);
+        assert_eq!(locked.get(280, 5)[3], 0);
     }
 
     #[test]

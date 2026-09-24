@@ -533,7 +533,11 @@ impl Editor {
             (Target::Pixels, _) if !layer.has_pixels() => return false,
             (Target::Pixels, _) => Surface::Pixels(layer.pixels.clone()),
         };
+        let locked = target == Target::Pixels && layer.lock_alpha;
         let mut stroke = Stroke::new(settings, paint, surface);
+        if locked {
+            stroke = stroke.keeping_alpha();
+        }
         if let Some(selection) = &self.doc.selection {
             stroke = stroke.within(selection.coverage.clone());
         }
