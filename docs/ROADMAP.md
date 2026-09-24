@@ -111,6 +111,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
 - [ ] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
+- [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
 - [ ] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
 - [ ] Undo/redo after each of the above (done for everything checked)
 
@@ -153,7 +154,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - For raws, darktable's raw denoise before export is better still. Omapix's is for files that arrive already developed.
 - **Sharpen** (Filter › Sharpen), near the end.
   - Photoshop's **Unsharp Mask** (Amount, Radius, Threshold) and **Smart Sharpen** (Gaussian or lens blur, noise reduction, fading in shadows and highlights), on luminance only, so edges don't get colour fringes.
-  - A one-click **High Pass sharpening** setup, like Frequency Separation: a High Pass copy of the visible image in Overlay or Linear Light, whose opacity and mask set the strength. Needs a High Pass filter, which is handy anyway.
+  - ~~A one-click **High Pass sharpening** setup~~ (done): Retouch › High Pass Sharpening… asks for a radius (1–3 px for fine detail) and adds a "High Pass Sharpening" layer in Overlay above the selected layer, holding the High Pass of the visible image's luminance, so it sharpens without colour fringes. Its opacity sets the strength and a mask keeps it off skin. Filter › Other › High Pass… applies the filter itself to a layer. No live preview yet for either.
   - Previewed at 100 % in the dialog (Photoshop's filter preview box), since sharpening can't be judged zoomed out.
   - Later, output sharpening for the export size, once exports can resize (see Batch export).
 - **Add Noise** (Filter › Noise › Add Noise…), the last step.
