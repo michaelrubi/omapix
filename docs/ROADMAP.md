@@ -45,13 +45,9 @@ Ctrl+C copies the selected pixels of the active layer (or the whole layer withou
 Copies also go on the Wayland clipboard as an sRGB PNG (through `wl-copy`, so they stay pasteable after Omapix quits), and Ctrl+V pastes PNG or JPEG images copied in other apps, centred. While the clipboard still holds Omapix's own copy, pasting uses the full 16-bit original.
 - Later: Paste in Place and Paste Into (Ctrl+Shift+V, Ctrl+Alt+Shift+V), and centring pastes on the view rather than the canvas.
 
-### Marching ants for the marquees
+### ~~Marching ants for the marquees~~ (done)
 
-**Problem:** selections and the marquee or lasso being dragged show a dashed black-and-white outline, but it stands still, so it's easy to lose against a busy photo.
-
-**Plan:** animate the dashes so they march, as in Photoshop:
-- For the selection and for the marquee (rectangular or elliptical) or lasso shape while it's being dragged.
-- Repaint only while a selection is on screen, at a low rate, so an idle Omapix stays idle.
+The selection, and the marquee (rectangular or elliptical) or lasso shape being dragged, are drawn with white dashes over a black line that march along the outline, as in Photoshop. Omapix repaints for them only while an outline is on screen, about 12 times a second, so an idle Omapix stays idle.
 - Later: Ctrl+H hides the selection edges (Photoshop's Show Extras) while keeping the selection.
 
 ### One outline for combined selections

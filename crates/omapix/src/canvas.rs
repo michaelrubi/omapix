@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use egui::{
     Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -53,6 +54,14 @@ const MAX_IN_FLIGHT: usize = 16;
 
 /// Size of one checkerboard square behind transparent areas, in points.
 const CHECKER: f32 = 8.0;
+
+/// Marching ants: dash and gap lengths in points, how fast they march in
+/// points per second, and how often they're redrawn.
+const ANT_DASH: f32 = 4.0;
+const ANT_GAP: f32 = 4.0;
+const ANT_PERIOD: f32 = ANT_DASH + ANT_GAP;
+const ANT_SPEED: f64 = 12.0;
+const ANT_INTERVAL: Duration = Duration::from_millis(80);
 
 /// The flattened document at one moment, ready to display. Brush strokes
 /// update it in place while tile workers read it, hence the lock.
@@ -471,34 +480,66 @@ impl Canvas {
 
     /// Marching ants round the selection, and the shape being drawn.
     fn draw_outlines(&self, ui: &Ui, selection: &[Vec<(f32, f32)>], drawing: Option<&[Pos2]>) {
+        if selection.is_empty() && drawing.is_none() {
+            return;
+        }
+
+        let time = ui.input(|i| i.time);
+        let offset = ((time * ANT_SPEED) % (ANT_PERIOD as f64)) as f32;
+
         let painter = ui.painter_at(self.rect);
-        let ants = |points: Vec<Pos2>, closed: bool| {
+        let mut on_screen = false;
+
+        let mut draw_ants = |mut points: Vec<Pos2>, closed: bool| {
             if points.len() < 2 {
                 return;
             }
-            let mut points = points;
-            if closed {
+            if closed && points.first() != points.last() {
                 points.push(points[0]);
             }
+
+            let mut min = points[0];
+            let mut max = points[0];
+            for &p in &points[1..] {
+                min.x = min.x.min(p.x);
+                min.y = min.y.min(p.y);
+                max.x = max.x.max(p.x);
+                max.y = max.y.max(p.y);
+            }
+            let bbox = Rect::from_min_max(min, max);
+            if !bbox.intersects(self.rect) {
+                return;
+            }
+            on_screen = true;
+
             painter.add(egui::Shape::line(
                 points.clone(),
                 Stroke::new(1.0, Color32::BLACK),
             ));
-            painter.extend(egui::Shape::dashed_line(
+            let mut shapes = Vec::new();
+            dashed_path(
                 &points,
                 Stroke::new(1.0, Color32::WHITE),
-                4.0,
-                4.0,
-            ));
+                ANT_DASH,
+                ANT_GAP,
+                offset,
+                &mut shapes,
+            );
+            painter.extend(shapes);
         };
+
         for outline in selection {
-            ants(outline.iter().map(|&p| self.to_screen(p)).collect(), true);
+            draw_ants(outline.iter().map(|&p| self.to_screen(p)).collect(), true);
         }
         if let Some(path) = drawing {
-            ants(
+            draw_ants(
                 path.iter().map(|p| self.to_screen((p.x, p.y))).collect(),
                 false,
             );
+        }
+
+        if on_screen {
+            ui.ctx().request_repaint_after(ANT_INTERVAL);
         }
     }
 
@@ -814,5 +855,167 @@ impl Canvas {
                 ctx.request_repaint();
             }
         });
+    }
+}
+
+/// Turn a polyline into dashed line segments with a phase offset.
+///
+/// Segments wrap seamlessly around corners, and `offset` shifts the dashes
+/// along the polyline.
+fn dashed_path(
+    path: &[Pos2],
+    stroke: Stroke,
+    dash: f32,
+    gap: f32,
+    offset: f32,
+    shapes: &mut Vec<egui::Shape>,
+) {
+    if path.len() < 2 {
+        return;
+    }
+    let period = dash + gap;
+    if period <= 0.0 {
+        return;
+    }
+    let rem = (-offset).rem_euclid(period);
+    let mut drawing_dash = rem < dash;
+    let mut dist_left = if drawing_dash { dash - rem } else { period - rem };
+
+    for w in path.windows(2) {
+        let (start, end) = (w[0], w[1]);
+        let vector = end - start;
+        let seg_len = vector.length();
+        if seg_len <= 0.0001 {
+            continue;
+        }
+        let dir = vector / seg_len;
+        let mut pos = 0.0;
+
+        while pos < seg_len {
+            let next_pos = (pos + dist_left).min(seg_len);
+            if drawing_dash {
+                shapes.push(egui::Shape::line_segment(
+                    [start + dir * pos, start + dir * next_pos],
+                    stroke,
+                ));
+            }
+            let consumed = next_pos - pos;
+            dist_left -= consumed;
+            pos = next_pos;
+
+            if dist_left <= 0.0001 {
+                drawing_dash = !drawing_dash;
+                dist_left = if drawing_dash { dash } else { gap };
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn segment_points(shape: &egui::Shape) -> [Pos2; 2] {
+        match shape {
+            egui::Shape::LineSegment { points, .. } => *points,
+            _ => panic!("expected LineSegment"),
+        }
+    }
+
+    #[test]
+    fn dashed_path_creates_alternating_segments() {
+        let path = [pos2(0.0, 0.0), pos2(20.0, 0.0)];
+        let mut shapes = Vec::new();
+        dashed_path(
+            &path,
+            Stroke::new(1.0, Color32::WHITE),
+            4.0,
+            4.0,
+            0.0,
+            &mut shapes,
+        );
+
+        assert_eq!(shapes.len(), 3);
+        assert_eq!(segment_points(&shapes[0]), [pos2(0.0, 0.0), pos2(4.0, 0.0)]);
+        assert_eq!(segment_points(&shapes[1]), [pos2(8.0, 0.0), pos2(12.0, 0.0)]);
+        assert_eq!(segment_points(&shapes[2]), [pos2(16.0, 0.0), pos2(20.0, 0.0)]);
+    }
+
+    #[test]
+    fn dashed_path_wraps_around_corners() {
+        let path = [pos2(0.0, 0.0), pos2(6.0, 0.0), pos2(6.0, 6.0)];
+        let mut shapes = Vec::new();
+        dashed_path(
+            &path,
+            Stroke::new(1.0, Color32::WHITE),
+            4.0,
+            4.0,
+            0.0,
+            &mut shapes,
+        );
+
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(segment_points(&shapes[0]), [pos2(0.0, 0.0), pos2(4.0, 0.0)]);
+        // The 4px gap goes from (4,0) to (6,0) [2px], then (6,0) to (6,2) [2px].
+        // Next 4px dash is from (6,2) to (6,6).
+        assert_eq!(segment_points(&shapes[1]), [pos2(6.0, 2.0), pos2(6.0, 6.0)]);
+    }
+
+    #[test]
+    fn dashed_path_offset_shifts_segments_forward() {
+        let path = [pos2(0.0, 0.0), pos2(20.0, 0.0)];
+        let mut shapes = Vec::new();
+        dashed_path(
+            &path,
+            Stroke::new(1.0, Color32::WHITE),
+            4.0,
+            4.0,
+            1.0,
+            &mut shapes,
+        );
+
+        assert_eq!(shapes.len(), 3);
+        // Offset 1.0 shifts dashes forward along the path by 1.0 point.
+        assert_eq!(segment_points(&shapes[0]), [pos2(1.0, 0.0), pos2(5.0, 0.0)]);
+        assert_eq!(segment_points(&shapes[1]), [pos2(9.0, 0.0), pos2(13.0, 0.0)]);
+        assert_eq!(segment_points(&shapes[2]), [pos2(17.0, 0.0), pos2(20.0, 0.0)]);
+    }
+
+    #[test]
+    fn dashed_path_closed_loop_length_invariant() {
+        // A closed loop with perimeter 160 (multiple of 8 = 4 dash + 4 gap).
+        let path = [
+            pos2(0.0, 0.0),
+            pos2(40.0, 0.0),
+            pos2(40.0, 40.0),
+            pos2(0.0, 40.0),
+            pos2(0.0, 0.0),
+        ];
+
+        for i in 0..80 {
+            let offset = i as f32 * 0.1;
+            let mut shapes = Vec::new();
+            dashed_path(
+                &path,
+                Stroke::new(1.0, Color32::WHITE),
+                4.0,
+                4.0,
+                offset,
+                &mut shapes,
+            );
+
+            let total_dash_len: f32 = shapes
+                .iter()
+                .map(|s| {
+                    let pts = segment_points(s);
+                    (pts[1] - pts[0]).length()
+                })
+                .sum();
+
+            assert!(
+                (total_dash_len - 80.0).abs() < 1e-3,
+                "offset {offset} produced total dash length {total_dash_len}, expected 80.0"
+            );
+        }
     }
 }
