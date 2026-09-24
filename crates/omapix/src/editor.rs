@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
 use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
+use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
 use omapix_engine::reduced::Reduced;
@@ -150,6 +151,9 @@ pub struct Editor {
     rendered: (u64, u64),
     /// Layers shrunk to the zoomed-out level on screen, for previews.
     reduced: Arc<Mutex<Reduced>>,
+    /// What isolated groups composite to, at full size and in previews.
+    groups: Arc<GroupCache>,
+    preview_groups: Arc<GroupCache>,
     /// Flattened image a separation preview blurs, with its revision.
     separation_base: Option<(u64, Arc<Tiled<Pixel>>)>,
     /// A slow operation running in the background. Edits are refused until
@@ -193,6 +197,8 @@ impl Editor {
             rendering: None,
             rendered: (0, u64::MAX),
             reduced: Arc::default(),
+            groups: Arc::default(),
+            preview_groups: Arc::default(),
             separation_base: None,
             job: None,
             modified: false,
@@ -627,7 +633,13 @@ impl Editor {
         if matches!(self.view, View::Separation { .. } | View::GaussianBlur { .. }) {
             return;
         }
-        let data = draw_tiles(&self.doc.layers, self.view, self.overlay_colour, &changed);
+        let data = draw_tiles(
+            &self.doc.layers,
+            self.view,
+            self.overlay_colour,
+            &changed,
+            Some(&self.groups),
+        );
         render.write_tiles(0, &changed, &data, None);
         self.canvas.invalidate_tiles(0, &changed);
         self.painted = self.revision;
@@ -960,6 +972,8 @@ impl Editor {
                 render: Arc::clone(render),
                 visible: self.canvas.visible_area(),
                 reduced: Arc::clone(&self.reduced),
+                groups: Arc::clone(&self.groups),
+                preview_groups: Arc::clone(&self.preview_groups),
                 cancel: Arc::clone(&cancel),
                 tx,
                 ctx,
@@ -1053,7 +1067,7 @@ pub(crate) fn render_view(
                 vec![[0; 4]; doc.width as usize * doc.height as usize],
             );
             for tiles in all_tiles().chunks(BATCH) {
-                let data = draw_tiles(&doc.layers, view, colour, tiles);
+                let data = draw_tiles(&doc.layers, view, colour, tiles, None);
                 for (&(col, row), tile) in tiles.iter().zip(&data) {
                     image.put_tile(col, row, tile);
                 }
@@ -1094,12 +1108,14 @@ pub(crate) fn render_view(
 }
 
 /// Draw 256 px tiles (col, row) of what `view` shows (anything but a
-/// separation preview), with `colour` for the mask overlay.
+/// separation preview), with `colour` for the mask overlay, reusing and
+/// keeping what isolated groups composite to in `groups`.
 fn draw_tiles(
     layers: &[Layer],
     view: View,
     colour: Pixel,
     tiles: &[(u32, u32)],
+    groups: Option<&GroupCache>,
 ) -> Vec<Vec<Pixel>> {
     const MAX: u32 = u16::MAX as u32;
     let mask = |id: u64| {
@@ -1125,7 +1141,7 @@ fn draw_tiles(
         // Tinted with `colour` where the mask hides, fading to clear where
         // it reveals.
         View::MaskOverlay(id) => {
-            let mut out = composite::composite_tiles(layers, tiles);
+            let mut out = composite::composite_tiles(layers, tiles, groups);
             let Some(mask) = mask(id) else {
                 return out;
             };
@@ -1144,7 +1160,7 @@ fn draw_tiles(
             out
         }
         View::Image | View::Separation { .. } | View::GaussianBlur { .. } => {
-            composite::composite_tiles(layers, tiles)
+            composite::composite_tiles(layers, tiles, groups)
         }
     }
 }
@@ -1158,6 +1174,8 @@ struct InPlace {
     /// The pyramid level on screen and the part of the image showing.
     visible: Option<(usize, (u32, u32, u32, u32))>,
     reduced: Arc<Mutex<Reduced>>,
+    groups: Arc<GroupCache>,
+    preview_groups: Arc<GroupCache>,
     cancel: Arc<AtomicBool>,
     tx: Sender<Progress>,
     ctx: egui::Context,
@@ -1224,7 +1242,12 @@ impl InPlace {
             if self.cancel.load(Ordering::Acquire) {
                 return false;
             }
-            let data = draw_tiles(layers, self.view, self.colour, batch);
+            let groups = if level == 0 {
+                &self.groups
+            } else {
+                &self.preview_groups
+            };
+            let data = draw_tiles(layers, self.view, self.colour, batch, Some(groups));
             if !self
                 .render
                 .write_tiles(level, batch, &data, Some(&self.cancel))
@@ -1769,6 +1792,8 @@ mod tests {
             // Half size, looking at the top left.
             visible: Some((1, (0, 0, 300, 200))),
             reduced: Arc::default(),
+            groups: Arc::default(),
+            preview_groups: Arc::default(),
             cancel: Arc::default(),
             tx,
             ctx: egui::Context::default(),

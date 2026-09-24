@@ -1,6 +1,7 @@
 //! Flattening a layer stack into one image.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rayon::prelude::*;
 
@@ -47,15 +48,24 @@ pub fn composite(layers: &[Layer], width: u32, height: u32) -> Raster {
 /// Recomposite only the given 256 px tiles (col, row) into an existing
 /// flattened image, e.g. the area a brush stroke just touched.
 pub fn composite_into(layers: &[Layer], image: &mut Raster, tiles: &[(u32, u32)]) {
-    for (&(col, row), tile) in tiles.iter().zip(composite_tiles(layers, tiles)) {
+    for (&(col, row), tile) in tiles.iter().zip(composite_tiles(layers, tiles, None)) {
         image.put_tile(col, row, &tile);
     }
 }
 
 /// Composite the given 256 px tiles (col, row) in parallel, each returned
 /// as a whole tile of pixels, row-major, ready for [`Raster::put_tile`].
-pub fn composite_tiles(layers: &[Layer], tiles: &[(u32, u32)]) -> Vec<Vec<Pixel>> {
-    let visible = prepare(layers);
+/// With `groups`, what isolated groups composite to is reused from earlier
+/// calls where nothing in them has changed, and kept for later ones.
+pub fn composite_tiles(
+    layers: &[Layer],
+    tiles: &[(u32, u32)],
+    groups: Option<&GroupCache>,
+) -> Vec<Vec<Pixel>> {
+    let mut visible = prepare(layers);
+    if let Some(groups) = groups {
+        groups.attach(&mut visible);
+    }
     tiles
         .par_iter()
         .map(|&(col, row)| {
@@ -74,6 +84,155 @@ struct Node<'a> {
     adjustment: Option<Prepared>,
     children: Vec<Node<'a>>,
     clipped: Vec<Node<'a>>,
+    /// For a group composited on its own, where to keep what its contents
+    /// composite to.
+    cached: Option<Arc<Slots>>,
+}
+
+/// What a group's contents composite to, a slot per 256 px tile (row
+/// major), each filled on first use: `None` where it's all transparent.
+type Slots = Vec<OnceLock<Option<Arc<Vec<Pixel>>>>>;
+
+/// What the contents of groups that are composited on their own (any mode
+/// but Pass Through, or clipped, or with layers clipped to them) last
+/// composited to, reused while nothing in them changes. Dragging a slider
+/// on a layer above a big group then just blends the group's result
+/// rather than compositing everything in it again.
+///
+/// Each group's result costs up to as much memory as a layer. One cache is
+/// for one image size: a different size (such as shrunk layers for a
+/// preview) needs its own, or each call throws away the other's results.
+#[derive(Default)]
+pub struct GroupCache {
+    groups: Mutex<HashMap<u64, Cached>>,
+}
+
+struct Cached {
+    /// The group's visible contents when last composited, in order, each
+    /// with where it sits in the group (see [`contents`]). Holding on to
+    /// them keeps their tiles alive, so a tile at the same address is
+    /// known to be the same tile.
+    contents: Vec<(u32, Layer)>,
+    slots: Arc<Slots>,
+}
+
+impl GroupCache {
+    /// Give each group among `nodes` that's composited on its own the
+    /// results kept for it, less those of tiles where something in it has
+    /// changed since. Groups that aren't there any more are forgotten.
+    fn attach(&self, nodes: &mut [Node]) {
+        let mut groups = self.groups.lock().expect("group cache");
+        let mut seen = HashSet::new();
+        attach(&mut groups, &mut seen, nodes, false);
+        groups.retain(|id, _| seen.contains(id));
+    }
+}
+
+fn attach(
+    groups: &mut HashMap<u64, Cached>,
+    seen: &mut HashSet<u64>,
+    nodes: &mut [Node],
+    atop: bool,
+) {
+    for node in nodes {
+        let layer = node.layer;
+        let own = layer.blend != BlendMode::PassThrough || atop || !node.clipped.is_empty();
+        if layer.is_group && own {
+            seen.insert(layer.id);
+            node.cached = Some(slots(groups, node));
+        }
+        attach(groups, seen, &mut node.children, false);
+        attach(groups, seen, &mut node.clipped, true);
+    }
+}
+
+/// The slots for group `node`, keeping those of tiles where nothing in it
+/// has changed since the last call.
+fn slots(groups: &mut HashMap<u64, Cached>, node: &Node) -> Arc<Slots> {
+    let mut now = Vec::new();
+    contents(&node.children, 0, &mut now);
+    let pixels = &node.layer.pixels;
+    let (cols, rows) = (pixels.cols(), pixels.rows());
+    let fresh = || (0..cols * rows).map(|_| OnceLock::new()).collect::<Slots>();
+    let old = groups.remove(&node.layer.id).filter(|old| {
+        old.contents.len() == now.len()
+            && old
+                .contents
+                .iter()
+                .zip(&now)
+                .all(|((d0, a), (d1, b))| d0 == d1 && same_settings(a, b))
+    });
+    let slots = match old {
+        Some(old) => {
+            let same = |col: u32, row: u32| {
+                old.contents.iter().zip(&now).all(|((_, a), (_, b))| {
+                    let masks = match (&a.mask, &b.mask) {
+                        (Some(m), Some(n)) => m.pixels.same_tile(&n.pixels, col, row),
+                        _ => true,
+                    };
+                    masks && a.pixels.same_tile(&b.pixels, col, row)
+                })
+            };
+            let kept = (0..rows).flat_map(|row| (0..cols).map(move |col| (col, row)));
+            if kept.clone().all(|(col, row)| same(col, row)) {
+                old.slots
+            } else {
+                // A new set, so a render still going with the old contents
+                // can't fill in the new ones.
+                let slots = kept
+                    .zip(old.slots.iter())
+                    .map(|((col, row), slot)| match slot.get() {
+                        Some(tile) if same(col, row) => OnceLock::from(tile.clone()),
+                        _ => OnceLock::new(),
+                    })
+                    .collect();
+                Arc::new(slots)
+            }
+        }
+        None => Arc::new(fresh()),
+    };
+    let contents = now.into_iter().map(|(d, l)| (d, l.clone())).collect();
+    groups.insert(
+        node.layer.id,
+        Cached {
+            contents,
+            slots: Arc::clone(&slots),
+        },
+    );
+    slots
+}
+
+/// Everything in `nodes`, depth first, each with its depth and whether it's
+/// clipped (odd) or not (even), which together give the tree's shape.
+fn contents<'a>(nodes: &[Node<'a>], depth: u32, out: &mut Vec<(u32, &'a Layer)>) {
+    for node in nodes {
+        out.push((depth * 2, node.layer));
+        contents(&node.children, depth + 1, out);
+        for c in &node.clipped {
+            out.push((depth * 2 + 1, c.layer));
+            contents(&c.children, depth + 1, out);
+        }
+    }
+}
+
+/// True if two layers composite the same where their tiles are the same:
+/// everything but their pixels and name.
+fn same_settings(a: &Layer, b: &Layer) -> bool {
+    let size = |l: &Layer| (l.pixels.width(), l.pixels.height());
+    let mask = |l: &Layer| {
+        l.mask
+            .as_ref()
+            .map(|m| (m.enabled, m.pixels.fill(), m.pixels.width(), m.pixels.height()))
+    };
+    a.id == b.id
+        && a.is_group == b.is_group
+        && a.opacity == b.opacity
+        && a.blend == b.blend
+        && a.blend_if == b.blend_if
+        && a.adjustment == b.adjustment
+        && size(a) == size(b)
+        && a.pixels.fill() == b.pixels.fill()
+        && mask(a) == mask(b)
 }
 
 /// The visible layers as a tree of groups, bottom first. Layers whose group
@@ -115,6 +274,7 @@ fn nodes<'a>(layers: &'a [Layer], within: &dyn Fn(&Layer) -> bool) -> Vec<Node<'
                 Vec::new()
             },
             clipped: Vec::new(),
+            cached: None,
         };
         match out.last_mut() {
             Some(b) if clipped => b.clipped.push(node),
@@ -214,9 +374,11 @@ fn blend_one(acc: &mut [[f32; 4]], node: &Node, atop: bool, col: u32, row: u32) 
     if layer.blend != BlendMode::PassThrough || atop {
         // Composite the contents on their own, then blend the result like
         // a single layer.
-        let mut inner = vec![[0f32; 4]; TILE_PIXELS];
-        blend_all(&mut inner, &node.children, col, row);
-        blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| inner[i]);
+        if let Some(inner) = group_tile(node, col, row) {
+            blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| {
+                unpack(inner[i])
+            });
+        }
         return;
     }
     // Pass Through: the contents blend straight onto what's below. The
@@ -260,8 +422,11 @@ fn blend_clipping(acc: &mut [[f32; 4]], node: &Node, col: u32, row: u32) {
     }
     let mut inner = vec![[0f32; 4]; TILE_PIXELS];
     if base.is_group {
-        blend_all(&mut inner, &node.children, col, row);
+        let Some(contents) = group_tile(node, col, row) else {
+            return;
+        };
         for (i, px) in inner.iter_mut().enumerate() {
+            *px = unpack(contents[i]);
             px[3] *= coverage.at(i);
         }
     } else {
@@ -281,6 +446,29 @@ fn blend_clipping(acc: &mut [[f32; 4]], node: &Node, col: u32, row: u32) {
         blend_one(&mut inner, c, true, col, row);
     }
     blend_source(acc, Params::of(base), &Coverage::FULL, |i| inner[i]);
+}
+
+/// What's in group `node` composited on its own over one tile, or `None`
+/// where that's all transparent. Rounded to 16 bits, as it's cached, so
+/// that results are the same with the cache as without.
+fn group_tile(node: &Node, col: u32, row: u32) -> Option<Arc<Vec<Pixel>>> {
+    let make = || {
+        let mut inner = vec![[0f32; 4]; TILE_PIXELS];
+        blend_all(&mut inner, &node.children, col, row);
+        let tile: Vec<Pixel> = inner.into_iter().map(to_u16).collect();
+        tile.iter().any(|p| p[3] > 0).then(|| Arc::new(tile))
+    };
+    let Some(slots) = &node.cached else {
+        return make();
+    };
+    let slot = &slots[(row * node.layer.pixels.cols() + col) as usize];
+    if let Some(tile) = slot.get() {
+        return tile.clone();
+    }
+    // Not `get_or_init`, so another render of the same tile never waits.
+    let tile = make();
+    let _ = slot.set(tile.clone());
+    tile
 }
 
 /// `a` faded towards `b` by `t`, with premultiplied alpha, so a colour
@@ -774,6 +962,93 @@ mod tests {
     fn clipped_layers_with_nothing_below_show_unclipped() {
         let blue = clipped(solid(1, 10, 10, [0, 0, 65535, 65535]));
         assert_eq!(composite(&[blue], 10, 10).get(5, 5), [0, 0, 65535, 65535]);
+    }
+
+    fn all_tiles(w: u32, h: u32) -> Vec<(u32, u32)> {
+        (0..h.div_ceil(TILE))
+            .flat_map(|r| (0..w.div_ceil(TILE)).map(move |c| (c, r)))
+            .collect()
+    }
+
+    /// The kept result for group `id` at its `n`th tile (row major): `None`
+    /// if there's none, `Some(None)` if it's transparent.
+    fn kept(cache: &GroupCache, id: u64, n: usize) -> Option<Option<Arc<Vec<Pixel>>>> {
+        let groups = cache.groups.lock().unwrap();
+        groups.get(&id)?.slots[n].get().cloned()
+    }
+
+    #[test]
+    fn cached_groups_match_uncached_and_redo_only_what_changed() {
+        let (w, h) = (600, 300);
+        let bottom = solid(1, w, h, [40000, 30000, 20000, 65535]);
+        let mut multiply = solid(2, w, h, [50000, 65535, 30000, 50000]);
+        multiply.blend = BlendMode::Multiply;
+        let mut layers = vec![bottom];
+        layers.extend(grouped(10, vec![multiply, desaturate(3, w, h)], w, h));
+        layers.last_mut().unwrap().blend = BlendMode::Screen;
+        layers.push(solid(4, w, h, [0, 0, 65535, 65535]));
+        layers[4].opacity = 0.3;
+        let tiles = all_tiles(w, h);
+        let cache = GroupCache::default();
+        let check = |layers: &[Layer]| {
+            let cached = composite_tiles(layers, &tiles, Some(&cache));
+            assert_eq!(cached, composite_tiles(layers, &tiles, None));
+        };
+        check(&layers);
+        let first = kept(&cache, 10, 1).flatten().expect("kept");
+
+        // A change above the group reuses what's in it.
+        layers[4].opacity = 0.8;
+        check(&layers);
+        assert!(Arc::ptr_eq(&first, &kept(&cache, 10, 1).flatten().unwrap()));
+
+        // Painting in the group redoes just the tiles painted.
+        let before = kept(&cache, 10, 0).flatten().unwrap();
+        layers[1].pixels.tile_mut(1, 0)[0] = [0, 0, 0, 65535];
+        check(&layers);
+        assert!(Arc::ptr_eq(&before, &kept(&cache, 10, 0).flatten().unwrap()));
+        assert!(!Arc::ptr_eq(&first, &kept(&cache, 10, 1).flatten().unwrap()));
+
+        // Changing a layer's settings in the group, or hiding it, redoes
+        // the lot.
+        let before = kept(&cache, 10, 0).flatten().unwrap();
+        layers[1].opacity = 0.5;
+        check(&layers);
+        assert!(!Arc::ptr_eq(&before, &kept(&cache, 10, 0).flatten().unwrap()));
+        layers[2].visible = false;
+        check(&layers);
+
+        // Pass Through groups aren't composited on their own, so there's
+        // nothing to keep.
+        layers[3].blend = BlendMode::PassThrough;
+        check(&layers);
+        assert!(cache.groups.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cached_nested_and_clipped_groups_match_uncached() {
+        let (w, h) = (300, 300);
+        let bottom = solid(1, w, h, [40000, 30000, 20000, 65535]);
+        let mut inner = grouped(10, vec![left_tile(2, w, h, [10000, 60000, 0, 65535])], w, h);
+        inner[1].blend = BlendMode::Overlay;
+        inner[1].parent = Some(11);
+        let mut layers = vec![bottom];
+        layers.extend(inner);
+        layers.push(Layer::group(11, "outer", w, h));
+        layers.push(clipped(solid(3, w, h, [65535, 0, 0, 40000])));
+        let tiles = all_tiles(w, h);
+        let cache = GroupCache::default();
+        for opacity in [1.0, 0.5] {
+            layers[4].opacity = opacity;
+            let cached = composite_tiles(&layers, &tiles, Some(&cache));
+            assert_eq!(cached, composite_tiles(&layers, &tiles, None));
+        }
+        // The outer group is a clipping base and the inner one isolated,
+        // so both are kept.
+        assert!(kept(&cache, 10, 0).flatten().is_some());
+        assert!(kept(&cache, 11, 0).flatten().is_some());
+        // Transparent tiles are kept as nothing.
+        assert!(matches!(kept(&cache, 10, 3), Some(None)));
     }
 
     #[test]

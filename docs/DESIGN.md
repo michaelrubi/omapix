@@ -91,7 +91,13 @@ unit tests, and leaves room to replace the UI toolkit later.
   Through group blends its contents straight onto what's below, then
   fades between before and after by its opacity and mask; any other mode
   composites the contents on their own and blends the result as one
-  layer.
+  layer. On the canvas, what those contents composite to is kept per
+  tile in 16 bits (`GroupCache` in `composite.rs`), along with the layers
+  it was made from. A tile is redone only when one of their tiles is no
+  longer the same shared tile; if a setting inside the group changes,
+  or a layer is shown or hidden, the whole group is redone. The result is
+  rounded to 16 bits with or without the cache, so both give the same
+  pixels.
 - A clipped layer is flagged `clipped` and clips to the first unclipped
   layer below it in its group, so clipping masks need no structure of
   their own. Compositing hangs each run of clipped layers off its base in
