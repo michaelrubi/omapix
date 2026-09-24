@@ -57,7 +57,7 @@ The UI has been tested through the same code paths with scripts
 ## 3. Retouching and editing
 
 - **Layer groups:** folders in the Layers panel with their own blend mode, opacity and mask. OpenRaster supports groups (nested stacks).
-- **Elliptical marquee**, and Shift to constrain marquee shapes to a square or circle.
+- **Elliptical marquee** (done), and Shift to constrain marquee shapes to a square or circle.
 - **Live preview for Gaussian Blur**, like the frequency-separation preview.
 - **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.
 - **Pen pressure** for size and opacity. Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol.
