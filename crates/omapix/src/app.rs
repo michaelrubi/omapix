@@ -43,6 +43,8 @@ enum Dialog {
     /// Ask for a radius, then run a filter. For frequency separation,
     /// `preview` shows the texture layer (`Some(true)`), the colour/tone
     /// layer (`Some(false)`) or the image (`None`) while adjusting.
+    /// For Gaussian blur, `preview` shows the blurred layer (`Some(true)`)
+    /// or the unblurred image (`Some(false)`).
     Radius {
         command: Command,
         radius: f32,
@@ -76,7 +78,7 @@ struct FileJob {
 /// - `Tool Move|Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
 ///   `Look x y` (centre the view on an image point at 100 %),
-///   `View image|mask|overlay|texture r|tone r` (what the canvas shows).
+///   `View image|mask|overlay|texture r|tone r|blur r` (what the canvas shows).
 #[derive(Debug)]
 enum ScriptStep {
     Command(Command),
@@ -119,6 +121,10 @@ impl ScriptStep {
                 ("tone", &[radius]) => ScriptStep::View(View::Separation {
                     radius,
                     texture: false,
+                }),
+                ("blur", &[radius]) => ScriptStep::View(View::GaussianBlur {
+                    layer: 0,
+                    radius,
                 }),
                 _ => return None,
             },
@@ -532,7 +538,7 @@ impl App {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius: self.blur_radius,
-                    preview: None,
+                    preview: Some(true),
                 });
             }
             Command::Feather => {
@@ -839,6 +845,11 @@ impl App {
             return;
         }
         let Some(dialog) = &mut self.dialog else {
+            if let Some(editor) = &mut self.editor
+                && matches!(editor.view(), View::Separation { .. } | View::GaussianBlur { .. })
+            {
+                editor.set_view(View::Image);
+            }
             return;
         };
         let mut close = false;
@@ -892,6 +903,12 @@ impl App {
                             .fixed_decimals(1);
                         ui.add(value);
                     });
+                    if *command == Command::GaussianBlur
+                        && let Some(on) = preview
+                    {
+                        ui.add_space(4.0);
+                        ui.checkbox(on, "Preview");
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let ok = ui.button("OK").clicked()
@@ -939,7 +956,7 @@ impl App {
         if close || response.should_close() {
             self.dialog = None;
         }
-        // Show the separation preview while its dialog is open.
+        // Show the separation or blur preview while its dialog is open.
         if let Some(editor) = &mut self.editor {
             match &self.dialog {
                 Some(Dialog::Radius {
@@ -956,7 +973,21 @@ impl App {
                     };
                     editor.set_view(view);
                 }
-                _ if matches!(editor.view(), View::Separation { .. }) => {
+                Some(Dialog::Radius {
+                    command: Command::GaussianBlur,
+                    radius,
+                    preview,
+                }) => {
+                    let view = match preview {
+                        Some(true) => View::GaussianBlur {
+                            layer: editor.active,
+                            radius: *radius,
+                        },
+                        _ => View::Image,
+                    };
+                    editor.set_view(view);
+                }
+                _ if matches!(editor.view(), View::Separation { .. } | View::GaussianBlur { .. }) => {
                     editor.set_view(View::Image)
                 }
                 _ => {}
@@ -1213,10 +1244,14 @@ impl App {
             }
             ScriptStep::View(view) => {
                 if let Some(editor) = &mut self.editor {
-                    // "mask" and "overlay" mean the active layer's mask.
+                    // "mask", "overlay" and "blur" apply to the active layer.
                     let view = match view {
                         View::Mask(_) => View::Mask(editor.active),
                         View::MaskOverlay(_) => View::MaskOverlay(editor.active),
+                        View::GaussianBlur { radius, .. } => View::GaussianBlur {
+                            layer: editor.active,
+                            radius,
+                        },
                         view => view,
                     };
                     editor.set_view(view);
@@ -1714,6 +1749,7 @@ fn ellipse_points(a: Pos2, b: Pos2) -> Vec<Pos2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::render_view;
 
     fn editor_with_selection() -> Editor {
         let (w, h) = (600, 400);
@@ -1844,5 +1880,153 @@ mod tests {
             Some(omapix_engine::adjust::Adjustment::ColorLookup(_))
         ));
         assert_eq!(editor.target, Target::Mask);
+    }
+
+    fn test_app() -> App {
+        let (_tx, rx) = channel();
+        App {
+            theme: Theme::default(),
+            theme_rx: rx,
+            editor: Some(editor_with_selection()),
+            layers: LayersPanel::default(),
+            properties: PropertiesPanel::default(),
+            tools: Tools::default(),
+            opening: None,
+            picking: None,
+            file_job: None,
+            dialog: None,
+            status: None,
+            blur_radius: 2.0,
+            feather_radius: 5.0,
+            separation_radius: None,
+            allow_close: false,
+            title: String::new(),
+            drawing: None,
+            move_from: None,
+            script: VecDeque::new(),
+            clipboard: Clipboard::new(false),
+            pasting: None,
+            v_down: false,
+        }
+    }
+
+    #[test]
+    fn gaussian_blur_dialog_shows_live_preview_and_reverts_on_cancel() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active_id = app.editor.as_ref().unwrap().active;
+
+        app.run(Command::GaussianBlur, &ctx);
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Radius {
+                command: Command::GaussianBlur,
+                radius: 2.0,
+                preview: Some(true),
+            })
+        ));
+
+        // Running dialogs updates the editor view to View::GaussianBlur
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.editor.as_ref().unwrap().view(),
+            View::GaussianBlur {
+                layer: active_id,
+                radius: 2.0,
+            }
+        );
+
+        // Toggling preview off reverts to View::Image
+        if let Some(Dialog::Radius { preview, .. }) = &mut app.dialog {
+            *preview = Some(false);
+        }
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.editor.as_ref().unwrap().view(), View::Image);
+
+        // Toggling preview back on updates to View::GaussianBlur
+        if let Some(Dialog::Radius { preview, radius, .. }) = &mut app.dialog {
+            *preview = Some(true);
+            *radius = 4.5;
+        }
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            app.editor.as_ref().unwrap().view(),
+            View::GaussianBlur {
+                layer: active_id,
+                radius: 4.5,
+            }
+        );
+
+        // Canceling (closing dialog) reverts view to View::Image
+        app.dialog = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            app.dialogs(ctx);
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.editor.as_ref().unwrap().view(), View::Image);
+    }
+
+    #[test]
+    fn script_step_view_blur_sets_active_layer_blur_view() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active_id = app.editor.as_ref().unwrap().active;
+
+        let (render, _) = render_view(
+            &app.editor.as_ref().unwrap().doc,
+            View::Image,
+            [0; 4],
+            None,
+        );
+        app.editor
+            .as_mut()
+            .unwrap()
+            .canvas
+            .set_render(Arc::new(render));
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ui.allocate_ui(egui::vec2(800.0, 600.0), |ui| {
+                let editor = app.editor.as_mut().unwrap();
+                let overlay = crate::canvas::Overlay {
+                    tool: false,
+                    alt_samples: false,
+                    brush: None,
+                    moves: false,
+                    source: None,
+                    selection: &[],
+                    drawing: None,
+                };
+                editor.canvas.show(ui, egui::Color32::BLACK, overlay);
+            });
+        });
+        output.textures_delta.clear();
+
+        let step = ScriptStep::parse("View blur 3.5").expect("failed to parse View blur");
+        app.script.push_back(step);
+        app.run_script(&ctx);
+
+        assert_eq!(
+            app.editor.as_ref().unwrap().view(),
+            View::GaussianBlur {
+                layer: active_id,
+                radius: 3.5,
+            }
+        );
     }
 }

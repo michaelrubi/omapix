@@ -9,7 +9,9 @@ use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
 use omapix_engine::selection::Selection;
 use omapix_engine::tiled::{TILE, Tiled};
-use omapix_engine::{BlendMode, DisplayTransform, Document, Pixel, Raster, composite, filters};
+use omapix_engine::{
+    BlendMode, DisplayTransform, Document, Pixel, Raster, composite, filters, ops,
+};
 
 use crate::canvas::{Canvas, Render};
 
@@ -34,6 +36,8 @@ pub enum View {
     /// What frequency separation at `radius` would produce: the texture
     /// layer, or the colour/tone layer.
     Separation { radius: f32, texture: bool },
+    /// What Gaussian blur at `radius` on `layer` would produce.
+    GaussianBlur { layer: u64, radius: f32 },
 }
 
 /// A finished background render: the revision and view it shows, and for
@@ -477,7 +481,7 @@ impl Editor {
             View::Mask(id) => {
                 render.update_tiles(&changed, |image, tiles| draw_mask(layers, id, image, tiles))
             }
-            View::Separation { .. } => None,
+            View::Separation { .. } | View::GaussianBlur { .. } => None,
         });
         if let Some(area) = updated {
             self.canvas.invalidate(area);
@@ -646,6 +650,11 @@ impl Editor {
                 self.set_view(View::Image);
             }
         }
+        if let View::GaussianBlur { layer, .. } = self.view
+            && (self.doc.layer(layer).is_none() || layer != self.active)
+        {
+            self.set_view(View::Image);
+        }
 
         if let Some(((revision, generation), rx)) = &self.rendering
             && let Ok((render, base)) = rx.try_recv()
@@ -718,7 +727,7 @@ impl Editor {
 /// Render what `view` shows, with `colour` for the mask overlay. For
 /// separation previews, also return the flattened image used, so later
 /// radius changes can reuse it.
-fn render_view(
+pub(crate) fn render_view(
     doc: &Document,
     view: View,
     colour: Pixel,
@@ -761,6 +770,19 @@ fn render_view(
                 low.to_raster()
             };
             (Render::new(image), Some(base))
+        }
+        View::GaussianBlur { layer, radius } => {
+            let Some(l) = doc.layer(layer) else {
+                return (Render::new(doc.composite()), None);
+            };
+            let blurred = filters::gaussian_blur(&l.pixels, radius);
+            let blurred = ops::within_selection(&l.pixels, blurred, doc.selection.as_ref());
+            let mut layers = doc.layers.clone();
+            if let Some(target) = layers.iter_mut().find(|l| l.id == layer) {
+                target.pixels = blurred;
+            }
+            let image = composite::composite(&layers, doc.width, doc.height);
+            (Render::new(image), None)
         }
     }
 }
@@ -934,6 +956,22 @@ mod tests {
             base,
         );
         assert!(tone.sample_for_test(300, 200)[0].abs_diff(30000) <= 2);
+
+        // Gaussian blur preview blurs the layer pixels.
+        e.edit("Dot", |doc, active| {
+            doc.layer_mut(*active).unwrap().pixels.tile_mut(0, 0)[0] = [0, 0, 0, 65535];
+        });
+        let (blurred, _) = render_view(
+            &e.doc,
+            View::GaussianBlur {
+                layer: e.active,
+                radius: 5.0,
+            },
+            RED,
+            None,
+        );
+        // The dot was spread out: pixel at (100, 100) is no longer pure black.
+        assert!(blurred.sample_for_test(100, 100)[0] > 0);
     }
 
     /// An editor with a neutral dodge & burn layer on top, selected, whose
