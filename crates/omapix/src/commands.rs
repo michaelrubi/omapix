@@ -43,6 +43,7 @@ pub enum Command {
     Deselect,
     InvertSelection,
     Feather,
+    SelectionEdges,
     FillForeground,
     FillBackground,
     Clear,
@@ -126,6 +127,7 @@ impl Command {
         Command::Deselect,
         Command::InvertSelection,
         Command::Feather,
+        Command::SelectionEdges,
         Command::FillForeground,
         Command::FillBackground,
         Command::Clear,
@@ -157,6 +159,9 @@ impl Command {
     pub fn from_name(name: &str) -> Option<Command> {
         if name == "NewLut" {
             return Some(Command::NewColorLookup);
+        }
+        if name == "HideSelectionEdges" || name == "ShowSelectionEdges" {
+            return Some(Command::SelectionEdges);
         }
         Self::ALL.iter().copied().find(|c| format!("{c:?}") == name)
     }
@@ -191,6 +196,7 @@ impl Command {
         Command::Invert,
         Command::SelectAll,
         Command::Deselect,
+        Command::SelectionEdges,
         Command::Feather,
         Command::SelectLayerAbove,
         Command::SelectLayerBelow,
@@ -251,6 +257,7 @@ impl Command {
             Command::Deselect => "Deselect",
             Command::InvertSelection => "Inverse",
             Command::Feather => "Feather…",
+            Command::SelectionEdges => "Selection Edges",
             Command::FillForeground => "Fill with Foreground",
             Command::FillBackground => "Fill with Background",
             Command::Clear => "Clear",
@@ -310,6 +317,7 @@ impl Command {
             Command::SelectAll => s(CMD, Key::A),
             Command::Deselect => s(CMD, Key::D),
             Command::InvertSelection => s(CMD_SHIFT, Key::I),
+            Command::SelectionEdges => s(CMD, Key::H),
             Command::Feather => s(Modifiers::SHIFT, Key::F6),
             Command::FillForeground => s(Modifiers::ALT, Key::Backspace),
             Command::FillBackground => s(CMD, Key::Backspace),
@@ -512,5 +520,22 @@ mod tests {
         assert!(pos(Command::ClippingMask) < pos(Command::GroupLayers));
         assert!(pos(Command::BringToFront) < pos(Command::RaiseLayer));
         assert!(pos(Command::SendToBack) < pos(Command::LowerLayer));
+    }
+
+    #[test]
+    fn ctrl_h_triggers_selection_edges() {
+        let ctx = egui::Context::default();
+        let mut v_down = false;
+        let event = egui::Event::Key {
+            key: Key::H,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: CMD,
+        };
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD, vec![event]),
+            [Command::SelectionEdges]
+        );
     }
 }

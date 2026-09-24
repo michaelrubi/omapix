@@ -232,6 +232,8 @@ pub struct App {
     pasting: Option<Receiver<Result<Clip, String>>>,
     /// Whether V is held, for spotting Ctrl+V (see [`Command::pressed`]).
     v_down: bool,
+    /// Hide marching ants round the selection (Ctrl+H).
+    hide_selection_edges: bool,
 }
 
 impl App {
@@ -283,6 +285,7 @@ impl App {
             clipboard: Clipboard::new(std::env::var_os("WAYLAND_DISPLAY").is_some()),
             pasting: None,
             v_down: false,
+            hide_selection_edges: false,
         };
         if let Some(path) = path {
             app.open(path, ctx);
@@ -730,6 +733,15 @@ impl App {
                     self.layers.step_selection(editor, false);
                 }
             }
+            Command::SelectAll | Command::InvertSelection => {
+                self.hide_selection_edges = false;
+                if let Some(editor) = &mut self.editor {
+                    run_on_editor(editor, cmd, ctx);
+                }
+            }
+            Command::SelectionEdges => {
+                self.hide_selection_edges = !self.hide_selection_edges;
+            }
             _ => {
                 if let Some(editor) = &mut self.editor {
                     run_on_editor(editor, cmd, ctx);
@@ -785,6 +797,7 @@ impl App {
         match command {
             Command::Feather => {
                 self.feather_radius = radius;
+                self.hide_selection_edges = false;
                 editor.edit_in_background(
                     "Feather",
                     move |doc, _| {
@@ -993,6 +1006,12 @@ impl App {
                 self.menu_item(ui, Command::FitOnScreen, None);
                 self.menu_item(ui, Command::ActualPixels, None);
                 ui.separator();
+                let edges_label = if self.hide_selection_edges {
+                    "Show Selection Edges"
+                } else {
+                    "Hide Selection Edges"
+                };
+                self.menu_item(ui, Command::SelectionEdges, Some(edges_label.to_string()));
                 self.menu_item(ui, Command::MaskOverlay, None);
             });
             ui.menu_button("Window", |ui| {
@@ -1026,6 +1045,13 @@ impl App {
                 };
                 if let Some(text) = showing {
                     ui.label(RichText::new(text).color(self.theme.accent));
+                    ui.separator();
+                }
+                if self.hide_selection_edges && doc.selection.is_some() {
+                    ui.label(
+                        RichText::new("Selection edges hidden — press Ctrl+H to show")
+                            .color(self.theme.accent),
+                    );
                     ui.separator();
                 }
                 ui.label(editor.canvas.zoom_label());
@@ -1603,14 +1629,16 @@ impl App {
                         }
                         return;
                     }
-                    editor.magic_wand(
+                    if editor.magic_wand(
                         (p.x as u32, p.y as u32),
                         omapix_engine::raster::widen(self.tools.wand_tolerance),
                         self.tools.wand_contiguous,
                         self.tools.wand_anti_alias,
                         self.tools.sample_all,
                         how,
-                    );
+                    ) {
+                        self.hide_selection_edges = false;
+                    }
                     return;
                 }
                 // A click without a real drag.
@@ -1660,6 +1688,7 @@ impl App {
                     }
                     (None, _) => {}
                     (Some(shape), how) => {
+                        self.hide_selection_edges = false;
                         editor.edit(label, |doc, _| {
                             let combined = match (&doc.selection, how) {
                                 (Some(current), how) if how != Combine::Replace => {
@@ -2320,11 +2349,15 @@ impl eframe::App for App {
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
                 let idle = editor.busy().is_none();
-                let outlines = editor
-                    .doc
-                    .selection
-                    .as_ref()
-                    .map_or(&[][..], |s| &s.outlines[..]);
+                let outlines = if self.hide_selection_edges {
+                    &[][..]
+                } else {
+                    editor
+                        .doc
+                        .selection
+                        .as_ref()
+                        .map_or(&[][..], |s| &s.outlines[..])
+                };
                 let modifiers = ui.input(|i| i.modifiers);
                 let eyedropper_armed = self.properties.eyedropper.is_some();
                 let overlay = crate::canvas::Overlay {
@@ -2603,6 +2636,7 @@ mod tests {
             clipboard: Clipboard::new(false),
             pasting: None,
             v_down: false,
+            hide_selection_edges: false,
         }
     }
 
@@ -3532,6 +3566,317 @@ mod tests {
         });
         out.textures_delta.clear();
         assert_eq!(app.properties.eyedropper, None);
+    }
+
+    struct SelectionEdgesHarness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+    }
+
+    impl SelectionEdgesHarness {
+        fn new() -> Self {
+            let app = test_app();
+            assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+            Self {
+                ctx: egui::Context::default(),
+                app,
+                time: 0.0,
+            }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut output = self.ctx.run_ui(input, |ui| {
+                for cmd in Command::pressed(ui.ctx(), &mut self.app.v_down) {
+                    let ctx = ui.ctx().clone();
+                    self.app.run(cmd, &ctx);
+                }
+                self.app.menu_bar(ui);
+                self.app.status_bar(ui);
+            });
+            output.textures_delta.clear();
+            output
+        }
+
+        fn press_ctrl_h(&mut self) {
+            self.frame(vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+                egui::Event::Key {
+                    key: egui::Key::H,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                },
+            ]);
+        }
+
+        fn output_contains_text(&self, output: &egui::FullOutput, needle: &str) -> bool {
+            fn shape_contains(shape: &egui::Shape, needle: &str) -> bool {
+                match shape {
+                    egui::Shape::Text(t) => t.galley.text().contains(needle),
+                    egui::Shape::Vec(v) => v.iter().any(|s| shape_contains(s, needle)),
+                    _ => false,
+                }
+            }
+            output.shapes.iter().any(|cs| shape_contains(&cs.shape, needle))
+        }
+
+        fn find_text_pos(&self, output: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
+            fn shape_pos(shape: &egui::Shape, text: &str) -> Option<egui::Pos2> {
+                match shape {
+                    egui::Shape::Text(t) => {
+                        if t.galley.text() == text {
+                            Some(t.pos)
+                        } else {
+                            None
+                        }
+                    }
+                    egui::Shape::Vec(v) => v.iter().find_map(|s| shape_pos(s, text)),
+                    _ => None,
+                }
+            }
+            output.shapes.iter().find_map(|cs| shape_pos(&cs.shape, text))
+        }
+
+        fn click(&mut self, pos: egui::Pos2) {
+            self.time += 0.5;
+            self.frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            self.frame(vec![
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+
+        fn open_view_menu(&mut self) -> egui::FullOutput {
+            let out = self.frame(vec![]);
+            let pos = self
+                .find_text_pos(&out, "View")
+                .expect("View menu button not found");
+            self.click(pos);
+            self.frame(vec![])
+        }
+
+        fn close_menu(&mut self) {
+            self.frame(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+    }
+
+    #[test]
+    fn selection_edges_ctrl_h_toggles_and_updates_status_bar() {
+        let mut h = SelectionEdgesHarness::new();
+        assert!(!h.app.hide_selection_edges);
+
+        // Initially visible: status bar does not have hidden message
+        let out = h.frame(vec![]);
+        assert!(!h.output_contains_text(&out, "Selection edges hidden"));
+
+        // Press Ctrl+H to hide selection edges
+        h.press_ctrl_h();
+        assert!(h.app.hide_selection_edges);
+
+        // Status bar now displays the hidden message
+        let out = h.frame(vec![]);
+        assert!(h.output_contains_text(&out, "Selection edges hidden — press Ctrl+H to show"));
+
+        // Press Ctrl+H again to show edges
+        h.press_ctrl_h();
+        assert!(!h.app.hide_selection_edges);
+
+        let out = h.frame(vec![]);
+        assert!(!h.output_contains_text(&out, "Selection edges hidden"));
+    }
+
+    #[test]
+    fn selection_edges_view_menu_label_reflects_state() {
+        let mut h = SelectionEdgesHarness::new();
+
+        // When visible, open View menu and verify it offers to hide
+        let out = h.open_view_menu();
+        assert!(h.output_contains_text(&out, "Hide Selection Edges"));
+        assert!(!h.output_contains_text(&out, "Show Selection Edges"));
+
+        // Close menu
+        h.close_menu();
+
+        // When hidden, open View menu and verify it offers to show
+        h.press_ctrl_h();
+        let out = h.open_view_menu();
+        assert!(h.output_contains_text(&out, "Show Selection Edges"));
+        assert!(!h.output_contains_text(&out, "Hide Selection Edges"));
+    }
+
+    #[test]
+    fn selection_edges_new_selection_shows_edges_again() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::SelectionEdges, &ctx);
+        assert!(app.hide_selection_edges);
+
+        // Select All resets hidden state
+        app.run(Command::SelectAll, &ctx);
+        assert!(!app.hide_selection_edges);
+
+        // Hide edges again, then InvertSelection
+        app.run(Command::SelectionEdges, &ctx);
+        assert!(app.hide_selection_edges);
+        app.run(Command::InvertSelection, &ctx);
+        assert!(!app.hide_selection_edges);
+
+        // Hide edges again, then draw a Marquee
+        app.run(Command::SelectionEdges, &ctx);
+        assert!(app.hide_selection_edges);
+        app.tools.select(crate::tools::Tool::Marquee);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(10.0, 10.0)),
+            egui::Modifiers::NONE,
+        );
+        app.tool_input(
+            ToolInput::StrokeMove(egui::pos2(50.0, 50.0)),
+            egui::Modifiers::NONE,
+        );
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert!(!app.hide_selection_edges);
+
+        // Hide edges again, then use Magic Wand
+        app.run(Command::SelectionEdges, &ctx);
+        assert!(app.hide_selection_edges);
+        app.tools.select(crate::tools::Tool::MagicWand);
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(20.0, 20.0)),
+            egui::Modifiers::NONE,
+        );
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert!(!app.hide_selection_edges);
+    }
+
+    #[test]
+    fn selection_edges_deselect_keeps_hidden_state_irrelevant() {
+        let mut h = SelectionEdgesHarness::new();
+        h.press_ctrl_h();
+        assert!(h.app.hide_selection_edges);
+
+        // With edges hidden and selection active, status bar message is shown
+        let out = h.frame(vec![]);
+        assert!(h.output_contains_text(&out, "Selection edges hidden — press Ctrl+H to show"));
+
+        // Deselect
+        let ctx = egui::Context::default();
+        h.app.run(Command::Deselect, &ctx);
+        assert!(h.app.editor.as_ref().unwrap().doc.selection.is_none());
+
+        // Status bar message must not appear when there is no selection
+        let out = h.frame(vec![]);
+        assert!(!h.output_contains_text(&out, "Selection edges hidden"));
+    }
+
+    #[test]
+    fn selection_edges_canvas_stops_repaints_when_hidden_and_draws_during_drag() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+
+        // Settle any background tile rendering
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            app.editor.as_mut().unwrap().update(&ctx);
+            let mut out = ctx.run_ui(input.clone(), |ui| {
+                let editor = app.editor.as_mut().unwrap();
+                let overlay = crate::canvas::Overlay::default();
+                editor.canvas.show(ui, egui::Color32::BLACK, overlay);
+            });
+            out.textures_delta.clear();
+        }
+
+        // 1. Initially with edges visible, canvas requests repaint for marching ants
+        let mut out = ctx.run_ui(input.clone(), |ui| {
+            let editor = app.editor.as_mut().unwrap();
+            let outlines = if app.hide_selection_edges {
+                &[][..]
+            } else {
+                editor.doc.selection.as_ref().map_or(&[][..], |s| &s.outlines[..])
+            };
+            let overlay = crate::canvas::Overlay {
+                selection: outlines,
+                drawing: None,
+                ..Default::default()
+            };
+            editor.canvas.show(ui, egui::Color32::BLACK, overlay);
+        });
+        out.textures_delta.clear();
+        assert!(out.viewport_output[&egui::ViewportId::ROOT].repaint_delay <= Duration::from_millis(100));
+
+        // 2. Hide selection edges: canvas must go idle (no repaint requested)
+        app.hide_selection_edges = true;
+        let mut out = ctx.run_ui(input.clone(), |ui| {
+            let editor = app.editor.as_mut().unwrap();
+            let outlines = if app.hide_selection_edges {
+                &[][..]
+            } else {
+                editor.doc.selection.as_ref().map_or(&[][..], |s| &s.outlines[..])
+            };
+            let overlay = crate::canvas::Overlay {
+                selection: outlines,
+                drawing: None,
+                ..Default::default()
+            };
+            editor.canvas.show(ui, egui::Color32::BLACK, overlay);
+        });
+        out.textures_delta.clear();
+        assert_eq!(out.viewport_output[&egui::ViewportId::ROOT].repaint_delay, Duration::MAX);
+
+        // 3. While dragging a marquee, shape is drawn and repaints resume
+        let drag_shape = [egui::pos2(10.0, 10.0), egui::pos2(100.0, 100.0)];
+        let mut out = ctx.run_ui(input, |ui| {
+            let editor = app.editor.as_mut().unwrap();
+            let outlines = if app.hide_selection_edges {
+                &[][..]
+            } else {
+                editor.doc.selection.as_ref().map_or(&[][..], |s| &s.outlines[..])
+            };
+            let overlay = crate::canvas::Overlay {
+                selection: outlines,
+                drawing: Some(&drag_shape),
+                ..Default::default()
+            };
+            editor.canvas.show(ui, egui::Color32::BLACK, overlay);
+        });
+        out.textures_delta.clear();
+        assert!(out.viewport_output[&egui::ViewportId::ROOT].repaint_delay <= Duration::from_millis(100));
     }
 }
 
