@@ -108,7 +108,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Clipping masks: Ctrl+Alt+G, Alt+click between rows (and its cursor and line), the arrow and underline, and a Curves clipped to the dodge & burn layer
 - [x] Open, Save As and Export file dialogs (xdg portal)
 - [ ] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
-- [ ] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
+- [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
 - [ ] Undo/redo after each of the above (done for everything checked)
