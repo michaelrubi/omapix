@@ -1,14 +1,16 @@
 //! One open document: its layers, undo history, selection, and the
 //! background work that keeps the canvas up to date.
 
-use std::sync::Arc;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
 
 use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
+use omapix_engine::reduced::Reduced;
 use omapix_engine::selection::Selection;
-use omapix_engine::tiled::{TILE, Tiled};
+use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
 use omapix_engine::{
     BlendMode, DisplayTransform, Document, Pixel, Raster, composite, filters, ops,
 };
@@ -40,10 +42,35 @@ pub enum View {
     GaussianBlur { layer: u64, radius: f32 },
 }
 
-/// A finished background render: the revision and view it shows, and for
-/// separation previews the flattened image it started from (reused while
-/// only the radius changes).
+/// A whole new render, and for separation previews the flattened image it
+/// started from (reused while only the radius changes).
 type Rendered = (Render, Option<Arc<Tiled<Pixel>>>);
+
+/// Tiles made at a time when rendering a whole mask view.
+const BATCH: usize = 32;
+
+/// A background render in progress.
+struct Rendering {
+    /// Revision and view generation it shows.
+    target: (u64, u64),
+    /// Stops a render in place before its next batch of tiles.
+    cancel: Arc<AtomicBool>,
+    /// The part of the image on screen is done, or previewed.
+    visible: bool,
+    rx: Receiver<Progress>,
+}
+
+/// What a background render reports as it goes.
+enum Progress {
+    /// A whole new render, for the first one or a separation preview.
+    Whole(Rendered),
+    /// 256 px tiles of a pyramid level were redrawn in place.
+    Tiles(usize, Vec<(u32, u32)>),
+    /// The part of the image on screen is done, or previewed.
+    Visible,
+    /// Every tile is up to date.
+    Done,
+}
 
 /// Which part of the active layer edits apply to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +97,8 @@ struct Moving {
     label: String,
     /// The layer being moved, as it was before the move.
     original: Layer,
+    /// For a group, the layers in it, which move with it.
+    contents: Vec<Layer>,
     /// The selection before the move, which moves with the pixels.
     selection: Option<Selection>,
     target: Target,
@@ -107,10 +136,11 @@ pub struct Editor {
     /// What the canvas shows, and a counter bumped whenever that changes.
     view: View,
     view_generation: u64,
-    /// Revision and view generation being rendered, and the result.
-    rendering: Option<((u64, u64), Receiver<Rendered>)>,
+    rendering: Option<Rendering>,
     /// Revision and view generation the canvas is showing.
     rendered: (u64, u64),
+    /// Layers shrunk to the zoomed-out level on screen, for previews.
+    reduced: Arc<Mutex<Reduced>>,
     /// Flattened image a separation preview blurs, with its revision.
     separation_base: Option<(u64, Arc<Tiled<Pixel>>)>,
     /// A slow operation running in the background. Edits are refused until
@@ -152,6 +182,7 @@ impl Editor {
             view_generation: 0,
             rendering: None,
             rendered: (0, u64::MAX),
+            reduced: Arc::default(),
             separation_base: None,
             job: None,
             modified: false,
@@ -377,6 +408,8 @@ impl Editor {
             (Target::Mask, _) if copying => return false,
             (Target::Mask, Some(mask)) => Surface::Mask(mask.pixels.clone()),
             (Target::Mask, None) => return false,
+            // Groups and adjustment layers have no pixels to paint.
+            (Target::Pixels, _) if !layer.has_pixels() => return false,
             (Target::Pixels, _) => Surface::Pixels(layer.pixels.clone()),
         };
         let mut stroke = Stroke::new(settings, paint, surface);
@@ -469,28 +502,24 @@ impl Editor {
         }
         let up_to_date = self.rendered == (self.revision, self.view_generation);
         self.changed();
-        let (layers, view, colour) = (&self.doc.layers, self.view, self.overlay_colour);
-        let updated = self.canvas.render().cloned().and_then(|render| match view {
-            View::Image => render.update_tiles(&changed, |image, tiles| {
-                composite::composite_into(layers, image, tiles)
-            }),
-            View::MaskOverlay(id) => render.update_tiles(&changed, |image, tiles| {
-                composite::composite_into(layers, image, tiles);
-                draw_overlay(layers, id, colour, image, tiles);
-            }),
-            View::Mask(id) => {
-                render.update_tiles(&changed, |image, tiles| draw_mask(layers, id, image, tiles))
-            }
-            View::Separation { .. } | View::GaussianBlur { .. } => None,
-        });
-        if let Some(area) = updated {
-            self.canvas.invalidate(area);
-            self.painted = self.revision;
-            // If the canvas was current before this dab, it still is. If
-            // not, a full render will catch up with the rest.
-            if up_to_date {
-                self.rendered = (self.revision, self.view_generation);
-            }
+        // A render in place of an older revision would paint over this.
+        if let Some(rendering) = &self.rendering {
+            rendering.cancel.store(true, Ordering::Release);
+        }
+        let Some(render) = self.canvas.render() else {
+            return;
+        };
+        if matches!(self.view, View::Separation { .. } | View::GaussianBlur { .. }) {
+            return;
+        }
+        let data = draw_tiles(&self.doc.layers, self.view, self.overlay_colour, &changed);
+        render.write_tiles(0, &changed, &data, None);
+        self.canvas.invalidate_tiles(0, &changed);
+        self.painted = self.revision;
+        // If the canvas was current before this dab, it still is. If not, a
+        // full render will catch up with the rest.
+        if up_to_date {
+            self.rendered = (self.revision, self.view_generation);
         }
     }
 
@@ -503,21 +532,28 @@ impl Editor {
     /// Start moving the active layer with the Move tool: the whole layer
     /// and its mask, or with a selection, just the selected pixels (or mask
     /// values, when the mask is targeted) and the selection with them.
-    /// `copy` moves a copy (Alt+drag): of the whole layer as a new layer,
-    /// or of the selected pixels. `background` is the grey a mask is left
-    /// with where selected values move away. Nothing changes until
-    /// [`Self::move_to`] asks for a real move.
+    /// A group moves with everything in it, but has no pixels to move
+    /// within a selection. `copy` moves a copy (Alt+drag): of the whole
+    /// layer as a new layer, or of the selected pixels. `background` is the
+    /// grey a mask is left with where selected values move away. Nothing
+    /// changes until [`Self::move_to`] asks for a real move.
     pub fn begin_move(&mut self, label: &str, copy: bool, background: u16) -> bool {
         if self.job.is_some() {
             return false;
         }
         self.end_gesture();
-        let Some(layer) = self.doc.layer(self.active) else {
+        let Some(index) = self.active_index() else {
             return false;
         };
+        let layer = &self.doc.layers[index];
+        if layer.is_group && self.doc.selection.is_some() && self.target == Target::Pixels {
+            return false;
+        }
+        let contents = self.doc.layers[self.doc.span(index)].split_last().map(|(_, c)| c);
         self.moving = Some(Moving {
             label: label.to_owned(),
             original: layer.clone(),
+            contents: contents.unwrap_or_default().to_vec(),
             selection: self.doc.selection.clone(),
             target: self.target,
             copy,
@@ -531,14 +567,14 @@ impl Editor {
 
     /// Move to an offset from where the move started, in image pixels.
     /// Applied at once if the canvas is up to date, or else when the
-    /// render in progress finishes, so drags on large images skip
-    /// intermediate positions rather than falling behind.
+    /// render in progress has drawn what's on screen, so drags on large
+    /// images skip intermediate positions rather than falling behind.
     pub fn move_to(&mut self, dx: i32, dy: i32) {
         let Some(moving) = &mut self.moving else {
             return;
         };
         moving.wanted = (dx, dy);
-        if self.rendering.is_none() {
+        if self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_move();
         }
     }
@@ -583,26 +619,32 @@ impl Editor {
             });
             if moving.copy && moving.selection.is_none() {
                 let index = self.doc.index_of(moving.original.id).unwrap_or(0);
-                let id = self.doc.next_layer_id();
-                moving.original.id = id;
-                moving.original.name = format!("{} copy", moving.original.name);
-                self.doc.layers.insert(index + 1, moving.original.clone());
+                let id = self.doc.duplicate_layer(index);
+                let span = self.doc.span(self.doc.index_of(id).expect("just added"));
+                let (copy, contents) = self.doc.layers[span].split_last().expect("not empty");
+                moving.original = copy.clone();
+                moving.contents = contents.to_vec();
                 self.active = id;
             }
         }
         let moving = self.moving.as_mut().expect("still moving");
         moving.applied = (dx, dy);
+        if moving.lift.as_ref().expect("lifted").is_none() {
+            for from in std::iter::once(&moving.original).chain(&moving.contents) {
+                if let Some(layer) = self.doc.layer_mut(from.id) {
+                    layer.pixels = from.pixels.translated(dx, dy, from.pixels.fill());
+                    if let (Some(mask), Some(from)) = (&mut layer.mask, &from.mask) {
+                        mask.pixels = from.pixels.translated(dx, dy, from.pixels.fill());
+                    }
+                }
+            }
+        }
         let Some(layer) = self.doc.layer_mut(moving.original.id) else {
             return;
         };
         let original = &moving.original;
         match moving.lift.as_ref().expect("lifted") {
-            None => {
-                layer.pixels = original.pixels.translated(dx, dy, original.pixels.fill());
-                if let (Some(mask), Some(from)) = (&mut layer.mask, &original.mask) {
-                    mask.pixels = from.pixels.translated(dx, dy, from.pixels.fill());
-                }
-            }
+            None => {}
             // Put back where it was, it's the original (soft edges would
             // otherwise lose a little opacity).
             Some(_) if (dx, dy) == (0, 0) && !moving.copy => {
@@ -656,45 +698,99 @@ impl Editor {
             self.set_view(View::Image);
         }
 
-        if let Some(((revision, generation), rx)) = &self.rendering
-            && let Ok((render, base)) = rx.try_recv()
-        {
-            let (revision, generation) = (*revision, *generation);
-            self.rendering = None;
-            if let Some(base) = base {
-                self.separation_base = Some((revision, base));
+        if let Some(rendering) = &mut self.rendering {
+            loop {
+                match rendering.rx.try_recv() {
+                    Ok(Progress::Whole((render, base))) => {
+                        let (revision, generation) = rendering.target;
+                        if let Some(base) = base {
+                            self.separation_base = Some((revision, base));
+                        }
+                        // A render started before brush dabs were drawn in
+                        // place would erase them from the screen, and one
+                        // for a previous view is simply out of date; drop
+                        // both and render again.
+                        if revision >= self.painted && generation == self.view_generation {
+                            self.rendered = rendering.target;
+                            self.canvas.set_render(Arc::new(render));
+                        }
+                    }
+                    Ok(Progress::Tiles(level, tiles)) => {
+                        self.canvas.invalidate_tiles(level, &tiles)
+                    }
+                    Ok(Progress::Visible) => rendering.visible = true,
+                    Ok(Progress::Done) => self.rendered = rendering.target,
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.rendering = None;
+                        break;
+                    }
+                }
             }
-            // A render started before brush dabs were drawn in place would
-            // erase them from the screen, and one for a previous view is
-            // simply out of date; drop both and render again.
-            if revision >= self.painted && generation == self.view_generation {
-                self.rendered = (revision, generation);
-                self.canvas.set_render(Arc::new(render));
-            }
-            // Catch up with a move dragged further while rendering.
+        }
+        // Catch up with a move dragged further while rendering.
+        if self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_move();
         }
-        // One render at a time; when it finishes, the latest state is
-        // rendered next, so fast slider drags skip intermediate states.
+        // One render at a time. Once what's on screen is drawn, a render
+        // that's out of date stops, and the latest state is rendered next,
+        // so fast slider drags skip intermediate states.
         let current = (self.revision, self.view_generation);
+        if let Some(rendering) = &self.rendering
+            && rendering.visible
+            && rendering.target != current
+        {
+            rendering.cancel.store(true, Ordering::Release);
+        }
         if self.rendering.is_none() && self.rendered != current && self.stroke.is_none() {
-            let (tx, rx) = channel();
-            let doc = self.doc.clone();
-            let view = self.view;
-            let colour = self.overlay_colour;
+            self.start_render(ctx);
+        }
+    }
+
+    /// Render the current state in the background: in place over what the
+    /// canvas shows if it can, or else as a whole new render.
+    fn start_render(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let doc = self.doc.clone();
+        let view = self.view;
+        let colour = self.overlay_colour;
+        let ctx = ctx.clone();
+        let in_place = self
+            .canvas
+            .render()
+            .filter(|_| !matches!(view, View::Separation { .. } | View::GaussianBlur { .. }));
+        if let Some(render) = in_place {
+            let job = InPlace {
+                doc,
+                view,
+                colour,
+                render: Arc::clone(render),
+                visible: self.canvas.visible_area(),
+                reduced: Arc::clone(&self.reduced),
+                cancel: Arc::clone(&cancel),
+                tx,
+                ctx,
+            };
+            std::thread::spawn(move || job.run());
+        } else {
             let base = self
                 .separation_base
                 .as_ref()
                 .filter(|(r, _)| *r == self.revision)
                 .map(|(_, b)| Arc::clone(b));
-            let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let rendered = render_view(&doc, view, colour, base);
-                let _ = tx.send(rendered);
+                let _ = tx.send(Progress::Whole(rendered));
                 ctx.request_repaint();
             });
-            self.rendering = Some((current, rx));
         }
+        self.rendering = Some(Rendering {
+            target: (self.revision, self.view_generation),
+            cancel,
+            visible: false,
+            rx,
+        });
     }
 
     pub fn view(&self) -> View {
@@ -740,18 +836,18 @@ pub(crate) fn render_view(
     };
     match view {
         View::Image => (Render::new(doc.composite()), None),
-        View::Mask(id) => {
+        View::Mask(_) | View::MaskOverlay(_) => {
             let mut image = Raster::new(
                 doc.width,
                 doc.height,
                 vec![[0; 4]; doc.width as usize * doc.height as usize],
             );
-            draw_mask(&doc.layers, id, &mut image, &all_tiles());
-            (Render::new(image), None)
-        }
-        View::MaskOverlay(id) => {
-            let mut image = doc.composite();
-            draw_overlay(&doc.layers, id, colour, &mut image, &all_tiles());
+            for tiles in all_tiles().chunks(BATCH) {
+                let data = draw_tiles(&doc.layers, view, colour, tiles);
+                for (&(col, row), tile) in tiles.iter().zip(&data) {
+                    image.put_tile(col, row, tile);
+                }
+            }
             (Render::new(image), None)
         }
         View::Separation { radius, texture } => {
@@ -787,61 +883,185 @@ pub(crate) fn render_view(
     }
 }
 
-/// Write a layer's mask as opaque grey into the given tiles of `image`.
-fn draw_mask(layers: &[Layer], id: u64, image: &mut Raster, tiles: &[(u32, u32)]) {
-    each_mask_value(layers, id, image, tiles, |pixel, v| {
-        *pixel = [v, v, v, u16::MAX]
-    });
-}
-
-/// Tint the given tiles of `image` with `colour` where a layer's mask
-/// hides, fading to clear where it reveals.
-fn draw_overlay(
+/// Draw 256 px tiles (col, row) of what `view` shows (anything but a
+/// separation preview), with `colour` for the mask overlay.
+fn draw_tiles(
     layers: &[Layer],
-    id: u64,
+    view: View,
     colour: Pixel,
-    image: &mut Raster,
     tiles: &[(u32, u32)],
-) {
+) -> Vec<Vec<Pixel>> {
     const MAX: u32 = u16::MAX as u32;
-    each_mask_value(layers, id, image, tiles, |pixel, v| {
-        let a = (MAX - v as u32) * OVERLAY_OPACITY / MAX;
-        // Overlay opaque colour over the pixel, so it shows on transparent
-        // areas too.
-        for (c, k) in pixel.iter_mut().zip(colour) {
-            *c = ((*c as u32 * (MAX - a) + k as u32 * a) / MAX) as u16;
-        }
-    });
-}
-
-/// Call `f` with each pixel of the given tiles of `image` and the value of
-/// a layer's mask there.
-fn each_mask_value(
-    layers: &[Layer],
-    id: u64,
-    image: &mut Raster,
-    tiles: &[(u32, u32)],
-    f: impl Fn(&mut Pixel, u16),
-) {
-    let Some(mask) = layers
-        .iter()
-        .find(|l| l.id == id)
-        .and_then(|l| l.mask.as_ref())
-    else {
-        return;
+    let mask = |id: u64| {
+        layers
+            .iter()
+            .find(|l| l.id == id)
+            .and_then(|l| l.mask.as_ref())
     };
-    let (w, h) = (image.width(), image.height());
-    for &(col, row) in tiles {
-        let tile = mask.pixels.tile(col, row);
-        for ty in 0..TILE.min(h.saturating_sub(row * TILE)) {
-            let y = row * TILE + ty;
-            let line = image.row_mut(y);
-            for tx in 0..TILE.min(w.saturating_sub(col * TILE)) {
-                let v = tile.map_or(mask.pixels.fill(), |t| t[(ty * TILE + tx) as usize]);
-                f(&mut line[(col * TILE + tx) as usize], v);
+    match view {
+        // The mask as opaque grey.
+        View::Mask(id) => tiles
+            .iter()
+            .map(|&(col, row)| {
+                let values = mask(id).map(|m| (m.pixels.tile(col, row), m.pixels.fill()));
+                (0..TILE_PIXELS)
+                    .map(|i| {
+                        let v = values.map_or(0, |(t, fill)| t.map_or(fill, |t| t[i]));
+                        [v, v, v, u16::MAX]
+                    })
+                    .collect()
+            })
+            .collect(),
+        // Tinted with `colour` where the mask hides, fading to clear where
+        // it reveals.
+        View::MaskOverlay(id) => {
+            let mut out = composite::composite_tiles(layers, tiles);
+            let Some(mask) = mask(id) else {
+                return out;
+            };
+            for (tile, &(col, row)) in out.iter_mut().zip(tiles) {
+                let values = mask.pixels.tile(col, row);
+                for (i, pixel) in tile.iter_mut().enumerate() {
+                    let v = values.map_or(mask.pixels.fill(), |t| t[i]);
+                    let a = (MAX - v as u32) * OVERLAY_OPACITY / MAX;
+                    // Opaque colour over the pixel, so it shows on
+                    // transparent areas too.
+                    for (c, k) in pixel.iter_mut().zip(colour) {
+                        *c = ((*c as u32 * (MAX - a) + k as u32 * a) / MAX) as u16;
+                    }
+                }
             }
+            out
+        }
+        View::Image | View::Separation { .. } | View::GaussianBlur { .. } => {
+            composite::composite_tiles(layers, tiles)
         }
     }
+}
+
+/// Brings a render up to date in place, in the background.
+struct InPlace {
+    doc: Document,
+    view: View,
+    colour: Pixel,
+    render: Arc<Render>,
+    /// The pyramid level on screen and the part of the image showing.
+    visible: Option<(usize, (u32, u32, u32, u32))>,
+    reduced: Arc<Mutex<Reduced>>,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<Progress>,
+    ctx: egui::Context,
+}
+
+impl InPlace {
+    /// Draw what's on screen first: zoomed out, a preview at the level
+    /// shown, composited from shrunk layers. Then draw every tile at full
+    /// size, nearest the middle of the view first. Stops early if
+    /// cancelled.
+    fn run(self) {
+        let (w, h) = (self.doc.width, self.doc.height);
+        let mut previewed = false;
+        if let Some((level, (x0, y0, x1, y1))) = self.visible.filter(|(level, _)| *level > 0) {
+            let layers = self
+                .reduced
+                .lock()
+                .expect("reduced layers")
+                .layers(&self.doc.layers, level as u32);
+            let scale = 1 << level;
+            let size = (w.div_ceil(scale), h.div_ceil(scale));
+            let area = (
+                x0 / scale,
+                y0 / scale,
+                x1.div_ceil(scale),
+                y1.div_ceil(scale),
+            );
+            let (mut tiles, on_screen) = tile_order(size, area, 2);
+            tiles.truncate(on_screen);
+            if !self.draw(&layers, level, &tiles, Some(on_screen)) {
+                return;
+            }
+            previewed = true;
+        }
+        let (tiles, on_screen) = match self.visible {
+            Some((level, area)) => tile_order((w, h), area, 2 << level),
+            None => tile_order((w, h), (0, 0, w, h), 2),
+        };
+        let visible = (!previewed).then_some(on_screen);
+        if self.draw(&self.doc.layers, 0, &tiles, visible) {
+            let _ = self.tx.send(Progress::Done);
+            self.ctx.request_repaint();
+        }
+    }
+
+    /// Draw `tiles` of pyramid level `level` from `layers`, reporting when
+    /// the first `visible` of them are done. Those are drawn in one go, as
+    /// they're never cancelled for an edit; the rest a tile per core at a
+    /// time, to stop soon when cancelled. Returns false if cancelled.
+    fn draw(
+        &self,
+        layers: &[Layer],
+        level: usize,
+        tiles: &[(u32, u32)],
+        mut visible: Option<usize>,
+    ) -> bool {
+        let (first, rest) = tiles.split_at(visible.unwrap_or(0).min(tiles.len()));
+        let batches = rest.chunks(rayon::current_num_threads());
+        let mut done = 0;
+        for batch in std::iter::once(first)
+            .filter(|b| !b.is_empty())
+            .chain(batches)
+        {
+            if self.cancel.load(Ordering::Acquire) {
+                return false;
+            }
+            let data = draw_tiles(layers, self.view, self.colour, batch);
+            if !self
+                .render
+                .write_tiles(level, batch, &data, Some(&self.cancel))
+            {
+                return false;
+            }
+            done += batch.len();
+            let _ = self.tx.send(Progress::Tiles(level, batch.to_vec()));
+            if visible.is_some_and(|n| done >= n) {
+                visible = None;
+                let _ = self.tx.send(Progress::Visible);
+            }
+            self.ctx.request_repaint();
+        }
+        true
+    }
+}
+
+/// The 256 px tiles of an image of `size`, those overlapping `area` (x0,
+/// y0, x1, y1) first, each nearest the middle of `area` first, and how many
+/// overlap. Tiles are kept together in blocks of `block` × `block`, the
+/// tiles under one display tile, so each display tile is redrawn once.
+fn tile_order(
+    (w, h): (u32, u32),
+    (x0, y0, x1, y1): (u32, u32, u32, u32),
+    block: u32,
+) -> (Vec<(u32, u32)>, usize) {
+    let t = TILE as f32;
+    let middle = ((x0 + x1) as f32 / 2.0 / t, (y0 + y1) as f32 / 2.0 / t);
+    let on_screen = |col: u32, row: u32| {
+        col * TILE < x1 && (col + 1) * TILE > x0 && row * TILE < y1 && (row + 1) * TILE > y0
+    };
+    let mut tiles: Vec<_> = (0..h.div_ceil(TILE))
+        .flat_map(|row| (0..w.div_ceil(TILE)).map(move |col| (col, row)))
+        .map(|(col, row)| {
+            let (bc, br) = (col / block, row / block);
+            let centre = (
+                (bc as f32 + 0.5) * block as f32,
+                (br as f32 + 0.5) * block as f32,
+            );
+            let distance = (centre.0 - middle.0).hypot(centre.1 - middle.1);
+            (!on_screen(col, row), distance, (br, bc), (col, row))
+        })
+        .collect();
+    tiles.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let visible = tiles.iter().filter(|t| !t.0).count();
+    (tiles.into_iter().map(|t| t.3).collect(), visible)
 }
 
 #[cfg(test)]
@@ -1225,5 +1445,150 @@ mod tests {
             Some(e.doc.composite().get(270, 260))
         );
         assert_eq!(e.canvas.sample(270, 260), Some([0, 0, 65535, 65535]));
+    }
+
+    /// Call `update` until the background render is finished.
+    fn settle(e: &mut Editor, ctx: &egui::Context) {
+        e.update(ctx);
+        while e.rendering.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            e.update(ctx);
+        }
+    }
+
+    #[test]
+    fn slider_drags_render_in_place_and_end_up_exact() {
+        let ctx = egui::Context::default();
+        let mut e = square_editor();
+        e.edit("Layer", |doc, active| {
+            let mut top = Layer::from_raster(
+                9,
+                "top",
+                &Raster::new(600, 400, vec![[0, 40000, 0, 65535]; 600 * 400]),
+            );
+            top.blend = BlendMode::Multiply;
+            doc.layers.push(top);
+            *active = 9;
+        });
+        settle(&mut e, &ctx);
+        let render = Arc::clone(e.canvas.render().unwrap());
+        for step in 0..20 {
+            e.edit_live("Opacity", |doc| {
+                doc.layers[1].opacity = 1.0 - step as f32 / 25.0
+            });
+            e.update(&ctx);
+        }
+        e.end_live();
+        settle(&mut e, &ctx);
+        assert!(
+            Arc::ptr_eq(&render, e.canvas.render().unwrap()),
+            "drawn in place"
+        );
+        assert_eq!(e.rendered, (e.revision, e.view_generation));
+        let full = e.doc.composite();
+        for (x, y) in [(0, 0), (50, 50), (599, 399), (300, 200)] {
+            assert_eq!(e.canvas.sample(x, y), Some(full.get(x, y)));
+        }
+        let exact = Render::new(full);
+        assert_eq!(
+            render.level_for_test(2).pixels(),
+            exact.level_for_test(2).pixels()
+        );
+    }
+
+    #[test]
+    fn zoomed_out_the_view_is_previewed_before_the_full_size_render() {
+        let e = square_editor();
+        let render = Arc::new(Render::new(Raster::new(600, 400, vec![[0; 4]; 600 * 400])));
+        let (tx, rx) = channel();
+        let job = InPlace {
+            doc: e.doc.clone(),
+            view: View::Image,
+            colour: RED,
+            render: Arc::clone(&render),
+            // Half size, looking at the top left.
+            visible: Some((1, (0, 0, 300, 200))),
+            reduced: Arc::default(),
+            cancel: Arc::default(),
+            tx,
+            ctx: egui::Context::default(),
+        };
+        job.run();
+        let progress: Vec<Progress> = rx.try_iter().collect();
+        let steps: Vec<String> = progress
+            .iter()
+            .map(|p| match p {
+                Progress::Tiles(level, tiles) => format!("{level}:{tiles:?}"),
+                Progress::Visible => "visible".into(),
+                Progress::Done => "done".into(),
+                Progress::Whole(_) => "whole".into(),
+            })
+            .collect();
+        // The half-size level has 2 × 1 tiles, one of them on screen. The
+        // full size image has 3 × 2, the two on screen first.
+        assert_eq!(
+            steps,
+            [
+                "1:[(0, 0)]",
+                "visible",
+                "0:[(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]",
+                "done"
+            ]
+        );
+        let exact = Render::new(e.doc.composite());
+        for level in 0..3 {
+            assert_eq!(
+                render.level_for_test(level).pixels(),
+                exact.level_for_test(level).pixels()
+            );
+        }
+    }
+
+    #[test]
+    fn tiles_on_screen_come_first_from_the_middle_out() {
+        // 5 × 3 tiles, looking at the middle three columns of the top row.
+        let (order, on_screen) = tile_order((1280, 768), (256, 0, 1024, 256), 1);
+        assert_eq!(on_screen, 3);
+        assert_eq!(&order[..3], [(2, 0), (1, 0), (3, 0)]);
+        assert_eq!(order.len(), 15);
+        // In blocks of 2 × 2, a block's tiles stay together.
+        let (order, _) = tile_order((1024, 512), (0, 0, 1024, 512), 2);
+        assert_eq!(&order[..4], [(0, 0), (1, 0), (0, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn groups_move_with_their_contents_and_have_no_pixels_to_paint() {
+        let mut e = square_editor();
+        let layer = e.active;
+        e.edit("Group Layers", |doc, active| *active = doc.group_layer(0));
+        let group = e.active;
+        assert!(!e.begin_stroke(hard(40.0), Paint::Color(RED), false));
+
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(200, 100);
+        e.end_move();
+        let moved = e.doc.layer(layer).unwrap();
+        assert_eq!(moved.pixels.get(250, 150), RED);
+        assert_eq!(moved.mask.as_ref().unwrap().pixels.get(210, 110), 0);
+
+        // Alt+drag copies the group and everything in it.
+        assert!(e.begin_move("Move", true, 0));
+        e.move_to(0, 200);
+        e.end_move();
+        assert_eq!(e.doc.layers.len(), 4);
+        let copy = e.doc.layer(e.active).unwrap();
+        assert_eq!((copy.name.as_str(), copy.is_group), ("Group 1 copy", true));
+        let inside = &e.doc.layers[2];
+        assert_eq!(inside.parent, Some(e.active));
+        assert_eq!(inside.pixels.get(250, 350), RED);
+        assert_eq!(e.doc.layer(layer).unwrap().pixels.get(250, 150), RED);
+        assert_eq!(e.doc.layers[1].id, group);
+
+        // A group has no pixels to move within a selection.
+        e.active = group;
+        e.edit("Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (50.0, 100.0)))
+        });
+        assert!(!e.begin_move("Move", false, 0));
     }
 }

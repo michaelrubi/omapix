@@ -60,6 +60,16 @@ The marching ants follow the edge of the whole selection, traced from its covera
 
 **Plan:** Photoshop's tool groups: one toolbar slot per group, showing the tool last used, with a small corner triangle. Right-clicking (or holding the mouse on) the slot opens a menu of the group's tools with their letters, and Shift+letter cycles through the group. Groups: Rectangular/Elliptical Marquee (`M`); Lasso (`L`); Object Selection/Magic Wand (`W`); and the same for Spot Healing/Healing (`J`).
 
+### Selecting several layers
+
+**Problem:** only one layer can be selected, so grouping, moving, deleting or merging several layers means doing them one at a time.
+
+**Plan:** Photoshop's multiple selection: Ctrl+click adds or removes a layer, Shift+click selects a range of rows. Ctrl+G then groups them all in one new group (in stack order, where the topmost was), dragging moves them together, Delete and Ctrl+J act on all of them, and Ctrl+E merges them (Merge Layers). The Move tool moves all of them. Painting and adjustments still apply to the last one clicked, which stays the active layer. The engine's group operations already move whole spans, so this is mostly panel and editor work.
+
+### Photoshop's layer navigation shortcuts
+
+Alt+] and Alt+[ select the layer above or below (following the rows shown, so into open groups and past closed ones), and Ctrl+Shift+] and Ctrl+Shift+[ bring a layer to the front or send it to the back of its group. Keyboard-first, and cheap now that `raise_place`/`lower_place` exist.
+
 ## 2. Hand-testing checklist
 
 The UI has been tested through the same code paths with scripts
@@ -70,6 +80,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Dragging Curves points, and dragging one off the graph to delete it
 - [ ] Blend If handles, including Alt+drag to split
 - [ ] Dragging layers to reorder them, including by the name
+- [ ] Layer groups: Ctrl+G and Ctrl+Shift+G, opening and closing groups, dragging layers into, out of and between groups, and the Move tool on a group
 - [ ] Clicking a layer row selects it, without accidentally starting a drag; double-clicks rename or open Blending Options
 - [x] Right-clicking layer rows and mask thumbnails for context menus
 - [x] Active tool contrast styling and frameless toolbar icons
@@ -77,6 +88,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Mask overlay: `\` and Esc, live updates while painting the mask
 - [x] Elliptical marquee, and Shift to constrain marquees to a square or circle
 - [ ] Marching ants move, and Omapix goes idle again once there's no selection
+- [ ] Slider drags (opacity, Curves, Hue/Saturation) and Move tool drags on a 24 MP image, at fit and at 100 %: smooth, and the image settles to the exact result
 - [ ] One outline for overlapping marquees and lassos, after adding, subtracting, inverting and feathering
 - [x] Cut, copy, Copy Merged and paste, within Omapix and to and from other apps (a browser, a screenshot)
 - [ ] Open, Save As and Export file dialogs (xdg portal)
@@ -86,23 +98,48 @@ The UI has been tested through the same code paths with scripts
 
 ## 3. Retouching and editing
 
-- **Layer groups:** folders in the Layers panel with their own blend mode, opacity and mask. OpenRaster supports groups (nested stacks).
+- ~~**Layer groups**~~ (done): folders in the Layers panel with their own blend mode, opacity, mask and Blend If, nested to any depth. Groups are Pass Through by default, so what's in them blends onto the layers below as if ungrouped; any other mode composites the group on its own first, so adjustment layers inside it change only the group. Ctrl+G groups the selected layer and Ctrl+Shift+G ungroups; Layer › New Group and the folder button make an empty one. New layers go into the top of a selected group. Groups start closed; the triangle opens them, and they open by themselves to show the selected layer. Drag a layer onto a group's row to put it in, or between rows to place it; Ctrl+] and Ctrl+[ step into and out of groups. Duplicating, deleting and moving a group (including with the Move tool and Alt+drag) take everything in it, and Ctrl+E on a group merges it into one layer (Merge Group). Saved in OpenRaster as nested stacks, which Krita and GIMP read.
+  - Later: grouping several layers at once (see "Selecting several layers" above), and Alt+click on a triangle to open or close every group inside.
+- **Clipping masks** (Ctrl+Alt+G, or Alt+click the line between two rows): clip a layer to the one below, so it shows only where that layer does. The retouching staple: a Curves or Hue/Saturation layer that fixes just the dodge & burn layer, or colour on one pasted patch. Compositing already builds a tree for groups, so a clipped run can reuse the isolated-group path (composite the base and its clipped layers together, then blend as one). Saved in OpenRaster under an `omapix:` attribute (check what Krita writes for its "inherit alpha", to open the same way there).
+- **Retouching setups as groups:** now that groups exist, Frequency Separation can put its two layers in a "Frequency Separation" group (hide it to compare before and after), and a second, curves-based **Dodge & Burn** setup can make the pro workflow in one step: a group with a brightening and a darkening Curves layer, each with a black mask to paint on.
+- **Lock transparent pixels** (`/`): brushes and fills change only pixels that are already there, as in Photoshop. Handy for recolouring a pasted patch or a hair layer. Lock All later.
 - ~~**Elliptical marquee**~~ (done): Shift+M switches between the rectangular and elliptical marquees, and Shift constrains either to a square or circle.
 - **Magic Wand** (`W`, grouped with Object Selection): click to select similar colours, with Tolerance, Contiguous and Sample All Layers in the options bar, and Shift/Alt to add and subtract as with the marquees. Anti-aliased edges, so it can feed Feather and masks directly.
 - **Object Selection** (Photoshop's "smart" select, `W`): drag a rough box or lasso around something (a person, a face, hair) and it selects just that object. Needs a local segmentation model such as SAM run through ONNX Runtime, so it shares groundwork with the AI retouching in section 7 and is best built alongside it.
 - ~~**Live preview for Gaussian Blur**~~ (done): updates the canvas live as the radius changes, with a Preview checkbox in the dialog, respecting layer masks, blend modes, adjustments and selections.
 - **Brush size and hardness by dragging:** Photoshop's Alt+right-drag. This may clash with Hyprland shortcuts, so check first.
 - **Tablet support:** pen pressure for size and opacity (and later tilt). Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol (`tablet-v2`) on the same Wayland connection. Tablet buttons (ExpressKeys, stylus buttons) are best mapped to keystrokes outside Omapix (Hyprland binds or OpenTabletDriver), so they work through custom hotkeys rather than needing pad support in Omapix.
-- **Liquify:** forward warp, push, bloat and pucker, with a mesh that can be edited again later.
+- **Liquify:** forward warp, push, bloat and pucker, with a mesh that can be edited again later. Shares its warp engine with the slider-driven Symmetry and Reshape in section 7 ([AI.md](AI.md)), and is how their results get touched up by hand.
 
 ## 4. Colour and adjustments
 
-- **Histogram in Curves and Levels**, drawn behind the curve.
+- ~~**Histogram in Curves and Levels**~~ (done): drawn behind the curve, and in Levels above the input controls.
 - **Eyedroppers in Curves and Levels:** set black, grey and white points by clicking the image.
 - ~~**Selective Color** and **Channel Mixer** adjustment layers~~ (done).
 - ~~**LUT adjustment layer:** load `.cube` files~~ (done).
 - **Monitor colour management:** read the display's ICC profile instead of assuming sRGB.
 - **Soft proofing** for print and web.
+
+### Denoise, sharpen and add noise
+
+Michael's finishing workflow, from years of Topaz and Nik Collection: denoise first, then retouch and grade, then sharpen, and add noise last, which makes the photo look more natural. Each goes on its own layer by default, so its opacity is its strength and a mask can keep it off the eyes or the background.
+
+- **Denoise** (Filter › Noise › Reduce Noise…), the first step.
+  - AI denoising with the NIND model darktable already installed here (`denoise-nind`: 768 px tiles, GPL-3.0 like Omapix), found through the shared model folders and run on the GPU with the same runtime as section 7 ([AI.md](AI.md)).
+  - Separate luminance and colour noise amounts. The result goes on a **Denoise** layer above the image.
+  - A classical fallback on the CPU (wavelet or non-local means) when there's no model.
+  - For raws, darktable's raw denoise before export is better still. Omapix's is for files that arrive already developed.
+- **Sharpen** (Filter › Sharpen), near the end.
+  - Photoshop's **Unsharp Mask** (Amount, Radius, Threshold) and **Smart Sharpen** (Gaussian or lens blur, noise reduction, fading in shadows and highlights), on luminance only, so edges don't get colour fringes.
+  - A one-click **High Pass sharpening** setup, like Frequency Separation: a High Pass copy of the visible image in Overlay or Linear Light, whose opacity and mask set the strength. Needs a High Pass filter, which is handy anyway.
+  - Previewed at 100 % in the dialog (Photoshop's filter preview box), since sharpening can't be judged zoomed out.
+  - Later, output sharpening for the export size, once exports can resize (see Batch export).
+- **Add Noise** (Filter › Noise › Add Noise…), the last step.
+  - Photoshop's controls (Amount, Uniform or Gaussian, Monochromatic), plus film-like grain: grain size, roughness, and less grain in deep shadows and bright highlights than in the midtones.
+  - Goes on a **Grain** layer by default: 50 % grey in Overlay carrying the grain, like the Dodge & Burn layer, so opacity is the amount.
+  - Seeded, so the same settings always give the same grain, without seams between tiles.
+  - Grain is measured in pixels, so an export at a smaller size loses it. Once exports can resize, grain should be added at the output size.
+- Later, a **Finish** action that runs Sharpen then Add Noise with saved settings, which Batch export can reuse.
 
 ## 5. Workflow and files
 
@@ -115,17 +152,25 @@ The UI has been tested through the same code paths with scripts
 
 ## 6. Performance
 
-- **Faster slider drags:** opacity and adjustment changes recomposite the whole image (about 100 ms at 24 MP). Recomposite only the visible area first, then the rest.
+- ~~**Faster slider drags**~~ (done): edits redraw the canvas in place, the part on screen first, then the rest in the background, which a newer edit cuts short. Zoomed out, what's on screen is first previewed from layers shrunk to the size shown (kept until they change), then replaced by the exact full-size result. With four layers at 24 MP, the screen follows a slider in about 60 ms at fit to screen (was about 300 ms), 20 ms at 25 % and 45 ms at 100 %. The Move tool's drags speed up the same way.
+  - Zoomed out, the preview blends shrunk layers rather than shrinking the blended image, so non-linear modes (Soft Light, Overlay…) can shift very slightly when the exact result lands.
+  - Shrunk layers cost a quarter of each layer's memory at 50 % (a sixteenth at 25 %) while zoomed out.
 - **GPU compositing:** move blend modes to the GPU for display, keeping the CPU path for export (see DESIGN.md).
+  - Plan: upload each layer and mask at the pyramid level on screen (the shrunk layers from `reduced.rs` are that input), composite at screen resolution in a WGSL shader through egui's wgpu paint callback, bake each adjustment and the display colour transform into a 3D LUT on the CPU so the shader has one path for all of them, and build isolated groups in offscreen textures. The CPU composite stays for export, the pixel readout and eyedroppers. Costs about 190 MB of GPU memory per full-size 24 MP layer, far less zoomed out.
 - **Memory:** free display textures that have been off-screen for a while.
+- **Cache group results:** an isolated group (any mode but Pass Through) composites its contents into its own buffer for every tile on every render. Keep that result while nothing inside the group changes, so dragging a slider on a layer above a big group doesn't redo the whole group.
 
 ## 7. The big one: AI-assisted retouching
 
-The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription. This will need its own design document before any code.
-- Skin and face-part segmentation (skin, eyes, lips, hair) to make masks automatically.
-- Automatic blemish detection that feeds the Spot Healing Brush.
+The goal is Evoto-style one-click cleanup, running locally on the GPU with no subscription, for client and personal work alike. Design: [AI.md](AI.md) (proposal, with milestones and a couple of open questions).
+- Object Selection (`W`) and Select › Subject, which prove the groundwork first.
+- Skin and face-part segmentation (skin, eyes, lips, teeth, hair) to make masks automatically, per face and per person.
+- Automatic blemish detection that feeds the Spot Healing Brush, onto its own layer.
 - Skin smoothing that keeps texture, built on frequency separation plus the segmentation masks.
-- Models run through ONNX Runtime on the GPU (already set up on this machine for darktable).
+- Even tone: the Dodge & Burn setup with its masks filled in automatically.
+- Auto Retouch: all of the above in one click, with each face edited on its own or all together, as layer groups whose opacity sets the strength.
+- Face symmetry, and Reshape ("easy Liquify"): sliders for face and body shape, driven by face and body landmarks.
+- Models run through ONNX Runtime on the GPU (already set up on this machine for darktable), shared with darktable's model folder.
 
 ## Out of scope for now
 - Vector and layout tools (Omapix is raster only).

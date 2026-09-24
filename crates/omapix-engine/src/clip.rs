@@ -174,14 +174,15 @@ impl Clip {
     }
 }
 
-/// Paste `clip` as a new layer above layer index `above`, and deselect, as
-/// Photoshop does. Returns the new layer's id.
+/// Paste `clip` as a new layer above layer index `above` (at the top of it,
+/// for a group), and deselect, as Photoshop does. Returns the new layer's
+/// id.
 pub fn paste(doc: &mut Document, clip: &Clip, above: usize) -> Result<u64> {
     let pixels = clip.place(doc.width, doc.height, &doc.profile)?;
     let id = doc.next_layer_id();
     let name = doc.unused_name("Layer");
-    let at = (above + 1).min(doc.layers.len());
-    doc.layers.insert(at, Layer::from_pixels(id, name, pixels));
+    let above = above.min(doc.layers.len() - 1);
+    doc.insert_above(above, Layer::from_pixels(id, name, pixels));
     doc.selection = None;
     Ok(id)
 }

@@ -73,11 +73,25 @@ unit tests, and leaves room to replace the UI toolkit later.
 ### Compositing and undo
 
 - Layers composite tile by tile on the CPU in parallel (`composite.rs`),
-  about 100 ms for four layers at 24 MP. The canvas shows the latest
-  composite; a whole-document render runs in the background after each
-  edit, and brush strokes recomposite only the tiles they touch, in place.
+  100–200 ms for four layers at 24 MP, depending on their modes. After
+  each edit a background render redraws the canvas's image and pyramid in
+  place: the tiles on screen first, nearest the middle, then the rest in
+  small batches. Once what's on screen is drawn, a newer edit stops it, so
+  slider drags skip states rather than queue them. Zoomed out, the part on
+  screen is first previewed at the level shown, composited from layers
+  shrunk to that size (`reduced.rs`): 4× less work per level, with shrunk
+  tiles kept until their layer's tiles change. The full-size render then
+  replaces the preview. Brush strokes recomposite only the tiles they
+  touch, in place.
 - Blend modes follow Photoshop's formulas (Soft Light included), plus
   GIMP/Krita's Grain Extract/Merge for frequency separation.
+- Layer groups keep the stack one flat list, as PSD files do: a group's
+  contents sit directly below it and name it as their parent
+  (`groups.rs`). Compositing builds the tree once per render. A Pass
+  Through group blends its contents straight onto what's below, then
+  fades between before and after by its opacity and mask; any other mode
+  composites the contents on their own and blends the result as one
+  layer.
 - Undo keeps whole-document snapshots, which cost almost nothing because
   they share tiles (a snapshot of a 24 MP, four-layer document takes
   ~30 µs). A continuous gesture, such as dragging a slider or one brush
@@ -87,8 +101,8 @@ unit tests, and leaves room to replace the UI toolkit later.
 
 - **OpenRaster (.ora)** is the native format: layers as 16-bit PNGs with
   the ICC profile, cropped to the area they use, blend modes under Krita's
-  names so files open correctly in Krita, and masks as extra PNGs under
-  `omapix:` attributes other apps ignore.
+  names so files open correctly in Krita, layer groups as nested stacks,
+  and masks as extra PNGs under `omapix:` attributes other apps ignore.
 - Exports: flattened 16-bit TIFF with ICC (back to darktable or to print)
   and 8-bit sRGB JPEG (web and clients).
 
@@ -113,7 +127,8 @@ Tile engine, pixel layers, opacity, 25 blend modes, layer masks, undo and
 redo, OpenRaster save/open, TIFF/JPEG export, Gaussian Blur, one-click
 frequency separation (with live preview) and dodge & burn layer, merge
 down, stamp visible, drag-to-reorder, Blend If (Blending Options, saved in
-OpenRaster), mask view. Layer groups are not done yet.
+OpenRaster), mask view, layer groups (Pass Through or isolated, nested,
+with their own opacity, mask and Blend If).
 
 ### 3. Retouch tools (mostly done)
 
@@ -147,7 +162,8 @@ All follow Photoshop.
 | Open / Save / Save As | Ctrl+O / Ctrl+S / Ctrl+Shift+S |
 | Undo / Redo | Ctrl+Z / Ctrl+Shift+Z |
 | New layer / Duplicate | Ctrl+Shift+N / Ctrl+J |
-| Merge down / Stamp visible | Ctrl+E / Ctrl+Alt+Shift+E |
+| Merge down (Merge Group on a group) / Stamp visible | Ctrl+E / Ctrl+Alt+Shift+E |
+| Group / Ungroup layers | Ctrl+G / Ctrl+Shift+G |
 | Bring forward / Send backward | Ctrl+] / Ctrl+[ |
 | Invert (layer or mask) | Ctrl+I |
 | Curves / Levels / Hue/Sat / Color Balance layer | Ctrl+M / Ctrl+L / Ctrl+U / Ctrl+B |
@@ -171,7 +187,8 @@ All follow Photoshop.
 
 Click a layer's mask thumbnail to paint on the mask; Alt+click shows the
 mask on its own (Alt+click again or Esc returns); Shift+click disables it.
-Drag layer rows to reorder them. With the Move tool, Alt+drag moves a
+Drag layer rows to reorder them, onto a group's row to put a layer in it,
+or between rows inside or outside a group. With the Move tool, Alt+drag moves a
 copy and Shift keeps the drag straight or at 45°. Double-click a layer thumbnail (or Layer ›
 Blending Options…) for Blend If; Alt+drag a slider handle to split it.
 The Frequency Separation dialog previews the texture or colour/tone layer

@@ -2,13 +2,14 @@
 //! Photoshop-style navigation, and pointer input for painting.
 //!
 //! The canvas shows a [`Render`]: the flattened document plus its zoom
-//! pyramid. Whole renders are produced in the background when the document
-//! changes; brush strokes update just the area they touch, in place.
+//! pyramid. The editor redraws it in place when the document changes, the
+//! part on screen first; brush strokes update just the area they touch.
 //! Visible tiles are converted to display colour on worker threads and
 //! uploaded as textures. Tiles that go stale stay on screen until their
 //! replacements are ready, so edits never flicker.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -93,30 +94,41 @@ impl Render {
         self.data.read().expect("render lock").image.get(x, y)
     }
 
-    /// Redraw the given 256 px engine tiles with `draw`, which writes them
-    /// into the full-size image, then update the pyramid. Returns the
-    /// changed area in image pixels as (x0, y0, x1, y1).
-    pub fn update_tiles(
+    #[cfg(test)]
+    pub fn level_for_test(&self, level: usize) -> Raster {
+        self.data.read().expect("render lock").level(level).clone()
+    }
+
+    /// Write whole 256 px tiles (col, row) of pyramid level `level`, as
+    /// made by [`omapix_engine::composite::composite_tiles`], then update
+    /// the levels above it. Nothing is written if `cancel` is set, which is checked under the
+    /// lock, so a cancelled background render can't overwrite a brush
+    /// stroke drawn since. Returns whether the tiles were written.
+    pub fn write_tiles(
         &self,
-        engine_tiles: &[(u32, u32)],
-        draw: impl FnOnce(&mut Raster, &[(u32, u32)]),
-    ) -> Option<(u32, u32, u32, u32)> {
-        let mut data = self.data.write().expect("render lock");
-        let (w, h) = (data.image.width(), data.image.height());
-        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
-        for &(col, row) in engine_tiles {
-            x0 = x0.min(col * TILE);
-            y0 = y0.min(row * TILE);
-            x1 = x1.max(((col + 1) * TILE).min(w));
-            y1 = y1.max(((row + 1) * TILE).min(h));
+        level: usize,
+        tiles: &[(u32, u32)],
+        data: &[Vec<Pixel>],
+        cancel: Option<&AtomicBool>,
+    ) -> bool {
+        let mut data_lock = self.data.write().expect("render lock");
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return false;
         }
-        if x0 >= x1 || y0 >= y1 {
-            return None;
+        let RenderData { image, pyramid } = &mut *data_lock;
+        let target = pyramid.level_mut(image, level);
+        let (w, h) = (target.width(), target.height());
+        for (&(col, row), tile) in tiles.iter().zip(data) {
+            target.put_tile(col, row, tile);
         }
-        draw(&mut data.image, engine_tiles);
-        let RenderData { image, pyramid } = &mut *data;
-        pyramid.update_region(image, (x0, y0, x1, y1));
-        Some((x0, y0, x1, y1))
+        for &(col, row) in tiles {
+            let (x0, y0) = (col * TILE, row * TILE);
+            if x0 < w && y0 < h {
+                let area = (x0, y0, (x0 + TILE).min(w), (y0 + TILE).min(h));
+                pyramid.update_from(image, level, area);
+            }
+        }
+        true
     }
 }
 
@@ -283,9 +295,39 @@ impl Canvas {
         self.render.as_ref()
     }
 
-    /// Mark display tiles covering an image-pixel area as out of date.
-    pub fn invalidate(&mut self, (x0, y0, x1, y1): (u32, u32, u32, u32)) {
+    /// The pyramid level drawn at the current zoom, and the part of the
+    /// image on screen as (x0, y0, x1, y1) in image pixels. `None` before
+    /// the canvas is laid out, or while the image is off screen.
+    pub fn visible_area(&self) -> Option<(usize, (u32, u32, u32, u32))> {
+        if !self.rect.is_positive() {
+            return None;
+        }
+        let lo = self.to_image(self.rect.min);
+        let hi = self.to_image(self.rect.max);
+        let (w, h) = (self.width as f32, self.height as f32);
+        let x0 = lo.x.clamp(0.0, w).floor() as u32;
+        let y0 = lo.y.clamp(0.0, h).floor() as u32;
+        let x1 = hi.x.clamp(0.0, w).ceil() as u32;
+        let y1 = hi.y.clamp(0.0, h).ceil() as u32;
+        (x0 < x1 && y0 < y1).then_some((self.target_level(), (x0, y0, x1, y1)))
+    }
+
+    /// Mark display tiles covering 256 px tiles (col, row) of pyramid level
+    /// `level` as out of date, after [`Render::write_tiles`].
+    pub fn invalidate_tiles(&mut self, level: usize, tiles: &[(u32, u32)]) {
         self.generation += 1;
+        let (w, h) = (self.width, self.height);
+        for &(col, row) in tiles {
+            let (x0, y0) = ((col * TILE) << level, (row * TILE) << level);
+            if x0 < w && y0 < h {
+                let (x1, y1) = (((col + 1) * TILE) << level, ((row + 1) * TILE) << level);
+                self.mark_dirty((x0, y0, x1.min(w), y1.min(h)));
+            }
+        }
+    }
+
+    /// Mark display tiles covering an image-pixel area as out of date.
+    fn mark_dirty(&mut self, (x0, y0, x1, y1): (u32, u32, u32, u32)) {
         for (level, &(lw, lh)) in self.levels.iter().enumerate() {
             let (kx, ky) = (
                 self.width as f32 / lw as f32,
@@ -928,6 +970,21 @@ mod tests {
             egui::Shape::LineSegment { points, .. } => *points,
             _ => panic!("expected LineSegment"),
         }
+    }
+
+    #[test]
+    fn cancelled_writes_change_nothing() {
+        let render = Render::new(Raster::new(300, 300, vec![[0; 4]; 300 * 300]));
+        let tile = vec![vec![[9; 4]; omapix_engine::tiled::TILE_PIXELS]];
+        let cancel = AtomicBool::new(true);
+        assert!(!render.write_tiles(0, &[(1, 1)], &tile, Some(&cancel)));
+        assert_eq!(render.sample_for_test(299, 299), [0; 4]);
+        cancel.store(false, Ordering::Release);
+        assert!(render.write_tiles(0, &[(1, 1)], &tile, Some(&cancel)));
+        assert_eq!(render.sample_for_test(299, 299), [9; 4]);
+        assert_eq!(render.sample_for_test(255, 255), [0; 4]);
+        // The pyramid follows.
+        assert_eq!(render.level_for_test(1).get(149, 149), [9; 4]);
     }
 
     #[test]

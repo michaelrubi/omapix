@@ -108,13 +108,13 @@ pub fn fill_mask(
 }
 
 /// Photoshop's "Stamp Visible": a new layer holding the flattened image,
-/// placed above `above`. Returns the new layer's id.
-pub fn stamp_visible(doc: &mut Document, above: usize) -> u64 {
+/// placed at the top of the stack, outside any group. Returns the new
+/// layer's id.
+pub fn stamp_visible(doc: &mut Document) -> u64 {
     let pixels = Tiled::from_raster(&doc.composite());
     let id = doc.next_layer_id();
     let name = doc.unused_name("Stamp");
-    doc.layers
-        .insert(above + 1, Layer::from_pixels(id, name, pixels));
+    doc.layers.push(Layer::from_pixels(id, name, pixels));
     id
 }
 
@@ -136,8 +136,8 @@ pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u
     let low = Layer::from_pixels(low_id, "Low - color/tone", low_pixels);
     let mut high = Layer::from_raster(high_id, "High - texture", &high_raster);
     high.blend = BlendMode::GrainMerge;
-    doc.layers.insert(above + 1, low);
-    doc.layers.insert(above + 2, high);
+    let at = doc.insert_above(above, low);
+    doc.insert_above(at, high);
     (low_id, high_id)
 }
 
@@ -154,19 +154,25 @@ pub fn dodge_and_burn_layer(doc: &mut Document, above: usize) -> u64 {
     let id = doc.next_layer_id();
     let mut layer = Layer::from_raster(id, "Dodge & Burn", &grey);
     layer.blend = BlendMode::SoftLight;
-    doc.layers.insert(above + 1, layer);
+    doc.insert_above(above, layer);
     id
+}
+
+/// Whether the layer at `index` can be merged into the one below it: both
+/// are in the same group, and the one below has pixels.
+pub fn can_merge_down(doc: &Document, index: usize) -> bool {
+    let (Some(upper), Some(lower)) = (doc.layers.get(index), index.checked_sub(1)) else {
+        return false;
+    };
+    let lower = &doc.layers[lower];
+    !upper.is_group && lower.parent == upper.parent && lower.has_pixels()
 }
 
 /// Merge the layer at `index` into the one below it (Ctrl+E). The result
 /// keeps the lower layer's name, mode, opacity and mask. Returns the merged
-/// layer's id, or `None` if there is no layer below.
+/// layer's id, or `None` if it can't be merged (see [`can_merge_down`]).
 pub fn merge_down(doc: &mut Document, index: usize) -> Option<u64> {
-    if index == 0 || index >= doc.layers.len() {
-        return None;
-    }
-    // Pixels can't be merged into an adjustment layer.
-    if doc.layers[index - 1].adjustment.is_some() {
+    if !can_merge_down(doc, index) {
         return None;
     }
     let upper = doc.layers.remove(index);
@@ -181,6 +187,25 @@ pub fn merge_down(doc: &mut Document, index: usize) -> Option<u64> {
     let merged = composite(&[base, upper], doc.width, doc.height);
     lower.pixels = Tiled::from_raster(&merged);
     Some(lower.id)
+}
+
+/// Flatten the group at `index` into one layer (Photoshop's Merge Group,
+/// Ctrl+E on a group). The layer keeps the group's name, opacity, mask and
+/// blend mode (Normal for Pass Through). Returns its id, or `None` if it
+/// isn't a group.
+pub fn merge_group(doc: &mut Document, index: usize) -> Option<u64> {
+    let group = doc.layers.get(index).filter(|l| l.is_group)?.clone();
+    let span = doc.span(index);
+    let merged = composite(&doc.layers[span.start..index], doc.width, doc.height);
+    let mut layer = group;
+    layer.is_group = false;
+    layer.pixels = Tiled::from_raster(&merged);
+    if layer.blend == BlendMode::PassThrough {
+        layer.blend = BlendMode::Normal;
+    }
+    let id = layer.id;
+    doc.layers.splice(span, [layer]);
+    Some(id)
 }
 
 #[cfg(test)]
@@ -265,9 +290,53 @@ mod tests {
     }
 
     #[test]
+    fn merging_stays_within_groups_and_merges_whole_groups() {
+        let mut doc = doc_with(vec![[40000, 40000, 40000, 65535]; 100], 10, 10);
+        let mut top = Layer::from_raster(
+            doc.next_layer_id(),
+            "top",
+            &Raster::new(10, 10, vec![[65535, 0, 0, 65535]; 100]),
+        );
+        top.opacity = 0.5;
+        let top_id = top.id;
+        doc.insert_above(0, top);
+        let group = doc.group_layer(1);
+        doc.layer_mut(group).unwrap().opacity = 0.5;
+        // "top" is the bottom of its group; the background is outside it.
+        assert!(!can_merge_down(&doc, 1));
+        assert!(!can_merge_down(&doc, 2), "a group isn't merged down");
+        let before = doc.composite();
+
+        assert_eq!(merge_group(&mut doc, 2), Some(group));
+        assert_eq!(merge_group(&mut doc, 0), None);
+        assert_eq!(doc.layers.len(), 2);
+        let merged = doc.layer(group).unwrap();
+        assert!(!merged.is_group && merged.blend == BlendMode::Normal);
+        assert!(doc.layer(top_id).is_none());
+        let after = doc.composite();
+        for c in 0..3 {
+            assert!(after.get(5, 5)[c].abs_diff(before.get(5, 5)[c]) <= 2);
+        }
+        // Now it's a plain layer above the background, it merges down.
+        assert!(can_merge_down(&doc, 1));
+    }
+
+    #[test]
+    fn merge_down_inside_a_group() {
+        let mut doc = doc_with(vec![[40000, 40000, 40000, 65535]; 100], 10, 10);
+        let group = doc.group_layer(0);
+        dodge_and_burn_layer(&mut doc, 0);
+        assert_eq!(doc.layers[1].parent, Some(group));
+        let before = doc.composite();
+        assert!(merge_down(&mut doc, 1).is_some());
+        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(doc.composite().get(5, 5), before.get(5, 5));
+    }
+
+    #[test]
     fn merge_down_bakes_the_blend_mode() {
         let mut doc = doc_with(vec![[40000, 40000, 40000, 65535]; 100], 10, 10);
-        let id = stamp_visible(&mut doc, 0);
+        let id = stamp_visible(&mut doc);
         doc.layer_mut(id).unwrap().blend = BlendMode::Multiply;
         let before = doc.composite();
         merge_down(&mut doc, 1).unwrap();
