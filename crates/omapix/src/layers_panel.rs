@@ -179,6 +179,34 @@ impl LayersPanel {
         }
     }
 
+    /// Open or close a group. Alt+click opens or closes it and every group
+    /// inside it. Closing a group that contains the active layer selects
+    /// the group, as in Photoshop.
+    fn toggle_group(&mut self, editor: &mut Editor, id: u64, recursive: bool) {
+        let open = !self.expanded.contains(&id);
+        let mut targets = vec![id];
+        if recursive {
+            targets.extend(
+                editor
+                    .doc
+                    .layers
+                    .iter()
+                    .filter(|l| l.is_group && editor.doc.is_inside(l.id, id))
+                    .map(|l| l.id),
+            );
+        }
+        for g in targets {
+            if open {
+                self.expanded.insert(g);
+            } else {
+                self.expanded.remove(&g);
+            }
+        }
+        if !open && editor.doc.is_inside(editor.active, id) {
+            select(editor, id);
+        }
+    }
+
     /// Draw the panel. Returns a command for buttons that act like menu items.
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> Option<Command> {
         let mut command = None;
@@ -307,6 +335,16 @@ impl LayersPanel {
             return;
         };
         let doc = &editor.doc;
+        let over_caret = self.rows.iter().any(|(id, _)| {
+            doc.layer(*id).is_some_and(|l| l.is_group)
+                && ui
+                    .ctx()
+                    .read_response(caret_id(*id))
+                    .is_some_and(|r| r.rect.contains(pointer))
+        });
+        if over_caret {
+            return;
+        }
         let line = self.rows.windows(2).find_map(|pair| {
             let [(upper, above), (lower, below)] = pair else {
                 return None;
@@ -484,16 +522,8 @@ impl LayersPanel {
                                 .interact(rect, caret_id(id), Sense::click())
                                 .on_hover_text(if expanded { "Close group" } else { "Open group" });
                             if toggle.clicked() {
-                                if expanded {
-                                    self.expanded.remove(&id);
-                                    // Closing the group around the selected
-                                    // layer selects the group, as in Photoshop.
-                                    if editor.doc.is_inside(editor.active, id) {
-                                        select(editor, id);
-                                    }
-                                } else {
-                                    self.expanded.insert(id);
-                                }
+                                let alt = ui.input(|i| i.modifiers.alt);
+                                self.toggle_group(editor, id, alt);
                             }
                         } else if has_groups {
                             // Line layers up with groups at the same level.
@@ -1797,5 +1827,92 @@ mod tests {
         assert_eq!(h.editor.active, g);
         h.panel.step_selection(&mut h.editor, true);
         assert_eq!(h.editor.active, CURVES);
+    }
+
+    #[test]
+    fn alt_clicking_group_triangle_toggles_nested_groups_and_preserves_clipping() {
+        let mut h = Harness::new();
+        let background = h.background();
+
+        // Build nested groups: outer -> inner -> MULTIPLY.
+        h.editor.active = MULTIPLY;
+        let inner = h.editor.doc.group_layer(1);
+        h.editor.active = inner;
+        let outer = h.editor.doc.group_layer(2);
+        h.editor.active = background;
+
+        // Groups start closed.
+        h.frame(vec![]);
+        assert!(!h.shown(inner));
+        assert!(!h.shown(MULTIPLY));
+
+        // Alt+click on outer caret opens outer and inner.
+        let outer_caret = h.ctx.read_response(caret_id(outer)).unwrap().rect.center();
+        h.modifiers = egui::Modifiers::ALT;
+        h.click(outer_caret);
+        assert!(h.shown(outer));
+        assert!(h.shown(inner));
+        assert!(h.shown(MULTIPLY));
+        assert!(h.panel.expanded.contains(&outer));
+        assert!(h.panel.expanded.contains(&inner));
+        // Alt+click on caret must not clip outer or any layer.
+        assert!(!h.editor.doc.layer(outer).unwrap().clipped);
+        assert_eq!(h.panel.clip_line, None);
+
+        // Select the active layer inside the innermost group.
+        h.modifiers = Default::default();
+        h.click(h.row_point(MULTIPLY));
+        assert_eq!(h.editor.active, MULTIPLY);
+
+        // Alt+click on outer caret closes outer and all nested groups.
+        // Closing a group around the active layer selects the group as in Photoshop,
+        // preventing the active layer's ancestors from immediately reopening.
+        h.modifiers = egui::Modifiers::ALT;
+        h.click(outer_caret);
+        assert_eq!(h.editor.active, outer);
+        assert!(!h.shown(inner));
+        assert!(!h.shown(MULTIPLY));
+        assert!(!h.panel.expanded.contains(&outer));
+        assert!(!h.panel.expanded.contains(&inner));
+
+        // Plain click on outer opens only outer; inner stays closed.
+        h.modifiers = Default::default();
+        h.click(outer_caret);
+        assert!(h.shown(outer));
+        assert!(h.shown(inner));
+        assert!(!h.shown(MULTIPLY));
+        assert!(h.panel.expanded.contains(&outer));
+        assert!(!h.panel.expanded.contains(&inner));
+
+        // Plain click on inner opens inner.
+        let inner_caret = h.ctx.read_response(caret_id(inner)).unwrap().rect.center();
+        h.click(inner_caret);
+        assert!(h.shown(MULTIPLY));
+        assert!(h.panel.expanded.contains(&inner));
+
+        // Plain click on outer closes outer while inner remembers its open state.
+        h.click(outer_caret);
+        assert!(!h.shown(inner));
+        assert!(!h.panel.expanded.contains(&outer));
+        assert!(h.panel.expanded.contains(&inner));
+
+        // Alt+click on outer while closed opens both outer and inner.
+        h.modifiers = egui::Modifiers::ALT;
+        h.click(outer_caret);
+        assert!(h.shown(inner));
+        assert!(h.shown(MULTIPLY));
+        assert!(h.panel.expanded.contains(&outer));
+        assert!(h.panel.expanded.contains(&inner));
+
+        // Alt+click between rows still clips (between top CURVES and outer group).
+        h.frame(vec![]);
+        let upper = h.ctx.read_response(row_id(CURVES)).unwrap().rect;
+        let lower = h.ctx.read_response(row_id(outer)).unwrap().rect;
+        let line = pos2(upper.center().x, (upper.bottom() + lower.top()) / 2.0);
+        h.modifiers = egui::Modifiers::ALT;
+        h.frame(vec![Event::PointerMoved(line)]);
+        h.click(line);
+        assert!(h.editor.doc.layer(CURVES).unwrap().clipped);
+        assert_eq!(h.editor.undo_label(), Some("Create Clipping Mask"));
     }
 }
