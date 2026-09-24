@@ -135,6 +135,49 @@ pub struct LayersPanel {
 }
 
 impl LayersPanel {
+    /// The rows shown, top of the stack first as in Photoshop, leaving out
+    /// what's in closed groups. The groups the active layer is in count as
+    /// open, as the panel opens them to show it.
+    fn rows(&self, doc: &Document, active: u64) -> Vec<u64> {
+        let open: HashSet<u64> = ancestors(doc, active).collect();
+        doc.layers
+            .iter()
+            .rev()
+            .filter(|l| ancestors(doc, l.id).all(|g| self.expanded.contains(&g) || open.contains(&g)))
+            .map(|l| l.id)
+            .collect()
+    }
+
+    /// The layer on the row above (`up`) or below the active one's, if any.
+    pub fn row_beside(&self, doc: &Document, active: u64, up: bool) -> Option<u64> {
+        let rows = self.rows(doc, active);
+        let at = rows.iter().position(|&id| id == active)?;
+        if up {
+            at.checked_sub(1).map(|i| rows[i])
+        } else {
+            rows.get(at + 1).copied()
+        }
+    }
+
+    /// Alt+] / Alt+[: select just the layer on the row above or below, as
+    /// clicking it does. Does nothing at the top or bottom.
+    pub fn step_selection(&mut self, editor: &mut Editor, up: bool) {
+        if let Some(id) = self.row_beside(&editor.doc, editor.active, up) {
+            select(editor, id);
+            self.anchor = Some(id);
+        }
+    }
+
+    /// Open or close group `id`.
+    #[cfg(test)]
+    pub fn set_group_expanded(&mut self, id: u64, expanded: bool) {
+        if expanded {
+            self.expanded.insert(id);
+        } else {
+            self.expanded.remove(&id);
+        }
+    }
+
     /// Draw the panel. Returns a command for buttons that act like menu items.
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> Option<Command> {
         let mut command = None;
@@ -154,15 +197,7 @@ impl LayersPanel {
                 self.expanded.retain(|id| doc.layer(*id).is_some_and(|l| l.is_group));
                 // Show the selected layer, wherever it is.
                 self.expanded.extend(ancestors(doc, editor.active));
-                // Top of the stack first, as in Photoshop, leaving out what's
-                // in closed groups.
-                let ids: Vec<u64> = doc
-                    .layers
-                    .iter()
-                    .rev()
-                    .filter(|l| ancestors(doc, l.id).all(|g| self.expanded.contains(&g)))
-                    .map(|l| l.id)
-                    .collect();
+                let ids = self.rows(doc, editor.active);
                 self.clip_line(ui, editor, theme);
                 let mut rows = Vec::with_capacity(ids.len());
                 for &id in &ids {
@@ -1659,5 +1694,85 @@ mod tests {
             layer_context_menu(ui, &mut h.editor, &mut command, &mut renaming, CURVES);
         });
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn layer_navigation_steps_through_rows_and_groups() {
+        let mut h = Harness::new();
+        let background = h.background();
+        // Stack top first: CURVES, MULTIPLY, background.
+        assert_eq!(h.editor.active, CURVES);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // At top: step up does nothing (no wrap).
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
+
+        // Step down to MULTIPLY (pixel layer: targets pixels).
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, MULTIPLY);
+        assert_eq!(h.editor.target, Target::Pixels);
+        assert_eq!(h.editor.selected(), [MULTIPLY]);
+
+        // Add a mask to CURVES. When stepping back up to it, target becomes Mask.
+        h.editor.doc.layer_mut(CURVES).unwrap().mask =
+            Some(omapix_engine::layer::Mask::white(60, 40));
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
+        assert_eq!(h.editor.target, Target::Mask);
+
+        // Step back down to MULTIPLY.
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, MULTIPLY);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // Step down to background.
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, background);
+        assert_eq!(h.editor.target, Target::Pixels);
+
+        // At bottom: step down does nothing (no wrap).
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, background);
+
+        // Now group MULTIPLY into a new group.
+        h.editor.active = MULTIPLY;
+        let g = h.editor.doc.group_layer(1);
+        // Stack top first: CURVES, g, [MULTIPLY], background.
+        // Group starts closed.
+        h.panel.set_group_expanded(g, false);
+        h.editor.active = background;
+
+        // From background, stepping up should hit group `g`, skipping closed contents (MULTIPLY).
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, g);
+
+        // From group `g`, stepping up should hit CURVES.
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
+
+        // From CURVES, stepping down hits group `g`.
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, g);
+
+        // Now open the group `g`.
+        h.panel.set_group_expanded(g, true);
+
+        // From CURVES down: CURVES -> g -> MULTIPLY -> background.
+        h.editor.active = CURVES;
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, g);
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, MULTIPLY);
+        h.panel.step_selection(&mut h.editor, false);
+        assert_eq!(h.editor.active, background);
+
+        // And back up: background -> MULTIPLY -> g -> CURVES.
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, MULTIPLY);
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, g);
+        h.panel.step_selection(&mut h.editor, true);
+        assert_eq!(h.editor.active, CURVES);
     }
 }
