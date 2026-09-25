@@ -14,6 +14,7 @@ mod layers_panel;
 mod live;
 mod properties_panel;
 mod recent;
+mod settings;
 mod theme;
 mod tools;
 

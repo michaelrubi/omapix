@@ -67,7 +67,7 @@ pub fn high_pass(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
 }
 
 /// Algorithm used by Smart Sharpen to remove blur.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SharpenRemove {
     GaussianBlur,
     LensBlur,
@@ -83,7 +83,7 @@ impl SharpenRemove {
 }
 
 /// Settings for Photoshop's Smart Sharpen filter.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SmartSharpenOptions {
     /// Sharpening strength in percent (100 = 100 %).
     pub amount: f32,
@@ -113,7 +113,7 @@ impl Default for SmartSharpenOptions {
 }
 
 /// Settings for Photoshop's Reduce Noise filter.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReduceNoiseOptions {
     /// Noise reduction strength (0–10).
     pub strength: f32,
@@ -126,7 +126,7 @@ pub struct ReduceNoiseOptions {
 }
 
 /// Quality setting for Photoshop's Smart Blur filter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SmartBlurQuality {
     Low,
     Medium,
@@ -134,7 +134,7 @@ pub enum SmartBlurQuality {
 }
 
 /// Mode setting for Photoshop's Smart Blur filter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SmartBlurMode {
     Normal,
     EdgeOnly,
@@ -142,7 +142,7 @@ pub enum SmartBlurMode {
 }
 
 /// Settings for Photoshop's Smart Blur filter.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SmartBlurOptions {
     /// Blur radius in pixels (0.1–100 px).
     pub radius: f32,
@@ -157,7 +157,7 @@ pub struct SmartBlurOptions {
 
 /// A filter from the Filter menu, applied to one layer's pixels, with its
 /// settings (so it can be previewed live, then applied).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayerFilter {
     GaussianBlur { radius: f32 },
     HighPass { radius: f32 },
