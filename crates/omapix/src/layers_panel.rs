@@ -323,37 +323,17 @@ impl LayersPanel {
         });
         ui.horizontal(|ui| {
             ui.label("Lock");
-            let btn_trans = Button::selectable(locks.transparency, LOCK_TRANSPARENT);
-            if ui
-                .add_enabled(has_pixels, btn_trans)
-                .on_hover_text("Lock transparent pixels (/)")
-                .clicked()
-            {
-                self.command = Some(Command::LockTransparent);
-            }
-            let btn_pixels = Button::selectable(locks.pixels, LOCK_PIXELS);
-            if ui
-                .add_enabled(has_pixels, btn_pixels)
-                .on_hover_text("Lock image pixels")
-                .clicked()
-            {
-                self.command = Some(Command::LockPixels);
-            }
-            let btn_pos = Button::selectable(locks.position, LOCK_POSITION);
-            if ui
-                .add(btn_pos)
-                .on_hover_text("Lock position")
-                .clicked()
-            {
-                self.command = Some(Command::LockPosition);
-            }
-            let btn_all = Button::selectable(locks.all, LOCK);
-            if ui
-                .add(btn_all)
-                .on_hover_text("Lock all (Ctrl+/)")
-                .clicked()
-            {
-                self.command = Some(Command::LockAll);
+            let buttons = [
+                (LOCK_TRANSPARENT, locks.transparency, has_pixels, "Lock transparent pixels (/)", Command::LockTransparent),
+                (LOCK_PIXELS, locks.pixels, has_pixels, "Lock image pixels", Command::LockPixels),
+                (LOCK_POSITION, locks.position, true, "Lock position", Command::LockPosition),
+                (LOCK, locks.all, true, "Lock all (Ctrl+/)", Command::LockAll),
+            ];
+            for (icon, locked, enabled, tip, cmd) in buttons {
+                let button = Button::selectable(locked, icon);
+                if ui.add_enabled(enabled, button).on_hover_text(tip).clicked() {
+                    self.command = Some(cmd);
+                }
             }
         });
     }

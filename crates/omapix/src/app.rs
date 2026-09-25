@@ -9,7 +9,7 @@ use omapix_engine::adjust::Eyedropper;
 use omapix_engine::brush::Paint;
 use omapix_engine::clip::{self, Clip};
 use omapix_engine::filters::LayerFilter;
-use omapix_engine::layer::{Layer, Mask};
+use omapix_engine::layer::{Layer, Locks, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{
@@ -917,34 +917,6 @@ impl App {
             .is_some_and(|l| l.is_group)
     }
 
-    fn active_is_locked_transparent(&self) -> bool {
-        self.editor
-            .as_ref()
-            .and_then(|e| e.doc.layer(e.active))
-            .is_some_and(|l| l.locks.transparency)
-    }
-
-    fn active_is_locked_pixels(&self) -> bool {
-        self.editor
-            .as_ref()
-            .and_then(|e| e.doc.layer(e.active))
-            .is_some_and(|l| l.locks.pixels)
-    }
-
-    fn active_is_locked_position(&self) -> bool {
-        self.editor
-            .as_ref()
-            .and_then(|e| e.doc.layer(e.active))
-            .is_some_and(|l| l.locks.position)
-    }
-
-    fn active_is_locked_all(&self) -> bool {
-        self.editor
-            .as_ref()
-            .and_then(|e| e.doc.layer(e.active))
-            .is_some_and(|l| l.locks.all)
-    }
-
     fn active_is_clipped(&self) -> bool {
         self.editor
             .as_ref()
@@ -1041,14 +1013,12 @@ impl App {
                 ui.separator();
                 let release = self.active_is_clipped().then(|| "Release Clipping Mask".to_owned());
                 self.menu_item(ui, Command::ClippingMask, release);
-                let unlock = self.active_is_locked_transparent().then(|| "Unlock Transparent Pixels".to_owned());
-                self.menu_item(ui, Command::LockTransparent, unlock);
-                let unlock = self.active_is_locked_pixels().then(|| "Unlock Image Pixels".to_owned());
-                self.menu_item(ui, Command::LockPixels, unlock);
-                let unlock = self.active_is_locked_position().then(|| "Unlock Position".to_owned());
-                self.menu_item(ui, Command::LockPosition, unlock);
-                let unlock = self.active_is_locked_all().then(|| "Unlock All".to_owned());
-                self.menu_item(ui, Command::LockAll, unlock);
+                let locks = self.editor.as_ref().and_then(|e| e.doc.layer(e.active)).map(|l| l.locks);
+                for cmd in LOCKS {
+                    let mut locks = locks.unwrap_or_default();
+                    let unlock = (*lock_flag(&mut locks, cmd)).then(|| cmd.label().replacen("Lock", "Unlock", 1));
+                    self.menu_item(ui, cmd, unlock);
+                }
                 ui.separator();
                 self.menu_item(ui, Command::BlendingOptions, None);
                 ui.separator();
@@ -2041,6 +2011,24 @@ fn radius_field(ui: &mut Ui, radius: &mut f32) {
     });
 }
 
+/// The Lock commands, in Photoshop's order.
+const LOCKS: [Command; 4] = [
+    Command::LockTransparent,
+    Command::LockPixels,
+    Command::LockPosition,
+    Command::LockAll,
+];
+
+/// The flag a Lock command toggles.
+fn lock_flag(locks: &mut Locks, cmd: Command) -> &mut bool {
+    match cmd {
+        Command::LockTransparent => &mut locks.transparency,
+        Command::LockPixels => &mut locks.pixels,
+        Command::LockPosition => &mut locks.position,
+        _ => &mut locks.all,
+    }
+}
+
 /// Fill the active layer (or its mask) where selected, like Photoshop's
 /// Alt+Backspace, as an undo step called `label`. `None` clears instead
 /// (Delete): pixels to transparency, masks to the background colour's grey,
@@ -2174,71 +2162,26 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 });
             }
         }
-        Command::LockTransparent => {
-            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.transparency);
+        Command::LockTransparent | Command::LockPixels | Command::LockPosition | Command::LockAll => {
+            let mut locks = editor.doc.layer(id).map(|l| l.locks).unwrap_or_default();
+            let lock = !*lock_flag(&mut locks, cmd);
             let label = if lock {
-                "Lock Transparent Pixels"
+                cmd.label().to_owned()
             } else {
-                "Unlock Transparent Pixels"
+                cmd.label().replacen("Lock", "Unlock", 1)
             };
-            editor.edit(label, |doc, _| {
+            // Only layers with pixels have pixels to lock.
+            let pixels = matches!(cmd, Command::LockTransparent | Command::LockPixels);
+            editor.edit(&label, |doc, _| {
                 for &s in &selected {
-                    if let Some(l) = doc.layer_mut(s).filter(|l| l.has_pixels()) {
-                        l.locks.transparency = lock;
-                        if !lock {
-                            l.locks.all = false;
-                        }
-                    }
-                }
-            });
-        }
-        Command::LockPixels => {
-            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.pixels);
-            let label = if lock {
-                "Lock Image Pixels"
-            } else {
-                "Unlock Image Pixels"
-            };
-            editor.edit(label, |doc, _| {
-                for &s in &selected {
-                    if let Some(l) = doc.layer_mut(s).filter(|l| l.has_pixels()) {
-                        l.locks.pixels = lock;
-                        if !lock {
-                            l.locks.all = false;
-                        }
-                    }
-                }
-            });
-        }
-        Command::LockPosition => {
-            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.position);
-            let label = if lock {
-                "Lock Position"
-            } else {
-                "Unlock Position"
-            };
-            editor.edit(label, |doc, _| {
-                for &s in &selected {
-                    if let Some(l) = doc.layer_mut(s) {
-                        l.locks.position = lock;
-                        if !lock {
-                            l.locks.all = false;
-                        }
-                    }
-                }
-            });
-        }
-        Command::LockAll => {
-            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.all);
-            let label = if lock {
-                "Lock All"
-            } else {
-                "Unlock All"
-            };
-            editor.edit(label, |doc, _| {
-                for &s in &selected {
-                    if let Some(l) = doc.layer_mut(s) {
+                    let Some(l) = doc.layer_mut(s).filter(|l| !pixels || l.has_pixels()) else {
+                        continue;
+                    };
+                    if cmd == Command::LockAll {
                         l.locks.set_all(lock);
+                    } else {
+                        *lock_flag(&mut l.locks, cmd) = lock;
+                        l.locks.all &= lock;
                     }
                 }
             });
