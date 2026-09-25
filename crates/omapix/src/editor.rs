@@ -11,7 +11,7 @@ use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
 use omapix_engine::reduced::Reduced;
-use omapix_engine::selection::{Combine, Selection};
+use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
 use omapix_engine::{
     BlendMode, DisplayTransform, Document, NoiseOptions, Pixel, Raster, composite, filters, ops,
@@ -51,6 +51,21 @@ pub enum View {
     },
     /// What adding noise with `options` above `layer` would produce.
     AddNoise { layer: u64, options: NoiseOptions },
+    /// One channel of the finished image, in grey (the Channels panel).
+    Channel(Channel),
+    /// A saved alpha channel, in grey.
+    Alpha(u64),
+}
+
+impl View {
+    /// Whether it's rendered whole by [`render_view`], rather than tile by
+    /// tile, in place, by [`draw_tiles`].
+    fn whole(self) -> bool {
+        matches!(
+            self,
+            View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. } | View::Alpha(_)
+        )
+    }
 }
 
 /// A whole new render, and for separation previews the flattened image it
@@ -703,7 +718,7 @@ impl Editor {
         let Some(render) = self.canvas.render() else {
             return;
         };
-        if matches!(self.view, View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }) {
+        if self.view.whole() {
             return;
         }
         let data = draw_tiles(
@@ -881,6 +896,12 @@ impl Editor {
     /// Combine a new selection with the current one (a marquee, lasso or
     /// Load Selection), as one undo step. Also shows the selection edges
     /// again if Ctrl+H hid them.
+    /// Load a channel of the finished image as a selection, combined `how`.
+    pub fn load_channel(&mut self, channel: Channel, how: Combine) {
+        let composite = self.doc.composite();
+        self.set_selection("Load Selection", Selection::from_channel(&composite, channel), how);
+    }
+
     pub fn set_selection(&mut self, label: &str, selection: Selection, how: Combine) {
         if self.edit(label, |doc, _| {
             let combined = match (&doc.selection, how) {
@@ -1068,6 +1089,11 @@ impl Editor {
         {
             self.set_view(View::Image);
         }
+        if let View::Alpha(id) = self.view
+            && self.doc.channel(id).is_none()
+        {
+            self.set_view(View::Image);
+        }
 
         if let Some(rendering) = &mut self.rendering {
             loop {
@@ -1205,7 +1231,7 @@ impl Editor {
         let in_place = self
             .canvas
             .render()
-            .filter(|_| !matches!(view, View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }));
+            .filter(|_| !view.whole());
         if let Some(render) = in_place {
             let job = InPlace {
                 doc,
@@ -1375,7 +1401,14 @@ pub(crate) fn render_view(
     };
     match view {
         View::Image => (Render::new(doc.composite()), None),
-        View::Mask(_) | View::MaskOverlay(_) => {
+        View::Alpha(id) => {
+            let image = match doc.channel(id) {
+                Some(c) => c.pixels.map(|v| [v, v, v, u16::MAX]).to_raster(),
+                None => doc.composite(),
+            };
+            (Render::new(image), None)
+        }
+        View::Mask(_) | View::MaskOverlay(_) | View::Channel(_) => {
             let mut image = Raster::new(
                 doc.width,
                 doc.height,
@@ -1495,10 +1528,20 @@ fn draw_tiles(
             }
             out
         }
+        View::Channel(channel) => {
+            let mut out = composite::composite_tiles(layers, tiles, groups);
+            for p in out.iter_mut().flatten() {
+                let v = channel.value(*p);
+                *p = [v, v, v, u16::MAX];
+            }
+            out
+        }
+        // The rest are drawn whole by `render_view`.
         View::Image
         | View::Separation { .. }
         | View::Filter { .. }
-        | View::AddNoise { .. } => composite::composite_tiles(layers, tiles, groups),
+        | View::AddNoise { .. }
+        | View::Alpha(_) => composite::composite_tiles(layers, tiles, groups),
     }
 }
 
@@ -1833,6 +1876,43 @@ mod tests {
             assert_eq!(e.canvas.sample(x, y), Some(full.sample_for_test(x, y)));
         }
         assert_ne!(e.canvas.sample(400, 300), e.canvas.sample(400, 380));
+    }
+
+    #[test]
+    fn channel_views_show_one_channel_or_a_saved_selection_in_grey() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let image = Raster::new(600, 400, vec![[10000, 20000, 40000, 65535]; 600 * 400]);
+        e.edit("Fill", |doc, _| doc.layers[0].pixels = Tiled::from_raster(&image));
+        let (render, _) = render_view(&e.doc, View::Channel(Channel::Green), RED, None);
+        assert_eq!(render.sample_for_test(5, 5), [20000, 20000, 20000, 65535]);
+
+        // Painting red while viewing Red updates the grey in place.
+        e.set_view(View::Channel(Channel::Red));
+        let (render, _) = render_view(&e.doc, e.view, e.overlay_colour, None);
+        e.canvas.set_render(Arc::new(render));
+        e.rendered = (e.revision, e.view_generation);
+        assert!(e.begin_stroke(hard(40.0), Paint::Color([65535, 0, 0, 65535]), Sample::Current));
+        e.stroke_to(300.0, 200.0);
+        e.end_stroke();
+        assert_eq!(e.canvas.sample(300, 200), Some([65535, 65535, 65535, 65535]));
+        assert_eq!(e.canvas.sample(10, 10), Some([10000, 10000, 10000, 65535]));
+
+        e.edit("Save Selection", |doc, _| {
+            doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (10.0, 10.0)));
+            doc.save_selection();
+        });
+        let id = e.doc.channels[0].id;
+        let (render, _) = render_view(&e.doc, View::Alpha(id), RED, None);
+        assert_eq!(render.sample_for_test(5, 5), [65535; 4]);
+        assert_eq!(render.sample_for_test(50, 5), [0, 0, 0, 65535]);
+        // Undoing the save leaves the channel's view.
+        e.set_view(View::Alpha(id));
+        e.update(&ctx);
+        assert_eq!(e.view(), View::Alpha(id));
+        e.undo();
+        e.update(&ctx);
+        assert_eq!(e.view(), View::Image);
     }
 
     #[test]

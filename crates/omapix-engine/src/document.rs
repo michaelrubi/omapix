@@ -2,7 +2,17 @@ use std::path::PathBuf;
 
 use crate::layer::Layer;
 use crate::selection::Selection;
+use crate::tiled::Tiled;
 use crate::{ColorProfile, Pixel, Raster};
+
+/// A saved selection: Photoshop's alpha channel.
+#[derive(Clone)]
+pub struct AlphaChannel {
+    pub id: u64,
+    pub name: String,
+    /// How selected each pixel is, 0 to 65535, like a mask.
+    pub pixels: Tiled<u16>,
+}
 
 /// An open image: a stack of layers in one colour space.
 ///
@@ -24,6 +34,8 @@ pub struct Document {
     /// The active selection; `None` means everything (Photoshop's
     /// "nothing selected").
     pub selection: Option<Selection>,
+    /// Saved selections, in the order they were made.
+    pub channels: Vec<AlphaChannel>,
     next_id: u64,
 }
 
@@ -42,6 +54,7 @@ impl Document {
             path,
             saved_path: None,
             selection: None,
+            channels: Vec::new(),
             width,
             height,
             profile,
@@ -81,6 +94,22 @@ impl Document {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    /// Save the selection as a new alpha channel (Select › Save Selection),
+    /// returning its id, or `None` if nothing is selected.
+    pub fn save_selection(&mut self) -> Option<u64> {
+        let pixels = self.selection.as_ref()?.coverage.clone();
+        let name = (1..)
+            .map(|n| format!("Alpha {n}"))
+            .find(|name| self.channels.iter().all(|c| &c.name != name))?;
+        let id = self.next_layer_id();
+        self.channels.push(AlphaChannel { id, name, pixels });
+        Some(id)
+    }
+
+    pub fn channel(&self, id: u64) -> Option<&AlphaChannel> {
+        self.channels.iter().find(|c| c.id == id)
     }
 
     pub fn index_of(&self, id: u64) -> Option<usize> {
@@ -151,6 +180,21 @@ mod tests {
         assert_eq!(doc.sample_below(2, 10, 5), None);
         // Non-existent layer returns None
         assert_eq!(doc.sample_below(999, 5, 5), None);
+    }
+
+    #[test]
+    fn saving_the_selection_makes_numbered_alpha_channels() {
+        let image = Raster::new(8, 8, vec![[0, 0, 0, 65535]; 64]);
+        let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        assert_eq!(doc.save_selection(), None, "nothing selected");
+        doc.selection = Some(Selection::rectangle(8, 8, (0.0, 0.0), (4.0, 8.0)));
+        let first = doc.save_selection().unwrap();
+        let second = doc.save_selection().unwrap();
+        let names: Vec<_> = doc.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Alpha 1", "Alpha 2"]);
+        assert_ne!(first, second);
+        let saved = &doc.channel(first).unwrap().pixels;
+        assert_eq!((saved.get(1, 1), saved.get(6, 1)), (65535, 0));
     }
 }
 

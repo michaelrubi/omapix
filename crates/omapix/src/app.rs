@@ -58,7 +58,16 @@ struct PendingClip {
 enum RightTab {
     #[default]
     Layers,
+    Channels,
     History,
+}
+
+impl RightTab {
+    const ALL: [(RightTab, Command); 3] = [
+        (RightTab::Layers, Command::ShowLayers),
+        (RightTab::Channels, Command::ShowChannels),
+        (RightTab::History, Command::ShowHistory),
+    ];
 }
 
 enum Dialog {
@@ -640,7 +649,9 @@ impl App {
         let no_pixels = layer.is_some_and(|l| !l.has_pixels());
         match cmd {
             Command::ReopenLast => self.recent.last().is_some(),
-            Command::ShowLayers | Command::ShowHistory => true,
+            Command::ShowLayers | Command::ShowChannels | Command::ShowHistory => true,
+            Command::SaveSelection => editor.doc.selection.is_some(),
+            Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some(),
             Command::Redo => editor.redo_label().is_some(),
             // Something must be left, and layer must be deletable.
@@ -712,6 +723,7 @@ impl App {
                 }
             }
             Command::ShowLayers => self.right_tab = RightTab::Layers,
+            Command::ShowChannels => self.right_tab = RightTab::Channels,
             Command::ShowHistory => self.right_tab = RightTab::History,
             Command::Quit => self.guard(Then::Quit, ctx),
             Command::Save => self.save(ctx),
@@ -1125,6 +1137,7 @@ impl App {
                     self.menu_item(ui, Command::LoadSelectionTransparency, None);
                     self.menu_item(ui, Command::LoadSelectionLayerMask, None);
                 });
+                self.menu_item(ui, Command::SaveSelection, None);
             });
             ui.menu_button("Image", |ui| {
                 ui.menu_button("Adjustments", |ui| {
@@ -1173,18 +1186,10 @@ impl App {
                 self.menu_item(ui, Command::MaskOverlay, None);
             });
             ui.menu_button("Window", |ui| {
-                let layers_label = if self.right_tab == RightTab::Layers {
-                    "✓ Layers"
-                } else {
-                    "   Layers"
-                };
-                let history_label = if self.right_tab == RightTab::History {
-                    "✓ History"
-                } else {
-                    "   History"
-                };
-                self.menu_item(ui, Command::ShowLayers, Some(layers_label.to_string()));
-                self.menu_item(ui, Command::ShowHistory, Some(history_label.to_string()));
+                for (tab, command) in RightTab::ALL {
+                    let tick = if self.right_tab == tab { "✓" } else { "  " };
+                    self.menu_item(ui, command, Some(format!("{tick} {}", command.label())));
+                }
             });
         });
     }
@@ -1199,6 +1204,9 @@ impl App {
                         Some("Viewing layer mask — Alt+click the mask or press Esc to return")
                     }
                     View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
+                    View::Channel(_) | View::Alpha(_) => {
+                        Some("Viewing one channel — click RGB in Channels, or press Ctrl+2 or Esc to return")
+                    }
                     _ => None,
                 };
                 if let Some(text) = showing {
@@ -1620,13 +1628,17 @@ impl App {
         });
     }
 
-    /// Esc disarms an eyedropper, or leaves mask view or the mask overlay
-    /// (the editor leaves them itself when their mask goes away).
+    /// Esc disarms an eyedropper, or leaves mask view, the mask overlay or
+    /// a channel view (the editor leaves them itself when what they show
+    /// goes away).
     fn check_escape(&mut self, ctx: &egui::Context) {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let mask_view = matches!(editor.view(), View::Mask(_) | View::MaskOverlay(_));
+        let mask_view = matches!(
+            editor.view(),
+            View::Mask(_) | View::MaskOverlay(_) | View::Channel(_) | View::Alpha(_)
+        );
         let escape = (mask_view || self.properties.eyedropper.is_some())
             && self.dialog.is_none()
             && !ctx.egui_wants_keyboard_input()
@@ -2494,9 +2506,23 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 Command::LoadSelectionBlue => Channel::Blue,
                 _ => Channel::Luminosity,
             };
-            let composite = editor.doc.composite();
-            editor.set_selection("Load Selection", Selection::from_channel(&composite, channel), Combine::Replace);
+            editor.load_channel(channel, Combine::Replace);
         }
+        Command::SaveSelection => {
+            editor.edit("Save Selection", |doc, _| {
+                doc.save_selection();
+            });
+        }
+        Command::DeleteChannel => {
+            if let View::Alpha(channel) = editor.view() {
+                editor.set_view(View::Image);
+                editor.edit("Delete Channel", |doc, _| doc.channels.retain(|c| c.id != channel));
+            }
+        }
+        Command::ViewComposite => editor.set_view(View::Image),
+        Command::ViewRed => editor.set_view(View::Channel(Channel::Red)),
+        Command::ViewGreen => editor.set_view(View::Channel(Channel::Green)),
+        Command::ViewBlue => editor.set_view(View::Channel(Channel::Blue)),
         Command::LoadSelectionTransparency => {
             if let Some(layer) = editor.doc.layer(editor.active)
                 && layer.has_pixels()
@@ -2609,24 +2635,16 @@ impl eframe::App for App {
                 .resizable(true)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let layers_active = self.right_tab == RightTab::Layers;
-                        let history_active = self.right_tab == RightTab::History;
-
-                        let tab_btn = |ui: &mut Ui, label: &str, active: bool| {
-                            let text = if active {
-                                RichText::new(label).color(self.theme.foreground).strong()
+                        for (tab, command) in RightTab::ALL {
+                            let text = if self.right_tab == tab {
+                                RichText::new(command.label()).color(self.theme.foreground).strong()
                             } else {
-                                RichText::new(label).color(self.theme.dark_foreground)
+                                RichText::new(command.label()).color(self.theme.dark_foreground)
                             };
-                            ui.add(Button::new(text).frame(false))
-                        };
-
-                        if tab_btn(ui, "Layers", layers_active).clicked() {
-                            self.right_tab = RightTab::Layers;
-                        }
-                        ui.add_space(8.0);
-                        if tab_btn(ui, "History", history_active).clicked() {
-                            self.right_tab = RightTab::History;
+                            if ui.add(Button::new(text).frame(false)).clicked() {
+                                self.right_tab = tab;
+                            }
+                            ui.add_space(8.0);
                         }
                     });
                     ui.separator();
@@ -2635,6 +2653,9 @@ impl eframe::App for App {
                         RightTab::Layers => {
                             self.properties.show(ui, editor, &self.theme);
                             command = self.layers.show(ui, editor, &self.theme);
+                        }
+                        RightTab::Channels => {
+                            command = crate::channels_panel::show(ui, editor, &self.theme);
                         }
                         RightTab::History => {
                             command = self.history.show(ui, editor, &self.theme);
@@ -4553,6 +4574,34 @@ mod tests {
         assert!(!app.enabled(Command::Close));
         assert!(app.dialog.is_none());
         assert!(app.separation_radius.is_none());
+    }
+
+    #[test]
+    fn saving_viewing_and_deleting_alpha_channels() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::ViewRed, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().view(), View::Channel(Channel::Red));
+        assert!(!app.enabled(Command::DeleteChannel), "only an alpha channel can be deleted");
+        app.run(Command::ViewComposite, &ctx);
+
+        app.run(Command::SaveSelection, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        assert_eq!(editor.undo_label(), Some("Save Selection"));
+        let channel = &editor.doc.channels[0];
+        assert_eq!((channel.pixels.get(150, 150), channel.pixels.get(300, 150)), (65535, 0));
+        let id = channel.id;
+        editor.set_view(View::Alpha(id));
+
+        app.run(Command::DeleteChannel, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        assert!(editor.doc.channels.is_empty());
+        assert_eq!(editor.view(), View::Image);
+        editor.undo();
+        assert_eq!(editor.doc.channels[0].id, id);
+
+        app.run(Command::Deselect, &ctx);
+        assert!(!app.enabled(Command::SaveSelection), "nothing to save");
     }
 
     #[test]

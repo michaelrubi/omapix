@@ -1,6 +1,7 @@
 mod app;
 mod blending_options;
 mod canvas;
+mod channels_panel;
 mod clipboard;
 mod commands;
 mod drop;

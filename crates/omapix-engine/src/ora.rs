@@ -8,7 +8,8 @@
 //!   each layer actually uses;
 //! - blend modes under the names Krita uses (see [`BlendMode::ora_name`]);
 //! - layer masks as extra 16-bit grey PNGs, referenced by `omapix:*`
-//!   attributes that other apps ignore;
+//!   attributes that other apps ignore, and alpha channels (saved
+//!   selections) the same way, as `omapix:channel` elements after the stack;
 //! - layer groups as nested stacks, with `isolation="auto"` for Pass
 //!   Through and `isolation="isolate"` for groups with their own blend mode.
 
@@ -25,6 +26,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::blend::BlendMode;
+use crate::document::AlphaChannel;
 use crate::layer::{Layer, Locks, Mask};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::{ColorProfile, Document, Error, Pixel, Result};
@@ -137,6 +139,15 @@ fn xml_escape(s: &str) -> String {
 /// An encoded PNG: archive path, bytes, and top-left position.
 type Png = (String, Vec<u8>, (u32, u32));
 
+/// Encode a mask or alpha channel as a grey PNG called `name`, cropped to
+/// the area it uses, plus its fill value for the rest.
+fn encode_grey(pixels: &Tiled<u16>, name: String) -> Result<(Png, u16)> {
+    // An untouched one still needs a file; use one pixel.
+    let area = used_area(pixels).unwrap_or((0, 0, 1, 1));
+    let png = encode_png(&crop(pixels, area), area.2, area.3, 1, None)?;
+    Ok(((name, png, (area.0, area.1)), pixels.fill()))
+}
+
 struct Encoded {
     layer_png: Option<Png>,
     /// Plus the mask's fill value for areas outside the PNG.
@@ -230,16 +241,7 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
                 None => None,
             };
             let mask_png = match &layer.mask {
-                Some(mask) => {
-                    // An untouched mask still needs a file; use one pixel.
-                    let area = used_area(&mask.pixels).unwrap_or((0, 0, 1, 1));
-                    let data = crop(&mask.pixels, area);
-                    let png = encode_png(&data, area.2, area.3, 1, None)?;
-                    Some((
-                        (format!("data/mask{i}.png"), png, (area.0, area.1)),
-                        mask.pixels.fill(),
-                    ))
-                }
+                Some(mask) => Some(encode_grey(&mask.pixels, format!("data/mask{i}.png"))?),
                 None => None,
             };
             Ok(Encoded {
@@ -247,6 +249,12 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
                 mask_png,
             })
         })
+        .collect::<Result<_>>()?;
+    let channels: Vec<(Png, u16)> = doc
+        .channels
+        .par_iter()
+        .enumerate()
+        .map(|(i, c)| encode_grey(&c.pixels, format!("data/channel{i}.png")))
         .collect::<Result<_>>()?;
 
     let merged = doc.composite();
@@ -259,7 +267,14 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
         "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{w}\" h=\"{h}\" xmlns:omapix=\"{NAMESPACE}\">\n<stack>\n"
     );
     write_stack(&mut xml, doc, &encoded, None);
-    xml.push_str("</stack>\n</image>\n");
+    xml.push_str("</stack>\n");
+    for (c, ((src, _, (x, y)), fill)) in doc.channels.iter().zip(&channels) {
+        xml.push_str(&format!(
+            "<omapix:channel name=\"{}\" src=\"{src}\" x=\"{x}\" y=\"{y}\" fill=\"{fill}\"/>\n",
+            xml_escape(&c.name)
+        ));
+    }
+    xml.push_str("</image>\n");
 
     // Write to a temporary file and rename, so a failed save never
     // destroys the previous version.
@@ -291,6 +306,9 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
         if let Some(((name, png, _), _)) = &enc.mask_png {
             write(&mut zip, name, png, stored)?;
         }
+    }
+    for ((name, png, _), _) in &channels {
+        write(&mut zip, name, png, stored)?;
     }
     write(&mut zip, "mergedimage.png", &merged_png, stored)?;
     write(&mut zip, "Thumbnails/thumbnail.png", &thumbnail, stored)?;
@@ -344,11 +362,16 @@ struct LayerEntry {
     parent: Option<usize>,
 }
 
-/// The layers in stack.xml, top first, groups before what's in them.
-fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
+/// An alpha channel in stack.xml: name, PNG, position and fill.
+type ChannelEntry = (String, String, (u32, u32), u16);
+
+/// The layers in stack.xml, top first, groups before what's in them, and
+/// the alpha channels.
+fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>, Vec<ChannelEntry>)> {
     let mut reader = quick_xml::Reader::from_str(xml);
     let (mut w, mut h) = (0, 0);
     let mut layers = Vec::new();
+    let mut channels = Vec::new();
     // The stacks we're inside: `None` for the image's own stack, or the
     // entry of a group.
     let mut open: Vec<Option<usize>> = Vec::new();
@@ -388,6 +411,15 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
             }
             "stack" => true,
             "layer" => false,
+            "omapix:channel" => {
+                channels.push((
+                    attrs.get("name").cloned().unwrap_or_default(),
+                    attrs.get("src").cloned().unwrap_or_default(),
+                    (num("x").unwrap_or(0.0) as u32, num("y").unwrap_or(0.0) as u32),
+                    num("fill").unwrap_or(0.0) as u16,
+                ));
+                continue;
+            }
             _ => continue,
         };
         let mask = attrs.get("omapix:mask").map(|src| {
@@ -444,7 +476,7 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
     if w == 0 || h == 0 {
         return Err(Error::Unsupported("stack.xml has no image size".into()));
     }
-    Ok((w, h, layers))
+    Ok((w, h, layers, channels))
 }
 
 fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec<u8>> {
@@ -473,12 +505,23 @@ fn decode_png(data: &[u8], rgba: bool) -> Result<DecodedPng> {
     Ok((w, h, samples, icc))
 }
 
+/// Decode a grey PNG written by [`encode_grey`] at `(x, y)` into a
+/// `width` × `height` plane, `fill` elsewhere.
+fn decode_grey(png: &[u8], (x, y): (u32, u32), fill: u16, width: u32, height: u32) -> Result<Tiled<u16>> {
+    let (w, h, samples, _) = decode_png(png, false)?;
+    let area = (x, y, w.min(width.saturating_sub(x)), h.min(height.saturating_sub(y)));
+    let clipped: Vec<u16> = (0..area.3)
+        .flat_map(|row| samples[(row * w) as usize..(row * w + area.2) as usize].iter().copied())
+        .collect();
+    Ok(uncrop(width, height, fill, area, &clipped))
+}
+
 /// Open an OpenRaster file.
 pub fn load(path: &Path) -> Result<Document> {
     let file = File::open(path).map_err(|e| io_error(path, e))?;
     let mut zip = ZipArchive::new(BufReader::new(file)).map_err(zip_error)?;
     let xml = String::from_utf8_lossy(&read_entry(&mut zip, "stack.xml")?).into_owned();
-    let (width, height, entries) = parse_stack(&xml)?;
+    let (width, height, entries, channel_entries) = parse_stack(&xml)?;
 
     // Read compressed data sequentially, then decode in parallel.
     let mut files = Vec::new();
@@ -534,22 +577,8 @@ pub fn load(path: &Path) -> Result<Document> {
                 layer.clipped = e.clipped;
                 layer.locks = e.locks;
                 if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
-                    let (mw, mh, samples, _) = decode_png(mask_png, false)?;
-                    let area = (
-                        *mx,
-                        *my,
-                        mw.min(width.saturating_sub(*mx)),
-                        mh.min(height.saturating_sub(*my)),
-                    );
-                    let clipped: Vec<u16> = (0..area.3)
-                        .flat_map(|row| {
-                            samples[(row * mw) as usize..(row * mw + area.2) as usize]
-                                .iter()
-                                .copied()
-                        })
-                        .collect();
                     layer.mask = Some(Mask {
-                        pixels: uncrop(width, height, *fill, area, &clipped),
+                        pixels: decode_grey(mask_png, (*mx, *my), *fill, width, height)?,
                         enabled: *enabled,
                     });
                 }
@@ -566,6 +595,11 @@ pub fn load(path: &Path) -> Result<Document> {
     let layers: Vec<Layer> = decoded.into_iter().rev().map(|(l, _)| l).collect();
     let mut doc = Document::new(path.to_path_buf(), profile, 16, width, height, layers);
     doc.saved_path = Some(path.to_path_buf());
+    for (name, src, at, fill) in channel_entries {
+        let pixels = decode_grey(&read_entry(&mut zip, &src)?, at, fill, width, height)?;
+        let id = doc.next_layer_id();
+        doc.channels.push(AlphaChannel { id, name, pixels });
+    }
     Ok(doc)
 }
 
@@ -617,6 +651,12 @@ mod tests {
         // A small, empty-ish layer to exercise cropping and empty layers.
         let id = doc.next_layer_id();
         doc.layers.push(Layer::empty(id, "Empty", w, h));
+        // Two alpha channels: a rectangle, and one that's all selected.
+        doc.selection = Some(crate::Selection::rectangle(w, h, (300.0, 10.0), (420.0, 290.0)));
+        doc.save_selection();
+        doc.selection = Some(crate::Selection::all(w, h));
+        doc.save_selection();
+        doc.channels[1].name = "Sky & <sea>".into();
 
         let dir = std::env::temp_dir().join(format!("omapix-ora-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -644,6 +684,11 @@ mod tests {
             }
         }
         assert_eq!(doc.composite().pixels(), back.composite().pixels());
+        assert_eq!(back.channels.len(), 2);
+        for (a, b) in doc.channels.iter().zip(&back.channels) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.pixels.to_vec(), b.pixels.to_vec(), "channel {}", a.name);
+        }
     }
 
     #[test]
@@ -714,7 +759,7 @@ mod tests {
             </stack>
             <layer name="Bottom" src="data/2.png"/>
         </stack></image>"#;
-        let (_, _, entries) = parse_stack(xml).unwrap();
+        let (_, _, entries, _) = parse_stack(xml).unwrap();
         let summary: Vec<_> = entries
             .iter()
             .map(|e| (e.name.as_str(), e.src.is_none(), e.blend, e.parent))
