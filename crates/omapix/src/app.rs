@@ -2049,19 +2049,19 @@ impl App {
 
                 let params =
                     ops::GradientParams::new((p0.x, p0.y), (p1.x, p1.y), kind, reverse);
+                // On a mask, the colours' grey levels; to transparent keeps
+                // the mask as it is at the far end.
+                let v0 = crate::tools::grey(fg);
+                let v1 = match colors {
+                    crate::tools::GradientColors::ForegroundToBackground => Some(crate::tools::grey(bg)),
+                    crate::tools::GradientColors::ForegroundToTransparent => None,
+                };
                 editor.edit("Gradient", |doc, _| {
                     let selection = doc.selection.clone();
                     match target {
                         Target::QuickMask => {
                             let (w, h) = (doc.width, doc.height);
                             let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
-                            let v0 = crate::tools::grey(fg);
-                            let v1 = match colors {
-                                crate::tools::GradientColors::ForegroundToBackground => {
-                                    Some(crate::tools::grey(bg))
-                                }
-                                crate::tools::GradientColors::ForegroundToTransparent => None,
-                            };
                             sel.coverage = ops::apply_gradient_mask(
                                 &sel.coverage,
                                 params,
@@ -2076,13 +2076,6 @@ impl App {
                                 return;
                             };
                             if let Some(mask) = layer.mask.as_mut() {
-                                let v0 = crate::tools::grey(fg);
-                                let v1 = match colors {
-                                    crate::tools::GradientColors::ForegroundToBackground => {
-                                        Some(crate::tools::grey(bg))
-                                    }
-                                    crate::tools::GradientColors::ForegroundToTransparent => None,
-                                };
                                 mask.pixels = ops::apply_gradient_mask(
                                     &mask.pixels,
                                     params,

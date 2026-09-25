@@ -195,20 +195,8 @@ impl GradientParams {
     }
 }
 
-/// Position `t in 0..1` along a gradient from `start` to `end`.
-pub fn gradient_t(
-    px: f32,
-    py: f32,
-    start: (f32, f32),
-    end: (f32, f32),
-    kind: GradientType,
-    reverse: bool,
-) -> f32 {
-    GradientParams::new(start, end, kind, reverse).t(px, py)
-}
-
 /// A tiled raster filled with a gradient from `c0` to `c1`.
-pub fn gradient_pixels(
+fn gradient_pixels(
     width: u32,
     height: u32,
     params: GradientParams,
@@ -236,7 +224,7 @@ pub fn gradient_pixels(
 }
 
 /// Blend `top` over `original` with opacity using straight alpha source-over.
-pub fn blend_pixels(
+fn blend_pixels(
     original: &Tiled<crate::Pixel>,
     top: Tiled<crate::Pixel>,
     opacity: f32,
@@ -345,25 +333,6 @@ pub fn apply_gradient_mask(
     });
     out
 }
-
-/// A mask filled with a gradient from `v0` to `v1`.
-pub fn gradient_mask(
-    width: u32,
-    height: u32,
-    params: GradientParams,
-    v0: u16,
-    v1: u16,
-) -> Tiled<u16> {
-    apply_gradient_mask(
-        &Tiled::new(width, height, v0),
-        params,
-        v0,
-        Some(v1),
-        1.0,
-        None,
-    )
-}
-
 
 /// Photoshop's "Stamp Visible": a new layer holding the flattened image,
 /// placed at the top of the stack, outside any group. Returns the new
@@ -1017,7 +986,7 @@ mod tests {
     fn gradient_mask_and_to_transparent() {
         let (w, h) = (50, 10);
         let p = GradientParams::new((10.0, 5.0), (30.0, 5.0), GradientType::Linear, false);
-        let grad = gradient_mask(w, h, p, 0, 65535);
+        let grad = apply_gradient_mask(&Tiled::new(w, h, 0), p, 0, Some(65535), 1.0, None);
         assert_eq!(grad.get(10, 5), 0);
         assert_eq!(grad.get(30, 5), 65535);
         assert_eq!(grad.get(20, 5), 32768);
