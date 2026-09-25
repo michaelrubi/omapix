@@ -24,7 +24,7 @@ const LASSO_ICON: &str = "\u{f0c4}";
 const MIN_SIZE: f32 = 1.0;
 const MAX_SIZE: f32 = 5000.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ToolGroup {
     Move,
     Marquee,
@@ -64,8 +64,8 @@ impl ToolGroup {
         }
     }
 
-    pub fn key(self) -> Key {
-        match self {
+    pub fn default_key(self) -> Option<Key> {
+        let k = match self {
             ToolGroup::Move => Key::V,
             ToolGroup::Marquee => Key::M,
             ToolGroup::Lasso => Key::L,
@@ -75,7 +75,12 @@ impl ToolGroup {
             ToolGroup::Brush => Key::B,
             ToolGroup::CloneStamp => Key::S,
             ToolGroup::Eraser => Key::E,
-        }
+        };
+        Some(k)
+    }
+
+    pub fn key(self) -> Option<Key> {
+        crate::hotkeys::tool_group_key(self)
     }
 }
 
@@ -127,18 +132,8 @@ impl Tool {
         }
     }
 
-    pub fn shortcut_letter(self) -> &'static str {
-        match self {
-            Tool::Move => "V",
-            Tool::Brush => "B",
-            Tool::Eraser => "E",
-            Tool::CloneStamp => "S",
-            Tool::SpotHealing | Tool::Healing => "J",
-            Tool::Marquee | Tool::EllipticalMarquee => "M",
-            Tool::Lasso => "L",
-            Tool::MagicWand => "W",
-            Tool::Eyedropper => "I",
-        }
+    pub fn shortcut_letter(self) -> Option<&'static str> {
+        self.group().key().map(|k| k.symbol_or_name())
     }
 
     pub fn group(self) -> ToolGroup {
@@ -486,11 +481,13 @@ impl Tools {
             let shift = Modifiers::SHIFT;
             let mut layer_opacity = None;
             for &group in ToolGroup::ALL {
-                if i.consume_key(Modifiers::SHIFT, group.key()) {
-                    self.cycle_group(group);
-                }
-                if i.consume_key(Modifiers::NONE, group.key()) {
-                    self.select(self.group_tool(group));
+                if let Some(key) = group.key() {
+                    if i.consume_key(Modifiers::SHIFT, key) {
+                        self.cycle_group(group);
+                    }
+                    if i.consume_key(Modifiers::NONE, key) {
+                        self.select(self.group_tool(group));
+                    }
                 }
             }
             if i.consume_key(Modifiers::NONE, Key::X) {
@@ -699,7 +696,10 @@ impl Tools {
                     theme.dark_foreground
                 };
                 let icon = current_tool.icon();
-                let tip = format!("{} ({})", current_tool.name(), current_tool.shortcut_letter());
+                let tip = match current_tool.shortcut_letter() {
+                    Some(letter) => format!("{} ({letter})", current_tool.name()),
+                    None => current_tool.name().to_string(),
+                };
 
                 ui.push_id(group as usize, |ui| {
                     let button = Button::new(RichText::new(icon).size(18.0).color(colour))
@@ -754,8 +754,10 @@ impl Tools {
                                 let item_text =
                                     RichText::new(format!("{}  {}", tool.icon(), tool.name()))
                                         .color(item_colour);
-                                let item_button =
-                                    Button::new(item_text).shortcut_text(tool.shortcut_letter());
+                                let mut item_button = Button::new(item_text);
+                                if let Some(letter) = tool.shortcut_letter() {
+                                    item_button = item_button.shortcut_text(letter);
+                                }
                                 if ui.add(item_button).clicked() {
                                     self.select(tool);
                                     ui.close();

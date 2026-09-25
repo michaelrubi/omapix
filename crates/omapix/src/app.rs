@@ -238,6 +238,9 @@ pub struct App {
     v_down: bool,
 }
 
+#[cfg(test)]
+pub(crate) use tests::test_app;
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
         let ctx = &cc.egui_ctx;
@@ -292,6 +295,14 @@ impl App {
             pasting: None,
             v_down: false,
         };
+        let warnings = crate::hotkeys::load();
+        if !warnings.is_empty() {
+            for w in &warnings {
+                log::warn!("{w}");
+            }
+            app.message(warnings.join("; "), true);
+        }
+
         if let Some(path) = path {
             app.open(path, ctx);
         }
@@ -890,7 +901,7 @@ impl App {
             .is_some_and(|l| l.clipped)
     }
 
-    fn menu_item(&mut self, ui: &mut Ui, cmd: Command, label: Option<String>) {
+    pub(crate) fn menu_item(&mut self, ui: &mut Ui, cmd: Command, label: Option<String>) {
         let text = label.unwrap_or_else(|| cmd.label().to_owned());
         let mut button = Button::new(text);
         if let Some(shortcut) = cmd.shortcut() {
@@ -2750,7 +2761,7 @@ mod tests {
         assert_eq!(editor.target, Target::Mask);
     }
 
-    fn test_app() -> App {
+    pub(crate) fn test_app() -> App {
         let (_tx, rx) = channel();
         App {
             theme: Theme::default(),

@@ -3,7 +3,7 @@
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     Open,
     Save,
@@ -306,7 +306,7 @@ impl Command {
         }
     }
 
-    pub fn shortcut(self) -> Option<KeyboardShortcut> {
+    pub fn default_shortcut(self) -> Option<KeyboardShortcut> {
         let s = |m, k| Some(KeyboardShortcut::new(m, k));
         match self {
             Command::Open => s(CMD, Key::O),
@@ -359,6 +359,10 @@ impl Command {
         }
     }
 
+    pub fn shortcut(self) -> Option<KeyboardShortcut> {
+        crate::hotkeys::command_shortcut(self)
+    }
+
     /// Commands whose shortcut was pressed this frame, consuming the keys.
     /// `v_down` remembers between frames whether V is held.
     pub fn pressed(ctx: &egui::Context, v_down: &mut bool) -> Vec<Command> {
@@ -376,13 +380,15 @@ impl Command {
                     *key = *physical;
                 }
             }
-            let mut pressed: Vec<Command> = Self::KEYBOARD_ORDER
-                .iter()
-                .copied()
-                .filter(|c| c.shortcut().is_some_and(|s| i.consume_shortcut(&s)))
-                .collect();
+            let mut pressed: Vec<Command> = crate::hotkeys::with_keyboard_order(|order| {
+                order
+                    .iter()
+                    .copied()
+                    .filter(|c| c.shortcut().is_some_and(|s| i.consume_shortcut(&s)))
+                    .collect()
+            });
             // Ctrl++ on keyboards where + is its own key.
-            if i.consume_key(CMD, Key::Plus) {
+            if Command::ZoomIn.shortcut().is_some() && i.consume_key(CMD, Key::Plus) {
                 pressed.push(Command::ZoomIn);
             }
             // egui-winit turns Ctrl+C and Ctrl+X into Copy and Cut events
