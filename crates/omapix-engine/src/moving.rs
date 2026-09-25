@@ -1,9 +1,11 @@
 //! Moving part of a layer (the Move tool with a selection): the selected
 //! pixels are lifted out, leaving the rest behind, and put back down at an
-//! offset. Moving a whole layer is just [`Tiled::translated`].
+//! offset, or transformed (Free Transform). Moving a whole layer is just
+//! [`Tiled::translated`].
 
 use crate::Pixel;
 use crate::tiled::{TILE_PIXELS, Tiled};
+use crate::transform::{Affine, Resampling, transformed};
 
 const MAX: u32 = u16::MAX as u32;
 
@@ -73,7 +75,13 @@ impl Lifted<Pixel> {
     /// The layer with the lifted pixels put down (`dx`, `dy`) from where
     /// they came from, over what stayed behind.
     pub fn drop_at(&self, dx: i32, dy: i32) -> Tiled<Pixel> {
-        let moved = self.lifted.translated(dx, dy, [0; 4]);
+        self.drop_transformed(&Affine::translate(dx.into(), dy.into()), Resampling::Bilinear)
+    }
+
+    /// The layer with the lifted pixels put down transformed by `t` (Free
+    /// Transform), over what stayed behind.
+    pub fn drop_transformed(&self, t: &Affine, resampling: Resampling) -> Tiled<Pixel> {
+        let moved = transformed(&self.lifted, t, [0; 4], resampling);
         let mut out = self.below.clone();
         let fill = out.fill();
         out.par_update(|col, row, below| {
@@ -115,8 +123,13 @@ impl Lifted<u16> {
     /// The mask with the lifted values put down (`dx`, `dy`) from where
     /// they came from.
     pub fn drop_at(&self, dx: i32, dy: i32) -> Tiled<u16> {
-        let coverage = self.coverage.translated(dx, dy, 0);
-        let moved = self.lifted.translated(dx, dy, self.lifted.fill());
+        self.drop_transformed(&Affine::translate(dx.into(), dy.into()), Resampling::Bilinear)
+    }
+
+    /// The mask with the lifted values put down transformed by `t`.
+    pub fn drop_transformed(&self, t: &Affine, resampling: Resampling) -> Tiled<u16> {
+        let coverage = transformed(&self.coverage, t, 0, resampling);
+        let moved = transformed(&self.lifted, t, self.lifted.fill(), resampling);
         let mut out = self.below.clone();
         let fill = out.fill();
         out.par_update(|col, row, below| {

@@ -202,6 +202,9 @@ pub struct Overlay<'a> {
     pub drawing: Option<&'a [Pos2]>,
     /// Modifier badge (+, -, ×, copy) shown near the cursor.
     pub badge: Option<CursorBadge>,
+    /// Free Transform's box, its corners in image pixels clockwise from the
+    /// top left, and the cursor for what's under the pointer.
+    pub transform: Option<([Pos2; 4], CursorIcon)>,
 }
 
 /// Pointer input meant for the active tool, in image pixels.
@@ -244,6 +247,8 @@ pub struct Canvas {
     resizing: Option<Pos2>,
     /// Image pixel under the pointer, if any.
     pub hovered_pixel: Option<(u32, u32)>,
+    /// Where the pointer is over the canvas, in image pixels.
+    pub pointer: Option<Pos2>,
     /// Canvas area and scale from the last frame, for menu commands.
     rect: Rect,
     ppp: f32,
@@ -296,6 +301,7 @@ impl Canvas {
             display_lut: std::sync::OnceLock::new(),
             fresh: false,
             hovered_pixel: None,
+            pointer: None,
             rect: Rect::NOTHING,
             ppp: 1.0,
         }
@@ -497,6 +503,7 @@ impl Canvas {
             selection,
             drawing,
             badge,
+            transform,
         } = overlay;
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
@@ -525,8 +532,14 @@ impl Canvas {
             (img.x >= 0.0 && img.y >= 0.0 && img.x < size.x && img.y < size.y)
                 .then_some((img.x as u32, img.y as u32))
         });
+        self.pointer = response.hover_pos().map(|p| self.to_image(p));
         self.draw_outlines(ui, selection, drawing);
-        if let Some(pointer) = response.hover_pos()
+        if let Some((corners, cursor)) = transform {
+            self.draw_transform_box(ui, corners);
+            if response.hover_pos().is_some() && !navigating {
+                ui.ctx().set_cursor_icon(cursor);
+            }
+        } else if let Some(pointer) = response.hover_pos()
             && !navigating
             && tool
         {
@@ -558,6 +571,30 @@ impl Canvas {
             }
         }
         input
+    }
+
+    /// Image pixels per screen point, at the current zoom.
+    pub fn image_per_point(&self) -> f32 {
+        self.ppp / self.view.zoom
+    }
+
+    /// Free Transform's box: its outline, a handle at each corner and side,
+    /// and a mark at the centre.
+    fn draw_transform_box(&self, ui: &Ui, corners: [Pos2; 4]) {
+        let painter = ui.painter_at(self.rect);
+        let c = corners.map(|p| self.to_screen((p.x, p.y)));
+        let mut outline = c.to_vec();
+        outline.push(c[0]);
+        painter.add(egui::Shape::line(outline.clone(), Stroke::new(3.0, Color32::from_black_alpha(160))));
+        painter.add(egui::Shape::line(outline, Stroke::new(1.0, Color32::WHITE)));
+        let sides = (0..4).map(|i| c[i] + (c[(i + 1) % 4] - c[i]) / 2.0);
+        for at in c.into_iter().chain(sides) {
+            let square = Rect::from_center_size(at, vec2(7.0, 7.0));
+            painter.rect_filled(square, 0.0, Color32::WHITE);
+            painter.rect_stroke(square, 0.0, Stroke::new(1.0, Color32::BLACK), egui::StrokeKind::Middle);
+        }
+        let centre = c[0] + (c[2] - c[0]) / 2.0;
+        painter.circle_stroke(centre, 3.0, Stroke::new(1.0, Color32::WHITE));
     }
 
     /// Screen position (points) of an image position.

@@ -10,6 +10,7 @@ use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
 use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
+use omapix_engine::transform::{Affine, Resampling, transformed};
 use omapix_engine::reduced::Reduced;
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
@@ -143,6 +144,27 @@ struct Moving {
     wanted: (i32, i32),
 }
 
+/// A Free Transform (Ctrl+T) in progress: the layer, or its selected pixels
+/// or mask values, scaled, rotated and moved until it's applied or
+/// cancelled.
+struct Transforming {
+    /// The layer as it was.
+    original: Layer,
+    /// The selection as it was, which is transformed along with the pixels.
+    selection: Option<Selection>,
+    /// The selected part, lifted out; `None` transforms the whole layer and
+    /// its mask.
+    lift: Option<Lift>,
+    /// What's being transformed, before it was: (x0, y0, x1, y1).
+    bounds: [f64; 4],
+    /// The transform showing in the document (`None` once it needs doing
+    /// again at full quality), and the latest one asked for.
+    applied: Option<Affine>,
+    wanted: Affine,
+    /// The document has changed, as one undo step.
+    started: bool,
+}
+
 /// A Move drag, or a slider drag on one layer's settings, shown live on the
 /// GPU (see live.rs), and once it ends, until the CPU render of it is on
 /// screen.
@@ -209,6 +231,7 @@ pub struct Editor {
     stroke: Option<(Stroke, u64)>,
     /// The Move tool drag in progress.
     moving: Option<Moving>,
+    transforming: Option<Transforming>,
     live_view: Option<LiveView>,
     /// The largest GPU texture side for live moves, or `None` to move on
     /// the CPU (see gpu.rs).
@@ -263,6 +286,7 @@ impl Editor {
             canvas,
             stroke: None,
             moving: None,
+            transforming: None,
             live_view: None,
             live_limit: crate::gpu::max_side(),
             painted: 0,
@@ -742,6 +766,7 @@ impl Editor {
     fn end_gesture(&mut self) {
         self.end_stroke();
         self.end_move();
+        self.commit_transform();
     }
 
     /// Start moving the active layer with the Move tool: the whole layer
@@ -827,6 +852,138 @@ impl Editor {
             // Nothing moved.
             self.live_view = None;
         }
+    }
+
+    /// Start Free Transform on the active layer: its selected pixels (or
+    /// mask values, when the mask is targeted) with a selection, or else
+    /// the whole layer with its mask. Nothing changes until
+    /// [`Self::transform_to`] asks for a transform. `background` is the grey a
+    /// mask is left with where selected values move away. Returns why it
+    /// can't start, if it can't.
+    pub fn begin_transform(&mut self, background: u16) -> Result<(), &'static str> {
+        if self.job.is_some() {
+            return Err("Omapix is busy");
+        }
+        self.end_gesture();
+        let layer = self.doc.layer(self.active).ok_or("There's no layer to transform")?;
+        if !layer.can_move() {
+            return Err("Could not transform because the layer is locked");
+        }
+        let lift = match (&self.doc.selection, self.target, &layer.mask) {
+            (None, ..) => None,
+            (Some(sel), Target::Mask, Some(mask)) => {
+                Some(Lift::Mask(Lifted::mask(&mask.pixels, &sel.coverage, false, background)))
+            }
+            (Some(_), ..) if !layer.has_pixels() => return Err("Could not transform because the layer has no pixels"),
+            (Some(sel), ..) => Some(Lift::Pixels(Lifted::pixels(&layer.pixels, &sel.coverage, false))),
+        };
+        if lift.is_none() && !layer.has_pixels() {
+            return Err("Could not transform because the layer has no pixels");
+        }
+        let bounds = match &self.doc.selection {
+            Some(sel) => sel.bounds(),
+            None => Selection::from_alpha(&layer.pixels).bounds(),
+        };
+        let [x, y, w, h] = bounds.ok_or("Could not transform because the selected area is empty")?;
+        let (x, y, w, h) = (f64::from(x), f64::from(y), f64::from(w), f64::from(h));
+        self.transforming = Some(Transforming {
+            original: layer.clone(),
+            selection: self.doc.selection.clone(),
+            lift,
+            bounds: [x, y, x + w, y + h],
+            applied: Some(Affine::IDENTITY),
+            wanted: Affine::IDENTITY,
+            started: false,
+        });
+        Ok(())
+    }
+
+    /// The Free Transform in progress: what's transformed, before it was
+    /// (x0, y0, x1, y1), and the transform showing.
+    pub fn transform(&self) -> Option<([f64; 4], Affine)> {
+        self.transforming.as_ref().map(|t| (t.bounds, t.wanted))
+    }
+
+    /// Show the Free Transform with `t`. Applied at once if the canvas is up
+    /// to date, or else when the render in progress has drawn what's on
+    /// screen, as moves are.
+    pub fn transform_to(&mut self, t: Affine) {
+        let Some(transforming) = &mut self.transforming else {
+            return;
+        };
+        transforming.wanted = t;
+        if self.rendering.as_ref().is_none_or(|r| r.visible) {
+            self.apply_transform(Resampling::Bilinear);
+        }
+    }
+
+    /// Apply the Free Transform (Enter), resampled at full quality, as one
+    /// undo step.
+    pub fn commit_transform(&mut self) {
+        let Some(transforming) = &mut self.transforming else {
+            return;
+        };
+        if transforming.wanted == Affine::IDENTITY {
+            self.cancel_transform();
+            return;
+        }
+        transforming.applied = None;
+        self.apply_transform(Resampling::Bicubic);
+        self.transforming = None;
+    }
+
+    /// Put the layer and selection back as they were (Esc).
+    pub fn cancel_transform(&mut self) {
+        let Some(transforming) = self.transforming.take() else {
+            return;
+        };
+        if !transforming.started {
+            return;
+        }
+        // Undo the step the first change made, without offering to redo it.
+        if let Some(before) = self.undo.pop() {
+            self.restore(before);
+        }
+    }
+
+    fn apply_transform(&mut self, resampling: Resampling) {
+        let Some(transforming) = &self.transforming else {
+            return;
+        };
+        let t = transforming.wanted;
+        if transforming.applied == Some(t) {
+            return;
+        }
+        if !transforming.started {
+            // The first change: one undo step from here.
+            self.live = None;
+            let before = self.snapshot("Free Transform");
+            self.push_undo(before);
+        }
+        let transforming = self.transforming.as_mut().expect("still transforming");
+        (transforming.applied, transforming.started) = (Some(t), true);
+        let Some(layer) = self.doc.layer_mut(transforming.original.id) else {
+            return;
+        };
+        let original = &transforming.original;
+        match &transforming.lift {
+            None => {
+                layer.pixels = transformed(&original.pixels, &t, [0; 4], resampling);
+                if let (Some(mask), Some(from)) = (&mut layer.mask, &original.mask) {
+                    mask.pixels = transformed(&from.pixels, &t, from.pixels.fill(), resampling);
+                }
+            }
+            Some(Lift::Pixels(lifted)) => layer.pixels = lifted.drop_transformed(&t, resampling),
+            Some(Lift::Mask(lifted)) => {
+                if let Some(mask) = &mut layer.mask {
+                    mask.pixels = lifted.drop_transformed(&t, resampling);
+                }
+            }
+        }
+        if let Some(sel) = &transforming.selection {
+            self.doc.selection = Some(sel.transformed(&t)).filter(|s| !s.is_empty());
+        }
+        self.changed();
     }
 
     /// Magic Wand: click to select similar colours, combining with the
@@ -1125,9 +1282,10 @@ impl Editor {
                 }
             }
         }
-        // Catch up with a move dragged further while rendering.
+        // Catch up with a move or transform dragged further while rendering.
         if self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_move();
+            self.apply_transform(Resampling::Bilinear);
         }
         self.update_live_view();
         // One render at a time. Once what's on screen is drawn, a render
@@ -1982,6 +2140,69 @@ mod tests {
         e.undo();
         assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(50, 50), RED);
         assert_eq!(e.undo_label(), Some("Setup"));
+    }
+
+    #[test]
+    fn free_transform_scales_the_layer_and_mask_as_one_undo_step() {
+        let mut e = square_editor();
+        e.begin_transform(0).unwrap();
+        // The box fits the red square.
+        assert_eq!(e.transform().unwrap().0, [0.0, 0.0, 100.0, 100.0]);
+        e.transform_to(Affine::scale_about(1.5, 1.5, (0.0, 0.0)));
+        e.transform_to(Affine::scale_about(2.0, 2.0, (0.0, 0.0)));
+        e.commit_transform();
+        assert!(e.transform().is_none());
+        let layer = e.doc.layer(e.active).unwrap();
+        assert_eq!(layer.pixels.get(190, 190), RED);
+        assert_eq!(layer.pixels.get(210, 100)[3], 0);
+        let mask = &layer.mask.as_ref().unwrap().pixels;
+        assert_eq!((mask.get(90, 90), mask.get(110, 110)), (0, u16::MAX));
+        assert_eq!(e.undo_label(), Some("Free Transform"));
+        e.undo();
+        assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(150, 150)[3], 0);
+        assert_eq!(e.undo_label(), Some("Setup"));
+    }
+
+    #[test]
+    fn cancelling_free_transform_leaves_no_trace() {
+        let mut e = square_editor();
+        let before = e.doc.layer(e.active).unwrap().pixels.clone();
+        e.begin_transform(0).unwrap();
+        e.transform_to(Affine::rotate_about(0.3, (50.0, 50.0)));
+        e.cancel_transform();
+        assert!(e.doc.layer(e.active).unwrap().pixels.same_tiles(&before));
+        assert_eq!(e.undo_label(), Some("Setup"));
+        assert_eq!(e.redo_label(), None);
+        // Nor does applying it unchanged.
+        e.begin_transform(0).unwrap();
+        e.commit_transform();
+        assert_eq!(e.undo_label(), Some("Setup"));
+    }
+
+    #[test]
+    fn free_transform_with_a_selection_transforms_just_the_selected_pixels() {
+        let mut e = square_editor();
+        e.edit("Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (50.0, 100.0)))
+        });
+        e.begin_transform(0).unwrap();
+        assert_eq!(e.transform().unwrap().0, [0.0, 0.0, 50.0, 100.0]);
+        // Twice as wide, moved right by 200.
+        let t = Affine::scale_about(2.0, 1.0, (0.0, 0.0)).then(&Affine::translate(200.0, 0.0));
+        e.transform_to(t);
+        e.commit_transform();
+        let layer = e.doc.layer(e.active).unwrap();
+        assert_eq!(layer.pixels.get(25, 50)[3], 0);
+        assert_eq!(layer.pixels.get(75, 50), RED);
+        assert_eq!(layer.pixels.get(290, 50), RED);
+        let sel = e.doc.selection.as_ref().unwrap();
+        assert_eq!((sel.at(25, 50), sel.at(290, 50)), (0.0, 1.0));
+        // A layer with nothing on it can't be transformed.
+        e.edit("Clear", |doc, active| {
+            doc.selection = None;
+            doc.layer_mut(*active).unwrap().pixels = Tiled::new(600, 400, [0; 4]);
+        });
+        assert!(e.begin_transform(0).is_err());
     }
 
     #[test]

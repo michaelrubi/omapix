@@ -6,6 +6,7 @@ mod clipboard;
 mod commands;
 mod drop;
 mod editor;
+mod free_transform;
 mod gpu;
 mod history_panel;
 mod hotkeys;

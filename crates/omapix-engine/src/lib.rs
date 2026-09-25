@@ -24,6 +24,7 @@ pub mod reduced;
 pub mod selection;
 pub mod tiled;
 pub mod tiles;
+pub mod transform;
 
 pub use blend::BlendMode;
 pub use color::{ColorProfile, DisplayTransform};
