@@ -48,8 +48,8 @@ Ctrl+T (Edit › Free Transform) puts a box with eight handles round the active 
 
 Ctrl+C copies the selected pixels of the active layer (or the whole layer without a selection), and Ctrl+Shift+C (Copy Merged) copies what's visible from all layers. Partly selected pixels come out partly transparent, as in Photoshop. With a mask targeted, Ctrl+C copies the mask as grey. Ctrl+X copies, then clears like Delete: pixels to transparency, a mask to the background grey. Ctrl+V pastes as a new layer above the active one, in the same place it was copied from (centred if it doesn't fit there), and deselects. They're in the Edit menu too.
 
-Copies also go on the Wayland clipboard as an sRGB PNG (through `wl-copy`, so they stay pasteable after Omapix quits), and Ctrl+V pastes PNG or JPEG images copied in other apps, centred. While the clipboard still holds Omapix's own copy, pasting uses the full 16-bit original.
-- Later: Paste in Place and Paste Into (Ctrl+Shift+V, Ctrl+Alt+Shift+V), and centring pastes on the view rather than the canvas.
+Copies also go on the Wayland clipboard as an sRGB PNG (through `wl-copy`, so they stay pasteable after Omapix quits), and Ctrl+V pastes PNG or JPEG images copied in other apps, centred. While the clipboard still holds Omapix's own copy, pasting uses the full 16-bit original. Edit › Paste Special has Paste in Place (Ctrl+Shift+V) and Paste Into (Ctrl+Alt+Shift+V). Paste in Place is currently identical to Paste (putting Omapix copies where they came from and centring other apps' images), ready for when normal pastes centre on the view. Paste Into needs a selection, pastes centred on the selection's bounds (or in place for Omapix copies), adds a layer mask revealing just the selection, targets the layer's pixels, and drops the selection. Both work with system clipboard images too.
+- Later: centring pastes on the view rather than the canvas.
 
 ### ~~Marching ants for the marquees~~ (done)
 
@@ -146,6 +146,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
 - [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, and how smooth it is on a 24 MP layer
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates
+- [ ] Paste Special: Paste in Place (Ctrl+Shift+V) and Paste Into (Ctrl+Alt+Shift+V: layer mask reveals selection, pixels targeted, disabled without selection)
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing

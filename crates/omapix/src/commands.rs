@@ -18,6 +18,8 @@ pub enum Command {
     Copy,
     CopyMerged,
     Paste,
+    PasteInPlace,
+    PasteInto,
     FreeTransform,
     NewLayer,
     DuplicateLayer,
@@ -125,6 +127,8 @@ impl Command {
         Command::Copy,
         Command::CopyMerged,
         Command::Paste,
+        Command::PasteInPlace,
+        Command::PasteInto,
         Command::FreeTransform,
         Command::NewLayer,
         Command::DuplicateLayer,
@@ -217,6 +221,7 @@ impl Command {
     /// checked before it.
     pub const KEYBOARD_ORDER: &[Command] = &[
         Command::StampVisible,
+        Command::PasteInto,
         Command::InvertSelection,
         Command::UngroupLayers,
         Command::ClippingMask,
@@ -224,6 +229,7 @@ impl Command {
         Command::Redo,
         Command::CopyMerged,
         Command::NewLayer,
+        Command::PasteInPlace,
         Command::BringToFront,
         Command::SendToBack,
         Command::ReopenLast,
@@ -287,6 +293,8 @@ impl Command {
             Command::Copy => "Copy",
             Command::CopyMerged => "Copy Merged",
             Command::Paste => "Paste",
+            Command::PasteInPlace => "Paste in Place",
+            Command::PasteInto => "Paste Into",
             Command::FreeTransform => "Free Transform",
             Command::NewLayer => "New Layer",
             Command::DuplicateLayer => "Duplicate Layer",
@@ -378,6 +386,8 @@ impl Command {
             Command::Copy => s(CMD, Key::C),
             Command::CopyMerged => s(CMD_SHIFT, Key::C),
             Command::Paste => s(CMD, Key::V),
+            Command::PasteInPlace => s(CMD_SHIFT, Key::V),
+            Command::PasteInto => s(CMD_ALT_SHIFT, Key::V),
             Command::FreeTransform => s(CMD, Key::T),
             Command::NewLayer => s(CMD_SHIFT, Key::N),
             Command::DuplicateLayer => s(CMD, Key::J),
@@ -475,10 +485,33 @@ impl Command {
                     egui::Event::Key {
                         key: Key::V,
                         pressed: down,
+                        modifiers,
                         ..
                     } => {
                         if !*down && !*v_down {
-                            pressed.push(Command::Paste);
+                            let is_shift = modifiers.shift || i.modifiers.shift;
+                            let is_alt = modifiers.alt || i.modifiers.alt;
+                            let mods = if is_shift && is_alt {
+                                CMD_ALT_SHIFT
+                            } else if is_shift {
+                                CMD_SHIFT
+                            } else if is_alt {
+                                CMD_ALT
+                            } else {
+                                CMD
+                            };
+                            let sc = KeyboardShortcut::new(mods, Key::V);
+                            let cmd = [Command::PasteInto, Command::PasteInPlace, Command::Paste]
+                                .into_iter()
+                                .find(|&c| hotkeys.command(c) == Some(sc))
+                                .unwrap_or(match mods {
+                                    CMD_ALT_SHIFT => Command::PasteInto,
+                                    CMD_SHIFT => Command::PasteInPlace,
+                                    _ => Command::Paste,
+                                });
+                            if hotkeys.command(cmd).is_some() && !pressed.contains(&cmd) {
+                                pressed.push(cmd);
+                            }
                         }
                         *v_down = *down;
                     }
@@ -575,6 +608,16 @@ mod tests {
         assert_eq!(
             press(&ctx, &mut v_down, CMD, vec![v(false, CMD)]),
             [Command::Paste]
+        );
+        // Ctrl+Shift+V (Paste in Place)
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD_SHIFT, vec![v(false, CMD_SHIFT)]),
+            [Command::PasteInPlace]
+        );
+        // Ctrl+Alt+Shift+V (Paste Into)
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD_ALT_SHIFT, vec![v(false, CMD_ALT_SHIFT)]),
+            [Command::PasteInto]
         );
         // V on its own isn't pasting, however long it's held.
         assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);

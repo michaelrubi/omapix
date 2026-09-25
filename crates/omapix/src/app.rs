@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use egui::{Align, Align2, Button, Layout, Pos2, RichText, Sense, Ui, Vec2, pos2, vec2};
 use omapix_engine::adjust::Eyedropper;
 use omapix_engine::brush::Paint;
-use omapix_engine::clip::{self, Clip};
+use omapix_engine::clip::{self, Clip, PasteKind};
 use omapix_engine::filters::LayerFilter;
 use omapix_engine::layer::{Layer, Locks, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
@@ -54,6 +54,7 @@ enum Then {
 struct PendingClip {
     clip: Clip,
     name: Option<String>,
+    kind: PasteKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -383,6 +384,7 @@ impl App {
                 let res = load_clip(&path).map(|(clip, name)| PendingClip {
                     clip,
                     name: Some(name),
+                    kind: PasteKind::Normal,
                 });
                 let _ = tx.send(res);
                 ctx.request_repaint();
@@ -597,7 +599,7 @@ impl App {
             match rx.try_recv() {
                 Ok(Ok(item)) => {
                     if let Some(editor) = &mut self.editor {
-                        paste(editor, Arc::new(item.clip), item.name, ctx);
+                        paste(editor, Arc::new(item.clip), item.name, item.kind, ctx);
                     }
                 }
                 Ok(Err(err)) => self.message(err, true),
@@ -721,7 +723,8 @@ impl App {
             | Command::Clear
             | Command::Cut
             | Command::Copy => editor.target == Target::Mask || !no_pixels,
-            Command::Paste => self.pasting.is_none(),
+            Command::Paste | Command::PasteInPlace => self.pasting.is_none(),
+            Command::PasteInto => editor.doc.selection.is_some() && self.pasting.is_none(),
             Command::DeleteMask
             | Command::ToggleMask
             | Command::MaskOverlay
@@ -899,12 +902,17 @@ impl App {
                     fill(editor, "Cut", None, self.tools.background);
                 }
             }
-            Command::Paste => {
+            Command::Paste | Command::PasteInPlace | Command::PasteInto => {
+                let kind = match cmd {
+                    Command::PasteInto => PasteKind::Into,
+                    Command::PasteInPlace => PasteKind::InPlace,
+                    _ => PasteKind::Normal,
+                };
                 let Some(editor) = &mut self.editor else {
                     return;
                 };
                 match self.clipboard.current() {
-                    Some(clip) => paste(editor, clip, None, ctx),
+                    Some(clip) => paste(editor, clip, None, kind, ctx),
                     None => {
                         let (tx, rx) = channel();
                         let ctx = ctx.clone();
@@ -912,6 +920,7 @@ impl App {
                             let res = crate::clipboard::read_system().map(|clip| PendingClip {
                                 clip,
                                 name: None,
+                                kind,
                             });
                             let _ = tx.send(res);
                             ctx.request_repaint();
@@ -1165,6 +1174,10 @@ impl App {
                 self.menu_item(ui, Command::Copy, None);
                 self.menu_item(ui, Command::CopyMerged, None);
                 self.menu_item(ui, Command::Paste, None);
+                ui.menu_button("Paste Special", |ui| {
+                    self.menu_item(ui, Command::PasteInPlace, None);
+                    self.menu_item(ui, Command::PasteInto, None);
+                });
                 ui.separator();
                 self.menu_item(ui, Command::FreeTransform, None);
                 ui.separator();
@@ -2434,13 +2447,27 @@ fn load_clip(path: &Path) -> Result<(Clip, String), String> {
 }
 
 /// Paste or place `clip` as a new layer above the active one.
-fn paste(editor: &mut Editor, clip: Arc<Clip>, name: Option<String>, ctx: &egui::Context) {
+fn paste(
+    editor: &mut Editor,
+    clip: Arc<Clip>,
+    name: Option<String>,
+    kind: PasteKind,
+    ctx: &egui::Context,
+) {
     let index = editor.active_index().unwrap_or(0);
     editor.target = Target::Pixels;
-    let label = if name.is_some() { "Place" } else { "Paste" };
+    let label = if name.is_some() {
+        "Place"
+    } else {
+        match kind {
+            PasteKind::Normal => "Paste",
+            PasteKind::InPlace => "Paste in Place",
+            PasteKind::Into => "Paste Into",
+        }
+    };
     editor.edit_in_background(
         label,
-        move |doc, active| match clip::paste(doc, &clip, index) {
+        move |doc, active| match clip::paste(doc, &clip, index, kind) {
             Ok(id) => {
                 *active = id;
                 if let Some(name) = name
@@ -3083,7 +3110,7 @@ mod tests {
         assert_eq!(editor.doc.layers[0].pixels.get(150, 150)[3], 0);
         assert_eq!(editor.doc.layers[0].pixels.get(250, 150)[3], 65535);
 
-        paste(&mut editor, Arc::new(clip), None, &ctx);
+        paste(&mut editor, Arc::new(clip), None, PasteKind::Normal, &ctx);
         while editor.busy().is_some() {
             std::thread::sleep(Duration::from_millis(1));
             editor.update(&ctx);
@@ -3100,6 +3127,67 @@ mod tests {
             editor.doc.composite().get(150, 150),
             [30000, 30000, 30000, 65535]
         );
+    }
+
+    #[test]
+    fn paste_into_adds_layer_with_mask_from_selection_and_targets_pixels() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let original_sel = app.editor.as_ref().unwrap().doc.selection.clone().unwrap();
+        let clip = copy(app.editor.as_ref().unwrap(), false).unwrap();
+        app.clipboard.set(clip);
+
+        app.run(Command::PasteInto, &ctx);
+        while app.editor.as_ref().unwrap().busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            app.editor.as_mut().unwrap().update(&ctx);
+        }
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.undo_label(), Some("Paste Into"));
+        assert_eq!(editor.doc.layers.len(), 2);
+        let pasted = &editor.doc.layers[1];
+        assert_eq!(editor.active, pasted.id);
+        assert_eq!(editor.target, Target::Pixels);
+        assert!(editor.doc.selection.is_none());
+
+        let mask = pasted.mask.as_ref().expect("paste into must add a layer mask");
+        assert!(mask.enabled);
+        assert!(mask.pixels.same_tiles(&original_sel.coverage));
+    }
+
+    #[test]
+    fn paste_into_disabled_without_a_selection() {
+        let mut app = test_app();
+        assert!(app.enabled(Command::PasteInto));
+        app.editor.as_mut().unwrap().doc.selection = None;
+        assert!(!app.enabled(Command::PasteInto));
+    }
+
+    #[test]
+    fn paste_in_place_pastes_an_omapix_copy_where_it_came_from() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let clip = copy(app.editor.as_ref().unwrap(), false).unwrap();
+        app.clipboard.set(clip);
+        // Clear background where it was copied from so we can confirm it goes back in place.
+        fill(app.editor.as_mut().unwrap(), "Cut", None, [255, 255, 255]);
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers[0].pixels.get(150, 150)[3], 0);
+
+        app.run(Command::PasteInPlace, &ctx);
+        while app.editor.as_ref().unwrap().busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            app.editor.as_mut().unwrap().update(&ctx);
+        }
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.undo_label(), Some("Paste in Place"));
+        assert_eq!(editor.doc.layers.len(), 2);
+        let pasted = &editor.doc.layers[1];
+        assert_eq!(editor.active, pasted.id);
+        assert_eq!(pasted.pixels.get(150, 150), [30000, 30000, 30000, 65535]);
+        assert_eq!(pasted.pixels.get(250, 150)[3], 0);
+        assert!(editor.doc.selection.is_none());
     }
 
     #[test]
