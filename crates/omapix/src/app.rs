@@ -30,6 +30,8 @@ use crate::tools::Tools;
 
 const OPEN_EXTENSIONS: [&str; 7] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd"];
 const JPEG_QUALITY: u8 = 92;
+/// How near Free Transform's handles the pointer grabs them, in points.
+const HANDLE_REACH: f32 = 8.0;
 
 /// What a file dialog was opened for.
 #[derive(Clone, Copy)]
@@ -246,6 +248,8 @@ pub struct App {
     drawing: Option<(Vec<Pos2>, Combine)>,
     /// Where a Move tool drag started, in image pixels.
     move_from: Option<Pos2>,
+    /// A drag on Free Transform's box.
+    transform_drag: Option<crate::free_transform::Drag>,
     /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
     /// the real UI without a mouse; see [`ScriptStep`].
     script: VecDeque<ScriptStep>,
@@ -282,6 +286,7 @@ impl App {
             right_tab: RightTab::default(),
             drawing: None,
             move_from: None,
+            transform_drag: None,
             tools: Tools::default(),
             opening: None,
             picking: None,
@@ -496,6 +501,7 @@ impl App {
         self.history = HistoryPanel;
         self.drawing = None;
         self.move_from = None;
+        self.transform_drag = None;
         self.pasting = None;
         self.dialog = None;
         self.pending_drops.clear();
@@ -659,7 +665,8 @@ impl App {
             Command::ShowLayers | Command::ShowChannels | Command::ShowHistory => true,
             Command::SaveSelection => editor.doc.selection.is_some(),
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
-            Command::Undo => editor.undo_label().is_some(),
+            Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
+            Command::FreeTransform => layer.is_some() && editor.transform().is_none(),
             Command::Redo => editor.redo_label().is_some(),
             // Something must be left, and layer must be deletable.
             Command::DeleteLayer => {
@@ -725,6 +732,22 @@ impl App {
         };
         if !self.enabled(cmd) {
             return;
+        }
+        // A Free Transform is applied before the document is saved or closed.
+        let finishing = [
+            Command::Open,
+            Command::Close,
+            Command::ReopenLast,
+            Command::Quit,
+            Command::Save,
+            Command::SaveAs,
+            Command::ExportTiff,
+            Command::ExportJpeg,
+        ];
+        if finishing.contains(&cmd)
+            && let Some(editor) = &mut self.editor
+        {
+            editor.commit_transform();
         }
         match cmd {
             Command::Open => self.guard(Then::Open, ctx),
@@ -910,6 +933,21 @@ impl App {
                 if let Some(editor) = &mut self.editor {
                     editor.hide_selection_edges = false;
                     run_on_editor(editor, cmd, ctx);
+                }
+            }
+            Command::FreeTransform => {
+                let background = crate::tools::grey(self.tools.background);
+                if let Some(editor) = &mut self.editor
+                    && let Err(why) = editor.begin_transform(background)
+                {
+                    self.message(why, true);
+                }
+            }
+            // Undo while transforming cancels it, as in Photoshop.
+            Command::Undo if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) => {
+                self.transform_drag = None;
+                if let Some(editor) = &mut self.editor {
+                    editor.cancel_transform();
                 }
             }
             Command::SelectionEdges => {
@@ -1108,6 +1146,8 @@ impl App {
                 self.menu_item(ui, Command::CopyMerged, None);
                 self.menu_item(ui, Command::Paste, None);
                 ui.separator();
+                self.menu_item(ui, Command::FreeTransform, None);
+                ui.separator();
                 self.menu_item(ui, Command::FillForeground, None);
                 self.menu_item(ui, Command::FillBackground, None);
                 self.menu_item(ui, Command::Clear, None);
@@ -1249,6 +1289,10 @@ impl App {
                 };
                 if let Some(text) = showing {
                     ui.label(RichText::new(text).color(self.theme.accent));
+                    ui.separator();
+                }
+                if let Some((_, t)) = editor.transform() {
+                    ui.label(RichText::new(crate::free_transform::readout(&t)).color(self.theme.accent));
                     ui.separator();
                 }
                 if editor.hide_selection_edges && doc.selection.is_some() {
@@ -1702,7 +1746,55 @@ impl App {
         }
     }
 
+    /// Enter applies Free Transform and Esc cancels it.
+    fn check_transform_keys(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if editor.transform().is_none() || self.dialog.is_some() || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let key = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if key(egui::Key::Enter) {
+            editor.commit_transform();
+        } else if key(egui::Key::Escape) {
+            editor.cancel_transform();
+        } else {
+            return;
+        }
+        self.transform_drag = None;
+    }
+
+    /// Dragging Free Transform's box: its handles scale, inside moves, and
+    /// outside rotates.
+    fn transform_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let Some((bounds, t)) = editor.transform() else {
+            return;
+        };
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                let handle = crate::free_transform::hit(bounds, &t, p, reach);
+                self.transform_drag = Some(crate::free_transform::Drag::new(handle, p, t));
+            }
+            ToolInput::StrokeMove(p) => {
+                if let Some(drag) = &self.transform_drag {
+                    editor.transform_to(drag.to(bounds, p, modifiers.shift, modifiers.alt));
+                }
+            }
+            ToolInput::StrokeEnd => self.transform_drag = None,
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
+        }
+    }
+
     fn tool_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) {
+            self.transform_input(input, modifiers);
+            return;
+        }
         if let ToolInput::BrushDrag { size, hardness } = input {
             self.tools.drag_brush(size, hardness);
             return;
@@ -2725,6 +2817,7 @@ impl eframe::App for App {
             }
         }
         self.check_escape(ctx);
+        self.check_transform_keys(ctx);
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
                 editor.end_live();
@@ -2846,19 +2939,34 @@ impl eframe::App for App {
                         .map_or(&[][..], |s| &s.outlines[..])
                 };
                 let modifiers = ui.input(|i| i.modifiers);
-                let eyedropper_armed = self.properties.eyedropper.is_some();
+                // An armed Curves or Levels eyedropper, or Free Transform, takes the
+                // pointer from the tools.
+                let tools_off =
+                    self.properties.eyedropper.is_some() || editor.transform().is_some();
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
-                    alt_samples: !eyedropper_armed && tool.paints(),
-                    samples: !eyedropper_armed && tool == crate::tools::Tool::Eyedropper,
-                    brush: (!eyedropper_armed && tool.paints()).then_some(brush.size),
-                    moves: !eyedropper_armed && tool == crate::tools::Tool::Move,
+                    alt_samples: !tools_off && tool.paints(),
+                    samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
+                    brush: (!tools_off && tool.paints()).then_some(brush.size),
+                    moves: !tools_off && tool == crate::tools::Tool::Move,
                     source,
                     selection: outlines,
-                    drawing: (!eyedropper_armed).then_some(drawing.as_deref()).flatten(),
-                    badge: (idle && !eyedropper_armed)
+                    drawing: (!tools_off).then_some(drawing.as_deref()).flatten(),
+                    badge: (idle && !tools_off)
                         .then(|| crate::tools::cursor_badge(tool, modifiers))
                         .flatten(),
+                    transform: editor.transform().map(|(bounds, t)| {
+                        // The handle being dragged, or the one under the pointer.
+                        let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                        let handle = self.transform_drag.map(|d| d.handle()).or_else(|| {
+                            let p = editor.canvas.pointer?;
+                            Some(crate::free_transform::hit(bounds, &t, p, reach))
+                        });
+                        let cursor = handle.map_or(egui::CursorIcon::Default, |h| {
+                            crate::free_transform::cursor(bounds, &t, h)
+                        });
+                        (crate::free_transform::corners(bounds, &t), cursor)
+                    }),
                 };
                 input = editor.canvas.show(ui, pasteboard, overlay);
             } else {
@@ -2886,7 +2994,7 @@ fn constrain_square(p0: Pos2, p1: Pos2) -> Pos2 {
 }
 
 /// Snap a move to the nearest multiple of 45°, as Shift does in Photoshop.
-fn constrain_45(d: Vec2) -> Vec2 {
+pub(crate) fn constrain_45(d: Vec2) -> Vec2 {
     let (ax, ay) = (d.x.abs(), d.y.abs());
     // tan 22.5°: closer to an axis than to a diagonal.
     let near = std::f32::consts::FRAC_PI_8.tan();
@@ -3232,6 +3340,7 @@ mod tests {
             title: String::new(),
             drawing: None,
             move_from: None,
+            transform_drag: None,
             script: VecDeque::new(),
             clipboard: Clipboard::new(false),
             pasting: None,
@@ -3793,6 +3902,7 @@ mod tests {
                     selection: &[],
                     drawing: None,
                     badge: None,
+                    transform: None,
                 };
                 editor.canvas.show(ui, egui::Color32::BLACK, overlay);
             });
@@ -4226,6 +4336,7 @@ mod tests {
                     selection: &[],
                     drawing: None,
                     badge: None,
+                    transform: None,
                 };
                 editor.canvas.show(ui, egui::Color32::BLACK, overlay);
             });
@@ -4434,6 +4545,58 @@ mod tests {
             app.editor.as_ref().unwrap().undo_label(),
             Some("Set Gray Point")
         );
+    }
+
+    #[test]
+    fn free_transform_drags_a_corner_and_applies_on_enter() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let editor = app.editor.as_mut().unwrap();
+        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)), 1.0);
+        let key = |app: &mut App, key| {
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut out = ctx.run_ui(input, |ui| app.check_transform_keys(ui.ctx()));
+            out.textures_delta.clear();
+        };
+        let none = egui::Modifiers::NONE;
+
+        // The selection (100..200) is what's transformed. Dragging its
+        // bottom right corner to (300, 300) doubles it.
+        app.run(Command::FreeTransform, &ctx);
+        assert!(!app.enabled(Command::FreeTransform));
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(201.0, 199.0)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(300.0, 300.0)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        key(&mut app, egui::Key::Enter);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.transform().is_none());
+        let sel = editor.doc.selection.clone().unwrap();
+        let selected = |sel: &Selection| [(105, 105), (295, 295), (95, 150), (305, 150)].map(|(x, y)| sel.at(x, y));
+        assert_eq!(selected(&sel), [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(editor.undo_label(), Some("Free Transform"));
+
+        // Ctrl+Z while transforming cancels, leaving the step before.
+        app.run(Command::FreeTransform, &ctx);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(170.0, 150.0)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        app.run(Command::Undo, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.transform().is_none());
+        assert!(editor.doc.selection.as_ref().unwrap().coverage.same_tiles(&sel.coverage));
+        assert_eq!(editor.undo_label(), Some("Free Transform"));
+
+        // Esc cancels too.
+        app.run(Command::FreeTransform, &ctx);
+        key(&mut app, egui::Key::Escape);
+        assert!(app.editor.as_ref().unwrap().transform().is_none());
     }
 
     #[test]

@@ -36,7 +36,13 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 `V` picks the Move tool. Dragging moves the active layer, and its mask with it (Photoshop links them). With a selection, it moves just the selected pixels, or the selected part of the mask when the mask is targeted, and the selection moves with them. The hole left behind is transparent, or the background colour's grey on a mask, as with Delete. Alt+drag moves a copy: a new layer without a selection, or a copy of the selected pixels. Shift keeps the drag horizontal, vertical or at 45°. Arrow keys nudge by 1 px (Shift: 10 px). Number keys set the layer's opacity rather than the brush's. Each drag or nudge is one undo step. On large images the drag updates as fast as the image re-renders, skipping positions in between rather than falling behind.
 - Pixels moved past the edge of the canvas are cut off when the move ends. Photoshop keeps them in the layer, but Omapix layers are the size of the canvas.
 - Each nudge of a selection lifts and drops it again, so feathered edges fade slightly with repeated nudges. Photoshop keeps the pixels "floating" until you deselect.
-- Later: Auto-Select (Ctrl+click picks the layer under the pointer) and Free Transform (Ctrl+T).
+- Later: Auto-Select (Ctrl+click picks the layer under the pointer).
+
+### ~~Free Transform~~ (done)
+
+Ctrl+T (Edit › Free Transform) puts a box with eight handles round the active layer's pixels, or round the selection, which transforms just the selected pixels (or mask values, with the mask targeted) and the selection with them. As in Photoshop: dragging a corner scales in proportion (Shift for free), a side stretches one way, Alt scales about the centre, dragging inside moves (Shift keeps it straight), and dragging outside rotates (Shift in 15° steps). The status bar shows the width, height and angle. Enter applies it, resampled bicubic, as one undo step; Esc or Ctrl+Z cancels. The layer's mask goes with it. Saving, exporting or closing applies it first.
+- The preview while dragging is resampled bilinear on the CPU: quick for a pasted patch, about a quarter of a second a step for a whole 24 MP layer. Next: show it live on the GPU, as Move tool drags are.
+- Later: several layers or a group at once, typed values in an options bar, moving the reference point, Skew/Distort/Perspective/Warp (Ctrl+drag a corner), Flip and Rotate 90°, and double-click to apply.
 
 ### ~~Cut, Copy and Paste~~ (done)
 
@@ -138,6 +144,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
 - [ ] PSD import: a flattened 16-bit .psd and a layered one (layers, groups, masks and colours as in Photoshop), and Ctrl+S asking where to save rather than overwriting the .psd
 - [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
+- [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, and how smooth it is on a 24 MP layer
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing

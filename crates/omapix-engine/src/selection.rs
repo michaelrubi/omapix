@@ -236,6 +236,13 @@ impl Selection {
         Selection::from_coverage(self.coverage.translated(dx, dy, 0))
     }
 
+    /// The same selection transformed by `t`, as Free Transform does to
+    /// selected pixels.
+    pub fn transformed(&self, t: &crate::transform::Affine) -> Selection {
+        let coverage = crate::transform::transformed(&self.coverage, t, 0, crate::transform::Resampling::Bilinear);
+        Selection::from_coverage(coverage)
+    }
+
     /// Soften the edge (Photoshop's Select › Modify › Feather), `radius`
     /// being the blur's standard deviation in pixels.
     pub fn feather(&self, radius: f32) -> Selection {
