@@ -7,6 +7,7 @@
 //! handed to egui here as pointer events, and its pressure kept for the
 //! brushes. Its cursor has to be set here too.
 
+use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 
 use egui::{CursorIcon, PointerButton, pos2};
@@ -51,11 +52,17 @@ struct Shared {
 
 pub struct Tablet {
     shared: Arc<Mutex<Shared>>,
+    /// Never dropped: winit closes the display as Omapix quits, and
+    /// destroying these after that crashes it.
+    wayland: ManuallyDrop<Wayland>,
+    /// Where the pen was last, in egui points.
+    last: egui::Pos2,
+}
+
+struct Wayland {
     connection: Connection,
     shapes: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     queue: QueueHandle<State>,
-    /// Where the pen was last, in egui points.
-    last: egui::Pos2,
 }
 
 impl Tablet {
@@ -84,13 +91,20 @@ impl Tablet {
         };
         std::thread::Builder::new()
             .name("tablet".into())
-            .spawn(move || while queue.blocking_dispatch(&mut state).is_ok() {})
+            .spawn(move || {
+                while queue.blocking_dispatch(&mut state).is_ok() {}
+                // The display's closed (Omapix is quitting): destroying the
+                // queue and the objects on it now would crash.
+                std::mem::forget((queue, state));
+            })
             .ok()?;
         Some(Self {
             shared,
-            connection,
-            shapes,
-            queue: qh,
+            wayland: ManuallyDrop::new(Wayland {
+                connection,
+                shapes,
+                queue: qh,
+            }),
             last: egui::Pos2::ZERO,
         })
     }
@@ -120,15 +134,15 @@ impl Tablet {
         match shape(icon) {
             None => tool.set_cursor(*serial, None, 0, 0),
             Some(shape) => {
-                if let Some(shapes) = &self.shapes {
-                    let device = shapes.get_tablet_tool_v2(tool, &self.queue, ());
+                if let Some(shapes) = &self.wayland.shapes {
+                    let device = shapes.get_tablet_tool_v2(tool, &self.wayland.queue, ());
                     device.set_shape(*serial, shape);
                     device.destroy();
                 }
             }
         }
         shared.cursor_shown = true;
-        let _ = self.connection.flush();
+        let _ = self.wayland.connection.flush();
     }
 }
 
