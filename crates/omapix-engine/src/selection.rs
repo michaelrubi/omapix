@@ -163,9 +163,28 @@ impl Selection {
 
     /// True if nothing is selected.
     pub fn is_empty(&self) -> bool {
-        self.coverage.fill() == 0
-            && (0..self.coverage.rows())
-                .all(|r| (0..self.coverage.cols()).all(|c| self.coverage.tile(c, r).is_none()))
+        self.everywhere(0)
+    }
+
+    /// True if everything is selected.
+    pub fn is_all(&self) -> bool {
+        self.everywhere(u16::MAX)
+    }
+
+    /// Whether every pixel's coverage is `v` (Quick Mask can leave tiles
+    /// that are all one value, so the tiles themselves are looked at).
+    fn everywhere(&self, v: u16) -> bool {
+        let c = &self.coverage;
+        let (w, h) = (c.width(), c.height());
+        (0..c.rows()).all(|row| {
+            (0..c.cols()).all(|col| match c.tile(col, row) {
+                None => c.fill() == v,
+                Some(tile) => {
+                    let (tw, th) = (TILE.min(w - col * TILE), TILE.min(h - row * TILE));
+                    (0..th).all(|y| tile[(y * TILE) as usize..(y * TILE + tw) as usize].iter().all(|&t| t == v))
+                }
+            })
+        })
     }
 
     /// The smallest rectangle holding everything selected, as `[x, y,
@@ -1159,5 +1178,21 @@ mod tests {
         assert_eq!(sel.coverage.get(0, 0), 52000);
         assert_eq!(sel.coverage.get(1, 0), 0);
         assert!(!sel.is_empty());
+    }
+
+    #[test]
+    fn is_all_and_is_empty_checks() {
+        let (w, h) = (300, 300);
+        let all = Selection::all(w, h);
+        assert!(all.is_all());
+        assert!(!all.is_empty());
+
+        let empty = Selection::from_coverage(Tiled::new(w, h, 0));
+        assert!(empty.is_empty());
+        assert!(!empty.is_all());
+
+        let rect = Selection::rectangle(w, h, (50.0, 50.0), (100.0, 100.0));
+        assert!(!rect.is_empty());
+        assert!(!rect.is_all());
     }
 }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use egui::{Align, Align2, Button, Layout, Pos2, RichText, Sense, Ui, Vec2, pos2, vec2};
 use omapix_engine::adjust::Eyedropper;
 use omapix_engine::brush::Paint;
-use omapix_engine::clip::{self, Clip};
+use omapix_engine::clip::{self, Clip, PasteKind};
 use omapix_engine::filters::LayerFilter;
 use omapix_engine::layer::{Layer, Locks, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
@@ -54,6 +54,7 @@ enum Then {
 struct PendingClip {
     clip: Clip,
     name: Option<String>,
+    kind: PasteKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -162,6 +163,7 @@ impl ScriptStep {
                 ("image", _) => ScriptStep::View(View::Image),
                 ("mask", _) => ScriptStep::View(View::Mask(0)),
                 ("overlay", _) => ScriptStep::View(View::MaskOverlay(0)),
+                ("quickmask", _) => ScriptStep::View(View::QuickMask),
                 ("texture", &[radius]) => ScriptStep::View(View::Separation {
                     radius,
                     texture: true,
@@ -263,7 +265,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, round_trip: bool) -> Self {
         let ctx = &cc.egui_ctx;
         // Ctrl+= / Ctrl+- zoom the image, not the interface.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -330,8 +332,10 @@ impl App {
             app.message(warnings.join("; "), true);
         }
 
-        if let Some(path) = path {
-            app.open(path, ctx);
+        match path {
+            Some(path) if round_trip => app.open_with(path, omapix_engine::io::load_round_trip, ctx),
+            Some(path) => app.open(path, ctx),
+            None => {}
         }
         app
     }
@@ -345,12 +349,22 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.open_with(path, omapix_engine::io::load, ctx);
+    }
+
+    /// Open `path` with `load` in the background.
+    fn open_with(
+        &mut self,
+        path: PathBuf,
+        load: fn(&Path) -> omapix_engine::Result<Document>,
+        ctx: &egui::Context,
+    ) {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         let target = path.clone();
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result = omapix_engine::io::load(&target)
+            let result = load(&target)
                 .and_then(|mut doc| {
                     let converted = ops::prepare_for_editing(&mut doc)?;
                     Ok((doc, converted))
@@ -371,6 +385,7 @@ impl App {
                 let res = load_clip(&path).map(|(clip, name)| PendingClip {
                     clip,
                     name: Some(name),
+                    kind: PasteKind::Normal,
                 });
                 let _ = tx.send(res);
                 ctx.request_repaint();
@@ -448,7 +463,10 @@ impl App {
             let result = match purpose {
                 Purpose::ExportTiff => export::tiff(&doc, &path).map(|_| false),
                 Purpose::ExportJpeg => export::jpeg(&doc, &path, JPEG_QUALITY).map(|_| false),
-                _ => ora::save(&doc, &path).map(|_| true),
+                // A round trip from darktable also updates its TIFF.
+                _ => ora::save(&doc, &path)
+                    .and_then(|_| doc.round_trip.as_ref().map_or(Ok(()), |tiff| export::tiff(&doc, tiff)))
+                    .map(|_| true),
             };
             log::info!("wrote {} in {:?}", path.display(), started.elapsed());
             let _ = tx.send(
@@ -566,7 +584,12 @@ impl App {
                     }
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     let verb = if native { "Saved" } else { "Exported" };
-                    self.message(format!("{verb} {name}"), false);
+                    let mut text = format!("{verb} {name}");
+                    let round_trip = self.editor.as_ref().and_then(|e| e.doc.round_trip.as_ref());
+                    if native && let Some(tiff) = round_trip.and_then(|t| t.file_name()) {
+                        text += &format!(", and {} for darktable", tiff.to_string_lossy());
+                    }
+                    self.message(text, false);
                 }
                 Err(err) => self.message(format!("{label} failed: {err}"), true),
             }
@@ -577,7 +600,7 @@ impl App {
             match rx.try_recv() {
                 Ok(Ok(item)) => {
                     if let Some(editor) = &mut self.editor {
-                        paste(editor, Arc::new(item.clip), item.name, ctx);
+                        paste(editor, Arc::new(item.clip), item.name, item.kind, ctx);
                     }
                 }
                 Ok(Err(err)) => self.message(err, true),
@@ -700,8 +723,11 @@ impl App {
             | Command::FillBackground
             | Command::Clear
             | Command::Cut
-            | Command::Copy => editor.target == Target::Mask || !no_pixels,
-            Command::Paste => self.pasting.is_none(),
+            | Command::Copy => {
+                editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels
+            }
+            Command::Paste | Command::PasteInPlace => self.pasting.is_none(),
+            Command::PasteInto => editor.doc.selection.is_some() && self.pasting.is_none(),
             Command::DeleteMask
             | Command::ToggleMask
             | Command::MaskOverlay
@@ -719,7 +745,9 @@ impl App {
                 }
             }
             Command::AddNoise => editor.target == Target::Pixels || has_mask,
-            Command::Invert => editor.target == Target::Mask || !no_pixels,
+            Command::Invert => {
+                editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels
+            }
             _ => true,
         }
     }
@@ -879,12 +907,17 @@ impl App {
                     fill(editor, "Cut", None, self.tools.background);
                 }
             }
-            Command::Paste => {
+            Command::Paste | Command::PasteInPlace | Command::PasteInto => {
+                let kind = match cmd {
+                    Command::PasteInto => PasteKind::Into,
+                    Command::PasteInPlace => PasteKind::InPlace,
+                    _ => PasteKind::Normal,
+                };
                 let Some(editor) = &mut self.editor else {
                     return;
                 };
                 match self.clipboard.current() {
-                    Some(clip) => paste(editor, clip, None, ctx),
+                    Some(clip) => paste(editor, clip, None, kind, ctx),
                     None => {
                         let (tx, rx) = channel();
                         let ctx = ctx.clone();
@@ -892,6 +925,7 @@ impl App {
                             let res = crate::clipboard::read_system().map(|clip| PendingClip {
                                 clip,
                                 name: None,
+                                kind,
                             });
                             let _ = tx.send(res);
                             ctx.request_repaint();
@@ -1145,6 +1179,10 @@ impl App {
                 self.menu_item(ui, Command::Copy, None);
                 self.menu_item(ui, Command::CopyMerged, None);
                 self.menu_item(ui, Command::Paste, None);
+                ui.menu_button("Paste Special", |ui| {
+                    self.menu_item(ui, Command::PasteInPlace, None);
+                    self.menu_item(ui, Command::PasteInto, None);
+                });
                 ui.separator();
                 self.menu_item(ui, Command::FreeTransform, None);
                 ui.separator();
@@ -1212,6 +1250,17 @@ impl App {
                     self.menu_item(ui, Command::LoadSelectionLayerMask, None);
                 });
                 self.menu_item(ui, Command::SaveSelection, None);
+                ui.separator();
+                let in_qm = self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|e| e.view() == View::QuickMask);
+                let tick = if in_qm { "✓" } else { "  " };
+                self.menu_item(
+                    ui,
+                    Command::QuickMask,
+                    Some(format!("{tick} {}", Command::QuickMask.label())),
+                );
             });
             ui.menu_button("Image", |ui| {
                 ui.menu_button("Adjustments", |ui| {
@@ -1282,6 +1331,7 @@ impl App {
                         Some("Viewing layer mask — Alt+click the mask or press Esc to return")
                     }
                     View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
+                    View::QuickMask => Some("Quick Mask — press Q to exit"),
                     View::Channel(_) | View::Alpha(_) => {
                         Some("Viewing one channel — click RGB in Channels, or press Ctrl+2 or Esc to return")
                     }
@@ -2344,6 +2394,13 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
     let target = editor.target;
     let profile = editor.doc.profile.clone();
     editor.edit(label, |doc, _| {
+        if target == Target::QuickMask {
+            let (w, h) = (doc.width, doc.height);
+            let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
+            let grey = crate::tools::grey(colour.unwrap_or(background));
+            sel.coverage = ops::fill_mask(&sel.coverage, grey, None);
+            return;
+        }
         let selection = doc.selection.clone();
         let Some(layer) = doc.layer_mut(id) else {
             return;
@@ -2371,6 +2428,7 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
                     filled
                 };
             }
+            Target::QuickMask => unreachable!(),
         }
     });
 }
@@ -2386,6 +2444,9 @@ fn copy(editor: &Editor, merged: bool) -> Option<Clip> {
             selection,
             &doc.profile,
         )
+    } else if editor.target == Target::QuickMask {
+        let sel = selection?;
+        Clip::copy_mask(&sel.coverage, None, &doc.profile)
     } else {
         let layer = doc.layer(editor.active)?;
         match (editor.target, &layer.mask) {
@@ -2414,13 +2475,27 @@ fn load_clip(path: &Path) -> Result<(Clip, String), String> {
 }
 
 /// Paste or place `clip` as a new layer above the active one.
-fn paste(editor: &mut Editor, clip: Arc<Clip>, name: Option<String>, ctx: &egui::Context) {
+fn paste(
+    editor: &mut Editor,
+    clip: Arc<Clip>,
+    name: Option<String>,
+    kind: PasteKind,
+    ctx: &egui::Context,
+) {
     let index = editor.active_index().unwrap_or(0);
     editor.target = Target::Pixels;
-    let label = if name.is_some() { "Place" } else { "Paste" };
+    let label = if name.is_some() {
+        "Place"
+    } else {
+        match kind {
+            PasteKind::Normal => "Paste",
+            PasteKind::InPlace => "Paste in Place",
+            PasteKind::Into => "Paste Into",
+        }
+    };
     editor.edit_in_background(
         label,
-        move |doc, active| match clip::paste(doc, &clip, index) {
+        move |doc, active| match clip::paste(doc, &clip, index, kind) {
             Ok(id) => {
                 *active = id;
                 if let Some(name) = name
@@ -2600,7 +2675,13 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             });
         }
         Command::Invert => {
-            if editor.target == Target::Mask {
+            if editor.target == Target::QuickMask {
+                editor.edit("Invert Selection", |doc, _| {
+                    let (w, h) = (doc.width, doc.height);
+                    let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
+                    *sel = sel.invert();
+                });
+            } else if editor.target == Target::Mask {
                 editor.edit("Invert Mask", |doc, _| {
                     if let Some(m) = doc.layer_mut(id).and_then(|l| l.mask.as_mut()) {
                         m.invert();
@@ -2776,6 +2857,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 View::MaskOverlay(id)
             });
         }
+        Command::QuickMask => {
+            editor.toggle_quick_mask();
+        }
         _ => {}
     }
 }
@@ -2929,7 +3013,7 @@ impl eframe::App for App {
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
                 let idle = editor.busy().is_none();
-                let outlines = if editor.hide_selection_edges {
+                let outlines = if editor.hide_selection_edges || editor.view() == View::QuickMask {
                     &[][..]
                 } else {
                     editor
@@ -3063,7 +3147,7 @@ mod tests {
         assert_eq!(editor.doc.layers[0].pixels.get(150, 150)[3], 0);
         assert_eq!(editor.doc.layers[0].pixels.get(250, 150)[3], 65535);
 
-        paste(&mut editor, Arc::new(clip), None, &ctx);
+        paste(&mut editor, Arc::new(clip), None, PasteKind::Normal, &ctx);
         while editor.busy().is_some() {
             std::thread::sleep(Duration::from_millis(1));
             editor.update(&ctx);
@@ -3080,6 +3164,67 @@ mod tests {
             editor.doc.composite().get(150, 150),
             [30000, 30000, 30000, 65535]
         );
+    }
+
+    #[test]
+    fn paste_into_adds_layer_with_mask_from_selection_and_targets_pixels() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let original_sel = app.editor.as_ref().unwrap().doc.selection.clone().unwrap();
+        let clip = copy(app.editor.as_ref().unwrap(), false).unwrap();
+        app.clipboard.set(clip);
+
+        app.run(Command::PasteInto, &ctx);
+        while app.editor.as_ref().unwrap().busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            app.editor.as_mut().unwrap().update(&ctx);
+        }
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.undo_label(), Some("Paste Into"));
+        assert_eq!(editor.doc.layers.len(), 2);
+        let pasted = &editor.doc.layers[1];
+        assert_eq!(editor.active, pasted.id);
+        assert_eq!(editor.target, Target::Pixels);
+        assert!(editor.doc.selection.is_none());
+
+        let mask = pasted.mask.as_ref().expect("paste into must add a layer mask");
+        assert!(mask.enabled);
+        assert!(mask.pixels.same_tiles(&original_sel.coverage));
+    }
+
+    #[test]
+    fn paste_into_disabled_without_a_selection() {
+        let mut app = test_app();
+        assert!(app.enabled(Command::PasteInto));
+        app.editor.as_mut().unwrap().doc.selection = None;
+        assert!(!app.enabled(Command::PasteInto));
+    }
+
+    #[test]
+    fn paste_in_place_pastes_an_omapix_copy_where_it_came_from() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let clip = copy(app.editor.as_ref().unwrap(), false).unwrap();
+        app.clipboard.set(clip);
+        // Clear background where it was copied from so we can confirm it goes back in place.
+        fill(app.editor.as_mut().unwrap(), "Cut", None, [255, 255, 255]);
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers[0].pixels.get(150, 150)[3], 0);
+
+        app.run(Command::PasteInPlace, &ctx);
+        while app.editor.as_ref().unwrap().busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            app.editor.as_mut().unwrap().update(&ctx);
+        }
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.undo_label(), Some("Paste in Place"));
+        assert_eq!(editor.doc.layers.len(), 2);
+        let pasted = &editor.doc.layers[1];
+        assert_eq!(editor.active, pasted.id);
+        assert_eq!(pasted.pixels.get(150, 150), [30000, 30000, 30000, 65535]);
+        assert_eq!(pasted.pixels.get(250, 150)[3], 0);
+        assert!(editor.doc.selection.is_none());
     }
 
     #[test]
@@ -4742,6 +4887,15 @@ mod tests {
             self.frame(vec![])
         }
 
+        fn open_select_menu(&mut self) -> egui::FullOutput {
+            let out = self.frame(vec![]);
+            let pos = self
+                .find_text_pos(&out, "Select")
+                .expect("Select menu button not found");
+            self.click(pos);
+            self.frame(vec![])
+        }
+
         fn close_menu(&mut self) {
             self.frame(vec![egui::Event::Key {
                 key: egui::Key::Escape,
@@ -4859,6 +5013,66 @@ mod tests {
         // Status bar message must not appear when there is no selection
         let out = h.frame(vec![]);
         assert!(!h.output_contains_text(&out, "Selection edges hidden"));
+    }
+
+    #[test]
+    fn quick_mask_toggle_status_bar_select_menu_and_actions() {
+        let mut h = SelectionEdgesHarness::new();
+        let ctx = egui::Context::default();
+
+        // Initially in normal image view, no Quick Mask message
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::Image);
+        let out = h.frame(vec![]);
+        assert!(!h.output_contains_text(&out, "Quick Mask — press Q to exit"));
+
+        // Select menu initially does not have checkmark on Quick Mask
+        let out = h.open_select_menu();
+        assert!(h.output_contains_text(&out, "Edit in Quick Mask Mode"));
+        assert!(!h.output_contains_text(&out, "✓ Edit in Quick Mask Mode"));
+        h.close_menu();
+
+        // Enter Quick Mask via command
+        h.app.run(Command::QuickMask, &ctx);
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::QuickMask);
+        assert_eq!(h.app.editor.as_ref().unwrap().target, Target::QuickMask);
+
+        // Status bar displays Quick Mask message
+        let out = h.frame(vec![]);
+        assert!(h.output_contains_text(&out, "Quick Mask — press Q to exit"));
+
+        // Select menu shows checkmark
+        let out = h.open_select_menu();
+        assert!(h.output_contains_text(&out, "✓ Edit in Quick Mask Mode"));
+        h.close_menu();
+
+        // Pressing Escape does NOT exit Quick Mask
+        h.frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::QuickMask);
+
+        // Invert in Quick Mask inverts the selection
+        let orig_cov = h.app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap().coverage.get(20, 20);
+        h.app.run(Command::Invert, &ctx);
+        let new_cov = h.app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap().coverage.get(20, 20);
+        assert_eq!(new_cov, u16::MAX - orig_cov);
+
+        // Copy in Quick Mask returns a mask clip
+        let clip = copy(h.app.editor.as_ref().unwrap(), false);
+        assert!(clip.is_some());
+
+        // Exit Quick Mask via command
+        h.app.run(Command::QuickMask, &ctx);
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::Image);
+        assert_eq!(h.app.editor.as_ref().unwrap().target, Target::Pixels);
+
+        // Status bar no longer has Quick Mask message
+        let out = h.frame(vec![]);
+        assert!(!h.output_contains_text(&out, "Quick Mask — press Q to exit"));
     }
 
     #[test]
@@ -5052,6 +5266,29 @@ mod tests {
         app.run(Command::LoadSelectionRed, &ctx);
         assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Load Selection"));
+    }
+
+    #[test]
+    fn saving_a_round_trip_also_writes_the_tiff_for_darktable() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix-app-round-trip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ora, tiff) = (dir.join("IMG.ora"), dir.join("IMG.tif"));
+        let editor = app.editor.as_mut().unwrap();
+        editor.doc.saved_path = Some(ora.clone());
+        editor.doc.round_trip = Some(tiff.clone());
+
+        app.run(Command::Save, &ctx);
+        while app.file_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        assert!(ora.exists() && tiff.exists());
+        let flat = omapix_engine::io::load(&tiff).unwrap();
+        assert_eq!((flat.width, flat.height, flat.layers.len()), (600, 400, 1));
+        assert_eq!(app.status.as_ref().unwrap().0, "Saved IMG.ora, and IMG.tif for darktable");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

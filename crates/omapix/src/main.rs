@@ -25,7 +25,14 @@ use eframe::wgpu::PowerPreference;
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,omapix=info"))
         .init();
-    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    // `omapix --round-trip image.tif` is how darktable sends an image (see
+    // darktable/omapix.lua): saving also writes it back to the TIFF.
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    let round_trip = args.first().is_some_and(|a| a == "--round-trip");
+    if round_trip {
+        args.remove(0);
+    }
+    let path = args.into_iter().next().map(PathBuf::from);
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -45,6 +52,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "omapix",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, path)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, path, round_trip)))),
     )
 }

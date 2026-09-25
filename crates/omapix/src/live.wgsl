@@ -23,7 +23,14 @@ struct Layer {
     lut_size: u32,
     opacity: f32,
     mask_fill: f32,
-    pad: vec2<f32>,
+    // 1: the layer is drawn through `inverse` (Free Transform), sampled
+    // between its pixels, rather than moved by `offset`.
+    transformed: u32,
+    pad: u32,
+    // Level pixel on the layer shown at level pixel (x, y): (a·x + b·y + c,
+    // d·x + e·y + f), as (a, b, c, d) and (e, f).
+    inverse_abcd: vec4<f32>,
+    inverse_ef: vec4<f32>,
 };
 
 @group(0) @binding(0) var below: texture_2d<f32>;
@@ -59,6 +66,43 @@ fn mask_at(q: vec2<i32>) -> f32 {
         return p.mask_fill;
     }
     return f32(textureLoad(mask, q - p.mask_origin, 0).r) / 65535.0;
+}
+
+struct Sampled {
+    // Straight alpha.
+    colour: vec4<f32>,
+    mask: f32,
+};
+
+// The transformed layer's pixel and mask at level pixel `q`, interpolated
+// between the four nearest (premultiplied), as the CPU's bilinear preview
+// does. Outside the layer it's transparent.
+fn transformed_at(q: vec2<i32>) -> Sampled {
+    let at = vec2<f32>(q) + 0.5;
+    let s = vec2<f32>(
+        dot(p.inverse_abcd.xy, at) + p.inverse_abcd.z,
+        dot(vec2<f32>(p.inverse_abcd.w, p.inverse_ef.x), at) + p.inverse_ef.y,
+    ) - 0.5;
+    let i = vec2<i32>(floor(s));
+    let f = s - floor(s);
+    var sum = vec4<f32>(0.0);
+    var mask = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let t = i + vec2<i32>(k & 1, k >> 1u);
+        let wx = select(1.0 - f.x, f.x, (k & 1) == 1);
+        let wy = select(1.0 - f.y, f.y, (k >> 1u) == 1);
+        var c = vec4<f32>(0.0);
+        if inside(t, p.plane_origin, p.plane_size) {
+            c = vec4<f32>(textureLoad(pixels, t - p.plane_origin, 0)) / 65535.0;
+        }
+        sum += vec4<f32>(c.rgb * c.a, c.a) * wx * wy;
+        mask += mask_at(t) * wx * wy;
+    }
+    var colour = vec4<f32>(0.0);
+    if sum.a > 0.0 {
+        colour = vec4<f32>(sum.rgb / sum.a, sum.a);
+    }
+    return Sampled(colour, mask);
 }
 
 // Trilinear interpolation of a lookup table, as a 3D texture of 32-bit
@@ -226,7 +270,15 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         dst = textureLoad(below, r, 0);
     }
     let q = r + p.region_origin - p.offset;
-    let coverage = p.opacity * mask_at(q);
+    var src = vec4<f32>(0.0);
+    var coverage = 0.0;
+    if p.transformed == 1u {
+        let sampled = transformed_at(r + p.region_origin);
+        src = sampled.colour;
+        coverage = p.opacity * sampled.mask;
+    } else {
+        coverage = p.opacity * mask_at(q);
+    }
     let cb = dst.rgb;
     let a_b = dst.a;
 
@@ -241,7 +293,9 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     // Pixels: source-over with the blend mode (composite.rs `blend_source`).
-    let src = pixel_at(q);
+    if p.transformed == 0u {
+        src = pixel_at(q);
+    }
     let a_s = src.a * coverage;
     if a_s <= 0.0 {
         return dst;

@@ -123,12 +123,21 @@ impl Clip {
         Ok(png)
     }
 
-    /// The clip as a `width`×`height` layer's pixels in `profile`: back
-    /// where it was copied from if it fits there, otherwise centred.
-    pub fn place(&self, width: u32, height: u32, profile: &ColorProfile) -> Result<Tiled<Pixel>> {
+    /// The clip as a `width`×`height` layer's pixels in `profile`: centred
+    /// on `centre` if given (Paste Into), or else back where it was copied
+    /// from if it fits there, otherwise centred.
+    pub fn place(
+        &self,
+        width: u32,
+        height: u32,
+        profile: &ColorProfile,
+        centre: Option<(i64, i64)>,
+    ) -> Result<Tiled<Pixel>> {
         let src = &self.pixels;
         let [bx, by, bw, bh] = self.bounds;
-        let (x, y) = if self.in_place && bx + bw <= width && by + bh <= height {
+        let (x, y) = if let Some((cx, cy)) = centre {
+            (cx - i64::from(bw) / 2, cy - i64::from(bh) / 2)
+        } else if self.in_place && bx + bw <= width && by + bh <= height {
             (i64::from(bx), i64::from(by))
         } else {
             (
@@ -174,15 +183,46 @@ impl Clip {
     }
 }
 
+/// What kind of paste to perform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PasteKind {
+    #[default]
+    Normal,
+    InPlace,
+    Into,
+}
+
 /// Paste `clip` as a new layer above layer index `above` (at the top of it,
 /// for a group), and deselect, as Photoshop does. Returns the new layer's
 /// id.
-pub fn paste(doc: &mut Document, clip: &Clip, above: usize) -> Result<u64> {
-    let pixels = clip.place(doc.width, doc.height, &doc.profile)?;
+pub fn paste(doc: &mut Document, clip: &Clip, above: usize, kind: PasteKind) -> Result<u64> {
+    let centre = if kind == PasteKind::Into {
+        doc.selection
+            .as_ref()
+            .and_then(|s| s.bounds())
+            .map(|[bx, by, bw, bh]| {
+                (
+                    i64::from(bx) + i64::from(bw) / 2,
+                    i64::from(by) + i64::from(bh) / 2,
+                )
+            })
+    } else {
+        None
+    };
+    let pixels = clip.place(doc.width, doc.height, &doc.profile, centre)?;
     let id = doc.next_layer_id();
     let name = doc.unused_name("Layer");
     let above = above.min(doc.layers.len() - 1);
-    doc.insert_above(above, Layer::from_pixels(id, name, pixels));
+    let mut layer = Layer::from_pixels(id, name, pixels);
+    if kind == PasteKind::Into
+        && let Some(sel) = &doc.selection
+    {
+        layer.mask = Some(crate::Mask {
+            pixels: sel.coverage.clone(),
+            enabled: true,
+        });
+    }
+    doc.insert_above(above, layer);
     doc.selection = None;
     Ok(id)
 }
@@ -226,7 +266,7 @@ mod tests {
         assert!(clip.pixels.same_tiles(&d.layers[0].pixels));
         assert_eq!(clip.bounds, [0, 0, 600, 400]);
         // Pasting back into a document this size shares them too.
-        let placed = clip.place(600, 400, &d.profile).unwrap();
+        let placed = clip.place(600, 400, &d.profile, None).unwrap();
         assert!(placed.same_tiles(&d.layers[0].pixels));
     }
 
@@ -245,7 +285,7 @@ mod tests {
         let sel = Selection::rectangle(600, 400, (500.0, 300.0), (550.0, 350.0));
         let clip = Clip::copy(&d.layers[0].pixels, Some(&sel), &d.profile).unwrap();
         d.selection = Some(sel);
-        let id = paste(&mut d, &clip, 0).unwrap();
+        let id = paste(&mut d, &clip, 0, PasteKind::Normal).unwrap();
         assert_eq!(d.index_of(id), Some(1));
         assert_eq!(d.layer(id).unwrap().name, "Layer 1");
         assert!(d.selection.is_none());
@@ -261,7 +301,7 @@ mod tests {
         let clip = Clip::copy(&big.layers[0].pixels, Some(&sel), &big.profile).unwrap();
         let mut small = doc(300, 200);
         small.layers[0].pixels = Tiled::new(300, 200, [0; 4]);
-        let id = paste(&mut small, &clip, 0).unwrap();
+        let id = paste(&mut small, &clip, 0, PasteKind::Normal).unwrap();
         let pasted = &small.layer(id).unwrap().pixels;
         // 100×100 centred in 300×200: from (100, 50).
         assert_eq!(pasted.get(100, 50), big.layers[0].pixels.get(500, 300));
@@ -271,8 +311,69 @@ mod tests {
 
         // Bigger than the document: centred and cropped.
         let whole = Clip::copy(&big.layers[0].pixels, None, &big.profile).unwrap();
-        let placed = whole.place(300, 200, &big.profile).unwrap();
+        let placed = whole.place(300, 200, &big.profile, None).unwrap();
         assert_eq!(placed.get(0, 0), big.layers[0].pixels.get(150, 100));
+    }
+
+    #[test]
+    fn place_centres_foreign_image_on_given_point_and_clips_at_edges() {
+        let (w, h) = (100, 100);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| [(i % w) as u16 * 100, (i / w) as u16 * 100, 10000, 65535])
+            .collect();
+        let clip = Clip {
+            pixels: Tiled::from_raster(&Raster::new(w, h, px)),
+            bounds: [0, 0, 100, 100],
+            profile: ColorProfile::srgb(),
+            in_place: false,
+        };
+
+        // 100×100 centred on (20, 20) in a 200×200 canvas: top-left is (-30, -30).
+        // Negative coordinates clip at the top/left canvas edges.
+        let placed = clip.place(200, 200, &ColorProfile::srgb(), Some((20, 20))).unwrap();
+        assert_eq!(placed.get(0, 0), clip.pixels.get(30, 30));
+        assert_eq!(placed.get(69, 69), clip.pixels.get(99, 99));
+        assert_eq!(placed.get(70, 70), [0; 4]);
+        assert_eq!(placed.get(100, 100), [0; 4]);
+
+        // Centred at (190, 190): top-left is (140, 140).
+        // Extends to (240, 240), clipped at right/bottom edges.
+        let placed_br = clip.place(200, 200, &ColorProfile::srgb(), Some((190, 190))).unwrap();
+        assert_eq!(placed_br.get(140, 140), clip.pixels.get(0, 0));
+        assert_eq!(placed_br.get(199, 199), clip.pixels.get(59, 59));
+        assert_eq!(placed_br.get(139, 139), [0; 4]);
+    }
+
+    #[test]
+    fn paste_into_centres_foreign_clip_on_selection_and_masks_to_coverage() {
+        let mut d = doc(600, 400);
+        let sel = Selection::rectangle(600, 400, (100.0, 100.0), (300.0, 300.0));
+        d.selection = Some(sel.clone());
+
+        let mut px = vec![[0; 4]; 100 * 100];
+        px[0] = [50000, 50000, 50000, 65535];
+        let foreign = Clip {
+            pixels: Tiled::from_raster(&Raster::new(100, 100, px)),
+            bounds: [0, 0, 100, 100],
+            profile: ColorProfile::srgb(),
+            in_place: false,
+        };
+
+        let id = paste(&mut d, &foreign, 0, PasteKind::Into).unwrap();
+        let layer = d.layer(id).unwrap();
+        assert!(layer.mask.as_ref().unwrap().pixels.same_tiles(&sel.coverage));
+        assert!(d.selection.is_none());
+        // Selection bounds [100, 100, 201, 201] has centre (200, 200).
+        // 100×100 centred on (200, 200) has top-left (150, 150).
+        assert_eq!(layer.pixels.get(150, 150), [50000, 50000, 50000, 65535]);
+
+        // A copy from elsewhere in the image lands in the selection too,
+        // not back where it came from.
+        let copied = Selection::rectangle(600, 400, (400.0, 0.0), (500.0, 100.0));
+        let own = Clip::copy(&d.layers[0].pixels, Some(&copied), &d.profile).unwrap();
+        d.selection = Some(sel);
+        let id = paste(&mut d, &own, 0, PasteKind::Into).unwrap();
+        assert_eq!(d.layer(id).unwrap().pixels.get(160, 160), d.layers[0].pixels.get(410, 10));
     }
 
     #[test]

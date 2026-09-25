@@ -18,6 +18,8 @@ pub enum Command {
     Copy,
     CopyMerged,
     Paste,
+    PasteInPlace,
+    PasteInto,
     FreeTransform,
     NewLayer,
     DuplicateLayer,
@@ -51,6 +53,7 @@ pub enum Command {
     InvertSelection,
     Feather,
     SelectionEdges,
+    QuickMask,
     LoadSelectionRed,
     LoadSelectionGreen,
     LoadSelectionBlue,
@@ -125,6 +128,8 @@ impl Command {
         Command::Copy,
         Command::CopyMerged,
         Command::Paste,
+        Command::PasteInPlace,
+        Command::PasteInto,
         Command::FreeTransform,
         Command::NewLayer,
         Command::DuplicateLayer,
@@ -158,6 +163,7 @@ impl Command {
         Command::InvertSelection,
         Command::Feather,
         Command::SelectionEdges,
+        Command::QuickMask,
         Command::LoadSelectionRed,
         Command::LoadSelectionGreen,
         Command::LoadSelectionBlue,
@@ -217,6 +223,7 @@ impl Command {
     /// checked before it.
     pub const KEYBOARD_ORDER: &[Command] = &[
         Command::StampVisible,
+        Command::PasteInto,
         Command::InvertSelection,
         Command::UngroupLayers,
         Command::ClippingMask,
@@ -224,6 +231,7 @@ impl Command {
         Command::Redo,
         Command::CopyMerged,
         Command::NewLayer,
+        Command::PasteInPlace,
         Command::BringToFront,
         Command::SendToBack,
         Command::ReopenLast,
@@ -256,6 +264,7 @@ impl Command {
         Command::LockPosition,
         Command::LockAll,
         Command::MaskOverlay,
+        Command::QuickMask,
         Command::ShowLayers,
         Command::NewCurves,
         Command::NewLevels,
@@ -287,6 +296,8 @@ impl Command {
             Command::Copy => "Copy",
             Command::CopyMerged => "Copy Merged",
             Command::Paste => "Paste",
+            Command::PasteInPlace => "Paste in Place",
+            Command::PasteInto => "Paste Into",
             Command::FreeTransform => "Free Transform",
             Command::NewLayer => "New Layer",
             Command::DuplicateLayer => "Duplicate Layer",
@@ -320,6 +331,7 @@ impl Command {
             Command::InvertSelection => "Inverse",
             Command::Feather => "Feather…",
             Command::SelectionEdges => "Selection Edges",
+            Command::QuickMask => "Edit in Quick Mask Mode",
             Command::LoadSelectionRed => "Red",
             Command::LoadSelectionGreen => "Green",
             Command::LoadSelectionBlue => "Blue",
@@ -378,6 +390,8 @@ impl Command {
             Command::Copy => s(CMD, Key::C),
             Command::CopyMerged => s(CMD_SHIFT, Key::C),
             Command::Paste => s(CMD, Key::V),
+            Command::PasteInPlace => s(CMD_SHIFT, Key::V),
+            Command::PasteInto => s(CMD_ALT_SHIFT, Key::V),
             Command::FreeTransform => s(CMD, Key::T),
             Command::NewLayer => s(CMD_SHIFT, Key::N),
             Command::DuplicateLayer => s(CMD, Key::J),
@@ -404,6 +418,7 @@ impl Command {
             Command::FillBackground => s(CMD, Key::Backspace),
             Command::Clear => s(Modifiers::NONE, Key::Delete),
             Command::MaskOverlay => s(Modifiers::NONE, Key::Backslash),
+            Command::QuickMask => s(Modifiers::NONE, Key::Q),
             Command::ShowLayers => s(Modifiers::NONE, Key::F7),
             // Photoshop's shortcuts for these apply them destructively;
             // Omapix makes an adjustment layer instead.
@@ -475,10 +490,20 @@ impl Command {
                     egui::Event::Key {
                         key: Key::V,
                         pressed: down,
+                        modifiers,
                         ..
                     } => {
                         if !*down && !*v_down {
-                            pressed.push(Command::Paste);
+                            // Whichever paste V is with the Shift and Alt held.
+                            let held = |m: Modifiers| modifiers.shift == m.shift && modifiers.alt == m.alt;
+                            let paste = [Command::Paste, Command::PasteInPlace, Command::PasteInto]
+                                .into_iter()
+                                .find(|&c| {
+                                    hotkeys.command(c).is_some_and(|s| s.logical_key == Key::V && held(s.modifiers))
+                                });
+                            if let Some(paste) = paste.filter(|p| !pressed.contains(p)) {
+                                pressed.push(paste);
+                            }
                         }
                         *v_down = *down;
                     }
@@ -575,6 +600,16 @@ mod tests {
         assert_eq!(
             press(&ctx, &mut v_down, CMD, vec![v(false, CMD)]),
             [Command::Paste]
+        );
+        // Ctrl+Shift+V (Paste in Place)
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD_SHIFT, vec![v(false, CMD_SHIFT)]),
+            [Command::PasteInPlace]
+        );
+        // Ctrl+Alt+Shift+V (Paste Into)
+        assert_eq!(
+            press(&ctx, &mut v_down, CMD_ALT_SHIFT, vec![v(false, CMD_ALT_SHIFT)]),
+            [Command::PasteInto]
         );
         // V on its own isn't pasting, however long it's held.
         assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);

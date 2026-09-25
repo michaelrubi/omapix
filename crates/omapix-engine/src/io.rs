@@ -30,6 +30,18 @@ pub fn load(path: &Path) -> Result<Document> {
     }
 }
 
+/// Open a TIFF sent from darktable for a round trip: the layers saved
+/// beside it by an earlier round trip, if there are any, or else the TIFF
+/// itself. Either way it saves its layers to a .ora beside the TIFF, and
+/// the flattened image back to the TIFF for darktable.
+pub fn load_round_trip(tiff: &Path) -> Result<Document> {
+    let ora = tiff.with_extension("ora");
+    let mut doc = if ora.exists() { crate::ora::load(&ora)? } else { load(tiff)? };
+    doc.saved_path = Some(ora);
+    doc.round_trip = Some(tiff.to_path_buf());
+    Ok(doc)
+}
+
 fn open(path: &Path) -> Result<BufReader<File>> {
     File::open(path)
         .map(BufReader::new)
@@ -152,6 +164,34 @@ mod tests {
         assert_eq!(expand(&[7, 9], 2), vec![[7, 7, 7, 9]]);
         assert_eq!(expand(&[1, 2, 3], 3), vec![[1, 2, 3, OPAQUE]]);
         assert_eq!(expand(&[1, 2, 3, 4], 4), vec![[1, 2, 3, 4]]);
+    }
+
+    #[test]
+    fn round_trip_keeps_its_layers_beside_the_tiff() {
+        let dir = std::env::temp_dir().join(format!("omapix-round-trip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tiff = dir.join("IMG_0001.tif");
+        let image = Raster::new(40, 30, vec![[20000, 30000, 40000, OPAQUE]; 40 * 30]);
+        let doc = Document::from_image(tiff.clone(), &image, ColorProfile::srgb(), 16);
+        crate::export::tiff(&doc, &tiff).unwrap();
+
+        // First time: the TIFF, set to save its layers beside it.
+        let mut doc = load_round_trip(&tiff).unwrap();
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.saved_path, Some(dir.join("IMG_0001.ora")));
+        assert_eq!(doc.round_trip, Some(tiff.clone()));
+        let id = doc.next_layer_id();
+        doc.layers.push(crate::Layer::empty(id, "Retouch", 40, 30));
+        crate::ora::save(&doc, &dir.join("IMG_0001.ora")).unwrap();
+
+        // The .ora remembers the TIFF, and opening the TIFF again brings
+        // the layers back.
+        let ora = crate::ora::load(&dir.join("IMG_0001.ora")).unwrap();
+        assert_eq!(ora.round_trip, Some(tiff.clone()));
+        let again = load_round_trip(&tiff).unwrap();
+        assert_eq!(again.layers.len(), 2);
+        assert_eq!(again.round_trip, Some(tiff));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Loads a real darktable export when one is available locally.

@@ -24,6 +24,9 @@ pub struct Document {
     pub path: PathBuf,
     /// Where it was last saved in Omapix's own format, if ever.
     pub saved_path: Option<PathBuf>,
+    /// A TIFF that saving also writes the flattened image to, for darktable
+    /// to pick up (the round trip, see [`crate::io::load_round_trip`]).
+    pub round_trip: Option<PathBuf>,
     pub width: u32,
     pub height: u32,
     pub profile: ColorProfile,
@@ -53,6 +56,7 @@ impl Document {
         Self {
             path,
             saved_path: None,
+            round_trip: None,
             selection: None,
             channels: Vec::new(),
             width,

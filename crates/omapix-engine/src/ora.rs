@@ -263,8 +263,15 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
     let thumbnail = thumbnail_png(&merged, &doc.profile)?;
 
     // stack.xml lists layers top first, with groups as nested stacks.
+    // The round trip's TIFF, by name when it's beside the file.
+    let round_trip = doc.round_trip.as_ref().map(|tiff| {
+        let beside = tiff.parent() == path.parent();
+        let name = if beside { tiff.file_name().map(Path::new).unwrap_or(tiff) } else { tiff };
+        format!(" omapix:round-trip=\"{}\"", xml_escape(&name.to_string_lossy()))
+    });
+    let round_trip = round_trip.unwrap_or_default();
     let mut xml = format!(
-        "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{w}\" h=\"{h}\" xmlns:omapix=\"{NAMESPACE}\">\n<stack>\n"
+        "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{w}\" h=\"{h}\" xmlns:omapix=\"{NAMESPACE}\"{round_trip}>\n<stack>\n"
     );
     write_stack(&mut xml, doc, &encoded, None);
     xml.push_str("</stack>\n");
@@ -367,9 +374,20 @@ type ChannelEntry = (String, String, (u32, u32), u16);
 
 /// The layers in stack.xml, top first, groups before what's in them, and
 /// the alpha channels.
-fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>, Vec<ChannelEntry>)> {
+/// What stack.xml holds: the size, layers top first, alpha channels, and
+/// the round trip's TIFF.
+struct Stack {
+    width: u32,
+    height: u32,
+    layers: Vec<LayerEntry>,
+    channels: Vec<ChannelEntry>,
+    round_trip: Option<String>,
+}
+
+fn parse_stack(xml: &str) -> Result<Stack> {
     let mut reader = quick_xml::Reader::from_str(xml);
     let (mut w, mut h) = (0, 0);
+    let mut round_trip = None;
     let mut layers = Vec::new();
     let mut channels = Vec::new();
     // The stacks we're inside: `None` for the image's own stack, or the
@@ -403,6 +421,7 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>, Vec<ChannelEntry
             "image" => {
                 w = num("w").unwrap_or(0.0) as u32;
                 h = num("h").unwrap_or(0.0) as u32;
+                round_trip = attrs.get("omapix:round-trip").cloned();
                 continue;
             }
             "stack" if open.is_empty() => {
@@ -476,7 +495,13 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>, Vec<ChannelEntry
     if w == 0 || h == 0 {
         return Err(Error::Unsupported("stack.xml has no image size".into()));
     }
-    Ok((w, h, layers, channels))
+    Ok(Stack {
+        width: w,
+        height: h,
+        layers,
+        channels,
+        round_trip,
+    })
 }
 
 fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec<u8>> {
@@ -521,7 +546,13 @@ pub fn load(path: &Path) -> Result<Document> {
     let file = File::open(path).map_err(|e| io_error(path, e))?;
     let mut zip = ZipArchive::new(BufReader::new(file)).map_err(zip_error)?;
     let xml = String::from_utf8_lossy(&read_entry(&mut zip, "stack.xml")?).into_owned();
-    let (width, height, entries, channel_entries) = parse_stack(&xml)?;
+    let Stack {
+        width,
+        height,
+        layers: entries,
+        channels: channel_entries,
+        round_trip,
+    } = parse_stack(&xml)?;
 
     // Read compressed data sequentially, then decode in parallel.
     let mut files = Vec::new();
@@ -595,6 +626,7 @@ pub fn load(path: &Path) -> Result<Document> {
     let layers: Vec<Layer> = decoded.into_iter().rev().map(|(l, _)| l).collect();
     let mut doc = Document::new(path.to_path_buf(), profile, 16, width, height, layers);
     doc.saved_path = Some(path.to_path_buf());
+    doc.round_trip = round_trip.map(|name| path.parent().unwrap_or(Path::new("")).join(name));
     for (name, src, at, fill) in channel_entries {
         let pixels = decode_grey(&read_entry(&mut zip, &src)?, at, fill, width, height)?;
         let id = doc.next_layer_id();
@@ -759,7 +791,7 @@ mod tests {
             </stack>
             <layer name="Bottom" src="data/2.png"/>
         </stack></image>"#;
-        let (_, _, entries, _) = parse_stack(xml).unwrap();
+        let entries = parse_stack(xml).unwrap().layers;
         let summary: Vec<_> = entries
             .iter()
             .map(|e| (e.name.as_str(), e.src.is_none(), e.blend, e.parent))

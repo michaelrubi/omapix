@@ -104,8 +104,10 @@ struct Params {
 }
 
 impl Params {
-    fn bytes(&self, offset: [i32; 2]) -> Vec<u8> {
-        let mut words: Vec<u32> = Vec::with_capacity(24);
+    /// The uniform, with the layer moved by `offset` or drawn through the
+    /// `inverse` of a transform (both in level pixels).
+    fn bytes(&self, offset: [i32; 2], inverse: Option<[f64; 6]>) -> Vec<u8> {
+        let mut words: Vec<u32> = Vec::with_capacity(32);
         for v in [
             self.region_origin,
             offset,
@@ -118,7 +120,10 @@ impl Params {
         }
         words.extend(self.pixel_fill.map(f32::to_bits));
         words.extend([self.mode, self.kind, self.has_mask.into(), LUT_SIZE as u32]);
-        words.extend([self.opacity, self.mask_fill, 0.0, 0.0].map(f32::to_bits));
+        words.extend([self.opacity, self.mask_fill].map(f32::to_bits));
+        words.extend([inverse.is_some().into(), 0]);
+        let [a, b, c, d, e, f] = inverse.unwrap_or_default();
+        words.extend([a, b, c, d, e, f, 0.0, 0.0].map(|v| (v as f32).to_bits()));
         bytemuck::cast_slice(&words).to_vec()
     }
 }
@@ -305,7 +310,7 @@ impl LiveGpu {
             .map(|(i, (params, pixels, mask, lut, subject))| {
                 let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("live layer"),
-                    contents: &params.bytes([0, 0]),
+                    contents: &params.bytes([0, 0], None),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
                 let view = |v: Option<wgpu::TextureView>, empty: &wgpu::TextureView| v.unwrap_or_else(|| empty.clone());
@@ -387,11 +392,12 @@ impl CallbackTrait for LiveDraw {
         }
         let uploaded = gpu.uploaded.as_mut().expect("just uploaded");
         let offset = [self.frame.offset.0, self.frame.offset.1];
+        let inverse = self.frame.transform.and_then(|t| t.inverse()).map(|t| t.coefficients());
         for (i, pass) in uploaded.passes.iter_mut().enumerate() {
             let mut params = pass.params;
-            let mut moved = [0, 0];
+            let (mut moved, mut through) = ([0, 0], None);
             if let Some((lut, uploaded_lut)) = &mut pass.subject {
-                moved = offset;
+                (moved, through) = (offset, inverse);
                 if let Some(Settings { opacity, mode, lut: table }) = &self.frame.settings {
                     (params.opacity, params.mode) = (*opacity, *mode as u32);
                     // An adjustment's new table, when it's changed.
@@ -403,7 +409,7 @@ impl CallbackTrait for LiveDraw {
                     }
                 }
             }
-            queue.write_buffer(&pass.uniform, 0, &params.bytes(moved));
+            queue.write_buffer(&pass.uniform, 0, &params.bytes(moved, through));
             let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("live layer"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -556,6 +562,7 @@ mod tests {
     use omapix_engine::adjust::{Adjustment, Curves};
     use omapix_engine::layer::{Layer, Mask};
     use omapix_engine::tiled::Tiled;
+    use omapix_engine::transform::{Affine, Resampling, transformed};
     use omapix_engine::{BlendMode, ColorProfile, Document, Raster, composite};
 
     fn device() -> (wgpu::Device, wgpu::Queue) {
@@ -648,7 +655,16 @@ mod tests {
 
     /// The worst channel difference between the GPU's live composite of
     /// moving the patch by `offset` and the CPU's composite of it moved.
-    fn worst_difference(device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document, offset: (i32, i32)) -> f32 {
+    /// The largest difference between the live composite of `doc`'s patch
+    /// moved by `offset` (or transformed by `transform`, as Free Transform's
+    /// bilinear preview) and the CPU's composite of it.
+    fn worst_difference(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        doc: &Document,
+        offset: (i32, i32),
+        transform: Option<Affine>,
+    ) -> f32 {
         let (w, h) = (doc.width, doc.height);
         let patch = doc.layers[1].id;
         let stack = live::build(doc, &doc.layers, patch, true, 0, (0, 0, w, h)).expect("shown live");
@@ -656,6 +672,7 @@ mod tests {
             frame: LiveFrame {
                 stack: Arc::new(stack),
                 offset,
+                transform,
                 settings: None,
             },
             display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
@@ -665,9 +682,15 @@ mod tests {
         let gpu = composite_on_gpu(device, queue, draw);
         let mut moved = doc.clone();
         let layer = &mut moved.layers[1];
-        layer.pixels = layer.pixels.translated(offset.0, offset.1, [0; 4]);
         let mask = layer.mask.as_mut().unwrap();
-        mask.pixels = mask.pixels.translated(offset.0, offset.1, 65535);
+        mask.pixels = match transform {
+            Some(t) => transformed(&mask.pixels, &t, 65535, Resampling::Bilinear),
+            None => mask.pixels.translated(offset.0, offset.1, 65535),
+        };
+        layer.pixels = match transform {
+            Some(t) => transformed(&layer.pixels, &t, [0; 4], Resampling::Bilinear),
+            None => layer.pixels.translated(offset.0, offset.1, [0; 4]),
+        };
         let cpu = composite::composite(&moved.layers, w, h);
         cpu.pixels()
             .iter()
@@ -681,12 +704,28 @@ mod tests {
     fn live_composite_matches_the_cpu_for_every_blend_mode() {
         let (device, queue) = device();
         for &mode in BlendMode::MENU.iter().flat_map(|g| g.iter()) {
-            let worst = worst_difference(&device, &queue, &document(mode, false), (5, -3));
+            let worst = worst_difference(&device, &queue, &document(mode, false), (5, -3), None);
             assert!(worst < 2e-4, "{mode:?}: off by {worst}");
         }
         // Adjustments go through a lookup table, so are a little less exact.
-        let worst = worst_difference(&device, &queue, &document(BlendMode::SoftLight, true), (-7, 4));
+        let worst = worst_difference(&device, &queue, &document(BlendMode::SoftLight, true), (-7, 4), None);
         assert!(worst < 4e-3, "Curves: off by {worst}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_free_transform_matches_the_cpu_preview() {
+        let (device, queue) = device();
+        let t = Affine::scale_about(1.3, 1.1, (25.0, 20.0)).then(&Affine::rotate_about(0.4, (25.0, 20.0)));
+        for &mode in BlendMode::MENU.iter().flat_map(|g| g.iter()) {
+            let worst = worst_difference(&device, &queue, &document(mode, false), (0, 0), Some(t));
+            assert!(worst < 2e-4, "{mode:?}: off by {worst}");
+        }
+        // Shrinking, the CPU averages more pixels together than the live
+        // preview does, which is only a preview.
+        let smaller = Affine::scale_about(0.8, 0.8, (25.0, 20.0));
+        let worst = worst_difference(&device, &queue, &document(BlendMode::Normal, false), (0, 0), Some(smaller));
+        assert!(worst < 0.05, "shrunk: off by {worst}");
     }
 
     #[test]
@@ -701,6 +740,7 @@ mod tests {
             frame: LiveFrame {
                 stack: Arc::new(stack),
                 offset: (0, 0),
+                transform: None,
                 settings: None,
             },
             display_lut: Arc::new(display_lut(&transform)),
@@ -814,6 +854,7 @@ mod tests {
             frame: LiveFrame {
                 stack,
                 offset: (0, 0),
+                transform: None,
                 settings: Some(settings),
             },
             display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),

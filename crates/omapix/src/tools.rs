@@ -393,7 +393,7 @@ impl Tools {
             return (target == Target::Pixels).then_some(Paint::SpotHeal);
         }
         if self.tool.copies() {
-            if target == Target::Mask {
+            if target == Target::Mask || target == Target::QuickMask {
                 return None;
             }
             let offset = match self.offset {
@@ -413,8 +413,8 @@ impl Tools {
         Some(match (self.tool, target) {
             // On a mask, the eraser reveals and the brush paints the
             // foreground colour's grey level, as in Photoshop.
-            (Tool::Eraser, Target::Mask) => Paint::Mask(u16::MAX),
-            (Tool::Brush, Target::Mask) => Paint::Mask(grey(self.foreground)),
+            (Tool::Eraser, Target::Mask | Target::QuickMask) => Paint::Mask(u16::MAX),
+            (Tool::Brush, Target::Mask | Target::QuickMask) => Paint::Mask(grey(self.foreground)),
             (Tool::Eraser, Target::Pixels) => Paint::Erase,
             (_, Target::Pixels) => {
                 Paint::Color(
@@ -423,7 +423,7 @@ impl Tools {
                         .unwrap_or([0, 0, 0, u16::MAX]),
                 )
             }
-            (_, Target::Mask) => Paint::Mask(grey(self.foreground)),
+            (_, Target::Mask | Target::QuickMask) => Paint::Mask(grey(self.foreground)),
         })
     }
 
@@ -685,6 +685,7 @@ impl Tools {
                 self.sample_options(ui);
                 ui.separator();
                 let (text, colour) = match target {
+                    Target::QuickMask => ("Quick Mask paints selections, not blemishes", theme.red),
                     Target::Mask => ("Select the layer, not its mask, to heal", theme.red),
                     Target::Pixels => (
                         "Paint over a blemish; it heals when you let go",
@@ -696,6 +697,10 @@ impl Tools {
                 self.sample_options(ui);
                 ui.separator();
                 let (text, colour) = match (target, self.source) {
+                    (Target::QuickMask, _) => (
+                        "Quick Mask paints selections, not cloned pixels",
+                        theme.red,
+                    ),
                     (Target::Mask, _) => (
                         "Select the layer, not its mask, to clone or heal",
                         theme.red,
@@ -706,6 +711,7 @@ impl Tools {
                 ui.label(RichText::new(text).color(colour));
             } else {
                 let (text, colour) = match target {
+                    Target::QuickMask => ("Painting in Quick Mask", theme.accent),
                     Target::Mask => ("Painting on layer mask", theme.accent),
                     Target::Pixels => ("Painting on layer", theme.dark_foreground),
                 };
