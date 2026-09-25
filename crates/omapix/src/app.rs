@@ -225,6 +225,7 @@ impl ScriptStep {
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 "Wand" | "MagicWand" => ScriptStep::Tool(crate::tools::Tool::MagicWand),
                 "Eyedropper" => ScriptStep::Tool(crate::tools::Tool::Eyedropper),
+                "Gradient" => ScriptStep::Tool(crate::tools::Tool::Gradient),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -1914,6 +1915,10 @@ impl App {
             self.move_input(input, modifiers);
             return;
         }
+        if self.tools.tool == crate::tools::Tool::Gradient {
+            self.gradient_input(input, modifiers);
+            return;
+        }
         match input {
             ToolInput::StrokeBegin(p) => {
                 let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p)
@@ -1989,6 +1994,133 @@ impl App {
             ToolInput::StrokeEnd => {
                 self.move_from = None;
                 editor.end_move();
+            }
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
+        }
+    }
+
+    /// Dragging with the Gradient tool to fill pixels or a mask.
+    fn gradient_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                if editor.target == Target::Pixels
+                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
+                {
+                    self.message("Could not use the gradient tool because the layer is locked", true);
+                    return;
+                }
+                if editor.target == Target::Mask
+                    && editor.doc.layer(editor.active).is_some_and(|l| l.mask.is_none() || l.locks.all)
+                {
+                    self.message("Could not use the gradient tool because the layer is locked", true);
+                    return;
+                }
+                self.drawing = Some((vec![p], Combine::Replace));
+            }
+            ToolInput::StrokeMove(p) => {
+                if let Some((points, _)) = &mut self.drawing {
+                    points.truncate(1);
+                    points.push(p);
+                }
+            }
+            ToolInput::StrokeEnd => {
+                let Some((points, _)) = self.drawing.take() else {
+                    return;
+                };
+                let p0 = points[0];
+                let p1 = if points.len() >= 2 { points[1] } else { p0 };
+                let p1 = if modifiers.shift {
+                    p0 + constrain_45(p1 - p0)
+                } else {
+                    p1
+                };
+                let id = editor.active;
+                let target = editor.target;
+                let kind = self.tools.gradient_type;
+                let colors = self.tools.gradient_colors;
+                let reverse = self.tools.gradient_reverse;
+                let opacity = self.tools.gradient_opacity;
+                let fg = self.tools.foreground;
+                let bg = self.tools.background;
+                let profile = editor.doc.profile.clone();
+
+                let params =
+                    ops::GradientParams::new((p0.x, p0.y), (p1.x, p1.y), kind, reverse);
+                editor.edit("Gradient", |doc, _| {
+                    let selection = doc.selection.clone();
+                    match target {
+                        Target::QuickMask => {
+                            let (w, h) = (doc.width, doc.height);
+                            let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
+                            let v0 = crate::tools::grey(fg);
+                            let v1 = match colors {
+                                crate::tools::GradientColors::ForegroundToBackground => {
+                                    Some(crate::tools::grey(bg))
+                                }
+                                crate::tools::GradientColors::ForegroundToTransparent => None,
+                            };
+                            sel.coverage = ops::apply_gradient_mask(
+                                &sel.coverage,
+                                params,
+                                v0,
+                                v1,
+                                opacity,
+                                None,
+                            );
+                        }
+                        Target::Mask => {
+                            let Some(layer) = doc.layer_mut(id) else {
+                                return;
+                            };
+                            if let Some(mask) = layer.mask.as_mut() {
+                                let v0 = crate::tools::grey(fg);
+                                let v1 = match colors {
+                                    crate::tools::GradientColors::ForegroundToBackground => {
+                                        Some(crate::tools::grey(bg))
+                                    }
+                                    crate::tools::GradientColors::ForegroundToTransparent => None,
+                                };
+                                mask.pixels = ops::apply_gradient_mask(
+                                    &mask.pixels,
+                                    params,
+                                    v0,
+                                    v1,
+                                    opacity,
+                                    selection.as_ref(),
+                                );
+                            }
+                        }
+                        Target::Pixels => {
+                            let Some(layer) = doc.layer_mut(id) else {
+                                return;
+                            };
+                            if !layer.can_paint_pixels() {
+                                return;
+                            }
+                            let c0 = profile.from_srgb8(fg).unwrap_or([0, 0, 0, u16::MAX]);
+                            let c1 = match colors {
+                                crate::tools::GradientColors::ForegroundToBackground => profile
+                                    .from_srgb8(bg)
+                                    .unwrap_or([u16::MAX, u16::MAX, u16::MAX, u16::MAX]),
+                                crate::tools::GradientColors::ForegroundToTransparent => {
+                                    [c0[0], c0[1], c0[2], 0]
+                                }
+                            };
+                            layer.pixels = ops::apply_gradient_pixels(
+                                &layer.pixels,
+                                params,
+                                c0,
+                                c1,
+                                opacity,
+                                layer.lock_alpha(),
+                                selection.as_ref(),
+                            );
+                        }
+                    }
+                });
             }
             ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
         }
@@ -3059,6 +3191,16 @@ impl eframe::App for App {
                     points[1]
                 };
                 ellipse_points(a, b)
+            }
+            // Show the gradient drag as a line (constrained to 45° with Shift).
+            crate::tools::Tool::Gradient if points.len() == 2 => {
+                let a = points[0];
+                let b = if shift {
+                    a + constrain_45(points[1] - a)
+                } else {
+                    points[1]
+                };
+                vec![a, b]
             }
             _ => points.clone(),
         });
@@ -5724,6 +5866,60 @@ mod tests {
             .pixels
             .get(250, 200);
         assert_eq!(all_pixel, blue);
+    }
+
+    #[test]
+    fn gradient_drag_on_pixels_with_selection_and_on_mask() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.tools.select(crate::tools::Tool::Gradient);
+        app.tools.foreground = [0, 0, 0];
+        app.tools.background = [255, 255, 255];
+
+        // test_app has a rectangular selection from (100, 100) to (200, 200).
+        // Initial layer has [30000, 30000, 30000, 65535].
+        let active = app.editor.as_ref().unwrap().active;
+
+        // Drag gradient from (100, 150) to (190, 150) on pixels
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(100.0, 150.0)), egui::Modifiers::NONE);
+        assert!(app.drawing.is_some());
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(190.0, 150.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert!(app.drawing.is_none());
+
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Gradient"));
+        let layer = app.editor.as_ref().unwrap().doc.layer(active).unwrap();
+        // Inside selection at start: foreground (black)
+        assert_eq!(layer.pixels.get(100, 150), [0, 0, 0, 65535]);
+        // Inside selection at end: background (white)
+        assert_eq!(layer.pixels.get(190, 150), [65535, 65535, 65535, 65535]);
+        // Inside selection halfway: mid grey
+        let mid = layer.pixels.get(145, 150);
+        assert!(mid[0].abs_diff(32768) <= 1);
+        // Outside selection: untouched
+        assert_eq!(layer.pixels.get(50, 50), [30000, 30000, 30000, 65535]);
+        assert_eq!(layer.pixels.get(250, 250), [30000, 30000, 30000, 65535]);
+
+        // Now test on a mask:
+        app.editor.as_mut().unwrap().doc.selection = None;
+        app.run(Command::AddMask, &ctx);
+        app.editor.as_mut().unwrap().target = Target::Mask;
+
+        // Drag gradient from (0, 50) to (100, 50) on the mask
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(0.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(100.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Gradient"));
+        let mask = app.editor.as_ref().unwrap().doc.layer(active).unwrap().mask.as_ref().unwrap();
+        assert_eq!(mask.pixels.get(0, 50), 0);
+        assert_eq!(mask.pixels.get(100, 50), 65535);
+        assert_eq!(mask.pixels.get(50, 50), 32768);
+
+        // Undo step restores mask
+        app.run(Command::Undo, &ctx);
+        let mask_after_undo = app.editor.as_ref().unwrap().doc.layer(active).unwrap().mask.as_ref().unwrap();
+        assert_eq!(mask_after_undo.pixels.get(0, 50), 65535);
     }
 }
 

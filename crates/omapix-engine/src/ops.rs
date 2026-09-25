@@ -131,6 +131,240 @@ pub fn fill_mask(
     out
 }
 
+/// The shape of a gradient: Linear (along a line) or Radial (circle outward from centre).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GradientType {
+    #[default]
+    Linear,
+    Radial,
+}
+
+/// Precomputed gradient parameters for evaluating position `t` across pixels.
+#[derive(Clone, Copy)]
+pub struct GradientParams {
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    pub kind: GradientType,
+    pub reverse: bool,
+    dx: f32,
+    dy: f32,
+    inv_len_sq: f32,
+    inv_radius: f32,
+}
+
+impl GradientParams {
+    pub fn new(start: (f32, f32), end: (f32, f32), kind: GradientType, reverse: bool) -> Self {
+        let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+        let len_sq = dx * dx + dy * dy;
+        let inv_len_sq = if len_sq > 0.0 { 1.0 / len_sq } else { 0.0 };
+        let radius = dx.hypot(dy);
+        let inv_radius = if radius > 0.0 { 1.0 / radius } else { 0.0 };
+        Self {
+            start,
+            end,
+            kind,
+            reverse,
+            dx,
+            dy,
+            inv_len_sq,
+            inv_radius,
+        }
+    }
+
+    /// Compute `t in 0..1` for pixel coordinates `(px, py)`.
+    #[inline]
+    pub fn t(&self, px: f32, py: f32) -> f32 {
+        let t = match self.kind {
+            GradientType::Linear => {
+                if self.inv_len_sq == 0.0 {
+                    0.0
+                } else {
+                    ((px - self.start.0) * self.dx + (py - self.start.1) * self.dy) * self.inv_len_sq
+                }
+            }
+            GradientType::Radial => {
+                if self.inv_radius == 0.0 {
+                    0.0
+                } else {
+                    (px - self.start.0).hypot(py - self.start.1) * self.inv_radius
+                }
+            }
+        };
+        let t = t.clamp(0.0, 1.0);
+        if self.reverse { 1.0 - t } else { t }
+    }
+}
+
+/// Position `t in 0..1` along a gradient from `start` to `end`.
+pub fn gradient_t(
+    px: f32,
+    py: f32,
+    start: (f32, f32),
+    end: (f32, f32),
+    kind: GradientType,
+    reverse: bool,
+) -> f32 {
+    GradientParams::new(start, end, kind, reverse).t(px, py)
+}
+
+/// A tiled raster filled with a gradient from `c0` to `c1`.
+pub fn gradient_pixels(
+    width: u32,
+    height: u32,
+    params: GradientParams,
+    c0: crate::Pixel,
+    c1: crate::Pixel,
+) -> Tiled<crate::Pixel> {
+    Tiled::from_tiles(width, height, c0, |col, row| {
+        let mut pixels = Vec::with_capacity(crate::tiled::TILE_PIXELS);
+        let base_x = col * crate::tiled::TILE;
+        let base_y = row * crate::tiled::TILE;
+        for ty in 0..crate::tiled::TILE {
+            let py = (base_y + ty) as f32;
+            for tx in 0..crate::tiled::TILE {
+                let px = (base_x + tx) as f32;
+                let t = params.t(px, py);
+                pixels.push(std::array::from_fn(|ch| {
+                    let a = f32::from(c0[ch]);
+                    let b = f32::from(c1[ch]);
+                    (a + (b - a) * t).round() as u16
+                }));
+            }
+        }
+        Some(pixels)
+    })
+}
+
+/// Blend `top` over `original` with opacity using straight alpha source-over.
+pub fn blend_pixels(
+    original: &Tiled<crate::Pixel>,
+    top: Tiled<crate::Pixel>,
+    opacity: f32,
+) -> Tiled<crate::Pixel> {
+    if opacity <= 0.0 {
+        return original.clone();
+    }
+    let mut out = original.clone();
+    let orig_fill = original.fill();
+    let top_fill = top.fill();
+    out.par_update(|col, row, tile| {
+        let t = top.tile(col, row);
+        if t.is_none() && top_fill[3] == 0 {
+            return None;
+        }
+        let o = tile;
+        Some(
+            (0..crate::tiled::TILE_PIXELS)
+                .map(|i| {
+                    let mut src = t.map_or(top_fill, |t| t[i]);
+                    if opacity < 1.0 {
+                        src[3] = (f32::from(src[3]) * opacity).round() as u16;
+                    }
+                    let dst = o.map_or(orig_fill, |t| t[i]);
+                    crate::moving::over(src, dst)
+                })
+                .collect(),
+        )
+    });
+    out
+}
+
+/// Blend a gradient onto layer pixels with opacity, respecting layer transparency lock
+/// and document selection.
+pub fn apply_gradient_pixels(
+    original: &Tiled<crate::Pixel>,
+    params: GradientParams,
+    c0: crate::Pixel,
+    c1: crate::Pixel,
+    opacity: f32,
+    lock_alpha: bool,
+    selection: Option<&crate::selection::Selection>,
+) -> Tiled<crate::Pixel> {
+    let gradient = gradient_pixels(
+        original.width(),
+        original.height(),
+        params,
+        c0,
+        c1,
+    );
+    let blended = blend_pixels(original, gradient, opacity);
+    let filled = within_selection(original, blended, selection);
+    if lock_alpha {
+        keep_alpha(original, filled)
+    } else {
+        filled
+    }
+}
+
+/// Fill a mask with a gradient. If `v1` is `None`, the gradient fades to
+/// the mask's current value (Photoshop's Foreground to Transparent on a mask).
+pub fn apply_gradient_mask(
+    mask: &Tiled<u16>,
+    params: GradientParams,
+    v0: u16,
+    v1: Option<u16>,
+    opacity: f32,
+    selection: Option<&crate::selection::Selection>,
+) -> Tiled<u16> {
+    if opacity <= 0.0 {
+        return mask.clone();
+    }
+    let sel = selection.map(|s| &s.coverage);
+    let mut out = mask.clone();
+    let mask_fill = mask.fill();
+    let sel_fill = sel.map_or(u16::MAX, |s| s.fill());
+
+    out.par_update(|col, row, tile| {
+        let s = sel.and_then(|s| s.tile(col, row));
+        if s.is_none() && sel_fill == 0 {
+            return None;
+        }
+        let base_x = col * crate::tiled::TILE;
+        let base_y = row * crate::tiled::TILE;
+        let mut pixels = Vec::with_capacity(crate::tiled::TILE_PIXELS);
+        for ty in 0..crate::tiled::TILE {
+            let py = (base_y + ty) as f32;
+            for tx in 0..crate::tiled::TILE {
+                let px = (base_x + tx) as f32;
+                let i = (ty * crate::tiled::TILE + tx) as usize;
+                let sel_k = f32::from(s.map_or(sel_fill, |t| t[i])) / 65535.0;
+                let orig = tile.map_or(mask_fill, |t| t[i]);
+                if sel_k <= 0.0 {
+                    pixels.push(orig);
+                    continue;
+                }
+                let t = params.t(px, py);
+                let target_end = v1.unwrap_or(orig);
+                let target = f32::from(v0) + (f32::from(target_end) - f32::from(v0)) * t;
+                let blended = f32::from(orig) + (target - f32::from(orig)) * opacity;
+                let val = (f32::from(orig) + (blended - f32::from(orig)) * sel_k).round() as u16;
+                pixels.push(val);
+            }
+        }
+        Some(pixels)
+    });
+    out
+}
+
+/// A mask filled with a gradient from `v0` to `v1`.
+pub fn gradient_mask(
+    width: u32,
+    height: u32,
+    params: GradientParams,
+    v0: u16,
+    v1: u16,
+) -> Tiled<u16> {
+    apply_gradient_mask(
+        &Tiled::new(width, height, v0),
+        params,
+        v0,
+        Some(v1),
+        1.0,
+        None,
+    )
+}
+
+
 /// Photoshop's "Stamp Visible": a new layer holding the flattened image,
 /// placed at the top of the stack, outside any group. Returns the new
 /// layer's id.
@@ -698,4 +932,105 @@ mod tests {
         assert!(px[3].abs_diff(49152) <= 2, "{px:?}");
         assert!((px[2] - 2 * px[0], px[1]) == (0, 0), "{px:?}");
     }
+
+    #[test]
+    fn linear_gradient_start_end_halfway_and_clamped() {
+        let (w, h) = (50, 10);
+        let c0: crate::Pixel = [10000, 20000, 30000, 65535];
+        let c1: crate::Pixel = [50000, 40000, 10000, 65535];
+        let p = GradientParams::new((10.0, 5.0), (30.0, 5.0), GradientType::Linear, false);
+        let grad = gradient_pixels(w, h, p, c0, c1);
+
+        // At start point (10, 5): exactly c0
+        assert_eq!(grad.get(10, 5), c0);
+        // At end point (30, 5): exactly c1
+        assert_eq!(grad.get(30, 5), c1);
+        // Halfway (20, 5): average of c0 and c1
+        let mid = grad.get(20, 5);
+        assert_eq!(mid, [30000, 30000, 20000, 65535]);
+        // Clamped beyond start (0, 5): clamped to c0
+        assert_eq!(grad.get(0, 5), c0);
+        // Clamped beyond end (45, 5): clamped to c1
+        assert_eq!(grad.get(45, 5), c1);
+    }
+
+    #[test]
+    fn radial_gradient_center_perimeter_and_clamped() {
+        let (w, h) = (50, 50);
+        let c0: crate::Pixel = [10000, 10000, 10000, 65535];
+        let c1: crate::Pixel = [50000, 50000, 50000, 65535];
+        // Center at (20, 20), perimeter at radius 20 (e.g. (40, 20))
+        let p = GradientParams::new((20.0, 20.0), (40.0, 20.0), GradientType::Radial, false);
+        let grad = gradient_pixels(w, h, p, c0, c1);
+
+        // Center (20, 20): exactly c0
+        assert_eq!(grad.get(20, 20), c0);
+        // Perimeter (40, 20): exactly c1
+        assert_eq!(grad.get(40, 20), c1);
+        // Halfway (30, 20): distance 10 / radius 20 = 0.5
+        assert_eq!(grad.get(30, 20), [30000, 30000, 30000, 65535]);
+        // Outside circle (45, 45): clamped to c1
+        assert_eq!(grad.get(45, 45), c1);
+    }
+
+    #[test]
+    fn gradient_reverse() {
+        let (w, h) = (50, 10);
+        let c0: crate::Pixel = [10000, 20000, 30000, 65535];
+        let c1: crate::Pixel = [50000, 40000, 10000, 65535];
+        let p = GradientParams::new((10.0, 5.0), (30.0, 5.0), GradientType::Linear, true);
+        let grad = gradient_pixels(w, h, p, c0, c1);
+
+        // Reversed: at start point it is c1, at end point it is c0
+        assert_eq!(grad.get(10, 5), c1);
+        assert_eq!(grad.get(30, 5), c0);
+        assert_eq!(grad.get(0, 5), c1);
+        assert_eq!(grad.get(45, 5), c0);
+    }
+
+    #[test]
+    fn gradient_to_transparent() {
+        let (w, h) = (50, 10);
+        let c0: crate::Pixel = [65535, 30000, 0, 65535];
+        let c1: crate::Pixel = [65535, 30000, 0, 0];
+        let p = GradientParams::new((10.0, 5.0), (30.0, 5.0), GradientType::Linear, false);
+        let grad = gradient_pixels(w, h, p, c0, c1);
+
+        assert_eq!(grad.get(10, 5), c0);
+        assert_eq!(grad.get(30, 5), c1);
+        let mid = grad.get(20, 5);
+        assert_eq!(mid[3], 32768);
+        assert_eq!(grad.get(45, 5)[3], 0);
+
+        // Blending over an existing blue layer:
+        let original = Tiled::new(w, h, [0, 0, 65535, 65535]);
+        let applied = apply_gradient_pixels(&original, p, c0, c1, 1.0, false, None);
+        // Start: fully c0
+        assert_eq!(applied.get(10, 5), c0);
+        // End: unchanged original blue
+        assert_eq!(applied.get(30, 5), [0, 0, 65535, 65535]);
+        // Beyond end: unchanged original blue
+        assert_eq!(applied.get(45, 5), [0, 0, 65535, 65535]);
+    }
+
+    #[test]
+    fn gradient_mask_and_to_transparent() {
+        let (w, h) = (50, 10);
+        let p = GradientParams::new((10.0, 5.0), (30.0, 5.0), GradientType::Linear, false);
+        let grad = gradient_mask(w, h, p, 0, 65535);
+        assert_eq!(grad.get(10, 5), 0);
+        assert_eq!(grad.get(30, 5), 65535);
+        assert_eq!(grad.get(20, 5), 32768);
+        assert_eq!(grad.get(0, 5), 0);
+        assert_eq!(grad.get(45, 5), 65535);
+
+        // To transparent on a mask (v1 is None): fades to mask's current value
+        let orig_mask = Tiled::new(w, h, 65535);
+        let applied = apply_gradient_mask(&orig_mask, p, 0, None, 1.0, None);
+        assert_eq!(applied.get(10, 5), 0);
+        assert_eq!(applied.get(30, 5), 65535);
+        assert_eq!(applied.get(20, 5), 32768);
+        assert_eq!(applied.get(45, 5), 65535);
+    }
 }
+
