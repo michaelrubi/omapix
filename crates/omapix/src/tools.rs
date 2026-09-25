@@ -367,6 +367,9 @@ pub struct Tools {
     pub foreground: [u8; 3],
     #[serde(skip)]
     pub background: [u8; 3],
+    /// While a mask is targeted: the colours to go back to afterwards.
+    #[serde(skip)]
+    kept_colours: Option<([u8; 3], [u8; 3])>,
 }
 
 impl Default for Tools {
@@ -377,6 +380,7 @@ impl Default for Tools {
             last_healing: Tool::SpotHealing,
             last_wand: Tool::MagicWand,
             held: None,
+            kept_colours: None,
             brush: BrushSettings::default(),
             eraser: BrushSettings {
                 hardness: 0.5,
@@ -642,8 +646,12 @@ impl Tools {
                 std::mem::swap(&mut self.foreground, &mut self.background);
             }
             if i.consume_key(Modifiers::NONE, Key::D) {
-                self.foreground = [0, 0, 0];
-                self.background = [255, 255, 255];
+                // On a mask, white (reveal) over black, as in Photoshop.
+                (self.foreground, self.background) = if self.kept_colours.is_some() {
+                    ([255; 3], [0; 3])
+                } else {
+                    ([0; 3], [255; 3])
+                };
             }
             // Shift+[ / Shift+] change hardness in 25 % steps; [ / ] change size.
             // Plain [ / ] and Shift+[ / ] only: Alt (layer navigation) and
@@ -1030,6 +1038,29 @@ impl Tools {
     }
 }
 
+impl Tools {
+    /// Masks take greys, as in Photoshop: while one (or Quick Mask) is
+    /// targeted, the colours show and paint as their grey levels, and any
+    /// colour picked becomes grey. Going back to pixels brings the colours
+    /// back.
+    pub fn follow_target(&mut self, target: Target) {
+        let masking = target != Target::Pixels;
+        match self.kept_colours {
+            None if masking => self.kept_colours = Some((self.foreground, self.background)),
+            Some((foreground, background)) if !masking => {
+                (self.foreground, self.background) = (foreground, background);
+                self.kept_colours = None;
+                return;
+            }
+            _ => {}
+        }
+        if masking {
+            let level = |c| [(f32::from(grey(c)) / 257.0).round() as u8; 3];
+            (self.foreground, self.background) = (level(self.foreground), level(self.background));
+        }
+    }
+}
+
 /// Grey level of an sRGB colour, as a mask value.
 pub fn grey([r, g, b]: [u8; 3]) -> u16 {
     let luma = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
@@ -1274,6 +1305,29 @@ mod tests {
         press(&ctx, &[(Key::W, Modifiers::NONE)]);
         tools.keys(&ctx);
         assert_eq!(tools.tool, Tool::MagicWand);
+    }
+
+    #[test]
+    fn masks_take_the_colours_as_greys_and_give_them_back_after() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+        (tools.foreground, tools.background) = ([255, 0, 0], [0, 0, 255]);
+        tools.follow_target(Target::Mask);
+        assert_eq!((tools.foreground, tools.background), ([76; 3], [29; 3]));
+        // A colour picked on the mask turns grey too.
+        tools.foreground = [0, 255, 0];
+        tools.follow_target(Target::Mask);
+        assert_eq!(tools.foreground, [150; 3]);
+        // D: white over black on a mask.
+        press(&ctx, &[(Key::D, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        tools.follow_target(Target::Mask);
+        assert_eq!((tools.foreground, tools.background), ([255; 3], [0; 3]));
+        // Back on the pixels, the colours from before.
+        tools.follow_target(Target::Pixels);
+        assert_eq!((tools.foreground, tools.background), ([255, 0, 0], [0, 0, 255]));
+        tools.follow_target(Target::QuickMask);
+        assert_eq!(tools.foreground, [76; 3]);
     }
 
     #[test]
