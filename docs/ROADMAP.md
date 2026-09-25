@@ -124,6 +124,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Eyedropper tool: click or drag sets foreground colour live, Alt+click sets background, Sample Size averages across edges, and Current Layer vs All Layers
 - [x] Load selection: Ctrl+click layer thumbnail for transparency, mask thumbnail for mask (with Shift/Alt/Shift+Alt), Select › Load Selection (RGB, Luminosity, Transparency, Mask), and edges show again if hidden
 - [ ] Live GPU Move tool drags on a 24 MP retouch (pasted patch under a Dodge & Burn group and Curves), at fit and at 100 %: smooth, looks the same as the CPU render, no flash when released
+- [ ] Custom hotkeys: override command shortcuts and tool letters in ~/.config/omapix/hotkeys.toml, menu labels and tooltips update, and startup warnings for clashes
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -185,7 +186,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - ~~**Recent files** and reopening the last document~~ (done).
 - **PSD import**, at least flattened and simple layers, for old Photoshop work.
 - ~~**History panel:** a list of undo steps you can click back to~~ (done).
-- **Custom hotkeys:** override any command's shortcut or tool letter from a TOML file in `~/.config/omapix/`, with Photoshop's shortcuts as the defaults. Warn about clashes at startup.
+- ~~**Custom hotkeys**~~ (done): override any command's shortcut or tool letter from `~/.config/omapix/hotkeys.toml`, with Photoshop's shortcuts as defaults and startup warnings for clashes.
 
 ## 6. Performance
 

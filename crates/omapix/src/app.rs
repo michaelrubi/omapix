@@ -292,6 +292,14 @@ impl App {
             pasting: None,
             v_down: false,
         };
+        let warnings = crate::hotkeys::load();
+        if !warnings.is_empty() {
+            for w in &warnings {
+                log::warn!("{w}");
+            }
+            app.message(warnings.join("; "), true);
+        }
+
         if let Some(path) = path {
             app.open(path, ctx);
         }

@@ -6,6 +6,7 @@ mod commands;
 mod editor;
 mod gpu;
 mod history_panel;
+mod hotkeys;
 mod layers_panel;
 mod live;
 mod properties_panel;

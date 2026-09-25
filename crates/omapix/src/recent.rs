@@ -10,11 +10,15 @@ pub struct RecentStore {
     pub files: Vec<PathBuf>,
 }
 
-fn default_config_path() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(dir.join("omapix/recent.toml"))
+    Some(dir.join("omapix"))
+}
+
+fn default_config_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("recent.toml"))
 }
 
 impl RecentStore {

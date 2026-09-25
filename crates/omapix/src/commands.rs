@@ -3,7 +3,7 @@
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     Open,
     Save,
@@ -306,7 +306,7 @@ impl Command {
         }
     }
 
-    pub fn shortcut(self) -> Option<KeyboardShortcut> {
+    pub fn default_shortcut(self) -> Option<KeyboardShortcut> {
         let s = |m, k| Some(KeyboardShortcut::new(m, k));
         match self {
             Command::Open => s(CMD, Key::O),
@@ -359,9 +359,22 @@ impl Command {
         }
     }
 
+    pub fn shortcut(self) -> Option<KeyboardShortcut> {
+        crate::hotkeys::current().command(self)
+    }
+
     /// Commands whose shortcut was pressed this frame, consuming the keys.
     /// `v_down` remembers between frames whether V is held.
     pub fn pressed(ctx: &egui::Context, v_down: &mut bool) -> Vec<Command> {
+        Self::pressed_with(ctx, v_down, crate::hotkeys::current())
+    }
+
+    /// [`Self::pressed`] with these shortcuts.
+    pub fn pressed_with(
+        ctx: &egui::Context,
+        v_down: &mut bool,
+        hotkeys: &crate::hotkeys::Hotkeys,
+    ) -> Vec<Command> {
         ctx.input_mut(|i| {
             // With Shift held, egui reports [ and ] as the { and } they
             // type, so Ctrl+Shift+[ and Shift+[ (brush hardness, read
@@ -376,13 +389,14 @@ impl Command {
                     *key = *physical;
                 }
             }
-            let mut pressed: Vec<Command> = Self::KEYBOARD_ORDER
+            let mut pressed: Vec<Command> = hotkeys
+                .keyboard_order()
                 .iter()
                 .copied()
-                .filter(|c| c.shortcut().is_some_and(|s| i.consume_shortcut(&s)))
+                .filter(|&c| hotkeys.command(c).is_some_and(|s| i.consume_shortcut(&s)))
                 .collect();
             // Ctrl++ on keyboards where + is its own key.
-            if i.consume_key(CMD, Key::Plus) {
+            if hotkeys.command(Command::ZoomIn).is_some() && i.consume_key(CMD, Key::Plus) {
                 pressed.push(Command::ZoomIn);
             }
             // egui-winit turns Ctrl+C and Ctrl+X into Copy and Cut events
