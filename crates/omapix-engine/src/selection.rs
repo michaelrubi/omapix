@@ -163,68 +163,28 @@ impl Selection {
 
     /// True if nothing is selected.
     pub fn is_empty(&self) -> bool {
-        let (w, h) = (self.coverage.width(), self.coverage.height());
-        for row in 0..self.coverage.rows() {
-            for col in 0..self.coverage.cols() {
-                let x0 = col * TILE;
-                let y0 = row * TILE;
-                let tw = TILE.min(w.saturating_sub(x0));
-                let th = TILE.min(h.saturating_sub(y0));
-                if tw == 0 || th == 0 {
-                    continue;
-                }
-                match self.coverage.tile(col, row) {
-                    Some(tile) => {
-                        for ty in 0..th {
-                            for tx in 0..tw {
-                                if tile[(ty * TILE + tx) as usize] != 0 {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        if self.coverage.fill() != 0 {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-        true
+        self.everywhere(0)
     }
 
-    /// True if everything is selected (coverage is MAX everywhere).
+    /// True if everything is selected.
     pub fn is_all(&self) -> bool {
-        let (w, h) = (self.coverage.width(), self.coverage.height());
-        for row in 0..self.coverage.rows() {
-            for col in 0..self.coverage.cols() {
-                let x0 = col * TILE;
-                let y0 = row * TILE;
-                let tw = TILE.min(w.saturating_sub(x0));
-                let th = TILE.min(h.saturating_sub(y0));
-                if tw == 0 || th == 0 {
-                    continue;
+        self.everywhere(u16::MAX)
+    }
+
+    /// Whether every pixel's coverage is `v` (Quick Mask can leave tiles
+    /// that are all one value, so the tiles themselves are looked at).
+    fn everywhere(&self, v: u16) -> bool {
+        let c = &self.coverage;
+        let (w, h) = (c.width(), c.height());
+        (0..c.rows()).all(|row| {
+            (0..c.cols()).all(|col| match c.tile(col, row) {
+                None => c.fill() == v,
+                Some(tile) => {
+                    let (tw, th) = (TILE.min(w - col * TILE), TILE.min(h - row * TILE));
+                    (0..th).all(|y| tile[(y * TILE) as usize..(y * TILE + tw) as usize].iter().all(|&t| t == v))
                 }
-                match self.coverage.tile(col, row) {
-                    Some(tile) => {
-                        for ty in 0..th {
-                            for tx in 0..tw {
-                                if tile[(ty * TILE + tx) as usize] != u16::MAX {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        if self.coverage.fill() != u16::MAX {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-        true
+            })
+        })
     }
 
     /// The smallest rectangle holding everything selected, as `[x, y,
