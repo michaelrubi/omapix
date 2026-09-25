@@ -74,6 +74,10 @@ Ctrl+click on a layer row adds it to the selected layers or takes it out, and Sh
 
 Alt+] and Alt+[ select the layer above or below following the rows in the Layers panel (stepping into open groups, skipping closed ones, stopping at the ends without wrapping; single selection targeting pixels on pixel layers). Ctrl+Shift+] and Ctrl+Shift+[ bring the active layer (and other selected layers) to the front or send them to the back of their group, with undo/redo.
 
+### ~~Hide All masks and loading masks from their menu~~ (done)
+
+Alt+click on the mask button adds a black mask that hides the whole layer (Photoshop's Hide All), or with a selection, one that hides just the selection; it's also Layer › Add Layer Mask (Hide All). Right-clicking a mask thumbnail offers Add Mask to Selection, Subtract Mask from Selection and Intersect Mask with Selection, the same as Ctrl+click, Ctrl+Alt+click and Ctrl+Shift+Alt+click on it.
+
 ### ~~Tool cursor modifier badges (`+` and `-`)~~ (done)
 
 Over the canvas, selection tools (Rectangular & Elliptical Marquee, Lasso, Magic Wand) show a small badge at the lower right of the crosshair: `+` while holding Shift (add), `-` while holding Alt (subtract), and `×` while holding Shift+Alt (intersect), matching the mode applied when clicking or dragging. The Move tool shows a copy badge while holding Alt (Alt+drag copy).
@@ -131,6 +135,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Channels panel: view Red, Green and Blue (click and Ctrl+2…5), Ctrl+click with Shift/Alt to load them and RGB's luminosity, Save Selection as Alpha 1 and 2, view, load and delete them, and reopen the .ora with them kept
 - [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
 - [ ] PSD import: a flattened 16-bit .psd and a layered one (layers, groups, masks and colours as in Photoshop), and Ctrl+S asking where to save rather than overwriting the .psd
+- [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing

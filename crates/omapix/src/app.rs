@@ -677,7 +677,7 @@ impl App {
             Command::ClippingMask => {
                 layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i))
             }
-            Command::AddMask => !has_mask,
+            Command::AddMask | Command::AddMaskHideAll => !has_mask,
             Command::LockTransparent | Command::LockPixels => !no_pixels,
             Command::LockPosition | Command::LockAll => layer.is_some(),
             Command::LoadSelectionTransparency => !no_pixels,
@@ -1112,6 +1112,9 @@ impl App {
                 self.menu_item(ui, Command::BlendingOptions, None);
                 ui.separator();
                 self.menu_item(ui, Command::AddMask, None);
+                let has_selection = self.editor.as_ref().is_some_and(|e| e.doc.selection.is_some());
+                let hide = has_selection.then(|| "Add Layer Mask (Hide Selection)".to_owned());
+                self.menu_item(ui, Command::AddMaskHideAll, hide);
                 self.menu_item(ui, Command::ToggleMask, None);
                 self.menu_item(ui, Command::DeleteMask, None);
                 ui.separator();
@@ -2380,16 +2383,21 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 doc.toggle_clipping(id);
             });
         }
-        Command::AddMask => {
-            // With a selection, the mask reveals just the selection.
+        Command::AddMask | Command::AddMaskHideAll => {
+            // With a selection, the mask reveals just the selection. Hide All
+            // (Alt+click the mask button) is the opposite: black, or hiding
+            // just the selection.
             editor.edit("Add Layer Mask", |doc, _| {
-                let mask = match &doc.selection {
+                let mut mask = match &doc.selection {
                     Some(sel) => Mask {
                         pixels: sel.coverage.clone(),
                         enabled: true,
                     },
                     None => Mask::white(w, h),
                 };
+                if cmd == Command::AddMaskHideAll {
+                    mask.invert();
+                }
                 if let Some(l) = doc.layer_mut(id) {
                     l.mask = Some(mask);
                 }
@@ -3337,6 +3345,30 @@ mod tests {
         assert_eq!(editor.undo_label(), Some("Reduce Noise"));
         let layer = editor.doc.layer(id).unwrap();
         assert_eq!(layer.pixels.to_vec(), pixels);
+    }
+
+    #[test]
+    fn hide_all_mask_is_black_or_hides_the_selection() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let mask = |app: &App, x, y| {
+            let e = app.editor.as_ref().unwrap();
+            e.doc.layer(e.active).unwrap().mask.as_ref().unwrap().pixels.get(x, y)
+        };
+
+        // With the selection (100..200), just the selection is hidden.
+        app.run(Command::AddMaskHideAll, &ctx);
+        assert_eq!(mask(&app, 150, 150), 0);
+        assert_eq!(mask(&app, 50, 50), u16::MAX);
+        assert_eq!(app.editor.as_ref().unwrap().target, Target::Mask);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Add Layer Mask"));
+        assert!(!app.enabled(Command::AddMaskHideAll));
+
+        app.run(Command::DeleteMask, &ctx);
+        app.run(Command::Deselect, &ctx);
+        app.run(Command::AddMaskHideAll, &ctx);
+        assert_eq!(mask(&app, 150, 150), 0);
+        assert_eq!(mask(&app, 50, 50), 0);
     }
 
     #[test]
