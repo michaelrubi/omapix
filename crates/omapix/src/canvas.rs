@@ -97,11 +97,15 @@ impl Render {
         self.data.read().ok().map(|d| f(&d.image))
     }
 
-    /// The smallest pyramid level, suitable for thumbnails.
-    pub fn smallest_level(&self) -> Raster {
+    /// The smallest pyramid level at least `side` pixels on its longer
+    /// side (or the largest there is), for a thumbnail that sharp.
+    pub fn level_at_least(&self, side: u32) -> Raster {
         let data = self.data.read().expect("render lock");
-        let level = data.pyramid.len().saturating_sub(1);
-        data.level(level).clone()
+        let big_enough = (0..data.pyramid.len()).rev().find(|&i| {
+            let level = data.level(i);
+            level.width().max(level.height()) >= side
+        });
+        data.level(big_enough.unwrap_or(0)).clone()
     }
 
     #[cfg(test)]

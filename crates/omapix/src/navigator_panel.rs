@@ -36,7 +36,9 @@ impl NavigatorPanel {
             && (!throttled || self.texture.is_none())
             && let Some(render) = editor.canvas.render()
         {
-            let raster = render.smallest_level();
+            // As many pixels as the thumbnail shows on screen, so it's sharp.
+            let side = (ui.available_width().min(280.0) * ui.ctx().pixels_per_point()) as u32;
+            let raster = render.level_at_least(side);
             let (w, h) = (raster.width() as usize, raster.height() as usize);
             if w > 0 && h > 0 {
                 let samples = raster.pixels();
