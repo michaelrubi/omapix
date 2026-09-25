@@ -33,13 +33,42 @@ pub struct Layer {
     pub is_group: bool,
     /// The group this layer is in, if any.
     pub parent: Option<u64>,
-    /// Clipped to the layer below (Photoshop's clipping mask): it shows only
-    /// where that layer does. A run of clipped layers all clip to the first
-    /// unclipped layer below them in the same group.
+    /// Photoshop's clipping mask: it shows only where that layer does.
     pub clipped: bool,
+    /// Layer lock flags matching Photoshop's layer locks.
+    pub locks: Locks,
+}
+
+/// Photoshop-compatible layer lock flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Locks {
     /// Photoshop's Lock Transparent Pixels (`/`): painting and fills change
     /// colour only, keeping each pixel's transparency.
-    pub lock_alpha: bool,
+    pub transparency: bool,
+    /// Photoshop's Lock Image Pixels: brushes, fills, filters, Clear/Cut and
+    /// pasting into the layer are refused.
+    pub pixels: bool,
+    /// Photoshop's Lock Position: the Move tool (drags, nudges, Alt+drag copies)
+    /// cannot move the layer.
+    pub position: bool,
+    /// Photoshop's Lock All (`Ctrl+/`): transparency, pixels and position locked,
+    /// plus refusing deletion and blend mode / opacity changes.
+    pub all: bool,
+}
+
+impl Locks {
+    /// Whether any lock flag is set.
+    pub fn any(self) -> bool {
+        self.transparency || self.pixels || self.position || self.all
+    }
+
+    /// Set or clear all lock flags.
+    pub fn set_all(&mut self, locked: bool) {
+        self.transparency = locked;
+        self.pixels = locked;
+        self.position = locked;
+        self.all = locked;
+    }
 }
 
 /// Which values Blend If compares.
@@ -186,7 +215,7 @@ impl Layer {
             is_group: false,
             parent: None,
             clipped: false,
-            lock_alpha: false,
+            locks: Locks::default(),
         }
     }
 
@@ -194,5 +223,30 @@ impl Layer {
     /// filter. Adjustment layers and groups don't.
     pub fn has_pixels(&self) -> bool {
         self.adjustment.is_none() && !self.is_group
+    }
+
+    /// Whether painting and fills preserve existing pixel alpha.
+    pub fn lock_alpha(&self) -> bool {
+        self.locks.transparency || self.locks.all
+    }
+
+    /// Whether this layer's pixels can be painted on, filled, filtered or pasted into.
+    pub fn can_paint_pixels(&self) -> bool {
+        self.has_pixels() && !self.locks.pixels && !self.locks.all
+    }
+
+    /// Whether this layer can be moved by the Move tool (drags, nudges, copies).
+    pub fn can_move(&self) -> bool {
+        !self.locks.position && !self.locks.all
+    }
+
+    /// Whether this layer can be deleted.
+    pub fn can_delete(&self) -> bool {
+        !self.locks.all
+    }
+
+    /// Whether this layer's blend mode or opacity can be changed.
+    pub fn can_modify(&self) -> bool {
+        !self.locks.all
     }
 }

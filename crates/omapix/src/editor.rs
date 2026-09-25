@@ -560,11 +560,11 @@ impl Editor {
             (Target::Mask, _) if copying => return false,
             (Target::Mask, Some(mask)) => Surface::Mask(mask.pixels.clone()),
             (Target::Mask, None) => return false,
-            // Groups and adjustment layers have no pixels to paint.
-            (Target::Pixels, _) if !layer.has_pixels() => return false,
+            // Groups, adjustment layers and image-locked layers cannot paint pixels.
+            (Target::Pixels, _) if !layer.can_paint_pixels() => return false,
             (Target::Pixels, _) => Surface::Pixels(layer.pixels.clone()),
         };
-        let locked = target == Target::Pixels && layer.lock_alpha;
+        let locked = target == Target::Pixels && layer.lock_alpha();
         let mut stroke = Stroke::new(settings, paint, surface);
         if locked {
             stroke = stroke.keeping_alpha();
@@ -718,6 +718,9 @@ impl Editor {
             self.doc.outermost(&self.selected())
         };
         let (original, contents) = moving_layers(&self.doc, self.active, &roots);
+        if !original.can_move() || contents.iter().any(|l| !l.can_move()) {
+            return false;
+        }
         let simple = !copy && self.doc.selection.is_none() && roots == [self.active];
         self.live_move = simple.then(|| self.start_live_move()).flatten();
         self.moving = Some(Moving {

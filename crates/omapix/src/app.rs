@@ -579,8 +579,11 @@ impl App {
             Command::ShowLayers | Command::ShowHistory => true,
             Command::Undo => editor.undo_label().is_some(),
             Command::Redo => editor.redo_label().is_some(),
-            // Something must be left.
-            Command::DeleteLayer => doc.removed_count(&editor.selected()) < doc.layers.len(),
+            // Something must be left, and layer must be deletable.
+            Command::DeleteLayer => {
+                doc.removed_count(&editor.selected()) < doc.layers.len()
+                    && !editor.selected().iter().any(|&id| doc.layer(id).is_some_and(|l| !l.can_delete()))
+            }
             Command::MergeDown => {
                 is_group
                     || editor.several_selected()
@@ -597,7 +600,8 @@ impl App {
                 layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i))
             }
             Command::AddMask => !has_mask,
-            Command::LockTransparent => !no_pixels,
+            Command::LockTransparent | Command::LockPixels => !no_pixels,
+            Command::LockPosition | Command::LockAll => layer.is_some(),
             Command::LoadSelectionTransparency => !no_pixels,
             Command::LoadSelectionLayerMask => has_mask,
             Command::Deselect | Command::InvertSelection | Command::Feather => {
@@ -667,6 +671,13 @@ impl App {
             | Command::HighPass
             | Command::UnsharpMask
             | Command::SmartSharpen => {
+                if let Some(editor) = &self.editor
+                    && editor.target == Target::Pixels
+                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
+                {
+                    self.message("Could not use the filter because the layer is locked", true);
+                    return;
+                }
                 let filter = match cmd {
                     Command::GaussianBlur => LayerFilter::GaussianBlur {
                         radius: self.blur_radius,
@@ -699,21 +710,39 @@ impl App {
                 }
             }
             Command::FillForeground | Command::FillBackground | Command::Clear => {
+                let Some(editor) = &mut self.editor else {
+                    return;
+                };
+                if editor.target == Target::Pixels
+                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
+                {
+                    let msg = match cmd {
+                        Command::Clear => "Could not clear because the layer is locked",
+                        _ => "Could not fill because the layer is locked",
+                    };
+                    self.message(msg, true);
+                    return;
+                }
                 let colour = match cmd {
                     Command::FillForeground => Some(self.tools.foreground),
                     Command::FillBackground => Some(self.tools.background),
                     _ => None,
                 };
                 let background = self.tools.background;
-                if let Some(editor) = &mut self.editor {
-                    let label = if colour.is_some() { "Fill" } else { "Clear" };
-                    fill(editor, label, colour, background);
-                }
+                let label = if colour.is_some() { "Fill" } else { "Clear" };
+                fill(editor, label, colour, background);
             }
             Command::Cut | Command::Copy | Command::CopyMerged => {
                 let Some(editor) = &mut self.editor else {
                     return;
                 };
+                if cmd == Command::Cut
+                    && editor.target == Target::Pixels
+                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
+                {
+                    self.message("Could not cut because the layer is locked", true);
+                    return;
+                }
                 let Some(clip) = copy(editor, cmd == Command::CopyMerged) else {
                     self.message("Nothing to copy: the selected area is empty", true);
                     return;
@@ -818,6 +847,10 @@ impl App {
             return;
         };
         let (id, mask) = (editor.active, editor.target == Target::Mask);
+        if !mask && editor.doc.layer(id).is_some_and(|l| !l.can_paint_pixels()) {
+            self.message("Could not use the filter because the layer is locked", true);
+            return;
+        }
         editor.edit_in_background(
             filter.name(),
             move |doc, _| {
@@ -884,11 +917,32 @@ impl App {
             .is_some_and(|l| l.is_group)
     }
 
-    fn active_is_locked(&self) -> bool {
+    fn active_is_locked_transparent(&self) -> bool {
         self.editor
             .as_ref()
             .and_then(|e| e.doc.layer(e.active))
-            .is_some_and(|l| l.lock_alpha)
+            .is_some_and(|l| l.locks.transparency)
+    }
+
+    fn active_is_locked_pixels(&self) -> bool {
+        self.editor
+            .as_ref()
+            .and_then(|e| e.doc.layer(e.active))
+            .is_some_and(|l| l.locks.pixels)
+    }
+
+    fn active_is_locked_position(&self) -> bool {
+        self.editor
+            .as_ref()
+            .and_then(|e| e.doc.layer(e.active))
+            .is_some_and(|l| l.locks.position)
+    }
+
+    fn active_is_locked_all(&self) -> bool {
+        self.editor
+            .as_ref()
+            .and_then(|e| e.doc.layer(e.active))
+            .is_some_and(|l| l.locks.all)
     }
 
     fn active_is_clipped(&self) -> bool {
@@ -987,8 +1041,14 @@ impl App {
                 ui.separator();
                 let release = self.active_is_clipped().then(|| "Release Clipping Mask".to_owned());
                 self.menu_item(ui, Command::ClippingMask, release);
-                let unlock = self.active_is_locked().then(|| "Unlock Transparent Pixels".to_owned());
+                let unlock = self.active_is_locked_transparent().then(|| "Unlock Transparent Pixels".to_owned());
                 self.menu_item(ui, Command::LockTransparent, unlock);
+                let unlock = self.active_is_locked_pixels().then(|| "Unlock Image Pixels".to_owned());
+                self.menu_item(ui, Command::LockPixels, unlock);
+                let unlock = self.active_is_locked_position().then(|| "Unlock Position".to_owned());
+                self.menu_item(ui, Command::LockPosition, unlock);
+                let unlock = self.active_is_locked_all().then(|| "Unlock All".to_owned());
+                self.menu_item(ui, Command::LockAll, unlock);
                 ui.separator();
                 self.menu_item(ui, Command::BlendingOptions, None);
                 ui.separator();
@@ -1567,9 +1627,16 @@ impl App {
                 else {
                     return;
                 };
+                if editor.target == Target::Pixels
+                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
+                {
+                    let name = self.tools.tool.name().to_lowercase();
+                    self.message(format!("Could not use the {name} because the layer is locked"), true);
+                    return;
+                }
                 // With transparency locked, the eraser paints the background
                 // colour, as in Photoshop.
-                let locked = editor.doc.layer(editor.active).is_some_and(|l| l.lock_alpha);
+                let locked = editor.doc.layer(editor.active).is_some_and(|l| l.lock_alpha());
                 if paint == Paint::Erase && locked && editor.target == Target::Pixels {
                     let background = editor.doc.profile.from_srgb8(self.tools.background);
                     paint = Paint::Color(background.unwrap_or([65535; 4]));
@@ -1610,9 +1677,13 @@ impl App {
         };
         match input {
             ToolInput::StrokeBegin(p) => {
-                if editor.begin_move("Move", modifiers.alt, background) {
-                    self.move_from = Some(p);
+                if !editor.begin_move("Move", modifiers.alt, background) {
+                    if editor.doc.layer(editor.active).is_some_and(|l| !l.can_move()) {
+                        self.message("Could not use the move tool because the layer is locked", true);
+                    }
+                    return;
                 }
+                self.move_from = Some(p);
             }
             ToolInput::StrokeMove(p) => {
                 let Some(from) = self.move_from else {
@@ -1991,13 +2062,16 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
                 }
             }
             Target::Pixels => {
+                if !layer.can_paint_pixels() {
+                    return;
+                }
                 // With transparency locked, Delete fills with the background
                 // colour, and only the colour of what's there changes.
-                let colour = colour.or(layer.lock_alpha.then_some(background));
+                let colour = colour.or(layer.lock_alpha().then_some(background));
                 let pixel =
                     colour.map(|rgb| profile.from_srgb8(rgb).unwrap_or([0, 0, 0, u16::MAX]));
                 let filled = ops::fill_pixels(&layer.pixels, pixel, selection.as_ref());
-                layer.pixels = if layer.lock_alpha {
+                layer.pixels = if layer.lock_alpha() {
                     ops::keep_alpha(&layer.pixels, filled)
                 } else {
                     filled
@@ -2078,6 +2152,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.edit(label, |doc, active| *active = doc.duplicate_layer(index));
         }
         Command::DeleteLayer => {
+            if selected.iter().any(|&s| editor.doc.layer(s).is_some_and(|l| !l.can_delete())) {
+                return;
+            }
             let label = if several { "Delete Layers" } else { "Delete Layer" };
             editor.edit(label, |doc, active| {
                 let below = doc.remove_layers(&selected).unwrap_or(0);
@@ -2098,7 +2175,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             }
         }
         Command::LockTransparent => {
-            let lock = !editor.doc.layer(id).is_some_and(|l| l.lock_alpha);
+            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.transparency);
             let label = if lock {
                 "Lock Transparent Pixels"
             } else {
@@ -2107,7 +2184,61 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.edit(label, |doc, _| {
                 for &s in &selected {
                     if let Some(l) = doc.layer_mut(s).filter(|l| l.has_pixels()) {
-                        l.lock_alpha = lock;
+                        l.locks.transparency = lock;
+                        if !lock {
+                            l.locks.all = false;
+                        }
+                    }
+                }
+            });
+        }
+        Command::LockPixels => {
+            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.pixels);
+            let label = if lock {
+                "Lock Image Pixels"
+            } else {
+                "Unlock Image Pixels"
+            };
+            editor.edit(label, |doc, _| {
+                for &s in &selected {
+                    if let Some(l) = doc.layer_mut(s).filter(|l| l.has_pixels()) {
+                        l.locks.pixels = lock;
+                        if !lock {
+                            l.locks.all = false;
+                        }
+                    }
+                }
+            });
+        }
+        Command::LockPosition => {
+            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.position);
+            let label = if lock {
+                "Lock Position"
+            } else {
+                "Unlock Position"
+            };
+            editor.edit(label, |doc, _| {
+                for &s in &selected {
+                    if let Some(l) = doc.layer_mut(s) {
+                        l.locks.position = lock;
+                        if !lock {
+                            l.locks.all = false;
+                        }
+                    }
+                }
+            });
+        }
+        Command::LockAll => {
+            let lock = !editor.doc.layer(id).is_some_and(|l| l.locks.all);
+            let label = if lock {
+                "Lock All"
+            } else {
+                "Unlock All"
+            };
+            editor.edit(label, |doc, _| {
+                for &s in &selected {
+                    if let Some(l) = doc.layer_mut(s) {
+                        l.locks.set_all(lock);
                     }
                 }
             });
@@ -2368,19 +2499,23 @@ impl eframe::App for App {
                 && let Some(editor) = &mut self.editor
             {
                 let id = editor.active;
-                editor.edit("Opacity", |doc, _| {
-                    if let Some(l) = doc.layer_mut(id) {
-                        l.opacity = opacity;
-                    }
-                });
+                if editor.doc.layer(id).is_some_and(|l| l.can_modify()) {
+                    editor.edit("Opacity", |doc, _| {
+                        if let Some(l) = doc.layer_mut(id) {
+                            l.opacity = opacity;
+                        }
+                    });
+                }
             }
             if let Some((dx, dy)) = self.tools.nudge(ctx) {
                 let background = crate::tools::grey(self.tools.background);
-                if let Some(editor) = &mut self.editor
-                    && editor.begin_move("Nudge", false, background)
-                {
-                    editor.move_to(dx, dy);
-                    editor.end_move();
+                if let Some(editor) = &mut self.editor {
+                    if editor.begin_move("Nudge", false, background) {
+                        editor.move_to(dx, dy);
+                        editor.end_move();
+                    } else if editor.doc.layer(editor.active).is_some_and(|l| !l.can_move()) {
+                        self.message("Could not use the move tool because the layer is locked", true);
+                    }
                 }
             }
         }
@@ -2663,7 +2798,7 @@ mod tests {
         run_on_editor(&mut editor, Command::NewLayer, &ctx);
         let empty = editor.active;
         run_on_editor(&mut editor, Command::LockTransparent, &ctx);
-        assert!(editor.doc.layer(empty).unwrap().lock_alpha);
+        assert!(editor.doc.layer(empty).unwrap().lock_alpha());
         assert_eq!(editor.undo_label(), Some("Lock Transparent Pixels"));
 
         // Nothing there to fill or paint on.
@@ -2685,7 +2820,115 @@ mod tests {
 
         run_on_editor(&mut editor, Command::LockTransparent, &ctx);
         assert_eq!(editor.undo_label(), Some("Unlock Transparent Pixels"));
-        assert!(!editor.doc.layer(background).unwrap().lock_alpha);
+        assert!(!editor.doc.layer(background).unwrap().lock_alpha());
+    }
+
+    #[test]
+    fn image_locked_layer_refuses_stroke_and_fill_with_message() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active = app.editor.as_ref().unwrap().active;
+
+        app.run(Command::LockPixels, &ctx);
+        assert!(app.editor.as_ref().unwrap().doc.layer(active).unwrap().locks.pixels);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Lock Image Pixels"));
+
+        let initial_pixel = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150);
+
+        // Brush stroke is refused on locked pixels with status message
+        app.tools.select(crate::tools::Tool::Brush);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(160.0, 160.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert_eq!(
+            app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150),
+            initial_pixel
+        );
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("Could not use the brush because the layer is locked")
+        );
+        assert!(app.status.as_ref().unwrap().1);
+
+        // Fill is refused with status message
+        app.status = None;
+        app.run(Command::FillForeground, &ctx);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("Could not fill because the layer is locked")
+        );
+        assert_eq!(
+            app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150),
+            initial_pixel
+        );
+
+        // Its mask can still be painted
+        app.run(Command::AddMask, &ctx);
+        app.editor.as_mut().unwrap().target = Target::Mask;
+        app.status = None;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn position_locked_layer_refuses_move_tool() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active = app.editor.as_ref().unwrap().active;
+
+        app.run(Command::LockPosition, &ctx);
+        assert!(app.editor.as_ref().unwrap().doc.layer(active).unwrap().locks.position);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Lock Position"));
+
+        // Move tool drag is refused with status message
+        app.tools.select(crate::tools::Tool::Move);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(100.0, 100.0)), egui::Modifiers::NONE);
+        assert!(app.move_from.is_none());
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("Could not use the move tool because the layer is locked")
+        );
+        assert!(!app.editor.as_mut().unwrap().begin_move("Move", false, 0));
+    }
+
+    #[test]
+    fn lock_all_toggles_all_flags_and_blocks_delete() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        run_on_editor(app.editor.as_mut().unwrap(), Command::NewLayer, &ctx);
+        let active = app.editor.as_ref().unwrap().active;
+
+        // Lock All sets all lock flags
+        app.run(Command::LockAll, &ctx);
+        let locks = app.editor.as_ref().unwrap().doc.layer(active).unwrap().locks;
+        assert!(locks.all);
+        assert!(locks.transparency);
+        assert!(locks.pixels);
+        assert!(locks.position);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Lock All"));
+        assert!(!app.editor.as_ref().unwrap().doc.layer(active).unwrap().can_delete());
+        assert!(!app.editor.as_ref().unwrap().doc.layer(active).unwrap().can_modify());
+
+        // Delete is disabled and blocked
+        assert!(!app.enabled(Command::DeleteLayer));
+        let count = app.editor.as_ref().unwrap().doc.layers.len();
+        app.run(Command::DeleteLayer, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers.len(), count);
+        run_on_editor(app.editor.as_mut().unwrap(), Command::DeleteLayer, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers.len(), count);
+
+        // Toggle Lock All off clears all flags and unblocks delete
+        app.run(Command::LockAll, &ctx);
+        let locks = app.editor.as_ref().unwrap().doc.layer(active).unwrap().locks;
+        assert!(!locks.all);
+        assert!(!locks.transparency);
+        assert!(!locks.pixels);
+        assert!(!locks.position);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Unlock All"));
+        assert!(app.enabled(Command::DeleteLayer));
+        assert!(app.editor.as_ref().unwrap().doc.layer(active).unwrap().can_delete());
+        assert!(app.editor.as_ref().unwrap().doc.layer(active).unwrap().can_modify());
     }
 
     #[test]
