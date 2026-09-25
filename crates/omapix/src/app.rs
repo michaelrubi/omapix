@@ -235,6 +235,7 @@ pub struct App {
     feather_radius: f32,
     separation_radius: Option<f32>,
     high_pass_radius: f32,
+    mask_density: f32,
     noise_options: NoiseOptions,
     /// The user chose to discard changes, so the next close goes through.
     allow_close: bool,
@@ -291,6 +292,7 @@ impl App {
             smart_sharpen: DEFAULT_SMART_SHARPEN,
             reduce_noise: DEFAULT_REDUCE_NOISE,
             high_pass_radius: 2.0,
+            mask_density: 100.0,
             feather_radius: 10.0,
             separation_radius: None,
             noise_options: NoiseOptions::default(),
@@ -691,7 +693,10 @@ impl App {
             | Command::Cut
             | Command::Copy => editor.target == Target::Mask || !no_pixels,
             Command::Paste => self.pasting.is_none(),
-            Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
+            Command::DeleteMask
+            | Command::ToggleMask
+            | Command::MaskOverlay
+            | Command::MaskDensity => has_mask,
             Command::GaussianBlur
             | Command::HighPass
             | Command::UnsharpMask
@@ -745,6 +750,17 @@ impl App {
             Command::AddNoise => {
                 self.dialog = Some(Dialog::AddNoise {
                     options: self.noise_options,
+                    preview: true,
+                });
+            }
+            Command::MaskDensity => {
+                if let Some(editor) = &mut self.editor {
+                    editor.target = Target::Mask;
+                }
+                self.dialog = Some(Dialog::Filter {
+                    filter: LayerFilter::MaskDensity {
+                        density: self.mask_density,
+                    },
                     preview: true,
                 });
             }
@@ -930,6 +946,7 @@ impl App {
             LayerFilter::AddNoise(options) => self.noise_options = options,
             LayerFilter::SmartSharpen(_) => self.smart_sharpen = filter,
             LayerFilter::ReduceNoise(_) => self.reduce_noise = filter,
+            LayerFilter::MaskDensity { density } => self.mask_density = density,
         }
         let Some(editor) = &mut self.editor else {
             return;
@@ -1117,6 +1134,7 @@ impl App {
                 self.menu_item(ui, Command::AddMaskHideAll, hide);
                 self.menu_item(ui, Command::ToggleMask, None);
                 self.menu_item(ui, Command::DeleteMask, None);
+                self.menu_item(ui, Command::MaskDensity, None);
                 ui.separator();
                 self.menu_item(ui, Command::BringToFront, None);
                 self.menu_item(ui, Command::RaiseLayer, None);
@@ -1405,6 +1423,16 @@ impl App {
                         }
                         LayerFilter::ReduceNoise(options) => {
                             reduce_noise_controls(ui, options, hint);
+                        }
+                        LayerFilter::MaskDensity { density } => {
+                            ui.horizontal(|ui| {
+                                ui.label("Density");
+                                ui.add(
+                                    egui::Slider::new(density, 0.0..=100.0)
+                                        .suffix(" %")
+                                        .fixed_decimals(0),
+                                );
+                            });
                         }
                     }
                     ui.add_space(4.0);
@@ -3138,6 +3166,7 @@ mod tests {
             smart_sharpen: DEFAULT_SMART_SHARPEN,
             reduce_noise: DEFAULT_REDUCE_NOISE,
             high_pass_radius: 2.0,
+            mask_density: 100.0,
             feather_radius: 5.0,
             separation_radius: None,
             noise_options: NoiseOptions::default(),
@@ -3369,6 +3398,58 @@ mod tests {
         app.run(Command::AddMaskHideAll, &ctx);
         assert_eq!(mask(&app, 150, 150), 0);
         assert_eq!(mask(&app, 50, 50), 0);
+    }
+
+    #[test]
+    fn mask_density_applies_and_undoes() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let id = app.editor.as_ref().unwrap().active;
+
+        // Command is disabled without a mask.
+        assert!(!app.enabled(Command::MaskDensity));
+
+        // A black mask, targeted at pixels: Mask Density targets the mask.
+        app.run(Command::Deselect, &ctx);
+        app.run(Command::AddMaskHideAll, &ctx);
+        app.editor.as_mut().unwrap().target = Target::Pixels;
+        assert!(app.enabled(Command::MaskDensity));
+        let (w, h) = (600, 400);
+
+        app.run(Command::MaskDensity, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().target, Target::Mask);
+        let Some(Dialog::Filter { filter, preview }) = &mut app.dialog else {
+            panic!("no filter dialog");
+        };
+        assert!(*preview);
+        assert_eq!(*filter, LayerFilter::MaskDensity { density: 100.0 });
+
+        *filter = LayerFilter::MaskDensity { density: 50.0 };
+        let filter = *filter;
+        app.dialog = None;
+        app.apply_filter(filter, &ctx);
+
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Mask Density"));
+
+        // 50 % turns black mask into mid grey.
+        let layer = editor.doc.layer(id).unwrap();
+        let mask = &layer.mask.as_ref().unwrap().pixels;
+        assert_eq!(mask.get(0, 0), 32768);
+        assert_eq!(mask.get(w / 2, h / 2), 32768);
+        assert_eq!(app.mask_density, 50.0);
+
+        // Undo restores black mask.
+        app.run(Command::Undo, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        let layer = editor.doc.layer(id).unwrap();
+        let mask = &layer.mask.as_ref().unwrap().pixels;
+        assert_eq!(mask.get(0, 0), 0);
+        assert_eq!(mask.get(w / 2, h / 2), 0);
     }
 
     #[test]

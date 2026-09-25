@@ -138,6 +138,7 @@ pub enum LayerFilter {
     AddNoise(NoiseOptions),
     SmartSharpen(SmartSharpenOptions),
     ReduceNoise(ReduceNoiseOptions),
+    MaskDensity { density: f32 },
 }
 
 impl LayerFilter {
@@ -149,6 +150,7 @@ impl LayerFilter {
             Self::AddNoise(_) => "Add Noise",
             Self::SmartSharpen(_) => "Smart Sharpen",
             Self::ReduceNoise(_) => "Reduce Noise",
+            Self::MaskDensity { .. } => "Mask Density",
         }
     }
 
@@ -164,8 +166,30 @@ impl LayerFilter {
             Self::AddNoise(options) => add_noise(image, &options),
             Self::SmartSharpen(options) => smart_sharpen(image, &options),
             Self::ReduceNoise(options) => reduce_noise(image, &options),
+            Self::MaskDensity { density } => mask_density(image, density),
         }
     }
+}
+
+/// Lower a layer mask's opacity destructively.
+///
+/// Density in percent (0–100 %). Maps each value `m` (0 = black/hidden,
+/// 1 = white/revealed) to `1 − d·(1 − m)`. At 100 % the mask is unchanged,
+/// at 50 % black becomes 50 % grey (32768), at 0 % the mask is all white.
+/// White stays white. Alpha is kept.
+pub fn mask_density(image: &Tiled<Pixel>, density: f32) -> Tiled<Pixel> {
+    let d = (density / 100.0).clamp(0.0, 1.0);
+    if d >= 1.0 {
+        return image.clone();
+    }
+    image.map(|p| {
+        let map_val = |v: u16| {
+            (MAX - d * (MAX - f32::from(v)))
+                .round()
+                .clamp(0.0, MAX) as u16
+        };
+        [map_val(p[0]), map_val(p[1]), map_val(p[2]), p[3]]
+    })
 }
 
 /// Photoshop's Add Noise applied to the pixels themselves: each moves by
@@ -1314,6 +1338,32 @@ mod tests {
                 mean_after[c],
                 mean_before[c]
             );
+        }
+    }
+
+    #[test]
+    fn mask_density_mapping() {
+        let mut pixels = Tiled::new(2, 2, [0, 0, 0, u16::MAX]);
+        pixels.tile_mut(0, 0)[0] = [0, 0, 0, u16::MAX]; // black
+        pixels.tile_mut(0, 0)[1] = [u16::MAX, u16::MAX, u16::MAX, u16::MAX]; // white
+        pixels.tile_mut(0, 0)[2] = [32768, 32768, 32768, u16::MAX]; // mid grey
+        pixels.tile_mut(0, 0)[3] = [10000, 10000, 10000, u16::MAX];
+
+        // 100 % unchanged
+        let at_100 = LayerFilter::MaskDensity { density: 100.0 }.apply(&pixels);
+        assert_eq!(at_100.to_vec(), pixels.to_vec());
+
+        // 50 % turns black into mid grey, white stays white
+        let at_50 = LayerFilter::MaskDensity { density: 50.0 }.apply(&pixels);
+        assert_eq!(at_50.get(0, 0)[0], 32768);
+        assert_eq!(at_50.get(1, 0)[0], u16::MAX);
+
+        // 0 % all white, white stays white
+        let at_0 = LayerFilter::MaskDensity { density: 0.0 }.apply(&pixels);
+        for p in at_0.to_vec() {
+            assert_eq!(p[0], u16::MAX);
+            assert_eq!(p[1], u16::MAX);
+            assert_eq!(p[2], u16::MAX);
         }
     }
 }

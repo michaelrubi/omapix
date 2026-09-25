@@ -972,6 +972,20 @@ fn mask_menu_items(
 
     menu_item(
         ui,
+        Command::MaskDensity.label(),
+        Command::MaskDensity
+            .shortcut()
+            .map(|s| ui.ctx().format_shortcut(&s)),
+        true,
+        || {
+            editor.active = id;
+            editor.target = Target::Mask;
+            *command = Some(Command::MaskDensity);
+        },
+    );
+
+    menu_item(
+        ui,
         "Invert Mask",
         Command::Invert
             .shortcut()
