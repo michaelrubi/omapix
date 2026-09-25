@@ -132,29 +132,8 @@ impl HistogramPanel {
         if let Some(hist) = &self.histogram {
             match self.channel {
                 HistogramChannel::Colors => {
-                    let interior_max = [
-                        *hist.red[1..255].iter().max().unwrap_or(&0),
-                        *hist.green[1..255].iter().max().unwrap_or(&0),
-                        *hist.blue[1..255].iter().max().unwrap_or(&0),
-                    ]
-                    .into_iter()
-                    .max()
-                    .unwrap_or(0);
-                    let max = [
-                        *hist.red.iter().max().unwrap_or(&0),
-                        *hist.green.iter().max().unwrap_or(&0),
-                        *hist.blue.iter().max().unwrap_or(&0),
-                    ]
-                    .into_iter()
-                    .max()
-                    .unwrap_or(0);
-                    let raw_max = if interior_max > 0 {
-                        max.min(interior_max * 3).max(interior_max)
-                    } else {
-                        max
-                    };
-                    let scale_max = raw_max as f32;
-
+                    // One scale for all three, so they compare.
+                    let scale_max = scale(&[&hist.red, &hist.green, &hist.blue]);
                     draw_histogram_scaled(&painter, rect, &hist.red, 1, Some(scale_max), theme);
                     draw_histogram_scaled(&painter, rect, &hist.green, 2, Some(scale_max), theme);
                     draw_histogram_scaled(&painter, rect, &hist.blue, 3, Some(scale_max), theme);
@@ -201,6 +180,16 @@ impl HistogramPanel {
     }
 }
 
+/// The count drawn full height for `channels`: the tallest bar, but no more
+/// than three times the tallest between pure black and white, so a clipped
+/// end doesn't flatten the rest.
+fn scale(channels: &[&[u32; 256]]) -> f32 {
+    let tallest = |range: std::ops::Range<usize>| channels.iter().flat_map(|c| &c[range.clone()]).copied().max().unwrap_or(0);
+    let (max, interior) = (tallest(0..256), tallest(1..255));
+    let scale = if interior > 0 { max.min(interior * 3).max(interior) } else { max };
+    scale as f32
+}
+
 /// Draw a histogram onto `painter` over `rect`.
 /// `channel`: 0 = Luminance/foreground, 1 = Red, 2 = Green, 3 = Blue.
 pub fn draw_histogram(
@@ -224,23 +213,7 @@ pub fn draw_histogram_scaled(
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
-    let max = *bins.iter().max().unwrap_or(&0);
-    if max == 0 {
-        return;
-    }
-    let scale_max = match scale_max {
-        Some(s) if s > 0.0 => s,
-        _ => {
-            let interior_max = *bins[1..255].iter().max().unwrap_or(&0);
-            let raw_max = if interior_max > 0 {
-                max.min(interior_max * 3).max(interior_max)
-            } else {
-                max
-            };
-            raw_max as f32
-        }
-    };
-
+    let scale_max = scale_max.unwrap_or_else(|| scale(&[bins]));
     if scale_max <= 0.0 {
         return;
     }

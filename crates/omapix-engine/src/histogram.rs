@@ -67,8 +67,8 @@ impl Histogram {
         Self::stats_for_bins(self.channel(ch))
     }
 
-    /// Compute mean, standard deviation, median, and pixel count for 256 bins.
-    pub fn stats_for_bins(bins: &[u32; 256]) -> HistogramStats {
+    /// Mean, standard deviation, median and pixel count of 256 bins.
+    fn stats_for_bins(bins: &[u32; 256]) -> HistogramStats {
         let pixels: u64 = bins.iter().map(|&c| c as u64).sum();
         if pixels == 0 {
             return HistogramStats {

@@ -67,6 +67,11 @@ enum TopTab {
 }
 
 impl TopTab {
+    /// Show `tab` above the layers, or hide it if it's showing.
+    fn toggle(shown: &mut Option<TopTab>, tab: TopTab) {
+        *shown = (*shown != Some(tab)).then_some(tab);
+    }
+
     const ALL: [(TopTab, Command); 2] = [
         (TopTab::Navigator, Command::ShowNavigator),
         (TopTab::Histogram, Command::ShowHistogram),
@@ -813,20 +818,8 @@ impl App {
             Command::ShowLayers => self.right_tab = RightTab::Layers,
             Command::ShowChannels => self.right_tab = RightTab::Channels,
             Command::ShowHistory => self.right_tab = RightTab::History,
-            Command::ShowNavigator => {
-                if self.top_tab == Some(TopTab::Navigator) {
-                    self.top_tab = None;
-                } else {
-                    self.top_tab = Some(TopTab::Navigator);
-                }
-            }
-            Command::ShowHistogram => {
-                if self.top_tab == Some(TopTab::Histogram) {
-                    self.top_tab = None;
-                } else {
-                    self.top_tab = Some(TopTab::Histogram);
-                }
-            }
+            Command::ShowNavigator => TopTab::toggle(&mut self.top_tab, TopTab::Navigator),
+            Command::ShowHistogram => TopTab::toggle(&mut self.top_tab, TopTab::Histogram),
             Command::Quit => self.guard(Then::Quit, ctx),
             Command::Save => self.save(ctx),
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
@@ -2984,11 +2977,7 @@ impl eframe::App for App {
                                     RichText::new(cmd.label()).color(self.theme.dark_foreground)
                                 };
                                 if ui.add(Button::new(text).frame(false)).clicked() {
-                                    if is_active {
-                                        self.top_tab = None;
-                                    } else {
-                                        self.top_tab = Some(tab);
-                                    }
+                                    TopTab::toggle(&mut self.top_tab, tab);
                                 }
                                 ui.add_space(8.0);
                             }
