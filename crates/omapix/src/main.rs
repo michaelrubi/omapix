@@ -4,6 +4,7 @@ mod canvas;
 mod channels_panel;
 mod clipboard;
 mod commands;
+mod content_fill;
 mod drop;
 mod editor;
 mod free_transform;

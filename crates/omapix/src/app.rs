@@ -20,6 +20,7 @@ use omapix_engine::{
 use crate::canvas::ToolInput;
 use crate::settings::FilterSettings;
 use crate::tablet::Tablet;
+use crate::content_fill::ContentFill;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
@@ -286,6 +287,7 @@ pub struct App {
     v_down: bool,
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
+    content_fill: ContentFill,
 }
 
 impl App {
@@ -345,6 +347,7 @@ impl App {
             pending_drops: Vec::new(),
             v_down: false,
             tablet: Tablet::connect(cc),
+            content_fill: ContentFill::default(),
         };
         let warnings = crate::hotkeys::load();
         if !warnings.is_empty() {
@@ -557,7 +560,8 @@ impl App {
             if let Some(commit) = self.tools.threshold_moved.take() {
                 self.objects.threshold(editor, self.tools.ai_threshold, commit);
             }
-            if let Some(e) = self.objects.poll(ctx, editor) {
+            let errors = [self.objects.poll(ctx, editor), self.content_fill.poll(editor)];
+            for e in errors.into_iter().flatten() {
                 self.message(e, true);
             }
         }
@@ -758,6 +762,7 @@ impl App {
             | Command::Feather => {
                 editor.doc.selection.is_some()
             }
+            Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
             Command::FillForeground
             | Command::FillBackground
             | Command::Clear
@@ -905,6 +910,13 @@ impl App {
                     self.dialog = Some(Dialog::BlendingOptions(
                         crate::blending_options::BlendingOptions::new(editor.active),
                     ));
+                }
+            }
+            Command::ContentAwareFill => {
+                if let Some(editor) = &self.editor
+                    && let Err(e) = self.content_fill.start(ctx, editor)
+                {
+                    self.message(e, true);
                 }
             }
             Command::FillForeground | Command::FillBackground | Command::Clear => {
@@ -1243,6 +1255,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::FillForeground, None);
                 self.menu_item(ui, Command::FillBackground, None);
                 self.menu_item(ui, Command::Clear, None);
+                self.menu_item(ui, Command::ContentAwareFill, None);
             });
             ui.menu_button("Layer", |ui| {
                 let several = self.editor.as_ref().is_some_and(|e| e.several_selected());
@@ -1408,6 +1421,10 @@ self.filters.remember(&filter);
                 }
                 if self.objects.busy() {
                     ui.label(RichText::new("Finding the object…").color(self.theme.accent));
+                    ui.separator();
+                }
+                if self.content_fill.busy() {
+                    ui.label(RichText::new("Filling the selection…").color(self.theme.accent));
                     ui.separator();
                 }
                 if let Some((_, t)) = editor.transform() {
@@ -3764,6 +3781,7 @@ mod tests {
             pending_drops: Vec::new(),
             v_down: false,
             tablet: None,
+            content_fill: ContentFill::default(),
         }
     }
 

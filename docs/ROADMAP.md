@@ -160,6 +160,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates
 - [ ] Paste Special: Paste in Place (Ctrl+Shift+V), and Paste Into (Ctrl+Alt+Shift+V) a copy from elsewhere in the image and from another app
 - [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit
+- [ ] Content-Aware Fill: a prop, a mark on the backdrop and a stray hair on a 24 MP portrait, the first use (loading), the layer and its mask, undo, and the message without the model
 - [ ] Pen tablet: hovering shows the brush outline, pressure thins and lightens strokes with each pressure button on and off, the side buttons, and the mouse still working afterwards
 - [ ] Filter settings kept between runs: apply a few filters and Frequency Separation, quit, reopen and check their dialogs; the Defaults buttons; and a default changed in defaults.toml
 - [ ] Quick Selection and Threshold: painting, adding, Alt, Shift, and the threshold slider on a click, a box and a painted selection
@@ -278,6 +279,8 @@ The goal is Evoto-style one-click cleanup, running locally on the GPU with no su
 - Auto Retouch: all of the above in one click, with each face edited on its own or all together, as layer groups whose opacity sets the strength.
 - Face symmetry, and Reshape ("easy Liquify"): sliders for face and body shape, driven by face and body landmarks.
 - Models run through ONNX Runtime on the GPU (already set up on this machine for darktable), shared with darktable's model folder.
+- ~~**Content-Aware Fill**~~ (done): Edit › Content-Aware Fill fills the selection from its surroundings with LaMa (Apache-2.0, 208 MB, installed by `scripts/fetch-models.sh`, which checks its SHA-256), for props, backdrop marks and stray objects. It looks at the visible image in a square twice the selection's size (at least 512 px), scaled to the model's 512 px, and puts the answer on a new "Content-Aware Fill" layer above the selected one, masked to the selection, so it can be painted back or deleted. 0.2–0.3 s on the GPU once the model's loaded, about 4 s the first time. Select a little beyond the object: anything of it left outside the selection gets smeared into the fill. Big fills come out soft, since the model works at 512 px; the healing tools stay better for skin.
+  - Later: **Generative Fill** with a prompt, using FLUX.2 klein 4B (Apache-2.0; an int4 ONNX export exists, 7.8 GB) once Arch's ONNX Runtime reaches 1.30, keeping the unselected part fixed while it generates, as ComfyUI's masked fills do. Several results to choose from, as in Photoshop.
 
 ## Out of scope for now
 - Vector and layout tools (Omapix is raster only).
