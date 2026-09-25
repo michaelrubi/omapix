@@ -246,6 +246,8 @@ pub struct App {
     move_from: Option<Pos2>,
     /// A drag on Free Transform's box.
     transform_drag: Option<crate::free_transform::Drag>,
+    /// The Object Selection tool's model, running on its own thread.
+    objects: crate::object_selection::ObjectSelection,
     /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
     /// the real UI without a mouse; see [`ScriptStep`].
     script: VecDeque<ScriptStep>,
@@ -283,6 +285,7 @@ impl App {
             drawing: None,
             move_from: None,
             transform_drag: None,
+            objects: Default::default(),
             tools: Tools::default(),
             opening: None,
             picking: None,
@@ -516,6 +519,17 @@ impl App {
         if let Some(theme) = self.theme_rx.try_iter().last() {
             ctx.set_visuals(theme.visuals());
             self.theme = theme;
+        }
+        if let Some(editor) = &mut self.editor
+            && let Some(found) = self.objects.poll(ctx, editor)
+        {
+            match found {
+                Ok(found) => {
+                    let selection = Selection::from_coverage(found.coverage);
+                    editor.set_selection("Object Selection", selection, found.how);
+                }
+                Err(e) => self.message(e, true),
+            }
         }
         if let Some((purpose, rx)) = &self.picking
             && let Ok(result) = rx.try_recv()
@@ -1331,6 +1345,10 @@ impl App {
                     ui.label(RichText::new(text).color(self.theme.accent));
                     ui.separator();
                 }
+                if self.objects.busy() {
+                    ui.label(RichText::new("Finding the object…").color(self.theme.accent));
+                    ui.separator();
+                }
                 if let Some((_, t)) = editor.transform() {
                     ui.label(RichText::new(crate::free_transform::readout(&t)).color(self.theme.accent));
                     ui.separator();
@@ -1952,7 +1970,9 @@ impl App {
             ToolInput::StrokeMove(p) => {
                 if let Some((points, _)) = &mut self.drawing {
                     match self.tools.tool {
-                        crate::tools::Tool::Marquee | crate::tools::Tool::EllipticalMarquee => {
+                        crate::tools::Tool::Marquee
+                        | crate::tools::Tool::EllipticalMarquee
+                        | crate::tools::Tool::ObjectSelection => {
                             points.truncate(1);
                             points.push(p);
                         }
@@ -1971,6 +1991,11 @@ impl App {
                     return;
                 };
                 let (w, h) = (editor.doc.width, editor.doc.height);
+                if self.tools.tool == crate::tools::Tool::ObjectSelection {
+                    let prompt = crate::object_selection::prompt(points[0], *points.last().expect("a point"));
+                    self.objects.ask(prompt, how);
+                    return;
+                }
                 if self.tools.tool == crate::tools::Tool::MagicWand {
                     let p = points[0];
                     if p.x < 0.0 || p.y < 0.0 || p.x >= w as f32 || p.y >= h as f32 {
@@ -2944,6 +2969,11 @@ impl eframe::App for App {
         let tool = self.tools.tool;
         let shift = ui.input(|i| i.modifiers.shift);
         let drawing: Option<Vec<Pos2>> = self.drawing.as_ref().map(|(points, _)| match tool {
+            // Object Selection's box, as it's dragged.
+            crate::tools::Tool::ObjectSelection if points.len() == 2 => {
+                let (a, b) = (points[0], points[1]);
+                vec![a, egui::pos2(b.x, a.y), b, egui::pos2(a.x, b.y), a]
+            }
             // Show the marquee as its rectangle (constrained to square with Shift).
             crate::tools::Tool::Marquee if points.len() == 2 => {
                 let a = points[0];
@@ -3436,6 +3466,7 @@ mod tests {
             drawing: None,
             move_from: None,
             transform_drag: None,
+            objects: Default::default(),
             script: VecDeque::new(),
             clipboard: Clipboard::new(false),
             pasting: None,
@@ -4692,6 +4723,20 @@ mod tests {
         app.run(Command::FreeTransform, &ctx);
         key(&mut app, egui::Key::Escape);
         assert!(app.editor.as_ref().unwrap().transform().is_none());
+    }
+
+    #[test]
+    fn object_selection_asks_the_model_about_a_click() {
+        let mut app = test_app();
+        app.tools.tool = crate::tools::Tool::ObjectSelection;
+        assert!(!app.objects.busy());
+        let none = egui::Modifiers::NONE;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        // Waiting for the canvas's image, then the model.
+        assert!(app.objects.busy());
+        // The selection changes only when the model answers.
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Rectangular Marquee"));
     }
 
     #[test]

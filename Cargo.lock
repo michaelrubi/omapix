@@ -1920,6 +1920,7 @@ dependencies = [
  "egui",
  "env_logger",
  "log",
+ "omapix-ai",
  "omapix-engine",
  "pollster 1.0.1",
  "rayon",

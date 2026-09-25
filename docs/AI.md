@@ -548,7 +548,11 @@ Each is useful on its own and ends with `make install` and hand testing.
    `omapix-ai` crate, on the CPU and with CUDA (once cuDNN is loaded
    first, see Runtime). One click on a portrait's face selects its skin.
    `crates/omapix-ai/examples/spike.rs` does it again.
-1. **Groundwork and Object Selection.**
+1. **Groundwork and Object Selection.** Object Selection is done
+   (click or box, Shift and Alt; `omapix-ai`'s runtime and SAM, and the
+   engine's `refine::mask_coverage` with the guided filter). Still to do:
+   the model registry with checksums, `fetch-models.sh`, Select › Subject
+   and Help › AI Models.
    - `omapix-ai`, the model registry (shared folders, matched by checksum),
      `fetch-models.sh`, and the model input/output path with the guided
      filter.
