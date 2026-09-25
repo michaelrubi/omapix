@@ -114,11 +114,11 @@ The UI has been tested through the same code paths with scripts
 - [x] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
 - [x] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
-- [ ] Smart Sharpen at 100 % on a portrait: Amount, Radius, Reduce Noise, Remove (Gaussian Blur or Lens Blur), and Shadows/Highlights Fade Amount with live preview
+- [x] Smart Sharpen at 100 % on a portrait: Amount, Radius, Reduce Noise, Remove (Gaussian Blur or Lens Blur), and Shadows/Highlights Fade Amount with live preview
 - [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
 - [x] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
 - [x] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
-- [ ] Layer locks: Lock All (`Ctrl+/`), Lock Image Pixels and Lock Position: buttons and shortcuts, refusing edits with messages, Move tool blocked, and OpenRaster round trip
+- [x] Layer locks: Lock All (`Ctrl+/`), Lock Image Pixels and Lock Position: buttons and shortcuts, refusing edits with messages, Move tool blocked, and OpenRaster round trip
 - [x] Alt+click on a group's triangle: opens or closes that group and every group inside it, and Alt+click between rows still clips
 - [x] Add Noise: dialog controls (Amount, Uniform/Gaussian, Monochromatic, Grain Size, Roughness, shadow/highlight falloff), live preview, and the new Grain layer in Overlay mode
 - [x] Selection edges: Ctrl+H hides marching ants while keeping selection, status bar notes it, Omapix goes idle, and a new selection shows them again
@@ -189,6 +189,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - **PSD import**, at least flattened and simple layers, for old Photoshop work.
 - ~~**History panel:** a list of undo steps you can click back to~~ (done).
 - ~~**Custom hotkeys**~~ (done): override any command's shortcut or tool letter from `~/.config/omapix/hotkeys.toml`, with Photoshop's shortcuts as defaults and startup warnings for clashes.
+  - When there's no `hotkeys.toml` (or it's empty), Omapix writes one listing every command and tool with its default shortcut, commented out, so what can be changed is there to see and edit.
 
 ## 6. Performance
 
@@ -196,7 +197,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - Zoomed out, the preview blends shrunk layers rather than shrinking the blended image, so non-linear modes (Soft Light, Overlay…) can shift very slightly when the exact result lands.
   - Shrunk layers cost a quarter of each layer's memory at 50 % (a sixteenth at 25 %) while zoomed out.
 - **GPU compositing:** move blend modes to the GPU for display, keeping the CPU path for export (see DESIGN.md).
-  - ~~Move tool drags~~ (done): when a drag starts, what's below the moving layer is composited once and it, the moving layer and the layers above are uploaded as textures at the zoom level on screen (adjustments as 3D lookup tables). Each frame a shader (`live.wgsl`) blends them with the moving layer offset, with the same formulas as `composite.rs`, and draws the result through the display transform. When the drag ends the move is made for real, and the live view stays up until the exact CPU render is on screen. A step costs next to nothing instead of a whole-layer translate (~15 ms at 24 MP) and recomposite. Building the stack takes ~30 ms once. A GPU test checks every blend mode against the CPU (to half a 16-bit level) and the display against the CPU display (to 2 levels in 255).
+  - ~~Move tool drags~~ (done): when a drag starts, what's below the moving layer is composited once and it, the moving layer and the layers above are uploaded as textures at the zoom level on screen (adjustments as 3D lookup tables). Each frame a shader (`live.wgsl`) blends them with the moving layer offset, with the same formulas as `composite.rs`, and draws the result through the display transform. When the drag ends the move is made for real, and the live view stays up until the canvas has drawn the exact CPU render, so there's no flash. Zoomed out, live moves go in whole pixels of the level on screen, so the move made lands exactly where the live view showed it. A step costs next to nothing instead of a whole-layer translate (~15 ms at 24 MP) and recomposite. Building the stack takes ~30 ms once. A GPU test checks every blend mode against the CPU (to half a 16-bit level) and the display against the CPU display (to 2 levels in 255).
     - Moves the shader doesn't handle stay on the CPU: layers in groups or clipping masks, Blend If, groups other than default Pass Through ones above, selections, and Alt+drag copies.
   - Next: slider drags (opacity, blend mode, adjustment layer settings) through the same live stack, then the other cases above, then showing every edit this way.
   - Plan for all of it: upload each layer and mask at the pyramid level on screen (the shrunk layers from `reduced.rs` are that input), composite at screen resolution in a WGSL shader through egui's wgpu paint callback, bake each adjustment and the display colour transform into a 3D LUT on the CPU so the shader has one path for all of them, and build isolated groups in offscreen textures. The CPU composite stays for export, the pixel readout and eyedroppers. Costs about 190 MB of GPU memory per full-size 24 MP layer, far less zoomed out.
