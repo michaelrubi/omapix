@@ -114,6 +114,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
 - [x] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
+- [ ] Smart Sharpen at 100 % on a portrait: Amount, Radius, Reduce Noise, Remove (Gaussian Blur or Lens Blur), and Shadows/Highlights Fade Amount with live preview
 - [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
 - [x] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
 - [x] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
@@ -169,7 +170,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - For raws, darktable's raw denoise before export is better still. Omapix's is for files that arrive already developed.
 - **Sharpen** (Filter › Sharpen), near the end.
   - ~~Photoshop's **Unsharp Mask**~~ (done): Filter › Sharpen › Unsharp Mask… with Amount, Radius and Threshold, on luminance only (the same offset goes to red, green and blue), so edges don't get colour fringes. Previewed live on the canvas; settings are remembered.
-  - **Smart Sharpen** (Gaussian or lens blur, noise reduction, fading in shadows and highlights), also on luminance only.
+  - ~~**Smart Sharpen**~~ (done): Filter › Sharpen › Smart Sharpen… with Amount, Radius, Reduce Noise, Gaussian or Lens Blur removal, and shadow/highlight fading, on luminance only. Previewed live on the canvas; settings are remembered.
   - ~~A one-click **High Pass sharpening** setup~~ (done): Retouch › High Pass Sharpening… asks for a radius (1–3 px for fine detail) and adds a "High Pass Sharpening" layer in Overlay above the selected layer, holding the High Pass of the visible image's luminance, so it sharpens without colour fringes. Its opacity sets the strength and a mask keeps it off skin. Filter › Other › High Pass… applies the filter itself to a layer. Filter › Other › High Pass… is previewed live on the canvas, like Gaussian Blur and Unsharp Mask; the sharpening setup isn't yet.
   - Previewed at 100 % in the dialog (Photoshop's filter preview box), since sharpening can't be judged zoomed out.
   - Later, output sharpening for the export size, once exports can resize (see Batch export).
