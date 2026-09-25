@@ -169,9 +169,14 @@ impl LayersPanel {
     /// clicking it does. Does nothing at the top or bottom.
     pub fn step_selection(&mut self, editor: &mut Editor, up: bool) {
         if let Some(id) = self.row_beside(&editor.doc, editor.active, up) {
-            select(editor, id);
-            self.anchor = Some(id);
+            self.pick(editor, id);
         }
+    }
+
+    /// Select layer `id` alone, as clicking its row does.
+    pub fn pick(&mut self, editor: &mut Editor, id: u64) {
+        select(editor, id);
+        self.anchor = Some(id);
     }
 
     /// Open or close group `id`.

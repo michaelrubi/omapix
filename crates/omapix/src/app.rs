@@ -2106,6 +2106,15 @@ self.filters.remember(&filter);
         };
         match input {
             ToolInput::StrokeBegin(p) => {
+                // Ctrl+click picks the layer under the pointer, then moves
+                // it (Photoshop's Auto-Select).
+                if modifiers.command
+                    && p.x >= 0.0
+                    && p.y >= 0.0
+                    && let Some(id) = editor.doc.layer_at(p.x as u32, p.y as u32)
+                {
+                    self.layers.pick(editor, id);
+                }
                 if !editor.begin_move("Move", modifiers.alt, background) {
                     if editor.doc.layer(editor.active).is_some_and(|l| !l.can_move()) {
                         self.message("Could not use the move tool because the layer is locked", true);
@@ -5444,6 +5453,28 @@ mod tests {
         assert!(editor.doc.selection.is_none());
         let mask = editor.doc.layer(editor.active).unwrap().mask.as_ref().unwrap();
         assert!(mask.pixels.get(150, 150) > 60000 && mask.pixels.get(50, 50) == 0);
+    }
+
+    #[test]
+    fn ctrl_click_with_the_move_tool_picks_the_layer_under_the_pointer() {
+        let mut app = test_app();
+        app.tools.tool = crate::tools::Tool::Move;
+        let editor = app.editor.as_mut().unwrap();
+        let background = editor.active;
+        let id = editor.doc.next_layer_id();
+        let mut patch = Layer::empty(id, "Patch", 600, 400);
+        patch.pixels.tile_mut(0, 0)[10 * 256 + 10] = [1, 2, 3, 65535];
+        editor.doc.layers.push(patch);
+        let click = |app: &mut App, x: f32, modifiers| {
+            app.tool_input(ToolInput::StrokeBegin(egui::pos2(x, 10.0)), modifiers);
+            app.tool_input(ToolInput::StrokeEnd, modifiers);
+            app.editor.as_ref().unwrap().active
+        };
+        // A plain click doesn't pick; Ctrl+click does, the top layer where
+        // it has pixels and the one below where it hasn't.
+        assert_eq!(click(&mut app, 10.0, egui::Modifiers::NONE), background);
+        assert_eq!(click(&mut app, 10.0, egui::Modifiers::COMMAND), id);
+        assert_eq!(click(&mut app, 50.0, egui::Modifiers::COMMAND), background);
     }
 
     struct SelectionEdgesHarness {

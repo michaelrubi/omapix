@@ -40,7 +40,7 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 `V` picks the Move tool. Dragging moves the active layer, and its mask with it (Photoshop links them). With a selection, it moves just the selected pixels, or the selected part of the mask when the mask is targeted, and the selection moves with them. The hole left behind is transparent, or the background colour's grey on a mask, as with Delete. Alt+drag moves a copy: a new layer without a selection, or a copy of the selected pixels. Shift keeps the drag horizontal, vertical or at 45°. Arrow keys nudge by 1 px (Shift: 10 px). Number keys set the layer's opacity rather than the brush's. Each drag or nudge is one undo step. On large images the drag updates as fast as the image re-renders, skipping positions in between rather than falling behind.
 - Pixels moved past the edge of the canvas are cut off when the move ends. Photoshop keeps them in the layer, but Omapix layers are the size of the canvas.
 - Each nudge of a selection lifts and drops it again, so feathered edges fade slightly with repeated nudges. Photoshop keeps the pixels "floating" until you deselect.
-- Later: Auto-Select (Ctrl+click picks the layer under the pointer).
+- ~~Auto-Select~~ (done): with the Move tool, Ctrl+click (or Ctrl+drag) picks the topmost layer showing pixels under the pointer, then moves it, as in Photoshop. Hidden layers, layers in hidden groups, and where a mask hides a layer are skipped.
 
 ### ~~Free Transform~~ (done)
 
@@ -162,6 +162,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit
 - [ ] Content-Aware Fill: a prop, a mark on the backdrop and a stray hair on a 24 MP portrait, the first use (loading), the layer and its mask, undo, and the message without the model
 - [ ] Holding I (or another tool key) to use a tool and going back on release, Alt's pipette cursor with the Brush, and the right-click menu on the image with and without a selection
+- [ ] Move tool Ctrl+click picking the layer under the pointer, on a retouch with patches, a group and a masked layer
 - [ ] Select and Mask: a rough selection round a head of hair with Radius 20–60, Smooth, Feather, Contrast and Shift Edge, each output, Cancel, and the Defaults button
 - [ ] Pen tablet: hovering shows the brush outline, pressure thins and lightens strokes with each pressure button on and off, the side buttons, and the mouse still working afterwards
 - [ ] Filter settings kept between runs: apply a few filters and Frequency Separation, quit, reopen and check their dialogs; the Defaults buttons; and a default changed in defaults.toml

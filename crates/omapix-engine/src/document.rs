@@ -124,6 +124,34 @@ impl Document {
         self.layers.iter().find(|l| l.id == id)
     }
 
+    /// The topmost layer showing pixels of its own at (x, y): what the Move
+    /// tool's Ctrl+click picks (Photoshop's Auto-Select). Hidden layers,
+    /// those in hidden groups, and where a mask hides them don't count.
+    pub fn layer_at(&self, x: u32, y: u32) -> Option<u64> {
+        let shown = |layer: &Layer| {
+            let mut next = Some(layer);
+            while let Some(l) = next {
+                if !l.visible {
+                    return false;
+                }
+                next = l.parent.and_then(|p| self.layer(p));
+            }
+            true
+        };
+        self.layers
+            .iter()
+            .rev()
+            .find(|l| {
+                l.has_pixels()
+                    && x < self.width
+                    && y < self.height
+                    && l.pixels.get(x, y)[3] > 0
+                    && l.mask.as_ref().is_none_or(|m| !m.enabled || m.pixels.get(x, y) > 0)
+                    && shown(l)
+            })
+            .map(|l| l.id)
+    }
+
     pub fn layer_mut(&mut self, id: u64) -> Option<&mut Layer> {
         self.layers.iter_mut().find(|l| l.id == id)
     }
@@ -200,5 +228,19 @@ mod tests {
         let saved = &doc.channel(first).unwrap().pixels;
         assert_eq!((saved.get(1, 1), saved.get(6, 1)), (65535, 0));
     }
-}
 
+    #[test]
+    fn auto_select_picks_the_topmost_layer_showing_pixels_there() {
+        let mut doc = Document::from_image("t.tif".into(), &Raster::new(20, 10, vec![[9000; 4]; 200]), ColorProfile::srgb(), 16);
+        let background = doc.layers[0].id;
+        let mut top = Layer::empty(doc.next_layer_id(), "top", 20, 10);
+        top.pixels.tile_mut(0, 0)[5] = [1, 2, 3, 65535];
+        let top_id = top.id;
+        doc.layers.push(top);
+        assert_eq!((doc.layer_at(5, 0), doc.layer_at(6, 0)), (Some(top_id), Some(background)));
+        doc.layer_mut(top_id).unwrap().visible = false;
+        assert_eq!(doc.layer_at(5, 0), Some(background));
+        doc.layer_mut(background).unwrap().visible = false;
+        assert_eq!((doc.layer_at(5, 0), doc.layer_at(30, 0)), (None, None));
+    }
+}
