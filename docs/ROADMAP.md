@@ -29,7 +29,11 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 
 `\` toggles a translucent red overlay of the selected layer's mask on top of the image, so the mask and the photo can be seen together. Hidden (black) areas of the mask are tinted 50 % red; revealed areas are clear. It updates live while painting the mask. The status bar says when it's on; `\` or Esc turns it off, and it goes away when another layer is selected or the mask is deleted, as in Photoshop. It's also in the View menu and the layer and mask context menus.
 - Later: choose the overlay's colour and opacity (Photoshop's Layer Mask Display Options).
-- Related, later: **Quick Mask** (`Q`), which paints a selection with the same red overlay and turns it back into a selection.
+
+### ~~Quick Mask~~ (done)
+
+`Q` (Select › Edit in Quick Mask Mode) toggles Photoshop's Quick Mask mode, showing the selection with the translucent red overlay: unselected areas are tinted 50 % red, selected areas are clear. With no selection, everything counts as selected (nothing is red). Painting tools (brush, eraser, fills, inverting) paint directly onto the selection coverage like a mask: black deselects (adds red), white selects (clears red). Each stroke is one undo step. Leaving Quick Mask (`Q`) converts the painted result back into an active selection with marching ants (or drops it if all selected or empty). Marching ants are hidden while in Quick Mask, the status bar shows "Quick Mask — press Q to exit", and selecting another layer or targeting a layer mask exits the mode.
+- Later: filters on Quick Mask (Gaussian Blur, etc., modifying the selection directly with live preview).
 
 ### ~~Move tool~~ (done)
 
@@ -147,6 +151,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, and how smooth it is on a 24 MP layer
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates
 - [ ] Paste Special: Paste in Place (Ctrl+Shift+V), and Paste Into (Ctrl+Alt+Shift+V) a copy from elsewhere in the image and from another app
+- [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing

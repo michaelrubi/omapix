@@ -163,9 +163,68 @@ impl Selection {
 
     /// True if nothing is selected.
     pub fn is_empty(&self) -> bool {
-        self.coverage.fill() == 0
-            && (0..self.coverage.rows())
-                .all(|r| (0..self.coverage.cols()).all(|c| self.coverage.tile(c, r).is_none()))
+        let (w, h) = (self.coverage.width(), self.coverage.height());
+        for row in 0..self.coverage.rows() {
+            for col in 0..self.coverage.cols() {
+                let x0 = col * TILE;
+                let y0 = row * TILE;
+                let tw = TILE.min(w.saturating_sub(x0));
+                let th = TILE.min(h.saturating_sub(y0));
+                if tw == 0 || th == 0 {
+                    continue;
+                }
+                match self.coverage.tile(col, row) {
+                    Some(tile) => {
+                        for ty in 0..th {
+                            for tx in 0..tw {
+                                if tile[(ty * TILE + tx) as usize] != 0 {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        if self.coverage.fill() != 0 {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// True if everything is selected (coverage is MAX everywhere).
+    pub fn is_all(&self) -> bool {
+        let (w, h) = (self.coverage.width(), self.coverage.height());
+        for row in 0..self.coverage.rows() {
+            for col in 0..self.coverage.cols() {
+                let x0 = col * TILE;
+                let y0 = row * TILE;
+                let tw = TILE.min(w.saturating_sub(x0));
+                let th = TILE.min(h.saturating_sub(y0));
+                if tw == 0 || th == 0 {
+                    continue;
+                }
+                match self.coverage.tile(col, row) {
+                    Some(tile) => {
+                        for ty in 0..th {
+                            for tx in 0..tw {
+                                if tile[(ty * TILE + tx) as usize] != u16::MAX {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        if self.coverage.fill() != u16::MAX {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// The smallest rectangle holding everything selected, as `[x, y,
@@ -1159,5 +1218,21 @@ mod tests {
         assert_eq!(sel.coverage.get(0, 0), 52000);
         assert_eq!(sel.coverage.get(1, 0), 0);
         assert!(!sel.is_empty());
+    }
+
+    #[test]
+    fn is_all_and_is_empty_checks() {
+        let (w, h) = (300, 300);
+        let all = Selection::all(w, h);
+        assert!(all.is_all());
+        assert!(!all.is_empty());
+
+        let empty = Selection::from_coverage(Tiled::new(w, h, 0));
+        assert!(empty.is_empty());
+        assert!(!empty.is_all());
+
+        let rect = Selection::rectangle(w, h, (50.0, 50.0), (100.0, 100.0));
+        assert!(!rect.is_empty());
+        assert!(!rect.is_all());
     }
 }

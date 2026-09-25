@@ -163,6 +163,7 @@ impl ScriptStep {
                 ("image", _) => ScriptStep::View(View::Image),
                 ("mask", _) => ScriptStep::View(View::Mask(0)),
                 ("overlay", _) => ScriptStep::View(View::MaskOverlay(0)),
+                ("quickmask", _) => ScriptStep::View(View::QuickMask),
                 ("texture", &[radius]) => ScriptStep::View(View::Separation {
                     radius,
                     texture: true,
@@ -722,7 +723,9 @@ impl App {
             | Command::FillBackground
             | Command::Clear
             | Command::Cut
-            | Command::Copy => editor.target == Target::Mask || !no_pixels,
+            | Command::Copy => {
+                editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels
+            }
             Command::Paste | Command::PasteInPlace => self.pasting.is_none(),
             Command::PasteInto => editor.doc.selection.is_some() && self.pasting.is_none(),
             Command::DeleteMask
@@ -742,7 +745,9 @@ impl App {
                 }
             }
             Command::AddNoise => editor.target == Target::Pixels || has_mask,
-            Command::Invert => editor.target == Target::Mask || !no_pixels,
+            Command::Invert => {
+                editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels
+            }
             _ => true,
         }
     }
@@ -1245,6 +1250,17 @@ impl App {
                     self.menu_item(ui, Command::LoadSelectionLayerMask, None);
                 });
                 self.menu_item(ui, Command::SaveSelection, None);
+                ui.separator();
+                let in_qm = self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|e| e.view() == View::QuickMask);
+                let tick = if in_qm { "✓" } else { "  " };
+                self.menu_item(
+                    ui,
+                    Command::QuickMask,
+                    Some(format!("{tick} {}", Command::QuickMask.label())),
+                );
             });
             ui.menu_button("Image", |ui| {
                 ui.menu_button("Adjustments", |ui| {
@@ -1315,6 +1331,7 @@ impl App {
                         Some("Viewing layer mask — Alt+click the mask or press Esc to return")
                     }
                     View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
+                    View::QuickMask => Some("Quick Mask — press Q to exit"),
                     View::Channel(_) | View::Alpha(_) => {
                         Some("Viewing one channel — click RGB in Channels, or press Ctrl+2 or Esc to return")
                     }
@@ -2377,6 +2394,13 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
     let target = editor.target;
     let profile = editor.doc.profile.clone();
     editor.edit(label, |doc, _| {
+        if target == Target::QuickMask {
+            let (w, h) = (doc.width, doc.height);
+            let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
+            let grey = crate::tools::grey(colour.unwrap_or(background));
+            sel.coverage = ops::fill_mask(&sel.coverage, grey, None);
+            return;
+        }
         let selection = doc.selection.clone();
         let Some(layer) = doc.layer_mut(id) else {
             return;
@@ -2404,6 +2428,7 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
                     filled
                 };
             }
+            Target::QuickMask => unreachable!(),
         }
     });
 }
@@ -2419,6 +2444,9 @@ fn copy(editor: &Editor, merged: bool) -> Option<Clip> {
             selection,
             &doc.profile,
         )
+    } else if editor.target == Target::QuickMask {
+        let sel = selection?;
+        Clip::copy_mask(&sel.coverage, None, &doc.profile)
     } else {
         let layer = doc.layer(editor.active)?;
         match (editor.target, &layer.mask) {
@@ -2647,7 +2675,13 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             });
         }
         Command::Invert => {
-            if editor.target == Target::Mask {
+            if editor.target == Target::QuickMask {
+                editor.edit("Invert Selection", |doc, _| {
+                    let (w, h) = (doc.width, doc.height);
+                    let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
+                    *sel = sel.invert();
+                });
+            } else if editor.target == Target::Mask {
                 editor.edit("Invert Mask", |doc, _| {
                     if let Some(m) = doc.layer_mut(id).and_then(|l| l.mask.as_mut()) {
                         m.invert();
@@ -2823,6 +2857,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 View::MaskOverlay(id)
             });
         }
+        Command::QuickMask => {
+            editor.toggle_quick_mask();
+        }
         _ => {}
     }
 }
@@ -2976,7 +3013,7 @@ impl eframe::App for App {
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
                 let idle = editor.busy().is_none();
-                let outlines = if editor.hide_selection_edges {
+                let outlines = if editor.hide_selection_edges || editor.view() == View::QuickMask {
                     &[][..]
                 } else {
                     editor
@@ -4850,6 +4887,15 @@ mod tests {
             self.frame(vec![])
         }
 
+        fn open_select_menu(&mut self) -> egui::FullOutput {
+            let out = self.frame(vec![]);
+            let pos = self
+                .find_text_pos(&out, "Select")
+                .expect("Select menu button not found");
+            self.click(pos);
+            self.frame(vec![])
+        }
+
         fn close_menu(&mut self) {
             self.frame(vec![egui::Event::Key {
                 key: egui::Key::Escape,
@@ -4967,6 +5013,66 @@ mod tests {
         // Status bar message must not appear when there is no selection
         let out = h.frame(vec![]);
         assert!(!h.output_contains_text(&out, "Selection edges hidden"));
+    }
+
+    #[test]
+    fn quick_mask_toggle_status_bar_select_menu_and_actions() {
+        let mut h = SelectionEdgesHarness::new();
+        let ctx = egui::Context::default();
+
+        // Initially in normal image view, no Quick Mask message
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::Image);
+        let out = h.frame(vec![]);
+        assert!(!h.output_contains_text(&out, "Quick Mask — press Q to exit"));
+
+        // Select menu initially does not have checkmark on Quick Mask
+        let out = h.open_select_menu();
+        assert!(h.output_contains_text(&out, "Edit in Quick Mask Mode"));
+        assert!(!h.output_contains_text(&out, "✓ Edit in Quick Mask Mode"));
+        h.close_menu();
+
+        // Enter Quick Mask via command
+        h.app.run(Command::QuickMask, &ctx);
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::QuickMask);
+        assert_eq!(h.app.editor.as_ref().unwrap().target, Target::QuickMask);
+
+        // Status bar displays Quick Mask message
+        let out = h.frame(vec![]);
+        assert!(h.output_contains_text(&out, "Quick Mask — press Q to exit"));
+
+        // Select menu shows checkmark
+        let out = h.open_select_menu();
+        assert!(h.output_contains_text(&out, "✓ Edit in Quick Mask Mode"));
+        h.close_menu();
+
+        // Pressing Escape does NOT exit Quick Mask
+        h.frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::QuickMask);
+
+        // Invert in Quick Mask inverts the selection
+        let orig_cov = h.app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap().coverage.get(20, 20);
+        h.app.run(Command::Invert, &ctx);
+        let new_cov = h.app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap().coverage.get(20, 20);
+        assert_eq!(new_cov, u16::MAX - orig_cov);
+
+        // Copy in Quick Mask returns a mask clip
+        let clip = copy(h.app.editor.as_ref().unwrap(), false);
+        assert!(clip.is_some());
+
+        // Exit Quick Mask via command
+        h.app.run(Command::QuickMask, &ctx);
+        assert_eq!(h.app.editor.as_ref().unwrap().view(), View::Image);
+        assert_eq!(h.app.editor.as_ref().unwrap().target, Target::Pixels);
+
+        // Status bar no longer has Quick Mask message
+        let out = h.frame(vec![]);
+        assert!(!h.output_contains_text(&out, "Quick Mask — press Q to exit"));
     }
 
     #[test]
