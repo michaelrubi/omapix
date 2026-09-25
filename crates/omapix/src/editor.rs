@@ -19,7 +19,7 @@ use omapix_engine::{
 
 use crate::canvas::{Canvas, Render};
 use crate::live::{self, LiveFrame, LiveStack, Settings, Table};
-use crate::tools::SampleSize;
+use crate::tools::{Sample, SampleSize};
 
 /// Undo steps kept. Snapshots share unchanged tiles, so this mostly costs
 /// memory for pixels that edits actually replaced.
@@ -206,6 +206,14 @@ pub struct Editor {
     /// Ctrl+H: the selection's marching ants are hidden. A new selection
     /// shows them again.
     pub hide_selection_edges: bool,
+    /// Cached source images for sampling (Current & Below and All Layers).
+    sample_cache: Mutex<SampleCache>,
+}
+
+#[derive(Default)]
+struct SampleCache {
+    all: Option<(u64, Arc<Tiled<Pixel>>)>,
+    current_and_below: Option<(u64, u64, Arc<Tiled<Pixel>>)>,
 }
 
 impl Editor {
@@ -245,6 +253,7 @@ impl Editor {
             painted: 0,
             overlay_colour,
             hide_selection_edges: false,
+            sample_cache: Mutex::new(SampleCache::default()),
         })
     }
 
@@ -569,14 +578,13 @@ impl Editor {
     }
 
     /// Start a brush stroke on the active layer (or its mask). Clone and
-    /// heal strokes copy from the active layer, or from the whole visible
-    /// image if `sample_all`. Returns false if there is nothing to paint
-    /// on or a background job is running.
+    /// heal strokes copy from the source image determined by `sample`.
+    /// Returns false if there is nothing to paint on or a background job is running.
     pub fn begin_stroke(
         &mut self,
         settings: BrushSettings,
         paint: Paint,
-        sample_all: bool,
+        sample: Sample,
     ) -> bool {
         if self.job.is_some() {
             return false;
@@ -607,11 +615,7 @@ impl Editor {
             stroke = stroke.within(selection.coverage.clone());
         }
         if copying {
-            let source = if sample_all {
-                Tiled::from_raster(&self.doc.composite())
-            } else {
-                layer.pixels.clone()
-            };
+            let source = self.sample_source(sample);
             stroke = stroke.sampling(source);
         }
         self.live = None;
@@ -818,7 +822,7 @@ impl Editor {
         tolerance: u16,
         contiguous: bool,
         anti_alias: bool,
-        sample_all: bool,
+        sample: Sample,
         how: Combine,
     ) -> bool {
         let (w, h) = (self.doc.width, self.doc.height);
@@ -829,19 +833,7 @@ impl Editor {
             return false;
         }
 
-        let selection = if sample_all {
-            self.canvas
-                .render()
-                .and_then(|r| {
-                    r.with_image(|img| {
-                        Selection::magic_wand_raster(img, start, tolerance, contiguous, anti_alias)
-                    })
-                })
-                .unwrap_or_else(|| {
-                    let composite = self.doc.composite();
-                    Selection::magic_wand_raster(&composite, start, tolerance, contiguous, anti_alias)
-                })
-        } else if self.target == Target::Mask {
+        let selection = if sample != Sample::All && self.target == Target::Mask {
             if let Some(mask) = self.doc.layer(self.active).and_then(|l| l.mask.as_ref()) {
                 Selection::magic_wand(
                     w,
@@ -858,14 +850,13 @@ impl Editor {
             } else {
                 Selection::from_coverage(Tiled::new(w, h, 0))
             }
-        } else if let Some(layer) = self.doc.layer(self.active) {
-            if layer.has_pixels() {
-                Selection::magic_wand_tiled(&layer.pixels, start, tolerance, contiguous, anti_alias)
-            } else {
-                Selection::from_coverage(Tiled::new(w, h, 0))
-            }
-        } else {
+        } else if sample == Sample::Current
+            && !self.doc.layer(self.active).is_some_and(|l| l.has_pixels())
+        {
             Selection::from_coverage(Tiled::new(w, h, 0))
+        } else {
+            let source = self.sample_source(sample);
+            Selection::magic_wand_tiled(&source, start, tolerance, contiguous, anti_alias)
         };
 
         self.edit("Magic Wand", |doc, _| {
@@ -1267,31 +1258,72 @@ impl Editor {
         }
     }
 
+    /// The source image for clone/heal strokes, eyedropper sampling, and the magic wand.
+    pub fn sample_source(&self, sample: Sample) -> Tiled<Pixel> {
+        match sample {
+            Sample::Current => self
+                .doc
+                .layer(self.active)
+                .map(|l| l.pixels.clone())
+                .unwrap_or_else(|| Tiled::new(self.doc.width, self.doc.height, [0, 0, 0, 0])),
+            Sample::CurrentAndBelow => {
+                let mut cache = self.sample_cache.lock().unwrap();
+                if let Some((rev, act, tiled)) = &cache.current_and_below
+                    && *rev == self.revision
+                    && *act == self.active
+                {
+                    return tiled.as_ref().clone();
+                }
+                let mut doc = self.doc.clone();
+                if let Some(idx) = doc.index_of(self.active) {
+                    for l in &mut doc.layers[idx + 1..] {
+                        if !self.doc.is_inside(self.active, l.id) {
+                            l.visible = false;
+                        }
+                    }
+                }
+                let tiled = Arc::new(Tiled::from_raster(&doc.composite()));
+                cache.current_and_below = Some((self.revision, self.active, Arc::clone(&tiled)));
+                (*tiled).clone()
+            }
+            Sample::All => {
+                let mut cache = self.sample_cache.lock().unwrap();
+                if let Some((rev, tiled)) = &cache.all
+                    && *rev == self.revision
+                {
+                    return tiled.as_ref().clone();
+                }
+                let tiled = Arc::new(Tiled::from_raster(&self.doc.composite()));
+                cache.all = Some((self.revision, Arc::clone(&tiled)));
+                (*tiled).clone()
+            }
+        }
+    }
+
     /// The colour at (x, y) for the eyedropper: the average over `size`
-    /// (ignoring pixels outside the image) of the visible image, or with
-    /// `sample_all` false of the active layer. `None` outside the image.
-    pub fn sample(&self, x: u32, y: u32, size: SampleSize, sample_all: bool) -> Option<Pixel> {
+    /// (ignoring pixels outside the image) of the chosen `sample` source.
+    /// `None` outside the image.
+    pub fn sample(&self, x: u32, y: u32, size: SampleSize, sample: Sample) -> Option<Pixel> {
         let (w, h) = (self.doc.width, self.doc.height);
         if x >= w || y >= h {
             return None;
         }
+        if sample == Sample::Current && self.doc.layer(self.active).is_none() {
+            return None;
+        }
         let r = size.radius();
-        let layer = self.doc.layer(self.active);
-        let at = |x: u32, y: u32| {
-            if sample_all {
-                self.canvas.sample(x, y)
-            } else {
-                layer.map(|l| l.pixels.get(x, y))
-            }
-        };
+        let source = self.sample_source(sample);
         let (x0, x1) = (x.saturating_sub(r), (x + r).min(w - 1));
         let (y0, y1) = (y.saturating_sub(r), (y + r).min(h - 1));
         let (mut sum, mut count) = ([0u64; 4], 0u64);
-        for p in (y0..=y1).flat_map(|y| (x0..=x1).filter_map(move |x| at(x, y))) {
-            for c in 0..4 {
-                sum[c] += u64::from(p[c]);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let p = source.get(x, y);
+                for c in 0..4 {
+                    sum[c] += u64::from(p[c]);
+                }
+                count += 1;
             }
-            count += 1;
         }
         (count > 0).then(|| sum.map(|v| ((v + count / 2) / count) as u16))
     }
@@ -1624,7 +1656,7 @@ mod tests {
             doc.layer_mut(*active).unwrap().mask = Some(Mask::white(600, 400))
         });
         e.target = Target::Mask;
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), false));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current));
         e.stroke_to(100.0, 100.0);
         e.stroke_to(300.0, 100.0);
         e.end_stroke();
@@ -1651,7 +1683,7 @@ mod tests {
     #[test]
     fn undo_mid_stroke_finishes_the_stroke_first() {
         let mut e = editor();
-        assert!(e.begin_stroke(hard(40.0), Paint::Color([0, 0, 0, 65535]), false));
+        assert!(e.begin_stroke(hard(40.0), Paint::Color([0, 0, 0, 65535]), Sample::Current));
         e.stroke_to(100.0, 100.0);
         e.undo();
         // Later moves of the abandoned stroke change nothing.
@@ -1779,7 +1811,7 @@ mod tests {
         let (render, _) = render_view(&e.doc, e.view, e.overlay_colour, None);
         e.canvas.set_render(Arc::new(render));
         e.rendered = (e.revision, e.view_generation);
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), false));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current));
         e.stroke_to(300.0, 300.0);
         e.stroke_to(500.0, 300.0);
         e.end_stroke();
@@ -2024,7 +2056,7 @@ mod tests {
         let render = Arc::new(Render::new(e.doc.composite()));
         e.canvas.set_render(Arc::clone(&render));
         e.rendered = (e.revision, e.view_generation);
-        assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535]), false));
+        assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535]), Sample::Current));
         e.stroke_to(250.0, 250.0);
         e.stroke_to(290.0, 270.0);
         e.end_stroke();
@@ -2157,7 +2189,7 @@ mod tests {
         let layer = e.active;
         e.edit("Group Layers", |doc, active| *active = doc.group_layer(0));
         let group = e.active;
-        assert!(!e.begin_stroke(hard(40.0), Paint::Color(RED), false));
+        assert!(!e.begin_stroke(hard(40.0), Paint::Color(RED), Sample::Current));
 
         assert!(e.begin_move("Move", false, 0));
         e.move_to(200, 100);
@@ -2232,7 +2264,7 @@ mod tests {
     fn magic_wand_selects_red_square_and_combines() {
         let mut e = square_editor();
         // Magic wand on the red square at (75, 75)
-        assert!(e.magic_wand((75, 75), 0, true, false, false, Combine::Replace));
+        assert!(e.magic_wand((75, 75), 0, true, false, Sample::Current, Combine::Replace));
         assert!(e.doc.selection.is_some());
         let sel = e.doc.selection.as_ref().unwrap();
         assert_eq!(sel.at(75, 75), 1.0);
@@ -2240,7 +2272,7 @@ mod tests {
         assert_eq!(sel.at(150, 150), 0.0);
 
         // Click outside image deselects
-        assert!(e.magic_wand((700, 700), 0, true, false, false, Combine::Replace));
+        assert!(e.magic_wand((700, 700), 0, true, false, Sample::Current, Combine::Replace));
         assert!(e.doc.selection.is_none());
 
         // Undo brings selection back
@@ -2264,14 +2296,14 @@ mod tests {
         e.canvas.set_render(Arc::clone(&render));
 
         // 1. Point sample at (5, 5) returns exact pixel [5000, 5000, 0, 65535]
-        let point = e.sample(5, 5, SampleSize::Point, false).unwrap();
+        let point = e.sample(5, 5, SampleSize::Point, Sample::Current).unwrap();
         assert_eq!(point, [5000, 5000, 0, 65535]);
 
-        let point_all = e.sample(5, 5, SampleSize::Point, true).unwrap();
+        let point_all = e.sample(5, 5, SampleSize::Point, Sample::All).unwrap();
         assert_eq!(point_all, [5000, 5000, 0, 65535]);
 
         // 2. 3x3 sample centered at (5, 5): interior averages to 5000
-        let avg_3x3 = e.sample(5, 5, SampleSize::ThreeByThree, false).unwrap();
+        let avg_3x3 = e.sample(5, 5, SampleSize::ThreeByThree, Sample::Current).unwrap();
         assert_eq!(avg_3x3, [5000, 5000, 0, 65535]);
 
         // 3. Top-left corner (0, 0) with 3x3:
@@ -2279,21 +2311,21 @@ mod tests {
         // Valid: (0,0), (1,0), (0,1), (1,1). Count = 4.
         // x values: 0, 1000, 0, 1000 -> avg = 500
         // y values: 0, 0, 1000, 1000 -> avg = 500
-        let corner_3x3 = e.sample(0, 0, SampleSize::ThreeByThree, false).unwrap();
+        let corner_3x3 = e.sample(0, 0, SampleSize::ThreeByThree, Sample::Current).unwrap();
         assert_eq!(corner_3x3, [500, 500, 0, 65535]);
 
         // 4. Bottom-right corner (9, 9) with 3x3:
         // Valid: (8,8), (9,8), (8,9), (9,9).
         // x values: 8000, 9000, 8000, 9000 -> avg = 8500
         // y values: 8000, 8000, 9000, 9000 -> avg = 8500
-        let corner_br = e.sample(9, 9, SampleSize::ThreeByThree, false).unwrap();
+        let corner_br = e.sample(9, 9, SampleSize::ThreeByThree, Sample::Current).unwrap();
         assert_eq!(corner_br, [8500, 8500, 0, 65535]);
 
         // 5. Out of bounds returns None
-        assert!(e.sample(10, 10, SampleSize::Point, false).is_none());
-        assert!(e.sample(15, 0, SampleSize::ThreeByThree, false).is_none());
+        assert!(e.sample(10, 10, SampleSize::Point, Sample::Current).is_none());
+        assert!(e.sample(15, 0, SampleSize::ThreeByThree, Sample::Current).is_none());
 
-        // 6. Current layer vs All layers
+        // 6. Current layer vs Current & Below vs All layers
         e.edit("Add layer", |doc, active| {
             let mut top = Layer::empty(2, "top", w, h);
             for y in 0..h {
@@ -2304,16 +2336,108 @@ mod tests {
             doc.layers.push(top);
             *active = 2;
         });
-        // Current layer samples yellow from active layer
+        // With top layer active:
         assert_eq!(
-            e.sample(0, 0, SampleSize::Point, false),
+            e.sample(0, 0, SampleSize::Point, Sample::Current),
             Some([65535, 65535, 0, 65535])
         );
-        // All layers samples from composite canvas
         assert_eq!(
-            e.sample(0, 0, SampleSize::Point, true),
+            e.sample(0, 0, SampleSize::Point, Sample::CurrentAndBelow),
+            Some([65535, 65535, 0, 65535])
+        );
+        assert_eq!(
+            e.sample(0, 0, SampleSize::Point, Sample::All),
+            Some([65535, 65535, 0, 65535])
+        );
+
+        // With bottom layer active:
+        e.select_layers(1, Vec::new());
+        assert_eq!(
+            e.sample(0, 0, SampleSize::Point, Sample::Current),
             Some([0, 0, 0, 65535])
         );
+        assert_eq!(
+            e.sample(0, 0, SampleSize::Point, Sample::CurrentAndBelow),
+            Some([0, 0, 0, 65535])
+        );
+        assert_eq!(
+            e.sample(0, 0, SampleSize::Point, Sample::All),
+            Some([65535, 65535, 0, 65535])
+        );
+    }
+
+    #[test]
+    fn sample_source_modes_respect_layers_above_and_groups() {
+        let (w, h) = (10, 10);
+        let red: Pixel = [60000, 0, 0, 65535];
+        let green: Pixel = [0, 60000, 0, 65535];
+        let blue: Pixel = [0, 0, 60000, 65535];
+        let white: Pixel = [60000, 60000, 60000, 65535];
+        let transparent: Pixel = [0, 0, 0, 0];
+
+        // Layer 1: Background (Red everywhere)
+        let bg_image = Raster::new(w, h, vec![red; (w * h) as usize]);
+        let mut doc = Document::from_image("t.tif".into(), &bg_image, ColorProfile::srgb(), 16);
+
+        // Group 10 containing Layer 2 and Layer 3:
+        // Flat stack order (bottom-first):
+        // Layer 1 (Background)
+        // Layer 2 (Active, Green on left x < 5, transparent on right x >= 5, parent: Some(10))
+        // Layer 3 (Above active in group, Blue everywhere, parent: Some(10))
+        // Layer 10 (Group 1, is_group: true, parent: None)
+        // Layer 20 (Above group, White on right x >= 5, transparent on left x < 5, parent: None)
+
+        let mut active_layer = Layer::empty(2, "Active", w, h);
+        active_layer.parent = Some(10);
+        for y in 0..h {
+            for x in 0..5 {
+                active_layer.pixels.tile_mut(0, 0)[(y * 256 + x) as usize] = green;
+            }
+        }
+        doc.layers.push(active_layer);
+
+        let mut above_in_group = Layer::empty(3, "Above In Group", w, h);
+        above_in_group.parent = Some(10);
+        for y in 0..h {
+            for x in 0..w {
+                above_in_group.pixels.tile_mut(0, 0)[(y * 256 + x) as usize] = blue;
+            }
+        }
+        doc.layers.push(above_in_group);
+
+        let mut group = Layer::empty(10, "Group 1", w, h);
+        group.is_group = true;
+        doc.layers.push(group);
+
+        let mut top_layer = Layer::empty(20, "Top", w, h);
+        for y in 0..h {
+            for x in 5..w {
+                top_layer.pixels.tile_mut(0, 0)[(y * 256 + x) as usize] = white;
+            }
+        }
+        doc.layers.push(top_layer);
+
+        let mut e = Editor::new(doc).unwrap();
+        e.select_layers(2, Vec::new());
+        assert_eq!(e.active, 2);
+
+        // Current mode: only the active layer's pixels
+        let src_current = e.sample_source(Sample::Current);
+        assert_eq!(src_current.get(2, 2), green);
+        assert_eq!(src_current.get(7, 2), transparent);
+
+        // Current & Below:
+        // - Layers above (Layer 3 inside group and Layer 20 above group) are hidden
+        // - Group 10 containing active layer (row after active layer) is kept visible
+        // - Layer 1 below active layer shows through where active layer is transparent
+        let src_below = e.sample_source(Sample::CurrentAndBelow);
+        assert_eq!(src_below.get(2, 2), green, "active layer on left");
+        assert_eq!(src_below.get(7, 2), red, "layer below shows where active is transparent");
+
+        // All mode: includes all layers above (Layer 3 in group and Layer 20 above group)
+        let src_all = e.sample_source(Sample::All);
+        assert_eq!(src_all.get(2, 2), blue, "layer above inside group covers left");
+        assert_eq!(src_all.get(7, 2), white, "top layer covers right");
     }
 }
 

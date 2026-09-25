@@ -206,6 +206,30 @@ impl SampleSize {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Sample {
+    Current,
+    CurrentAndBelow,
+    #[default]
+    All,
+}
+
+impl Sample {
+    pub const ALL: [Sample; 3] = [
+        Sample::Current,
+        Sample::CurrentAndBelow,
+        Sample::All,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sample::Current => "Current Layer",
+            Sample::CurrentAndBelow => "Current & Below",
+            Sample::All => "All Layers",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorBadge {
     Add,
@@ -245,8 +269,8 @@ pub struct Tools {
     /// Source minus destination, fixed by the first stroke after setting a
     /// source and kept for later strokes (Photoshop's "Aligned").
     offset: Option<Vec2>,
-    /// Clone/heal from all visible layers rather than the active one.
-    pub sample_all: bool,
+    /// Where to sample pixels from (Current Layer, Current & Below, All Layers).
+    pub sample: Sample,
     /// Eyedropper sample size (Point, 3×3, 5×5, 11×11 average).
     pub sample_size: SampleSize,
     /// Magic Wand settings matching Photoshop.
@@ -287,7 +311,7 @@ impl Default for Tools {
             },
             source: None,
             offset: None,
-            sample_all: true,
+            sample: Sample::All,
             sample_size: SampleSize::default(),
             wand_tolerance: 32,
             wand_contiguous: true,
@@ -568,6 +592,13 @@ impl Tools {
         })
     }
 
+    fn sample_options(&mut self, ui: &mut Ui) {
+        ui.label("Sample");
+        for sample in Sample::ALL {
+            ui.selectable_value(&mut self.sample, sample, sample.label());
+        }
+    }
+
     /// The options bar: settings for the current tool.
     pub fn options_bar(&mut self, ui: &mut Ui, target: Target, theme: &Theme) {
         ui.horizontal(|ui| {
@@ -583,9 +614,7 @@ impl Tools {
                         }
                     });
                 ui.separator();
-                ui.label("Sample");
-                ui.selectable_value(&mut self.sample_all, false, "Current Layer");
-                ui.selectable_value(&mut self.sample_all, true, "All Layers");
+                self.sample_options(ui);
                 ui.separator();
                 let hint = "Click or drag to sample foreground colour · Alt sets background";
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
@@ -600,7 +629,14 @@ impl Tools {
                 );
                 ui.checkbox(&mut self.wand_anti_alias, "Anti-alias");
                 ui.checkbox(&mut self.wand_contiguous, "Contiguous");
-                ui.checkbox(&mut self.sample_all, "Sample All Layers");
+                let mut sample_all = self.sample == Sample::All;
+                if ui.checkbox(&mut sample_all, "Sample All Layers").changed() {
+                    self.sample = if sample_all {
+                        Sample::All
+                    } else {
+                        Sample::Current
+                    };
+                }
                 ui.separator();
                 let hint = "Click to select similar colours · Shift adds · Alt subtracts · Shift+Alt intersects";
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
@@ -646,9 +682,7 @@ impl Tools {
             percent(ui, "Flow", &mut s.flow);
             ui.separator();
             if self.tool == Tool::SpotHealing {
-                ui.label("Sample");
-                ui.selectable_value(&mut self.sample_all, false, "Current Layer");
-                ui.selectable_value(&mut self.sample_all, true, "All Layers");
+                self.sample_options(ui);
                 ui.separator();
                 let (text, colour) = match target {
                     Target::Mask => ("Select the layer, not its mask, to heal", theme.red),
@@ -659,9 +693,7 @@ impl Tools {
                 };
                 ui.label(RichText::new(text).color(colour));
             } else if self.tool.copies() {
-                ui.label("Sample");
-                ui.selectable_value(&mut self.sample_all, false, "Current Layer");
-                ui.selectable_value(&mut self.sample_all, true, "All Layers");
+                self.sample_options(ui);
                 ui.separator();
                 let (text, colour) = match (target, self.source) {
                     (Target::Mask, _) => (
