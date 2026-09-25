@@ -125,17 +125,6 @@ pub struct ReduceNoiseOptions {
     pub sharpen_details: f32,
 }
 
-impl Default for ReduceNoiseOptions {
-    fn default() -> Self {
-        Self {
-            strength: 5.0,
-            preserve_details: 10.0,
-            reduce_color_noise: 25.0,
-            sharpen_details: 0.0,
-        }
-    }
-}
-
 /// A filter from the Filter menu, applied to one layer's pixels, with its
 /// settings (so it can be previewed live, then applied).
 #[derive(Clone, Copy, Debug, PartialEq)]

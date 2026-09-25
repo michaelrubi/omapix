@@ -2107,30 +2107,16 @@ fn reduce_noise_controls(ui: &mut Ui, options: &mut ReduceNoiseOptions, hint: eg
                 .fixed_decimals(0),
         );
     });
-    ui.horizontal(|ui| {
-        ui.label("Preserve Details");
-        ui.add(
-            egui::Slider::new(&mut options.preserve_details, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Reduce Color Noise");
-        ui.add(
-            egui::Slider::new(&mut options.reduce_color_noise, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label("Sharpen Details");
-        ui.add(
-            egui::Slider::new(&mut options.sharpen_details, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
-    });
+    for (label, value) in [
+        ("Preserve Details", &mut options.preserve_details),
+        ("Reduce Color Noise", &mut options.reduce_color_noise),
+        ("Sharpen Details", &mut options.sharpen_details),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::Slider::new(value, 0.0..=100.0).suffix(" %").fixed_decimals(0));
+        });
+    }
     ui.label(
         RichText::new("Smooths noise while preserving edges. Judge it at 100 %.")
             .color(hint),
