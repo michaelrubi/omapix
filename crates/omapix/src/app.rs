@@ -13,7 +13,8 @@ use omapix_engine::layer::{Layer, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{
-    Document, NoiseDistribution, NoiseOptions, export, ops, ora,
+    Document, NoiseDistribution, NoiseOptions, SharpenRemove, SmartSharpenOptions, export, ops,
+    ora,
 };
 
 use crate::canvas::ToolInput;
@@ -214,6 +215,7 @@ pub struct App {
     status: Option<(String, bool, Instant)>,
     blur_radius: f32,
     unsharp_mask: LayerFilter,
+    smart_sharpen: LayerFilter,
     feather_radius: f32,
     separation_radius: Option<f32>,
     high_pass_radius: f32,
@@ -267,6 +269,7 @@ impl App {
             status: None,
             blur_radius: 2.0,
             unsharp_mask: DEFAULT_UNSHARP_MASK,
+            smart_sharpen: DEFAULT_SMART_SHARPEN,
             high_pass_radius: 2.0,
             feather_radius: 10.0,
             separation_radius: None,
@@ -599,7 +602,10 @@ impl App {
             | Command::Copy => editor.target == Target::Mask || !no_pixels,
             Command::Paste => self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay => has_mask,
-            Command::GaussianBlur | Command::HighPass | Command::UnsharpMask => {
+            Command::GaussianBlur
+            | Command::HighPass
+            | Command::UnsharpMask
+            | Command::SmartSharpen => {
                 if editor.target == Target::Mask {
                     has_mask
                 } else {
@@ -649,7 +655,10 @@ impl App {
                     preview: true,
                 });
             }
-            Command::GaussianBlur | Command::HighPass | Command::UnsharpMask => {
+            Command::GaussianBlur
+            | Command::HighPass
+            | Command::UnsharpMask
+            | Command::SmartSharpen => {
                 let filter = match cmd {
                     Command::GaussianBlur => LayerFilter::GaussianBlur {
                         radius: self.blur_radius,
@@ -657,7 +666,9 @@ impl App {
                     Command::HighPass => LayerFilter::HighPass {
                         radius: self.high_pass_radius,
                     },
-                    _ => self.unsharp_mask,
+                    Command::UnsharpMask => self.unsharp_mask,
+                    Command::SmartSharpen => self.smart_sharpen,
+                    _ => unreachable!(),
                 };
                 self.dialog = Some(Dialog::Filter {
                     filter,
@@ -793,6 +804,7 @@ impl App {
             LayerFilter::HighPass { radius } => self.high_pass_radius = radius,
             LayerFilter::UnsharpMask { .. } => self.unsharp_mask = filter,
             LayerFilter::AddNoise(options) => self.noise_options = options,
+            LayerFilter::SmartSharpen(_) => self.smart_sharpen = filter,
         }
         let Some(editor) = &mut self.editor else {
             return;
@@ -1026,6 +1038,7 @@ impl App {
                 self.menu_item(ui, Command::GaussianBlur, None);
                 ui.menu_button("Sharpen", |ui| {
                     self.menu_item(ui, Command::UnsharpMask, None);
+                    self.menu_item(ui, Command::SmartSharpen, None);
                 });
                 self.menu_item(ui, Command::HighPass, None);
             });
@@ -1260,6 +1273,9 @@ impl App {
                             );
                         }
                         LayerFilter::AddNoise(options) => noise_controls(ui, options),
+                        LayerFilter::SmartSharpen(options) => {
+                            smart_sharpen_controls(ui, options, hint);
+                        }
                     }
                     ui.add_space(4.0);
                     ui.checkbox(preview, "Preview");
@@ -1836,6 +1852,16 @@ const DEFAULT_UNSHARP_MASK: LayerFilter = LayerFilter::UnsharpMask {
     threshold: 2.0,
 };
 
+/// Smart Sharpen's settings until it's first used.
+const DEFAULT_SMART_SHARPEN: LayerFilter = LayerFilter::SmartSharpen(SmartSharpenOptions {
+    amount: 100.0,
+    radius: 1.5,
+    reduce_noise: 10.0,
+    remove: SharpenRemove::GaussianBlur,
+    shadow_fade: 0.0,
+    highlight_fade: 0.0,
+});
+
 /// Add Noise's settings, for its dialog and for noise on a mask.
 fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     ui.horizontal(|ui| {
@@ -1873,6 +1899,54 @@ fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     });
     ui.add_space(4.0);
     ui.checkbox(&mut options.tonal_falloff, "Shadow/highlight falloff");
+}
+
+/// Smart Sharpen's settings, for its dialog.
+fn smart_sharpen_controls(ui: &mut Ui, options: &mut SmartSharpenOptions, hint: egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.label("Amount");
+        ui.add(
+            egui::Slider::new(&mut options.amount, 1.0..=500.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+    });
+    radius_field(ui, &mut options.radius);
+    ui.horizontal(|ui| {
+        ui.label("Reduce Noise");
+        ui.add(
+            egui::Slider::new(&mut options.reduce_noise, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Remove:");
+        ui.radio_value(&mut options.remove, SharpenRemove::GaussianBlur, "Gaussian Blur");
+        ui.radio_value(&mut options.remove, SharpenRemove::LensBlur, "Lens Blur");
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Shadows: Fade Amount");
+        ui.add(
+            egui::Slider::new(&mut options.shadow_fade, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Highlights: Fade Amount");
+        ui.add(
+            egui::Slider::new(&mut options.highlight_fade, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+    });
+    ui.label(
+        RichText::new("Sharpens luminance only. Judge it at 100 %.")
+            .color(hint),
+    );
 }
 
 /// A radius in pixels, for filter and radius dialogs.
@@ -2695,6 +2769,7 @@ mod tests {
             status: None,
             blur_radius: 2.0,
             unsharp_mask: DEFAULT_UNSHARP_MASK,
+            smart_sharpen: DEFAULT_SMART_SHARPEN,
             high_pass_radius: 2.0,
             feather_radius: 5.0,
             separation_radius: None,
@@ -2752,6 +2827,50 @@ mod tests {
     }
 
     #[test]
+    fn smart_sharpen_previews_then_applies_and_remembers_its_settings() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active = app.editor.as_ref().unwrap().active;
+        app.run(Command::SmartSharpen, &ctx);
+        let Some(Dialog::Filter { filter, preview }) = &mut app.dialog else {
+            panic!("no filter dialog");
+        };
+        assert!(*preview);
+        assert_eq!(*filter, DEFAULT_SMART_SHARPEN);
+        let custom = LayerFilter::SmartSharpen(SmartSharpenOptions {
+            amount: 250.0,
+            radius: 2.5,
+            reduce_noise: 20.0,
+            remove: SharpenRemove::LensBlur,
+            shadow_fade: 15.0,
+            highlight_fade: 25.0,
+        });
+        *filter = custom;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+        output.textures_delta.clear();
+        let view = app.editor.as_ref().unwrap().view();
+        assert_eq!(
+            view,
+            View::Filter {
+                layer: active,
+                filter: custom,
+                mask: false,
+            }
+        );
+
+        app.dialog = None;
+        app.apply_filter(custom, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Smart Sharpen"));
+        app.run(Command::SmartSharpen, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == custom));
+    }
+
+    #[test]
     fn filters_on_a_targeted_mask_change_the_mask_not_the_pixels() {
         let ctx = egui::Context::default();
         let mut app = test_app();
@@ -2783,6 +2902,22 @@ mod tests {
         let layer = editor.doc.layer(id).unwrap();
         let mask = &layer.mask.as_ref().unwrap().pixels;
         assert!((0..w).any(|x| mask.get(x, 10) != 32768));
+        assert_eq!(layer.pixels.to_vec(), pixels);
+
+        // Smart Sharpen on a mask also changes the mask, not the pixels.
+        app.run(Command::SmartSharpen, &ctx);
+        let Some(Dialog::Filter { filter, .. }) = app.dialog.take() else {
+            panic!("no filter dialog");
+        };
+        assert!(matches!(filter, LayerFilter::SmartSharpen(_)));
+        app.apply_filter(filter, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Smart Sharpen"));
+        let layer = editor.doc.layer(id).unwrap();
         assert_eq!(layer.pixels.to_vec(), pixels);
     }
 

@@ -66,6 +66,52 @@ pub fn high_pass(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
     Tiled::from_slice(image.width(), image.height(), [0; 4], &pixels)
 }
 
+/// Algorithm used by Smart Sharpen to remove blur.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharpenRemove {
+    GaussianBlur,
+    LensBlur,
+}
+
+impl SharpenRemove {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::GaussianBlur => "Gaussian Blur",
+            Self::LensBlur => "Lens Blur",
+        }
+    }
+}
+
+/// Settings for Photoshop's Smart Sharpen filter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmartSharpenOptions {
+    /// Sharpening strength in percent (100 = 100 %).
+    pub amount: f32,
+    /// Blur radius in pixels.
+    pub radius: f32,
+    /// Noise reduction in percent (0–100 %). Suppresses small-amplitude detail.
+    pub reduce_noise: f32,
+    /// Blur removal algorithm: Gaussian Blur or Lens Blur.
+    pub remove: SharpenRemove,
+    /// Fade amount in dark tones (0–100 %).
+    pub shadow_fade: f32,
+    /// Fade amount in bright tones (0–100 %).
+    pub highlight_fade: f32,
+}
+
+impl Default for SmartSharpenOptions {
+    fn default() -> Self {
+        Self {
+            amount: 100.0,
+            radius: 1.5,
+            reduce_noise: 10.0,
+            remove: SharpenRemove::GaussianBlur,
+            shadow_fade: 0.0,
+            highlight_fade: 0.0,
+        }
+    }
+}
+
 /// A filter from the Filter menu, applied to one layer's pixels, with its
 /// settings (so it can be previewed live, then applied).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,6 +123,7 @@ pub enum LayerFilter {
     /// Noise added straight to the pixels (Omapix otherwise puts grain on
     /// its own layer); used on masks.
     AddNoise(NoiseOptions),
+    SmartSharpen(SmartSharpenOptions),
 }
 
 impl LayerFilter {
@@ -86,6 +133,7 @@ impl LayerFilter {
             Self::HighPass { .. } => "High Pass",
             Self::UnsharpMask { .. } => "Unsharp Mask",
             Self::AddNoise(_) => "Add Noise",
+            Self::SmartSharpen(_) => "Smart Sharpen",
         }
     }
 
@@ -99,6 +147,7 @@ impl LayerFilter {
                 threshold,
             } => unsharp_mask(image, amount, radius, threshold),
             Self::AddNoise(options) => add_noise(image, &options),
+            Self::SmartSharpen(options) => smart_sharpen(image, &options),
         }
     }
 }
@@ -122,6 +171,36 @@ pub fn add_noise(image: &Tiled<Pixel>, options: &NoiseOptions) -> Tiled<Pixel> {
     Tiled::from_slice(w, h, [0; 4], &out)
 }
 
+/// Luminance of a 16-bit RGBA pixel.
+#[inline]
+fn pixel_luma(p: &Pixel) -> f32 {
+    0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])
+}
+
+/// Blur an image's luminance channel, premultiplied by alpha so transparent
+/// areas do not bleed dark fringes into the result.
+fn blur_luminance(pixels: &[Pixel], w: usize, h: usize, radius: f32) -> Vec<f32> {
+    let buf: Vec<[f32; 4]> = pixels
+        .par_iter()
+        .map(|p| {
+            let a = f32::from(p[3]) / MAX;
+            [pixel_luma(p) * a, a, 0.0, 0.0]
+        })
+        .collect();
+    let blurred = blur_buffer(buf, w, h, radius);
+    blurred
+        .into_par_iter()
+        .map(|[yb, a, _, _]| if a > 1e-6 { yb / a } else { 0.0 })
+        .collect()
+}
+
+/// Apply a luminance offset equally to red, green and blue, keeping colour and alpha.
+#[inline]
+fn apply_luma_offset(p: Pixel, delta: f32) -> Pixel {
+    let c = |v: u16| (f32::from(v) + delta).round().clamp(0.0, MAX) as u16;
+    [c(p[0]), c(p[1]), c(p[2]), p[3]]
+}
+
 /// Photoshop's Unsharp Mask, on luminance only so edges don't get colour
 /// fringes: each pixel's brightness moves away from its Gaussian-blurred
 /// surroundings by `amount` (1 = 100 %) times the difference, where that
@@ -130,30 +209,123 @@ pub fn add_noise(image: &Tiled<Pixel>, options: &NoiseOptions) -> Tiled<Pixel> {
 pub fn unsharp_mask(image: &Tiled<Pixel>, amount: f32, radius: f32, threshold: f32) -> Tiled<Pixel> {
     let (w, h) = (image.width() as usize, image.height() as usize);
     let pixels = image.to_vec();
-    let luma = |p: &Pixel| 0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2]);
-    // Luminance premultiplied by alpha, so transparent areas don't count.
-    let buf: Vec<[f32; 4]> = pixels
-        .par_iter()
-        .map(|p| {
-            let a = f32::from(p[3]) / MAX;
-            [luma(p) * a, a, 0.0, 0.0]
-        })
-        .collect();
-    let blurred = blur_buffer(buf, w, h, radius);
+    let blurred = blur_luminance(&pixels, w, h, radius);
     let threshold = threshold * MAX / 255.0;
     let out: Vec<Pixel> = pixels
         .into_par_iter()
         .zip(blurred)
-        .map(|(p, [yb, a, _, _])| {
-            let diff = luma(&p) - if a > 1e-6 { yb / a } else { 0.0 };
-            if p[3] == 0 || diff.abs() < threshold {
+        .map(|(p, yb)| {
+            if p[3] == 0 {
                 return p;
             }
-            let c = |v: u16| (f32::from(v) + amount * diff).round().clamp(0.0, MAX) as u16;
-            [c(p[0]), c(p[1]), c(p[2]), p[3]]
+            let diff = pixel_luma(&p) - yb;
+            if diff.abs() < threshold {
+                return p;
+            }
+            apply_luma_offset(p, amount * diff)
         })
         .collect();
     Tiled::from_slice(image.width(), image.height(), [0; 4], &out)
+}
+
+/// Photoshop's Smart Sharpen, on luminance only so edges don't get colour
+/// fringes. Supports Gaussian Blur or Lens Blur removal, noise reduction
+/// (suppressing low-amplitude texture), and tonal fading in shadows and
+/// highlights.
+pub fn smart_sharpen(image: &Tiled<Pixel>, options: &SmartSharpenOptions) -> Tiled<Pixel> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    if w == 0 || h == 0 || options.radius < 0.1 || options.amount <= 0.0 {
+        return image.clone();
+    }
+    let pixels = image.to_vec();
+    let amount_scale = options.amount / 100.0;
+    let noise_thresh = (options.reduce_noise / 100.0) * (0.05 * MAX);
+    let s_fade = options.shadow_fade;
+    let h_fade = options.highlight_fade;
+
+    let out: Vec<Pixel> = match options.remove {
+        SharpenRemove::GaussianBlur => {
+            let blurred = blur_luminance(&pixels, w, h, options.radius);
+            pixels
+                .into_par_iter()
+                .zip(blurred)
+                .map(|(p, yb)| {
+                    sharpen_pixel(p, pixel_luma(&p) - yb, noise_thresh, amount_scale, s_fade, h_fade)
+                })
+                .collect()
+        }
+        SharpenRemove::LensBlur => {
+            // Lens Blur removal approximation: unsharp masking with a smaller-radius
+            // second pass ((radius * 0.5).max(0.2)). This provides a stronger,
+            // more edge-preserving detail boost directly along edge transitions,
+            // mimicking the sharp defocus bokeh disk of a lens rather than a Gaussian bell.
+            let coarse = blur_luminance(&pixels, w, h, options.radius);
+            let fine = blur_luminance(&pixels, w, h, (options.radius * 0.5).max(0.2));
+            pixels
+                .into_par_iter()
+                .zip(coarse)
+                .zip(fine)
+                .map(|((p, yc), yf)| {
+                    let y = pixel_luma(&p);
+                    sharpen_pixel(p, (y - yc) + 0.5 * (y - yf), noise_thresh, amount_scale, s_fade, h_fade)
+                })
+                .collect()
+        }
+    };
+    Tiled::from_slice(image.width(), image.height(), [0; 4], &out)
+}
+
+#[inline]
+fn sharpen_pixel(
+    p: Pixel,
+    diff_raw: f32,
+    noise_thresh: f32,
+    amount_scale: f32,
+    s_fade: f32,
+    h_fade: f32,
+) -> Pixel {
+    if p[3] == 0 {
+        return p;
+    }
+    let diff = soft_threshold(diff_raw, noise_thresh);
+    if diff == 0.0 {
+        return p;
+    }
+    let y = pixel_luma(&p);
+    let fade = tonal_fade(y / MAX, s_fade, h_fade);
+    apply_luma_offset(p, amount_scale * diff * fade)
+}
+
+#[inline]
+fn soft_threshold(val: f32, threshold: f32) -> f32 {
+    if threshold <= 0.0 {
+        val
+    } else if val.abs() <= threshold {
+        0.0
+    } else {
+        val.signum() * (val.abs() - threshold)
+    }
+}
+
+#[inline]
+fn tonal_fade(y_norm: f32, shadow_fade_pct: f32, highlight_fade_pct: f32) -> f32 {
+    if shadow_fade_pct <= 0.0 && highlight_fade_pct <= 0.0 {
+        return 1.0;
+    }
+    let shadow_w = if y_norm < 0.5 {
+        let t = y_norm / 0.5;
+        1.0 - t * t * (3.0 - 2.0 * t)
+    } else {
+        0.0
+    };
+    let highlight_w = if y_norm > 0.5 {
+        let t = (y_norm - 0.5) / 0.5;
+        t * t * (3.0 - 2.0 * t)
+    } else {
+        0.0
+    };
+    let fade = shadow_w * (shadow_fade_pct / 100.0) + highlight_w * (highlight_fade_pct / 100.0);
+    (1.0 - fade).clamp(0.0, 1.0)
 }
 
 /// Gaussian-blur a row-major buffer of four-channel values, `sigma` being
@@ -428,6 +600,178 @@ mod tests {
         assert_eq!(light[0] - 40000, light[1] - 30000);
         // A threshold above the edge's contrast leaves it alone.
         assert_eq!(unsharp_mask(&img, 1.0, 2.0, 60.0).to_vec(), img.to_vec());
+    }
+
+    #[test]
+    fn smart_sharpen_flat_areas_unchanged() {
+        let img = Tiled::from_slice(
+            60,
+            20,
+            [0; 4],
+            &vec![[15000, 25000, 35000, 65535]; 60 * 20],
+        );
+        for remove in [SharpenRemove::GaussianBlur, SharpenRemove::LensBlur] {
+            let opts = SmartSharpenOptions {
+                amount: 300.0,
+                radius: 3.0,
+                reduce_noise: 0.0,
+                remove,
+                shadow_fade: 0.0,
+                highlight_fade: 0.0,
+            };
+            let out = smart_sharpen(&img, &opts);
+            for y in 0..20 {
+                for x in 0..60 {
+                    let p = out.get(x, y);
+                    let orig = img.get(x, y);
+                    for c in 0..4 {
+                        assert!(p[c].abs_diff(orig[c]) <= 1, "{remove:?} changed flat area: {p:?} vs {orig:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smart_sharpen_steepens_edges() {
+        let (w, h) = (100u32, 10u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| if i % w < 50 { [30000, 30000, 30000, 65535] } else { [40000, 40000, 40000, 65535] })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        for remove in [SharpenRemove::GaussianBlur, SharpenRemove::LensBlur] {
+            let opts = SmartSharpenOptions {
+                amount: 150.0,
+                radius: 2.0,
+                reduce_noise: 0.0,
+                remove,
+                shadow_fade: 0.0,
+                highlight_fade: 0.0,
+            };
+            let out = smart_sharpen(&img, &opts);
+            // Far from edge, unchanged
+            assert_eq!(out.get(5, 5), img.get(5, 5));
+            assert_eq!(out.get(95, 5), img.get(95, 5));
+            // Adjacent to edge, dark side gets darker, bright side gets lighter
+            let (dark, light) = (out.get(49, 5), out.get(50, 5));
+            assert!(dark[0] < 30000, "{remove:?} dark edge not darkened: {dark:?}");
+            assert!(light[0] > 40000, "{remove:?} light edge not lightened: {light:?}");
+        }
+
+        // Lens Blur removal provides a stronger detail boost on edges than Gaussian Blur
+        let opts_gauss = SmartSharpenOptions {
+            amount: 100.0,
+            radius: 2.0,
+            reduce_noise: 0.0,
+            remove: SharpenRemove::GaussianBlur,
+            shadow_fade: 0.0,
+            highlight_fade: 0.0,
+        };
+        let opts_lens = SmartSharpenOptions {
+            remove: SharpenRemove::LensBlur,
+            ..opts_gauss
+        };
+        let out_gauss = smart_sharpen(&img, &opts_gauss);
+        let out_lens = smart_sharpen(&img, &opts_lens);
+        let gauss_boost = out_gauss.get(50, 5)[0] - 40000;
+        let lens_boost = out_lens.get(50, 5)[0] - 40000;
+        assert!(lens_boost > gauss_boost, "lens blur boost {lens_boost} should exceed gaussian boost {gauss_boost}");
+    }
+
+    #[test]
+    fn smart_sharpen_keeps_colour() {
+        let (w, h) = (100u32, 10u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| if i % w < 50 { [30000, 20000, 15000, 65535] } else { [45000, 32000, 28000, 65535] })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        let opts = SmartSharpenOptions {
+            amount: 100.0,
+            radius: 2.0,
+            reduce_noise: 0.0,
+            remove: SharpenRemove::GaussianBlur,
+            shadow_fade: 0.0,
+            highlight_fade: 0.0,
+        };
+        let out = smart_sharpen(&img, &opts);
+        let dark = out.get(49, 5);
+        let light = out.get(50, 5);
+
+        // Same offset in each channel, preserving color ratios
+        let dark_delta_r = 30000 - dark[0];
+        let dark_delta_g = 20000 - dark[1];
+        let dark_delta_b = 15000 - dark[2];
+        assert_eq!(dark_delta_r, dark_delta_g);
+        assert_eq!(dark_delta_g, dark_delta_b);
+
+        let light_delta_r = light[0] - 45000;
+        let light_delta_g = light[1] - 32000;
+        let light_delta_b = light[2] - 28000;
+        assert_eq!(light_delta_r, light_delta_g);
+        assert_eq!(light_delta_g, light_delta_b);
+    }
+
+    #[test]
+    fn smart_sharpen_reduce_noise_leaves_low_amplitude_texture_alone_at_100_percent() {
+        let (w, h) = (100u32, 10u32);
+        // Low amplitude texture: 500 units difference (well within noise threshold)
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let v = if (i % w) % 4 < 2 { 32500 } else { 33000 };
+                [v, v, v, 65535]
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        let opts_no_reduction = SmartSharpenOptions {
+            amount: 200.0,
+            radius: 1.5,
+            reduce_noise: 0.0,
+            remove: SharpenRemove::GaussianBlur,
+            shadow_fade: 0.0,
+            highlight_fade: 0.0,
+        };
+        let out_sharpened = smart_sharpen(&img, &opts_no_reduction);
+        assert_ne!(out_sharpened.to_vec(), img.to_vec(), "should be sharpened at 0% reduce noise");
+
+        let opts_full_reduction = SmartSharpenOptions {
+            reduce_noise: 100.0,
+            ..opts_no_reduction
+        };
+        let out_suppressed = smart_sharpen(&img, &opts_full_reduction);
+        assert_eq!(out_suppressed.to_vec(), img.to_vec(), "100% reduce noise should leave low-amplitude texture alone");
+    }
+
+    #[test]
+    fn smart_sharpen_shadow_fade_reduces_sharpening_in_dark_areas() {
+        let (w, h) = (100u32, 10u32);
+        // Step edge in deep shadows (5000 to 10000, normalized < 0.16)
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| if i % w < 50 { [5000, 5000, 5000, 65535] } else { [10000, 10000, 10000, 65535] })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        let opts_nofade = SmartSharpenOptions {
+            amount: 150.0,
+            radius: 2.0,
+            reduce_noise: 0.0,
+            remove: SharpenRemove::GaussianBlur,
+            shadow_fade: 0.0,
+            highlight_fade: 0.0,
+        };
+        let opts_fade = SmartSharpenOptions {
+            shadow_fade: 100.0,
+            ..opts_nofade
+        };
+
+        let out_nofade = smart_sharpen(&img, &opts_nofade);
+        let out_fade = smart_sharpen(&img, &opts_fade);
+
+        let boost_nofade = out_nofade.get(50, 5)[0] - 10000;
+        let boost_fade = out_fade.get(50, 5)[0] - 10000;
+        assert!(boost_fade < boost_nofade, "shadow fade should reduce edge boost: {boost_fade} vs {boost_nofade}");
     }
 
     #[test]
