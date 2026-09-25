@@ -1,18 +1,21 @@
-//! Showing a Move drag live on the GPU.
+//! Showing a Move drag, or a slider dragged on one layer, live on the GPU.
 //!
 //! Moving a layer on the CPU means translating it, compositing every tile
-//! and rebuilding the display pyramid, many times a second. Instead, when
-//! a drag starts, what's below the moving layer is composited once, and it,
-//! the moving layer and the layers above are uploaded as textures at the
-//! pyramid level on screen (`gpu.rs`). Each frame the GPU composites them
-//! with the moving layer offset. When the drag ends the move is made for
-//! real and the exact CPU render replaces the live one.
+//! and rebuilding the display pyramid, many times a second; so does
+//! dragging its opacity or an adjustment's settings. Instead, when the drag
+//! starts, what's below the layer (the "subject") is composited once, and
+//! it and the layers above are uploaded as textures at the pyramid level on
+//! screen (`gpu.rs`). Each frame the GPU composites them with the subject
+//! moved, or with its opacity, blend mode and adjustment as they are now.
+//! When the drag ends the exact CPU render replaces the live one.
 //!
-//! Only stacks the shader handles are shown live: the moving layer is a
-//! pixel layer at the top level, and the layers above it are pixel or
-//! adjustment layers, at the top level or in Pass Through groups with
-//! default settings. Anything else (clipping, Blend If, other groups)
-//! moves on the CPU as before.
+//! Only stacks the shader handles are shown live: the subject is at the
+//! top level (a pixel layer, or for edits also an adjustment layer), and
+//! the layers above it are pixel or adjustment layers, at the top level or
+//! in Pass Through groups with default settings. Anything else (clipping,
+//! Blend If, other groups) stays on the CPU as before.
+
+use std::sync::Arc;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +27,10 @@ use omapix_engine::{BlendMode, Document, Pixel};
 
 /// Points per side of an adjustment's 3D lookup table.
 pub const LUT_SIZE: usize = 33;
+
+/// An adjustment's lookup table, [`LUT_SIZE`]³ points (see
+/// `Prepared::lut`).
+pub type Table = Arc<Vec<[f32; 3]>>;
 
 /// An area of one pyramid level, row-major, in that level's pixels.
 pub struct Plane<T> {
@@ -61,8 +68,25 @@ pub struct LiveLayer {
     pub mask: Option<Plane<u16>>,
     pub mode: BlendMode,
     pub opacity: f32,
-    /// Drawn at the drag's offset.
-    pub moves: bool,
+    /// The layer being moved or edited.
+    pub subject: bool,
+}
+
+/// The subject's settings this frame, while they're being edited.
+#[derive(Clone)]
+pub struct Settings {
+    pub opacity: f32,
+    pub mode: BlendMode,
+    pub lut: Option<Table>,
+}
+
+/// What the canvas draws live this frame.
+#[derive(Clone)]
+pub struct LiveFrame {
+    pub stack: Arc<LiveStack>,
+    /// How far the subject has moved, in image pixels.
+    pub offset: (i32, i32),
+    pub settings: Option<Settings>,
 }
 
 pub struct LiveStack {
@@ -71,21 +95,23 @@ pub struct LiveStack {
     /// The pyramid level, and the area of it on screen (x0, y0, w, h).
     pub level: usize,
     pub region: (u32, u32, u32, u32),
-    /// Everything below the moving layer, composited, over `region`.
+    /// Everything below the subject, composited, over `region`.
     pub below: Plane<Pixel>,
-    /// The moving layer, then those above it, bottom first.
+    /// The subject (unless it's hidden), then the layers above it, bottom
+    /// first.
     pub layers: Vec<LiveLayer>,
 }
 
-/// The layers from `id` up that a live move blends, bottom first, or
-/// `None` if the move can't be shown live.
-fn stack(doc: &Document, id: u64) -> Option<Vec<usize>> {
+/// The layers from `id` up that a live move (or edit) blends, bottom
+/// first, or `None` if it can't be shown live.
+fn stack(doc: &Document, id: u64, moving: bool) -> Option<Vec<usize>> {
     let index = doc.index_of(id)?;
-    let moving = &doc.layers[index];
+    let subject = &doc.layers[index];
     let plain = |l: &Layer| {
         !l.clipped && !doc.is_clip_base(l.id) && l.blend_if.is_none_or(|b| b.is_neutral())
     };
-    if moving.parent.is_some() || !moving.has_pixels() || !plain(moving) {
+    let kind = subject.has_pixels() || !moving && subject.adjustment.is_some();
+    if subject.parent.is_some() || !kind || !plain(subject) {
         return None;
     }
     let shown = |l: &Layer| {
@@ -109,28 +135,50 @@ fn stack(doc: &Document, id: u64) -> Option<Vec<usize>> {
             out.push(i);
         }
     }
-    // The moving layer itself may be hidden; there's still nothing to fall
-    // back for.
+    // The subject itself may be hidden; there's still nothing to fall back
+    // for.
     Some(out)
 }
 
-/// Whether a move of layer `id` can be shown live.
-pub fn can_show(doc: &Document, id: u64) -> bool {
-    stack(doc, id).is_some()
+/// Whether a move (or with `moving` false, an edit) of layer `id` can be
+/// shown live.
+pub fn can_show(doc: &Document, id: u64, moving: bool) -> bool {
+    stack(doc, id, moving).is_some()
 }
 
-/// Everything needed to show a move of layer `id` live: `layers` are the
-/// document's layers at pyramid level `level` (shrunk, or the originals at
-/// level 0), and `region` the area of that level on screen.
+/// Whether `after` differs from `before` only in layer `id`'s opacity,
+/// blend mode and adjustment settings: what a live edit can show.
+pub fn only_settings_changed(before: &[Layer], after: &[Layer], id: u64) -> bool {
+    before.len() == after.len()
+        && before.iter().zip(after).all(|(a, b)| {
+            let same_pixels = a.pixels.same_tiles(&b.pixels)
+                && match (&a.mask, &b.mask) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => x.enabled == y.enabled && x.pixels.same_tiles(&y.pixels),
+                    _ => false,
+                };
+            let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group, a.blend_if)
+                == (b.id, b.parent, b.visible, b.clipped, b.is_group, b.blend_if);
+            let same_settings =
+                (a.opacity, a.blend, &a.adjustment) == (b.opacity, b.blend, &b.adjustment);
+            same_pixels && same_place && (same_settings || a.id == id)
+        })
+}
+
+/// Everything needed to show a move (or with `moving` false, an edit) of
+/// layer `id` live: `layers` are the document's layers at pyramid level
+/// `level` (shrunk, or the originals at level 0), and `region` the area of
+/// that level on screen.
 pub fn build(
     doc: &Document,
     layers: &[Layer],
     id: u64,
+    moving: bool,
     level: usize,
     region: (u32, u32, u32, u32),
 ) -> Option<LiveStack> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
-    let order = stack(doc, id)?;
+    let order = stack(doc, id, moving)?;
     let index = doc.index_of(id)?;
     let (lw, lh) = (layers[index].pixels.width(), layers[index].pixels.height());
     let (x0, y0, w, h) = region;
@@ -145,10 +193,10 @@ pub fn build(
         .into_iter()
         .map(|i| {
             let layer = &layers[i];
-            let moves = i == index;
-            // The moving layer is uploaded whole, as any of it may be
-            // dragged into view; the rest only where they're seen.
-            let area = if moves { whole } else { region };
+            let subject = i == index;
+            // A moving layer is uploaded whole, as any of it may be dragged
+            // into view; the rest only where they're seen.
+            let area = if subject && moving { whole } else { region };
             let source = match &layer.adjustment {
                 Some(a) => Source::Adjustment(a.prepare().lut(LUT_SIZE)),
                 None => Source::Pixels(Plane::crop(&layer.pixels, area)),
@@ -162,7 +210,7 @@ pub fn build(
                     .map(|m| Plane::crop(&m.pixels, area)),
                 mode: layer.blend,
                 opacity: layer.opacity,
-                moves,
+                subject,
             }
         })
         .collect();
@@ -197,9 +245,9 @@ mod tests {
     fn a_top_level_pixel_layer_with_plain_layers_above_moves_live() {
         let doc = doc();
         let patch = doc.layers[1].id;
-        let live = build(&doc, &doc.layers, patch, 0, (10, 20, 280, 170)).unwrap();
+        let live = build(&doc, &doc.layers, patch, true, 0, (10, 20, 280, 170)).unwrap();
         assert_eq!(live.layers.len(), 3);
-        assert!(live.layers[0].moves && !live.layers[1].moves);
+        assert!(live.layers[0].subject && !live.layers[1].subject);
         assert!(matches!(live.layers[2].source, Source::Adjustment(ref l) if l.len() == LUT_SIZE.pow(3)));
         // The moving layer comes whole; the others and what's below, as seen.
         let Source::Pixels(moving) = &live.layers[0].source else { panic!() };
@@ -214,20 +262,35 @@ mod tests {
     fn clipping_blend_if_groups_and_adjustments_move_on_the_cpu() {
         let mut doc = doc();
         let (background, patch, curves) = (doc.layers[0].id, doc.layers[1].id, doc.layers[3].id);
-        assert!(!can_show(&doc, curves), "an adjustment layer");
-        assert!(can_show(&doc, background));
+        assert!(!can_show(&doc, curves, true), "an adjustment layer");
+        assert!(can_show(&doc, background, true));
         doc.layers[2].clipped = true;
-        assert!(!can_show(&doc, patch), "clipped layer above");
+        assert!(!can_show(&doc, patch, true), "clipped layer above");
         doc.layers[2].clipped = false;
         // A default Pass Through group above is fine; one with an opacity isn't.
         let group = doc.group_layer(2);
-        assert!(can_show(&doc, patch));
+        assert!(can_show(&doc, patch, true));
         doc.layer_mut(group).unwrap().opacity = 0.5;
-        assert!(!can_show(&doc, patch));
+        assert!(!can_show(&doc, patch, true));
         doc.layer_mut(group).unwrap().opacity = 1.0;
         // Inside a group, the moving layer stays on the CPU.
         let inner = doc.group_layer(doc.index_of(patch).unwrap());
-        assert!(!can_show(&doc, patch));
+        assert!(!can_show(&doc, patch, true));
         assert!(doc.layer(inner).is_some());
+    }
+
+    #[test]
+    fn edits_show_adjustment_layers_live_and_only_settings_changes_count() {
+        let doc = doc();
+        let curves = doc.layers[3].id;
+        assert!(can_show(&doc, curves, false), "an adjustment's settings");
+        let live = build(&doc, &doc.layers, curves, false, 0, (0, 0, 300, 200)).unwrap();
+        assert!(live.layers[0].subject && matches!(live.layers[0].source, Source::Adjustment(_)));
+        let mut after = doc.layers.clone();
+        after[3].opacity = 0.4;
+        assert!(only_settings_changed(&doc.layers, &after, curves));
+        assert!(!only_settings_changed(&doc.layers, &after, doc.layers[0].id), "another layer");
+        after[3].visible = false;
+        assert!(!only_settings_changed(&doc.layers, &after, curves), "hiding it");
     }
 }

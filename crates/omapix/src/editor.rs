@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
+use omapix_engine::adjust::Adjustment;
 use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
 use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
@@ -17,7 +18,7 @@ use omapix_engine::{
 };
 
 use crate::canvas::{Canvas, Render};
-use crate::live::{self, LiveStack};
+use crate::live::{self, LiveFrame, LiveStack, Settings, Table};
 use crate::tools::SampleSize;
 
 /// Undo steps kept. Snapshots share unchanged tiles, so this mostly costs
@@ -127,15 +128,21 @@ struct Moving {
     wanted: (i32, i32),
 }
 
-/// A Move drag shown live on the GPU (see live.rs), and once it ends,
-/// until the CPU render of the move is on screen.
-struct LiveMove {
+/// A Move drag, or a slider drag on one layer's settings, shown live on the
+/// GPU (see live.rs), and once it ends, until the CPU render of it is on
+/// screen.
+struct LiveView {
+    /// The layer moved or edited.
+    subject: u64,
     /// The stack being made in the background, then made.
     rx: Option<Receiver<Option<LiveStack>>>,
     stack: Option<Arc<LiveStack>>,
     /// How far the drag has moved, in image pixels.
     offset: (i32, i32),
-    /// Once the move is made: the revision to wait for.
+    /// For an edit: the subject's adjustment and its lookup table, kept
+    /// while the adjustment is unchanged.
+    edit: Option<Option<(Adjustment, Table)>>,
+    /// Once the move is made or the edit ends: the revision to wait for.
     until: Option<u64>,
 }
 
@@ -187,7 +194,7 @@ pub struct Editor {
     stroke: Option<(Stroke, u64)>,
     /// The Move tool drag in progress.
     moving: Option<Moving>,
-    live_move: Option<LiveMove>,
+    live_view: Option<LiveView>,
     /// The largest GPU texture side for live moves, or `None` to move on
     /// the CPU (see gpu.rs).
     pub live_limit: Option<u32>,
@@ -233,7 +240,7 @@ impl Editor {
             canvas,
             stroke: None,
             moving: None,
-            live_move: None,
+            live_view: None,
             live_limit: crate::gpu::max_side(),
             painted: 0,
             overlay_colour,
@@ -342,13 +349,39 @@ impl Editor {
             self.push_undo(before);
             self.live = Some(key.to_owned());
         }
+        let before = self.doc.layers.clone();
         f(&mut self.doc);
         self.changed();
+        self.show_edit_live(&before);
+    }
+
+    /// A continuous edit changed the document from `before`. If it only
+    /// changed the active layer's opacity, blend mode or adjustment, show
+    /// it live on the GPU until it ends; otherwise render it on the CPU.
+    fn show_edit_live(&mut self, before: &[Layer]) {
+        let fits = live::only_settings_changed(before, &self.doc.layers, self.active);
+        let showing = self.live_view.as_ref().is_some_and(|v| {
+            v.edit.is_some() && v.subject == self.active && v.until.is_none()
+        });
+        if !fits {
+            self.live_view = None;
+        } else if !showing {
+            self.live_view = self.start_live_view(false);
+        }
     }
 
     pub fn end_live(&mut self) {
         if self.group.is_none() {
             self.live = None;
+            self.end_live_edit();
+        }
+    }
+
+    /// A live edit is over: render it on the CPU, showing it live until
+    /// that's on screen.
+    fn end_live_edit(&mut self) {
+        if let Some(view) = self.live_view.as_mut().filter(|v| v.edit.is_some()) {
+            view.until.get_or_insert(self.revision);
         }
     }
 
@@ -367,6 +400,7 @@ impl Editor {
             return;
         };
         self.live = None;
+        self.end_live_edit();
         if changed && !keep {
             self.undo();
             self.redo.pop();
@@ -722,7 +756,7 @@ impl Editor {
             return false;
         }
         let simple = !copy && self.doc.selection.is_none() && roots == [self.active];
-        self.live_move = simple.then(|| self.start_live_move()).flatten();
+        self.live_view = simple.then(|| self.start_live_view(true)).flatten();
         self.moving = Some(Moving {
             label: label.to_owned(),
             original,
@@ -749,7 +783,7 @@ impl Editor {
         };
         moving.wanted = (dx, dy);
         // Shown live, it doesn't wait for renders.
-        let live = self.live_move.as_ref().is_some_and(|l| l.until.is_none());
+        let live = self.live_view.as_ref().is_some_and(|l| l.until.is_none());
         if live || self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_move();
         }
@@ -757,9 +791,12 @@ impl Editor {
 
     /// Finish the move at the last offset asked for.
     pub fn end_move(&mut self) {
+        if self.moving.is_none() {
+            return;
+        }
         // Made for real now; the live view stays up until it's on screen.
         let until = self.revision + 1;
-        if let Some(live) = &mut self.live_move {
+        if let Some(live) = &mut self.live_view {
             live.until = Some(until);
             if let (Some(moving), Some(_)) = (&mut self.moving, &live.stack) {
                 moving.wanted = live.offset;
@@ -769,7 +806,7 @@ impl Editor {
         self.moving = None;
         if self.revision < until {
             // Nothing moved.
-            self.live_move = None;
+            self.live_view = None;
         }
     }
 
@@ -859,13 +896,12 @@ impl Editor {
         }
     }
 
-    /// Put the moving layer (or its selected part) at the offset asked for.
-    /// Show a move of the active layer live on the GPU, if it can be: the
-    /// stack is made in the background.
-    fn start_live_move(&self) -> Option<LiveMove> {
+    /// Show a move (or with `moving` false, an edit) of the active layer
+    /// live on the GPU, if it can be: the stack is made in the background.
+    fn start_live_view(&self, moving: bool) -> Option<LiveView> {
         let limit = self.live_limit?;
         let (level, (x0, y0, x1, y1)) = self.canvas.visible_area()?;
-        if self.view != View::Image || !live::can_show(&self.doc, self.active) {
+        if self.view != View::Image || !live::can_show(&self.doc, self.active, moving) {
             return None;
         }
         let scale = 1u32 << level;
@@ -886,16 +922,19 @@ impl Editor {
             } else {
                 reduced.lock().expect("reduced layers").layers(&doc.layers, level as u32)
             };
-            let _ = tx.send(live::build(&doc, &layers, id, level, region));
+            let _ = tx.send(live::build(&doc, &layers, id, moving, level, region));
         });
-        Some(LiveMove {
+        Some(LiveView {
+            subject: self.active,
             rx: Some(rx),
             stack: None,
             offset: (0, 0),
+            edit: (!moving).then_some(None),
             until: None,
         })
     }
 
+    /// Put the moving layer (or its selected part) at the offset asked for.
     fn apply_move(&mut self) {
         let Some(moving) = &self.moving else {
             return;
@@ -904,7 +943,7 @@ impl Editor {
         // Shown live, the move is made only when it ends. Zoomed out, it
         // goes in whole pixels of the level on screen, so the move made
         // lands exactly where the live view showed it.
-        let live = match &mut self.live_move {
+        let live = match &mut self.live_view {
             Some(live) if live.until.is_none() => {
                 let k = live.stack.as_ref().map_or(1, |s| 1i32 << s.level);
                 let snap = |d: i32| (d as f32 / k as f32).round() as i32 * k;
@@ -1064,7 +1103,7 @@ impl Editor {
         if self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_move();
         }
-        self.update_live_move();
+        self.update_live_view();
         // One render at a time. Once what's on screen is drawn, a render
         // that's out of date stops, and the latest state is rendered next,
         // so fast slider drags skip intermediate states.
@@ -1075,7 +1114,12 @@ impl Editor {
         {
             rendering.cancel.store(true, Ordering::Release);
         }
-        if self.rendering.is_none() && self.rendered != current && self.stroke.is_none() {
+        // A live edit on screen renders on the CPU once it ends.
+        let editing_live = self
+            .live_view
+            .as_ref()
+            .is_some_and(|v| v.edit.is_some() && v.stack.is_some() && v.until.is_none());
+        if self.rendering.is_none() && self.rendered != current && self.stroke.is_none() && !editing_live {
             self.start_render(ctx);
         }
     }
@@ -1083,8 +1127,8 @@ impl Editor {
     /// Pick up a live move's stack once made, drop it once the move is on
     /// screen, and show it on the canvas meanwhile. If it can't be shown
     /// (or the view changes under it), the move goes on on the CPU.
-    fn update_live_move(&mut self) {
-        let Some(live) = &mut self.live_move else {
+    fn update_live_view(&mut self) {
+        let Some(live) = &mut self.live_view else {
             self.canvas.live = None;
             return;
         };
@@ -1105,7 +1149,8 @@ impl Editor {
             let k = 1u32 << s.level;
             s.level == level && x0 / k >= rx && y0 / k >= ry && x1.div_ceil(k) <= rx + rw && y1.div_ceil(k) <= ry + rh
         });
-        let failed = live.rx.is_none() && !covers;
+        // Not made (or not in time for a gesture that's already over).
+        let failed = live.rx.is_none() && !covers || live.until.is_some() && live.stack.is_none();
         // Once the move's render is on screen and the canvas's tiles show it.
         let caught_up = live.until.is_some_and(|until| {
             let rendered = self.rendered.0 >= until
@@ -1116,11 +1161,36 @@ impl Editor {
             rendered && self.canvas.fresh
         });
         if failed || caught_up {
-            self.live_move = None;
+            self.live_view = None;
             self.canvas.live = None;
             return;
         }
-        self.canvas.live = live.stack.as_ref().map(|s| (Arc::clone(s), live.offset));
+        // An edit's settings as they are now; its adjustment's table is
+        // made again only when the adjustment changes.
+        let layer = self.doc.layer(live.subject);
+        let settings = match (&mut live.edit, layer) {
+            (Some(cached), Some(layer)) => {
+                let lut = layer.adjustment.as_ref().map(|a| match cached {
+                    Some((made_from, table)) if made_from == a => Arc::clone(table),
+                    _ => {
+                        let table = Arc::new(a.prepare().lut(live::LUT_SIZE));
+                        *cached = Some((a.clone(), Arc::clone(&table)));
+                        table
+                    }
+                });
+                Some(Settings {
+                    opacity: layer.opacity,
+                    mode: layer.blend,
+                    lut,
+                })
+            }
+            _ => None,
+        };
+        self.canvas.live = live.stack.as_ref().map(|s| LiveFrame {
+            stack: Arc::clone(s),
+            offset: live.offset,
+            settings,
+        });
     }
 
     /// Render the current state in the background: in place over what the
@@ -2271,7 +2341,7 @@ mod live_tests {
     fn settle(e: &mut Editor, ctx: &egui::Context) {
         for _ in 0..500 {
             e.update(ctx);
-            if e.live_move.as_ref().is_none_or(|l| l.rx.is_none()) {
+            if e.live_view.as_ref().is_none_or(|l| l.rx.is_none()) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -2279,7 +2349,7 @@ mod live_tests {
     }
 
     #[test]
-    fn a_live_move_is_made_once_when_it_ends() {
+    fn a_live_view_is_made_once_when_it_ends() {
         let ctx = egui::Context::default();
         let mut e = editor();
         let patch = e.active;
@@ -2290,7 +2360,7 @@ mod live_tests {
         e.update(&ctx);
         // Shown live: the layer hasn't moved yet, the canvas shows it moved.
         assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0), [65535, 0, 0, 65535]);
-        let (stack, offset) = e.canvas.live.clone().expect("shown live");
+        let LiveFrame { stack, offset, .. } = e.canvas.live.clone().expect("shown live");
         assert_eq!((stack.level, offset), (0, (20, 7)));
         e.end_move();
         // Made for real, as one undo step, while the live view stays up
@@ -2323,7 +2393,7 @@ mod live_tests {
     }
 
     #[test]
-    fn zoomed_out_live_moves_land_on_the_levels_pixels() {
+    fn zoomed_out_live_views_land_on_the_levels_pixels() {
         let ctx = egui::Context::default();
         let mut e = editor();
         let patch = e.active;
@@ -2335,10 +2405,87 @@ mod live_tests {
         settle(&mut e, &ctx);
         e.move_to(5, 3);
         e.update(&ctx);
-        let (stack, offset) = e.canvas.live.clone().expect("shown live");
+        let LiveFrame { stack, offset, .. } = e.canvas.live.clone().expect("shown live");
         assert_eq!((stack.level, offset), (1, (6, 4)));
         e.end_move();
         assert_eq!(e.doc.layer(patch).unwrap().pixels.get(6, 4), [65535, 0, 0, 65535]);
+    }
+
+    #[test]
+    fn slider_drags_on_a_layers_settings_show_live_then_render_once() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        e.update(&ctx);
+        let opacity = |e: &mut Editor, v: f32| e.edit_live("Opacity", |doc| doc.layers[1].opacity = v);
+        opacity(&mut e, 0.8);
+        settle(&mut e, &ctx);
+        opacity(&mut e, 0.5);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        let settings = frame.settings.expect("an edit");
+        assert_eq!((settings.opacity, settings.mode), (0.5, BlendMode::Normal));
+        assert!(frame.stack.layers[0].subject);
+        // No CPU render of the drag while it's shown live.
+        for _ in 0..20 {
+            e.update(&ctx);
+        }
+        assert_ne!(e.rendered.0, e.revision);
+        assert!(e.rendering.as_ref().is_none_or(|r| r.target.0 < e.revision));
+        // Once it ends it's rendered (after any render already under way),
+        // and it's one undo step.
+        e.end_live();
+        let rendering_it = |e: &Editor| {
+            e.rendered.0 == e.revision || e.rendering.as_ref().is_some_and(|r| r.target.0 == e.revision)
+        };
+        for _ in 0..500 {
+            e.update(&ctx);
+            if rendering_it(&e) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(rendering_it(&e));
+        assert_eq!(e.undo_label(), Some("Opacity"));
+        e.undo();
+        assert_eq!(e.doc.layer(patch).unwrap().opacity, 1.0);
+    }
+
+    #[test]
+    fn adjustment_edits_show_live_with_their_lookup_table() {
+        use omapix_engine::adjust::{Adjustment, Curves};
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let (w, h) = (e.doc.width, e.doc.height);
+        let id = e.doc.next_layer_id();
+        e.doc.layers.push(Layer::adjustment(id, Adjustment::Curves(Curves::default()), w, h));
+        e.active = id;
+        let bend = |e: &mut Editor, y: f32| {
+            e.edit_live("Curves", |doc| {
+                let Some(Adjustment::Curves(c)) = &mut doc.layers[2].adjustment else { unreachable!() };
+                c.master.points = vec![(0.0, 0.0), (0.5, y), (1.0, 1.0)];
+            })
+        };
+        bend(&mut e, 0.6);
+        settle(&mut e, &ctx);
+        bend(&mut e, 0.7);
+        e.update(&ctx);
+        let first = e.canvas.live.clone().unwrap().settings.unwrap().lut.expect("a table");
+        let mid = first[16 + 16 * 33 + 16 * 33 * 33];
+        assert!((mid[0] - 0.7).abs() < 0.01, "the middle of the new curve, {mid:?}");
+        // Unchanged, the table isn't made again.
+        e.update(&ctx);
+        let again = e.canvas.live.clone().unwrap().settings.unwrap().lut.unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+    }
+
+    #[test]
+    fn edits_to_pixels_are_not_shown_live() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        e.edit_live("Paint", |doc| doc.layers[1].pixels.tile_mut(0, 0)[5] = [0, 0, 0, 65535]);
+        settle(&mut e, &ctx);
+        assert!(e.canvas.live.is_none());
     }
 
     #[test]
@@ -2418,7 +2565,7 @@ mod bench {
         });
         let patch = doc.layers[0].id;
         time("live stack for a move at 100 % (2560×1440)", &mut || {
-            std::hint::black_box(live::build(&doc, &doc.layers, patch, 0, (1000, 1000, 2560, 1440)));
+            std::hint::black_box(live::build(&doc, &doc.layers, patch, true, 0, (1000, 1000, 2560, 1440)));
         });
         // Zoomed out to fit: level 2 (1500×1000), whole image on screen.
         let mut reduced = Reduced::default();

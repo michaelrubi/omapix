@@ -10,7 +10,7 @@ use eframe::wgpu;
 use omapix_engine::{DisplayTransform, Pixel};
 use wgpu::util::DeviceExt;
 
-use crate::live::{LUT_SIZE, LiveStack, Plane, Source};
+use crate::live::{LUT_SIZE, LiveFrame, Plane, Settings, Source, Table};
 
 /// The largest texture side the GPU takes, once live compositing is set up
 /// at startup.
@@ -48,13 +48,12 @@ pub fn display_lut(transform: &DisplayTransform) -> Vec<[f32; 4]> {
         .collect()
 }
 
-/// What to draw this frame: a stack, where its moving layer is, and where
-/// on screen (in physical pixels) level pixel (0, 0) goes and how big
-/// level pixels are.
+/// What to draw this frame: a stack, where its subject is (in level
+/// pixels) and its settings, and where on screen (in physical pixels)
+/// level pixel (0, 0) goes and how big level pixels are.
 pub struct LiveDraw {
-    pub stack: Arc<LiveStack>,
+    pub frame: LiveFrame,
     pub display_lut: Arc<Vec<[f32; 4]>>,
-    pub offset: (i32, i32),
     pub origin: [f32; 2],
     pub scale: f32,
 }
@@ -86,7 +85,8 @@ struct Pass {
     uniform: wgpu::Buffer,
     group: wgpu::BindGroup,
     params: Params,
-    moves: bool,
+    /// The subject's pass, and its adjustment's table as last uploaded.
+    subject: Option<(wgpu::Texture, Option<Table>)>,
 }
 
 /// `Layer` in live.wgsl.
@@ -228,7 +228,7 @@ impl LiveGpu {
     }
 
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draw: &LiveDraw) {
-        let stack = &draw.stack;
+        let stack = &draw.frame.stack;
         let (x0, y0, w, h) = stack.region;
         let target = || {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -263,6 +263,11 @@ impl LiveGpu {
             mask_fill: 1.0,
         };
         let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, false)];
+        let table_texture = |data: &[[f32; 3]]| {
+            let texture = lut_texture(device, LUT_SIZE);
+            write_lut(queue, &texture, data, LUT_SIZE);
+            texture
+        };
         for layer in &stack.layers {
             let (pixels, lut, plane, fill, kind) = match &layer.source {
                 Source::Pixels(plane) => (
@@ -273,8 +278,7 @@ impl LiveGpu {
                     0,
                 ),
                 Source::Adjustment(table) => {
-                    let data: Vec<[f32; 4]> = table.iter().map(|c| [c[0], c[1], c[2], 1.0]).collect();
-                    (None, Some(upload_lut(device, queue, &data, LUT_SIZE)), ([0; 2], [0; 2]), [0.0; 4], 1)
+                    (None, Some(table_texture(table)), ([0; 2], [0; 2]), [0.0; 4], 1)
                 }
             };
             let mask = layer.mask.as_ref().map(|m| {
@@ -292,23 +296,24 @@ impl LiveGpu {
                 opacity: layer.opacity,
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
             };
-            sources.push((params, pixels, mask.map(|m| m.0), lut, layer.moves));
+            sources.push((params, pixels, mask.map(|m| m.0), lut, layer.subject));
         }
 
         let passes = sources
             .into_iter()
             .enumerate()
-            .map(|(i, (params, pixels, mask, lut, moves))| {
+            .map(|(i, (params, pixels, mask, lut, subject))| {
                 let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("live layer"),
                     contents: &params.bytes([0, 0]),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
                 let view = |v: Option<wgpu::TextureView>, empty: &wgpu::TextureView| v.unwrap_or_else(|| empty.clone());
-                let (pixels, mask, lut) = (
+                let lut_view = lut.as_ref().map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+                let (pixels, mask, lut_view) = (
                     view(pixels, &self.empty_pixels),
                     view(mask, &self.empty_mask),
-                    view(lut, &self.empty_lut),
+                    view(lut_view, &self.empty_lut),
                 );
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("live layer"),
@@ -317,7 +322,7 @@ impl LiveGpu {
                         entry(0, &targets[(i + 1) % 2].1),
                         entry(1, &pixels),
                         entry(2, &mask),
-                        entry(3, &lut),
+                        entry(3, &lut_view),
                         wgpu::BindGroupEntry {
                             binding: 4,
                             resource: uniform.as_entire_binding(),
@@ -328,7 +333,7 @@ impl LiveGpu {
                     uniform,
                     group,
                     params,
-                    moves,
+                    subject: subject.then(|| (lut.unwrap_or_else(|| table_texture(&[])), None)),
                 }
             })
             .collect::<Vec<_>>();
@@ -339,7 +344,9 @@ impl LiveGpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let display_lut = upload_lut(device, queue, &draw.display_lut, DISPLAY_LUT_SIZE);
+        let display_lut = lut_texture(device, DISPLAY_LUT_SIZE);
+        write(queue, &display_lut, bytemuck::cast_slice(draw.display_lut.as_slice()), DISPLAY_LUT_SIZE as u32 * 16, (DISPLAY_LUT_SIZE as u32, DISPLAY_LUT_SIZE as u32, DISPLAY_LUT_SIZE as u32));
+        let display_lut = display_lut.create_view(&wgpu::TextureViewDescriptor::default());
         let display_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live display"),
             layout: &self.display_layout,
@@ -374,14 +381,29 @@ impl CallbackTrait for LiveDraw {
         let Some(gpu) = resources.get_mut::<LiveGpu>() else {
             return Vec::new();
         };
-        if gpu.uploaded.as_ref().is_none_or(|u| u.id != self.stack.id) {
+        let stack = &self.frame.stack;
+        if gpu.uploaded.as_ref().is_none_or(|u| u.id != stack.id) {
             gpu.upload(device, queue, self);
         }
-        let uploaded = gpu.uploaded.as_ref().expect("just uploaded");
-        let offset = [self.offset.0, self.offset.1];
-        for (i, pass) in uploaded.passes.iter().enumerate() {
-            let moved = if pass.moves { offset } else { [0, 0] };
-            queue.write_buffer(&pass.uniform, 0, &pass.params.bytes(moved));
+        let uploaded = gpu.uploaded.as_mut().expect("just uploaded");
+        let offset = [self.frame.offset.0, self.frame.offset.1];
+        for (i, pass) in uploaded.passes.iter_mut().enumerate() {
+            let mut params = pass.params;
+            let mut moved = [0, 0];
+            if let Some((lut, uploaded_lut)) = &mut pass.subject {
+                moved = offset;
+                if let Some(Settings { opacity, mode, lut: table }) = &self.frame.settings {
+                    (params.opacity, params.mode) = (*opacity, *mode as u32);
+                    // An adjustment's new table, when it's changed.
+                    if let Some(table) = table
+                        && !uploaded_lut.as_ref().is_some_and(|u| Arc::ptr_eq(u, table))
+                    {
+                        write_lut(queue, lut, table, LUT_SIZE);
+                        *uploaded_lut = Some(Arc::clone(table));
+                    }
+                }
+            }
+            queue.write_buffer(&pass.uniform, 0, &params.bytes(moved));
             let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("live layer"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -402,7 +424,7 @@ impl CallbackTrait for LiveDraw {
             render.set_bind_group(0, &pass.group, &[]);
             render.draw(0..3, 0..1);
         }
-        let (x0, y0, w, h) = self.stack.region;
+        let (x0, y0, w, h) = stack.region;
         let mut words: Vec<u32> = Vec::with_capacity(12);
         words.extend([self.origin[0], self.origin[1], self.scale].map(f32::to_bits));
         words.push((self.scale < 1.0).into());
@@ -421,7 +443,7 @@ impl CallbackTrait for LiveDraw {
         let Some(gpu) = resources.get::<LiveGpu>() else {
             return;
         };
-        let Some(uploaded) = gpu.uploaded.as_ref().filter(|u| u.id == self.stack.id) else {
+        let Some(uploaded) = gpu.uploaded.as_ref().filter(|u| u.id == self.frame.stack.id) else {
             return;
         };
         render_pass.set_pipeline(&gpu.display_pipeline);
@@ -493,12 +515,19 @@ fn upload_pixels(device: &wgpu::Device, queue: &wgpu::Queue, plane: &Plane<Pixel
     upload(device, queue, wgpu::TextureFormat::Rgba16Uint, (plane.w, plane.h), &plane.data)
 }
 
-fn upload_lut(device: &wgpu::Device, queue: &wgpu::Queue, data: &[[f32; 4]], n: usize) -> wgpu::TextureView {
+fn lut_texture(device: &wgpu::Device, n: usize) -> wgpu::Texture {
     let n = n as u32;
-    let format = wgpu::TextureFormat::Rgba32Float;
-    let texture = texture_2d_or_3d(device, format, wgpu::TextureDimension::D3, (n, n, n));
-    write(queue, &texture, bytemuck::cast_slice(data), n * 16, (n, n, n));
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
+    texture_2d_or_3d(device, wgpu::TextureFormat::Rgba32Float, wgpu::TextureDimension::D3, (n, n, n))
+}
+
+/// Write an adjustment's lookup table into `texture`.
+fn write_lut(queue: &wgpu::Queue, texture: &wgpu::Texture, table: &[[f32; 3]], n: usize) {
+    if table.is_empty() {
+        return;
+    }
+    let data: Vec<[f32; 4]> = table.iter().map(|c| [c[0], c[1], c[2], 1.0]).collect();
+    let n = n as u32;
+    write(queue, texture, bytemuck::cast_slice(&data), n * 16, (n, n, n));
 }
 
 fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, bytes: &[u8], row: u32, size: (u32, u32, u32)) {
@@ -545,7 +574,7 @@ mod tests {
             pixels_per_point: 1.0,
         };
         draw.prepare(device, queue, &screen, &mut encoder, &mut resources);
-        let (_, _, w, h) = draw.stack.region;
+        let (_, _, w, h) = draw.frame.stack.region;
         let gpu = resources.get::<LiveGpu>().unwrap();
         let uploaded = gpu.uploaded.as_ref().unwrap();
         let last = &uploaded.targets[(uploaded.passes.len() - 1) % 2].0;
@@ -622,11 +651,14 @@ mod tests {
     fn worst_difference(device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document, offset: (i32, i32)) -> f32 {
         let (w, h) = (doc.width, doc.height);
         let patch = doc.layers[1].id;
-        let stack = live::build(doc, &doc.layers, patch, 0, (0, 0, w, h)).expect("shown live");
+        let stack = live::build(doc, &doc.layers, patch, true, 0, (0, 0, w, h)).expect("shown live");
         let draw = LiveDraw {
-            stack: Arc::new(stack),
+            frame: LiveFrame {
+                stack: Arc::new(stack),
+                offset,
+                settings: None,
+            },
             display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
-            offset,
             origin: [0.0; 2],
             scale: 1.0,
         };
@@ -664,11 +696,14 @@ mod tests {
         let doc = document(BlendMode::Overlay, true);
         let (w, h) = (doc.width, doc.height);
         let transform = DisplayTransform::to_srgb(&doc.profile).unwrap();
-        let stack = live::build(&doc, &doc.layers, doc.layers[1].id, 0, (0, 0, w, h)).unwrap();
+        let stack = live::build(&doc, &doc.layers, doc.layers[1].id, true, 0, (0, 0, w, h)).unwrap();
         let draw = LiveDraw {
-            stack: Arc::new(stack),
+            frame: LiveFrame {
+                stack: Arc::new(stack),
+                offset: (0, 0),
+                settings: None,
+            },
             display_lut: Arc::new(display_lut(&transform)),
-            offset: (0, 0),
             origin: [0.0; 2],
             scale: 1.0,
         };
@@ -752,5 +787,47 @@ mod tests {
             .unwrap();
         // The lookup table is interpolated between 65 points a side.
         assert!(worst <= 2, "off by {worst} levels");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_edits_match_the_cpu() {
+        let (device, queue) = device();
+        let doc = document(BlendMode::Normal, true);
+        let (w, h) = (doc.width, doc.height);
+        let curves = doc.layers[3].id;
+        // Built before the edit, as a live edit's stack is.
+        let stack = Arc::new(live::build(&doc, &doc.layers, curves, false, 0, (0, 0, w, h)).unwrap());
+        let mut edited = doc.clone();
+        let layer = &mut edited.layers[3];
+        let mut c = Curves::default();
+        c.master.points.insert(1, (0.5, 0.3));
+        layer.adjustment = Some(Adjustment::Curves(c));
+        layer.opacity = 0.6;
+        layer.blend = BlendMode::Luminosity;
+        let settings = Settings {
+            opacity: 0.6,
+            mode: BlendMode::Luminosity,
+            lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+        };
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack,
+                offset: (0, 0),
+                settings: Some(settings),
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(&device, &queue, draw);
+        let cpu = composite::composite(&edited.layers, w, h);
+        let worst = cpu
+            .pixels()
+            .iter()
+            .zip(&gpu)
+            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+            .fold(0.0, f32::max);
+        assert!(worst < 4e-3, "off by {worst}");
     }
 }

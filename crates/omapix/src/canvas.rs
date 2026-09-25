@@ -24,7 +24,7 @@ use omapix_engine::{DisplayTransform, Pixel, Raster, tiles};
 
 use crate::tools::CursorBadge;
 use crate::gpu::LiveDraw;
-use crate::live::LiveStack;
+use crate::live::LiveFrame;
 
 /// Photoshop's zoom presets, as fractions.
 const ZOOM_STEPS: [f32; 21] = [
@@ -247,9 +247,9 @@ pub struct Canvas {
     /// Canvas area and scale from the last frame, for menu commands.
     rect: Rect,
     ppp: f32,
-    /// A Move drag shown live on the GPU instead of the tiles, and how far
-    /// it's moved in image pixels (see live.rs).
-    pub live: Option<(Arc<LiveStack>, (i32, i32))>,
+    /// A Move drag or a slider drag shown live on the GPU instead of the
+    /// tiles (see live.rs).
+    pub live: Option<LiveFrame>,
     /// The display transform as a lookup table, for drawing live.
     display_lut: std::sync::OnceLock<Arc<Vec<[f32; 4]>>>,
     /// Every display tile on screen was up to date when last drawn.
@@ -895,13 +895,16 @@ impl Canvas {
         let target = self.target_level();
         // A live move is drawn instead of the tiles, which are still kept
         // up to date underneath, for when it ends.
-        let live = self.live.as_ref().filter(|(s, _)| s.level == target).map(|(stack, (dx, dy))| {
-            let k = (1u32 << stack.level) as f32;
+        let live = self.live.as_ref().filter(|f| f.stack.level == target).map(|frame| {
+            let k = (1u32 << frame.stack.level) as f32;
             let lut = self.display_lut.get_or_init(|| Arc::new(crate::gpu::display_lut(&self.transform)));
+            let (dx, dy) = frame.offset;
             LiveDraw {
-                stack: Arc::clone(stack),
+                frame: LiveFrame {
+                    offset: ((dx as f32 / k).round() as i32, (dy as f32 / k).round() as i32),
+                    ..frame.clone()
+                },
                 display_lut: Arc::clone(lut),
-                offset: ((*dx as f32 / k).round() as i32, (*dy as f32 / k).round() as i32),
                 origin: [origin.x * ppp, origin.y * ppp],
                 scale: self.view.zoom * k,
             }
