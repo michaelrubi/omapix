@@ -198,7 +198,7 @@ impl Tool {
 }
 
 /// Eyedropper sample size presets matching Photoshop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SampleSize {
     #[default]
     Point,
@@ -234,7 +234,7 @@ impl SampleSize {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Sample {
     Current,
     CurrentAndBelow,
@@ -282,7 +282,7 @@ pub fn cursor_badge(tool: Tool, modifiers: Modifiers) -> Option<CursorBadge> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum GradientColors {
     #[default]
     ForegroundToBackground,
@@ -303,10 +303,18 @@ impl GradientColors {
     }
 }
 
+/// The tools and their options. The options (not the tool, the colours
+/// or the clone source) are kept between runs in `~/.config/omapix/tools.toml`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Tools {
+    #[serde(skip)]
     pub tool: Tool,
+    #[serde(skip)]
     last_marquee: Tool,
+    #[serde(skip)]
     last_healing: Tool,
+    #[serde(skip)]
     last_wand: Tool,
     brush: BrushSettings,
     eraser: BrushSettings,
@@ -318,11 +326,14 @@ pub struct Tools {
     /// (0 is the model's own; lower selects more, higher less).
     pub ai_threshold: f32,
     /// The threshold slider moved this frame (`true`: let go).
+    #[serde(skip)]
     pub threshold_moved: Option<bool>,
     /// Where the clone/heal source was set with Alt+click, in image pixels.
+    #[serde(skip)]
     source: Option<Pos2>,
     /// Source minus destination, fixed by the first stroke after setting a
     /// source and kept for later strokes (Photoshop's "Aligned").
+    #[serde(skip)]
     offset: Option<Vec2>,
     /// Where to sample pixels from (Current Layer, Current & Below, All Layers).
     pub sample: Sample,
@@ -338,7 +349,9 @@ pub struct Tools {
     pub gradient_reverse: bool,
     pub gradient_opacity: f32,
     /// Foreground and background colours, in sRGB as shown in the pickers.
+    #[serde(skip)]
     pub foreground: [u8; 3],
+    #[serde(skip)]
     pub background: [u8; 3],
 }
 

@@ -126,39 +126,14 @@ impl FilterSettings {
             }
             let _ = std::fs::write(path, Self::template());
         }
-        Self::parse(path, &text, &Self::default())
+        parse(path, &text, &Self::default())
     }
 
     fn load_from(path: &Path, defaults: &Self) -> Self {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
         Self {
             path: Some(path.to_path_buf()),
-            ..Self::parse(path, &text, defaults)
+            ..load_from(path, defaults)
         }
-    }
-
-    /// `text`'s settings, over `base` for any it leaves out.
-    fn parse(path: &Path, text: &str, base: &Self) -> Self {
-        let parsed = toml::from_str::<toml::Table>(text).and_then(|mut over| {
-            // The first filters.toml kept filters as [unsharp_mask.UnsharpMask];
-            // their settings are what's inside.
-            for (_, value) in over.iter_mut() {
-                if let toml::Value::Table(t) = value
-                    && t.len() == 1
-                    && let Some((name, toml::Value::Table(inner))) = t.iter().next()
-                    && name.starts_with(char::is_uppercase)
-                {
-                    *value = toml::Value::Table(inner.clone());
-                }
-            }
-            let mut table = toml::Table::try_from(base).expect("settings are a table");
-            merge(&mut table, over);
-            table.try_into::<Self>()
-        });
-        parsed.unwrap_or_else(|e| {
-            log::warn!("{}: {e}", path.display());
-            base.clone()
-        })
     }
 
     /// Omapix's defaults as a `defaults.toml`, every line commented out.
@@ -175,20 +150,7 @@ impl FilterSettings {
     }
 
     pub fn save(&self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        match toml::to_string(self) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(path, text) {
-                    log::warn!("{}: {e}", path.display());
-                }
-            }
-            Err(e) => log::warn!("filter settings: {e}"),
-        }
+        save(self.path.as_deref(), self, "filter settings");
     }
 
     /// A filter like `kind`, with these settings.
@@ -224,7 +186,7 @@ impl FilterSettings {
 }
 
 /// `over`'s values in place of `base`'s, key by key, into nested tables.
-fn merge(base: &mut toml::Table, over: toml::Table) {
+pub(crate) fn merge(base: &mut toml::Table, over: toml::Table) {
     for (key, value) in over {
         match (base.get_mut(&key), value) {
             (Some(toml::Value::Table(inner)), toml::Value::Table(value)) => merge(inner, value),
@@ -232,6 +194,58 @@ fn merge(base: &mut toml::Table, over: toml::Table) {
                 base.insert(key, value);
             }
         }
+    }
+}
+
+/// `text`'s settings, over `base` for any it leaves out.
+pub(crate) fn parse<T>(path: &Path, text: &str, base: &T) -> T
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone,
+{
+    let parsed = toml::from_str::<toml::Table>(text).and_then(|mut over| {
+        // The first filters.toml kept filters as [unsharp_mask.UnsharpMask];
+        // their settings are what's inside.
+        for (_, value) in over.iter_mut() {
+            if let toml::Value::Table(t) = value
+                && t.len() == 1
+                && let Some((name, toml::Value::Table(inner))) = t.iter().next()
+                && name.starts_with(char::is_uppercase)
+            {
+                *value = toml::Value::Table(inner.clone());
+            }
+        }
+        let mut table = toml::Table::try_from(base).expect("settings are a table");
+        merge(&mut table, over);
+        table.try_into::<T>()
+    });
+    parsed.unwrap_or_else(|e| {
+        log::warn!("{}: {e}", path.display());
+        base.clone()
+    })
+}
+
+pub(crate) fn load_from<T>(path: &Path, defaults: &T) -> T
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone,
+{
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    parse(path, &text, defaults)
+}
+
+pub(crate) fn save<T: serde::Serialize>(path: Option<&Path>, value: &T, label: &str) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match toml::to_string(value) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(path, text) {
+                log::warn!("{}: {e}", path.display());
+            }
+        }
+        Err(e) => log::warn!("{label}: {e}"),
     }
 }
 

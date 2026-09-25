@@ -251,6 +251,9 @@ pub struct App {
     navigator: NavigatorPanel,
     right_tab: RightTab,
     tools: Tools,
+    /// Where the tool options are kept, and what was last written there.
+    tools_path: Option<PathBuf>,
+    saved_tools: String,
     /// A file being opened in the background.
     opening: Option<(PathBuf, Receiver<Opened>)>,
     /// A file dialog open in the background.
@@ -304,6 +307,11 @@ impl App {
         ctx.set_visuals(theme.visuals());
 
         let (filters, defaults) = FilterSettings::load();
+        let tools_path = crate::recent::config_dir().map(|dir| dir.join("tools.toml"));
+        let tools = tools_path
+            .as_deref()
+            .map_or_else(Tools::default, |path| crate::settings::load_from(path, &Tools::default()));
+        let saved_tools = toml::to_string(&tools).unwrap_or_default();
         let mut app = Self {
             theme,
             theme_rx: theme::watch(ctx.clone()),
@@ -320,7 +328,9 @@ impl App {
             move_from: None,
             transform_drag: None,
             objects: Default::default(),
-            tools: Tools::default(),
+            tools,
+            tools_path,
+            saved_tools,
             opening: None,
             picking: None,
             file_job: None,
@@ -2426,6 +2436,19 @@ self.filters.remember(&filter);
             self.title = title;
         }
     }
+
+    /// Keep the tool options once they've changed, and any drag changing
+    /// them is over.
+    fn save_tools(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        let text = toml::to_string(&self.tools).unwrap_or_default();
+        if text != self.saved_tools {
+            crate::settings::save(self.tools_path.as_deref(), &self.tools, "tool settings");
+            self.saved_tools = text;
+        }
+    }
 }
 
 
@@ -3165,6 +3188,7 @@ impl eframe::App for App {
         }
         self.run_script(ctx);
         self.update_title(ctx);
+        self.save_tools(ctx);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -3762,6 +3786,8 @@ mod tests {
             navigator: NavigatorPanel::default(),
             right_tab: RightTab::default(),
             tools: Tools::default(),
+            tools_path: None,
+            saved_tools: String::new(),
             opening: None,
             picking: None,
             file_job: None,
@@ -6148,6 +6174,64 @@ mod tests {
         app.run(Command::Undo, &ctx);
         let mask_after_undo = app.editor.as_ref().unwrap().doc.layer(active).unwrap().mask.as_ref().unwrap();
         assert_eq!(mask_after_undo.pixels.get(0, 50), 65535);
+    }
+
+    #[test]
+    fn changing_brush_size_in_tools_saves_once() {
+        let dir = std::env::temp_dir().join(format!("omapix-tool-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tools.toml");
+
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.tools_path = Some(path.clone());
+        app.saved_tools = toml::to_string(&app.tools).unwrap();
+
+        // While a pointer button is held, save check does not write.
+        app.tools.set_size(150.0);
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::PointerButton {
+            pos: Pos2::ZERO,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+        app.save_tools(&ctx);
+        assert!(!path.exists(), "must not write while pointer button is down");
+
+        // When pointer is released, save check writes the file once.
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::PointerButton {
+            pos: Pos2::ZERO,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut out = ctx.run_ui(raw, |_| {});
+        out.textures_delta.clear();
+        app.save_tools(&ctx);
+        assert!(path.exists(), "must write once pointer is released");
+
+        let loaded: Tools = crate::settings::load_from(&path, &Tools::default());
+        assert_eq!(toml::to_string(&loaded).unwrap(), toml::to_string(&app.tools).unwrap());
+
+        // Remove the file and verify subsequent save check does not write it again.
+        std::fs::remove_file(&path).unwrap();
+        app.save_tools(&ctx);
+        assert!(!path.exists(), "must not write again when settings haven't changed");
+
+        // A file with only some settings keeps the defaults for the rest.
+        std::fs::write(&path, "wand_tolerance = 12\n[eraser]\nsize = 42.0\n").unwrap();
+        let loaded: Tools = crate::settings::load_from(&path, &Tools::default());
+        assert_eq!((loaded.wand_tolerance, loaded.gradient_opacity), (12, 1.0));
+        let mut eraser = loaded.clone();
+        eraser.tool = crate::tools::Tool::Eraser;
+        assert_eq!((eraser.settings().size, eraser.settings().hardness), (42.0, 0.5));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
