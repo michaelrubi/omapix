@@ -1681,8 +1681,8 @@ impl App {
                     let background = editor.doc.profile.from_srgb8(self.tools.background);
                     paint = Paint::Color(background.unwrap_or([65535; 4]));
                 }
-                let (settings, sample_all) = (self.tools.settings(), self.tools.sample_all);
-                if editor.begin_stroke(settings, paint, sample_all) {
+                let (settings, sample) = (self.tools.settings(), self.tools.sample);
+                if editor.begin_stroke(settings, paint, sample) {
                     editor.stroke_to(p.x, p.y);
                 }
             }
@@ -1698,7 +1698,7 @@ impl App {
                         p.x as u32,
                         p.y as u32,
                         self.tools.sample_size,
-                        self.tools.sample_all,
+                        self.tools.sample,
                     )
                 {
                     let is_bg = self.tools.tool == crate::tools::Tool::Eyedropper && modifiers.alt;
@@ -1786,7 +1786,7 @@ impl App {
                         omapix_engine::raster::widen(self.tools.wand_tolerance),
                         self.tools.wand_contiguous,
                         self.tools.wand_anti_alias,
-                        self.tools.sample_all,
+                        self.tools.sample,
                         how,
                     ) {
                         editor.hide_selection_edges = false;
@@ -2846,7 +2846,7 @@ mod tests {
         // Nothing there to fill or paint on.
         fill(&mut editor, "Fill", Some([255, 0, 0]), [255, 255, 255]);
         let settings = omapix_engine::brush::BrushSettings::default();
-        assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), false));
+        assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), crate::tools::Sample::Current));
         editor.stroke_to(300.0, 300.0);
         editor.end_stroke();
         let pixels = &editor.doc.layer(empty).unwrap().pixels;
@@ -4753,6 +4753,101 @@ mod tests {
         let _ = std::fs::remove_file(&path1);
         let _ = std::fs::remove_file(&path2);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn clone_stamp_current_and_below_copies_below_not_above() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let red: omapix_engine::Pixel = [60000, 0, 0, 65535];
+        let blue: omapix_engine::Pixel = [0, 0, 60000, 65535];
+
+        // Deselect so painting isn't restricted by initial selection
+        app.run(Command::Deselect, &ctx);
+
+        // Fill background layer with red
+        let bg_id = app.editor.as_ref().unwrap().active;
+        app.editor.as_mut().unwrap().edit("Fill Red", |doc, _| {
+            let (w, h) = (doc.width, doc.height);
+            let bg = doc.layer_mut(bg_id).unwrap();
+            bg.pixels = Tiled::from_raster(&omapix_engine::Raster::new(
+                w,
+                h,
+                vec![red; (w * h) as usize],
+            ));
+        });
+
+        // Add empty layer (active layer to clone onto)
+        app.run(Command::NewLayer, &ctx);
+        let active_id = app.editor.as_ref().unwrap().active;
+
+        // Add top layer above active layer and fill with blue
+        app.run(Command::NewLayer, &ctx);
+        let top_id = app.editor.as_ref().unwrap().active;
+        app.editor.as_mut().unwrap().edit("Fill Blue", |doc, _| {
+            let (w, h) = (doc.width, doc.height);
+            let top = doc.layer_mut(top_id).unwrap();
+            top.pixels = Tiled::from_raster(&omapix_engine::Raster::new(
+                w,
+                h,
+                vec![blue; (w * h) as usize],
+            ));
+        });
+
+        // Select the middle active layer
+        app.editor.as_mut().unwrap().select_layers(active_id, Vec::new());
+        assert_eq!(app.editor.as_ref().unwrap().active, active_id);
+
+        // Set tool to Clone Stamp with Current & Below
+        app.tools.select(crate::tools::Tool::CloneStamp);
+        app.tools.sample = crate::tools::Sample::CurrentAndBelow;
+
+        // Alt+click to set source at (100.0, 100.0)
+        app.tool_input(
+            ToolInput::Sample(egui::pos2(100.0, 100.0)),
+            egui::Modifiers::ALT,
+        );
+
+        // Stroke at (200.0, 200.0)
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(200.0, 200.0)),
+            egui::Modifiers::NONE,
+        );
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+
+        // The active layer should have copied from below (Red), not from above (Blue)
+        let active_pixel = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .layer(active_id)
+            .unwrap()
+            .pixels
+            .get(200, 200);
+        assert_eq!(active_pixel, red);
+
+        // With All Layers, cloning stamps Blue from the top layer
+        app.tools.sample = crate::tools::Sample::All;
+        app.tool_input(
+            ToolInput::Sample(egui::pos2(100.0, 100.0)),
+            egui::Modifiers::ALT,
+        );
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(250.0, 200.0)),
+            egui::Modifiers::NONE,
+        );
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        let all_pixel = app
+            .editor
+            .as_ref()
+            .unwrap()
+            .doc
+            .layer(active_id)
+            .unwrap()
+            .pixels
+            .get(250, 200);
+        assert_eq!(all_pixel, blue);
     }
 }
 
