@@ -125,6 +125,36 @@ pub struct ReduceNoiseOptions {
     pub sharpen_details: f32,
 }
 
+/// Quality setting for Photoshop's Smart Blur filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmartBlurQuality {
+    Low,
+    Medium,
+    High,
+}
+
+/// Mode setting for Photoshop's Smart Blur filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmartBlurMode {
+    Normal,
+    EdgeOnly,
+    OverlayEdge,
+}
+
+/// Settings for Photoshop's Smart Blur filter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SmartBlurOptions {
+    /// Blur radius in pixels (0.1–100 px).
+    pub radius: f32,
+    /// Threshold in levels (0.1–100). Determines how different a neighbour's
+    /// tone can be before it is excluded from the blur.
+    pub threshold: f32,
+    /// Quality setting: Low, Medium, or High.
+    pub quality: SmartBlurQuality,
+    /// Mode setting: Normal, Edge Only, or Overlay Edge.
+    pub mode: SmartBlurMode,
+}
+
 /// A filter from the Filter menu, applied to one layer's pixels, with its
 /// settings (so it can be previewed live, then applied).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,6 +169,7 @@ pub enum LayerFilter {
     SmartSharpen(SmartSharpenOptions),
     ReduceNoise(ReduceNoiseOptions),
     MaskDensity { density: f32 },
+    SmartBlur(SmartBlurOptions),
 }
 
 impl LayerFilter {
@@ -151,6 +182,7 @@ impl LayerFilter {
             Self::SmartSharpen(_) => "Smart Sharpen",
             Self::ReduceNoise(_) => "Reduce Noise",
             Self::MaskDensity { .. } => "Mask Density",
+            Self::SmartBlur(_) => "Smart Blur",
         }
     }
 
@@ -167,6 +199,7 @@ impl LayerFilter {
             Self::SmartSharpen(options) => smart_sharpen(image, &options),
             Self::ReduceNoise(options) => reduce_noise(image, &options),
             Self::MaskDensity { density } => mask_density(image, density),
+            Self::SmartBlur(options) => smart_blur(image, &options),
         }
     }
 }
@@ -589,6 +622,92 @@ pub fn reduce_noise(image: &Tiled<Pixel>, options: &ReduceNoiseOptions) -> Tiled
     } else {
         out
     }
+}
+
+/// Photoshop's Filter › Blur › Smart Blur: an edge-preserving blur that
+/// averages the neighbours within `radius` whose luminance differs from the
+/// centre's by less than `threshold` (a sigma filter).
+///
+/// Quality sets how finely the neighbourhood is sampled: Low takes every
+/// third pixel, Medium every second, High every one. Large radii sample
+/// more sparsely still, so a radius of 100 costs no more than about 16
+/// samples across, keeping the live preview usable.
+///
+/// Edge Only shows the edges (pixels next to one differing by the threshold
+/// or more) in white on black; Overlay Edge draws them in white over the
+/// blurred image. Alpha is kept.
+pub fn smart_blur(image: &Tiled<Pixel>, options: &SmartBlurOptions) -> Tiled<Pixel> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let pixels = image.to_vec();
+    let luma: Vec<f32> = pixels.par_iter().map(pixel_luma).collect();
+
+    let radius = options.radius.clamp(0.1, 100.0);
+    let threshold = options.threshold.clamp(0.1, 100.0) * MAX / 255.0;
+    let reach = radius.ceil() as isize;
+    let (min_step, samples) = match options.quality {
+        SmartBlurQuality::Low => (3, 3),
+        SmartBlurQuality::Medium => (2, 5),
+        SmartBlurQuality::High => (1, 8),
+    };
+    // Samples each side of the centre, which is always one of them.
+    let step = min_step.max((reach + samples - 1) / samples).min(reach.max(1));
+    let span = (reach / step) * step;
+    let offsets: Vec<(isize, isize)> = (-span..=span)
+        .step_by(step as usize)
+        .flat_map(|dy| (-span..=span).step_by(step as usize).map(move |dx| (dx, dy)))
+        .filter(|&(dx, dy)| ((dx * dx + dy * dy) as f32) <= radius * radius)
+        .collect();
+
+    let (wi, hi) = (w as isize, h as isize);
+    let mut out = vec![[0u16; 4]; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let y = y as isize;
+        for (x, out) in row.iter_mut().enumerate() {
+            let x = x as isize;
+            let i = (y * wi + x) as usize;
+            let p = pixels[i];
+            let centre = luma[i];
+            let similar = |j: usize| (luma[j] - centre).abs() < threshold;
+
+            let edge = options.mode != SmartBlurMode::Normal
+                && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
+                    let (nx, ny) = (x + dx, y + dy);
+                    (0..wi).contains(&nx) && (0..hi).contains(&ny) && !similar((ny * wi + nx) as usize)
+                });
+            *out = match options.mode {
+                SmartBlurMode::EdgeOnly => {
+                    let v = if edge { u16::MAX } else { 0 };
+                    [v, v, v, p[3]]
+                }
+                _ if edge => [u16::MAX, u16::MAX, u16::MAX, p[3]],
+                _ => {
+                    let mut sum = [0u64; 3];
+                    let mut count = 0u64;
+                    for &(dx, dy) in &offsets {
+                        let (nx, ny) = (x + dx, y + dy);
+                        if !(0..wi).contains(&nx) || !(0..hi).contains(&ny) {
+                            continue;
+                        }
+                        let j = (ny * wi + nx) as usize;
+                        if pixels[j][3] > 0 && similar(j) {
+                            for c in 0..3 {
+                                sum[c] += u64::from(pixels[j][c]);
+                            }
+                            count += 1;
+                        }
+                    }
+                    if count == 0 {
+                        p
+                    } else {
+                        let avg = |c: usize| ((sum[c] + count / 2) / count) as u16;
+                        [avg(0), avg(1), avg(2), p[3]]
+                    }
+                }
+            };
+        }
+    });
+
+    Tiled::from_slice(image.width(), image.height(), [0; 4], &out)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1359,6 +1478,153 @@ mod tests {
             assert_eq!(p[1], u16::MAX);
             assert_eq!(p[2], u16::MAX);
         }
+    }
+
+    #[test]
+    fn smart_blur_flat_area_gets_smoothed() {
+        let (w, h) = (40u32, 40u32);
+        // Base tone 30000 with a ±600 checkerboard noise.
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                let y = i / w;
+                let noise = if (x + y) % 2 == 0 { 600i32 } else { -600i32 };
+                let v = (30000 + noise) as u16;
+                [v, v, v, 65535]
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+        let opts = SmartBlurOptions {
+            radius: 3.0,
+            threshold: 25.0,
+            quality: SmartBlurQuality::High,
+            mode: SmartBlurMode::Normal,
+        };
+        let out = smart_blur(&img, &opts);
+        // Centre pixels should be smoothed close to 30000 (much less than 600 diff).
+        for y in 10..30 {
+            for x in 10..30 {
+                let p = out.get(x, y);
+                assert!(
+                    p[0].abs_diff(30000) < 100,
+                    "noise was not smoothed: {p:?} at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn smart_blur_hard_edge_stays_sharp() {
+        let (w, h) = (100u32, 10u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                if i % w < 50 {
+                    [10000, 10000, 10000, 65535]
+                } else {
+                    [50000, 50000, 50000, 65535]
+                }
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+        let opts = SmartBlurOptions {
+            radius: 3.0,
+            threshold: 25.0,
+            quality: SmartBlurQuality::High,
+            mode: SmartBlurMode::Normal,
+        };
+        let out = smart_blur(&img, &opts);
+        // Next to the edge, the dark side stays 10000 and the bright side stays 50000
+        // because neighbours across the boundary differ by 40000 > threshold.
+        assert_eq!(out.get(49, 5), [10000, 10000, 10000, 65535]);
+        assert_eq!(out.get(50, 5), [50000, 50000, 50000, 65535]);
+        assert_eq!(out.get(5, 5), [10000, 10000, 10000, 65535]);
+        assert_eq!(out.get(95, 5), [50000, 50000, 50000, 65535]);
+    }
+
+    #[test]
+    fn smart_blur_preserves_alpha() {
+        let (w, h) = (20u32, 20u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let a = match (i % w) % 3 {
+                    0 => 0,
+                    1 => 32768,
+                    _ => 65535,
+                };
+                [20000, 25000, 30000, a]
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+        for mode in [
+            SmartBlurMode::Normal,
+            SmartBlurMode::EdgeOnly,
+            SmartBlurMode::OverlayEdge,
+        ] {
+            let opts = SmartBlurOptions {
+                radius: 2.0,
+                threshold: 25.0,
+                quality: SmartBlurQuality::Medium,
+                mode,
+            };
+            let out = smart_blur(&img, &opts);
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(
+                        out.get(x, y)[3],
+                        img.get(x, y)[3],
+                        "alpha changed in mode {mode:?} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smart_blur_edge_only_gives_white_on_edges_and_black_elsewhere() {
+        let (w, h) = (100u32, 10u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                if i % w < 50 {
+                    [10000, 10000, 10000, 65535]
+                } else {
+                    [50000, 50000, 50000, 65535]
+                }
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        // Edge Only
+        let edge_only_opts = SmartBlurOptions {
+            radius: 3.0,
+            threshold: 25.0,
+            quality: SmartBlurQuality::High,
+            mode: SmartBlurMode::EdgeOnly,
+        };
+        let out_edge = smart_blur(&img, &edge_only_opts);
+        // Flat areas far from the edge are black.
+        assert_eq!(out_edge.get(5, 5), [0, 0, 0, 65535]);
+        assert_eq!(out_edge.get(95, 5), [0, 0, 0, 65535]);
+        // Pixels right at the edge are white.
+        assert_eq!(out_edge.get(49, 5), [65535, 65535, 65535, 65535]);
+        assert_eq!(out_edge.get(50, 5), [65535, 65535, 65535, 65535]);
+        // Edges are one pixel either side, not the whole radius.
+        assert_eq!(out_edge.get(48, 5), [0, 0, 0, 65535]);
+        assert_eq!(out_edge.get(51, 5), [0, 0, 0, 65535]);
+
+        // Overlay Edge
+        let overlay_opts = SmartBlurOptions {
+            radius: 3.0,
+            threshold: 25.0,
+            quality: SmartBlurQuality::High,
+            mode: SmartBlurMode::OverlayEdge,
+        };
+        let out_overlay = smart_blur(&img, &overlay_opts);
+        // Flat areas retain their smoothed image colour.
+        assert_eq!(out_overlay.get(5, 5), [10000, 10000, 10000, 65535]);
+        assert_eq!(out_overlay.get(95, 5), [50000, 50000, 50000, 65535]);
+        // Edges are drawn in white.
+        assert_eq!(out_overlay.get(49, 5), [65535, 65535, 65535, 65535]);
+        assert_eq!(out_overlay.get(50, 5), [65535, 65535, 65535, 65535]);
     }
 }
 
