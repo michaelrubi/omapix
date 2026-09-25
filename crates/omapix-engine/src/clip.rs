@@ -122,9 +122,10 @@ impl Clip {
             .write_image(rgba.as_flattened(), bw, bh, image::ExtendedColorType::Rgba8)?;
         Ok(png)
     }
-    /// The clip as a `width`×`height` layer's pixels in `profile`: back
-    /// where it was copied from if it fits there, otherwise centred on
-    /// `centre` (or the canvas if `None`).
+
+    /// The clip as a `width`×`height` layer's pixels in `profile`: centred
+    /// on `centre` if given (Paste Into), or else back where it was copied
+    /// from if it fits there, otherwise centred.
     pub fn place(
         &self,
         width: u32,
@@ -134,13 +135,10 @@ impl Clip {
     ) -> Result<Tiled<Pixel>> {
         let src = &self.pixels;
         let [bx, by, bw, bh] = self.bounds;
-        let (x, y) = if self.in_place && bx + bw <= width && by + bh <= height {
+        let (x, y) = if let Some((cx, cy)) = centre {
+            (cx - i64::from(bw) / 2, cy - i64::from(bh) / 2)
+        } else if self.in_place && bx + bw <= width && by + bh <= height {
             (i64::from(bx), i64::from(by))
-        } else if let Some((cx, cy)) = centre {
-            (
-                cx - i64::from(bw) / 2,
-                cy - i64::from(bh) / 2,
-            )
         } else {
             (
                 (i64::from(width) - i64::from(bw)) / 2,
@@ -368,6 +366,14 @@ mod tests {
         // Selection bounds [100, 100, 201, 201] has centre (200, 200).
         // 100×100 centred on (200, 200) has top-left (150, 150).
         assert_eq!(layer.pixels.get(150, 150), [50000, 50000, 50000, 65535]);
+
+        // A copy from elsewhere in the image lands in the selection too,
+        // not back where it came from.
+        let copied = Selection::rectangle(600, 400, (400.0, 0.0), (500.0, 100.0));
+        let own = Clip::copy(&d.layers[0].pixels, Some(&copied), &d.profile).unwrap();
+        d.selection = Some(sel);
+        let id = paste(&mut d, &own, 0, PasteKind::Into).unwrap();
+        assert_eq!(d.layer(id).unwrap().pixels.get(160, 160), d.layers[0].pixels.get(410, 10));
     }
 
     #[test]

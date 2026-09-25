@@ -489,28 +489,15 @@ impl Command {
                         ..
                     } => {
                         if !*down && !*v_down {
-                            let is_shift = modifiers.shift || i.modifiers.shift;
-                            let is_alt = modifiers.alt || i.modifiers.alt;
-                            let mods = if is_shift && is_alt {
-                                CMD_ALT_SHIFT
-                            } else if is_shift {
-                                CMD_SHIFT
-                            } else if is_alt {
-                                CMD_ALT
-                            } else {
-                                CMD
-                            };
-                            let sc = KeyboardShortcut::new(mods, Key::V);
-                            let cmd = [Command::PasteInto, Command::PasteInPlace, Command::Paste]
+                            // Whichever paste V is with the Shift and Alt held.
+                            let held = |m: Modifiers| modifiers.shift == m.shift && modifiers.alt == m.alt;
+                            let paste = [Command::Paste, Command::PasteInPlace, Command::PasteInto]
                                 .into_iter()
-                                .find(|&c| hotkeys.command(c) == Some(sc))
-                                .unwrap_or(match mods {
-                                    CMD_ALT_SHIFT => Command::PasteInto,
-                                    CMD_SHIFT => Command::PasteInPlace,
-                                    _ => Command::Paste,
+                                .find(|&c| {
+                                    hotkeys.command(c).is_some_and(|s| s.logical_key == Key::V && held(s.modifiers))
                                 });
-                            if hotkeys.command(cmd).is_some() && !pressed.contains(&cmd) {
-                                pressed.push(cmd);
+                            if let Some(paste) = paste.filter(|p| !pressed.contains(p)) {
+                                pressed.push(paste);
                             }
                         }
                         *v_down = *down;
