@@ -28,7 +28,7 @@ use crate::recent::RecentStore;
 use crate::theme::{self, Theme};
 use crate::tools::Tools;
 
-const OPEN_EXTENSIONS: [&str; 6] = ["ora", "tif", "tiff", "png", "jpg", "jpeg"];
+const OPEN_EXTENSIONS: [&str; 7] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd"];
 const JPEG_QUALITY: u8 = 92;
 
 /// What a file dialog was opened for.
@@ -390,7 +390,8 @@ impl App {
         dialog = match purpose {
             Purpose::Open => dialog
                 .set_title("Open")
-                .add_filter("Images", &OPEN_EXTENSIONS),
+                .add_filter("Images", &OPEN_EXTENSIONS)
+                .add_filter("Photoshop", &["psd"]),
             Purpose::SaveAs => dialog
                 .set_title("Save As")
                 .add_filter("OpenRaster", &["ora"])

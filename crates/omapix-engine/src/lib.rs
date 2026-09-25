@@ -17,6 +17,7 @@ pub mod layer;
 pub mod moving;
 pub mod ops;
 pub mod ora;
+pub mod psd;
 pub mod pyramid;
 pub mod raster;
 pub mod reduced;

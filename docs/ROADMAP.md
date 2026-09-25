@@ -130,6 +130,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Live GPU slider drags on a 24 MP retouch: opacity, Curves and Levels, Hue/Saturation, and opacity or blend mode in Blending Options, at fit and at 100 %: smooth, no flash when released
 - [ ] Channels panel: view Red, Green and Blue (click and Ctrl+2…5), Ctrl+click with Shift/Alt to load them and RGB's luminosity, Save Selection as Alpha 1 and 2, view, load and delete them, and reopen the .ora with them kept
 - [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
+- [ ] PSD import: opening flattened and layered .psd files (names, opacity, visibility, blend modes, offsets), and Ctrl+S prompting Save As rather than overwriting the .psd
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -195,7 +196,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - ~~**Recent files** and reopening the last document~~ (done).
 - ~~**Close document**~~ (done): Ctrl+W (File › Close) closes the open image and returns to the empty start state, asking to save unsaved changes first.
 - ~~**Dropping files onto the window**~~ (done): dropping an image onto an open document places it centred as a new layer named after the file; Shift+drop or dropping with nothing open opens it instead.
-- **PSD import**, at least flattened and simple layers, for old Photoshop work.
+- ~~**PSD import**~~ (done): open Photoshop .psd files, flattened or with pixel layers (names, opacity, visibility, blend modes, offsets), falling back to composite for unsupported features.
 - ~~**History panel:** a list of undo steps you can click back to~~ (done).
 - ~~**Custom hotkeys**~~ (done): override any command's shortcut or tool letter from `~/.config/omapix/hotkeys.toml`, with Photoshop's shortcuts as defaults and startup warnings for clashes.
   - When there's no `hotkeys.toml` (or it's empty), Omapix writes one listing every command and tool with its default shortcut, commented out, so what can be changed is there to see and edit.

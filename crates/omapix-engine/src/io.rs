@@ -10,7 +10,7 @@ use tiff::tags::Tag;
 use crate::raster::{OPAQUE, widen};
 use crate::{ColorProfile, Document, Error, Pixel, Raster, Result};
 
-/// Open an image file. OpenRaster keeps its layers; TIFF is read directly
+/// Open an image file. OpenRaster and PSD keep their layers; TIFF is read directly
 /// so 16-bit data and the embedded ICC profile survive; PNG and JPEG go
 /// through the `image` crate.
 pub fn load(path: &Path) -> Result<Document> {
@@ -24,6 +24,7 @@ pub fn load(path: &Path) -> Result<Document> {
         .map(str::to_ascii_lowercase);
     match ext.as_deref() {
         Some("ora") => crate::ora::load(path),
+        Some("psd") => crate::psd::load(path),
         _ if is_tiff => load_tiff(path),
         _ => load_other(path),
     }
