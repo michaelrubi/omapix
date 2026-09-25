@@ -38,37 +38,18 @@ pub fn load(path: &Path) -> Result<Document> {
 }
 
 fn load_from_bytes(bytes: &[u8], path: &Path) -> Result<Document> {
-    let parse_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| psd::Psd::from_bytes(bytes)));
-    let psd = match parse_result {
-        Ok(Ok(psd)) => psd,
-        Ok(Err(e)) => {
-            if let Some(stripped) = try_strip_layers(bytes) {
-                let fallback = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    psd::Psd::from_bytes(&stripped)
-                }));
-                match fallback {
-                    Ok(Ok(psd)) => psd,
-                    _ => return Err(Error::Unsupported(format!("PSD: {e}"))),
-                }
-            } else {
-                return Err(Error::Unsupported(format!("PSD: {e}")));
-            }
-        }
-        Err(_) => {
-            if let Some(stripped) = try_strip_layers(bytes) {
-                let fallback = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    psd::Psd::from_bytes(&stripped)
-                }));
-                match fallback {
-                    Ok(Ok(psd)) => psd,
-                    _ => return Err(Error::Unsupported("PSD file is malformed".into())),
-                }
-            } else {
-                return Err(Error::Unsupported("PSD file is malformed".into()));
-            }
-        }
+    // The `psd` crate panics on some files it can't read, rather than
+    // returning an error.
+    let parse = |bytes: &[u8]| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| psd::Psd::from_bytes(bytes)))
+            .ok()?
+            .ok()
     };
+    let psd = parse(bytes)
+        .or_else(|| parse(&try_strip_layers(bytes)?))
+        .ok_or_else(|| {
+            Error::Unsupported("can't read this PSD (8-bit RGB and greyscale only)".into())
+        })?;
 
     let width = psd.width();
     let height = psd.height();
@@ -113,13 +94,7 @@ fn load_layers(
             return None;
         }
 
-        let pixels: Vec<Pixel> = rgba8
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|p| [widen(p[0]), widen(p[1]), widen(p[2]), widen(p[3])])
-            .collect();
-        let tiled = Tiled::from_slice(width, height, [0; 4], &pixels);
+        let tiled = Tiled::from_slice(width, height, [0; 4], &widen_rgba(&rgba8));
 
         let mut layer = Layer::from_pixels((idx + 1) as u64, psd_layer.name(), tiled);
         layer.opacity = (psd_layer.opacity() as f32 / 255.0).clamp(0.0, 1.0);
@@ -158,19 +133,18 @@ fn load_flattened(
         return Err(Error::Unsupported("PSD composite size mismatch".into()));
     }
 
-    let pixels: Vec<Pixel> = rgba8
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|p| [widen(p[0]), widen(p[1]), widen(p[2]), widen(p[3])])
-        .collect();
-    let raster = Raster::new(width, height, pixels);
+    let raster = Raster::new(width, height, widen_rgba(&rgba8));
     Ok(Document::from_image(path.to_path_buf(), &raster, profile, source_bits))
 }
 
+fn widen_rgba(rgba8: &[u8]) -> Vec<Pixel> {
+    rgba8.as_chunks::<4>().0.iter().map(|p| p.map(widen)).collect()
+}
+
+/// A layer's blend mode, from the `psd` crate's number for it (its enum
+/// isn't public).
 fn map_blend_mode(d: u8) -> BlendMode {
     match d {
-        0 => BlendMode::PassThrough,
         1 => BlendMode::Normal,
         3 => BlendMode::Darken,
         4 => BlendMode::Multiply,
@@ -194,7 +168,8 @@ fn map_blend_mode(d: u8) -> BlendMode {
         25 => BlendMode::Saturation,
         26 => BlendMode::Color,
         27 => BlendMode::Luminosity,
-        // Dissolve (2), DarkerColor (7), LighterColor (12), HardMix (19), or unknown -> Normal
+        // Pass Through (0, groups only), Dissolve (2), Darker Color (7),
+        // Lighter Color (12), Hard Mix (19), or unknown.
         _ => BlendMode::Normal,
     }
 }
