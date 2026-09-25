@@ -11,7 +11,7 @@ use omapix_engine::clip::{self, Clip, PasteKind};
 use omapix_engine::filters::LayerFilter;
 use omapix_engine::layer::{Layer, Locks, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
-use omapix_engine::tiled::Tiled;
+use omapix_engine::tiled::{Orientation, Tiled};
 use omapix_engine::{
     Document, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
     SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions, export, ops, ora,
@@ -827,11 +827,17 @@ impl App {
             Command::SaveAs,
             Command::ExportTiff,
             Command::ExportJpeg,
+            Command::Rotate180,
+            Command::Rotate90Cw,
+            Command::Rotate90Ccw,
+            Command::FlipCanvasHorizontal,
+            Command::FlipCanvasVertical,
         ];
-        if finishing.contains(&cmd)
-            && let Some(editor) = &mut self.editor
-        {
-            editor.commit_transform();
+        if finishing.contains(&cmd) {
+            self.transform_drag = None;
+            if let Some(editor) = &mut self.editor {
+                editor.commit_transform();
+            }
         }
         match cmd {
             Command::Open => self.guard(Then::Open, ctx),
@@ -1300,6 +1306,16 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::FillBackground, None);
                 self.menu_item(ui, Command::Clear, None);
                 self.menu_item(ui, Command::ContentAwareFill, None);
+            });
+            ui.menu_button("Image", |ui| {
+                ui.menu_button("Image Rotation", |ui| {
+                    self.menu_item(ui, Command::Rotate180, None);
+                    self.menu_item(ui, Command::Rotate90Cw, None);
+                    self.menu_item(ui, Command::Rotate90Ccw, None);
+                    ui.separator();
+                    self.menu_item(ui, Command::FlipCanvasHorizontal, None);
+                    self.menu_item(ui, Command::FlipCanvasVertical, None);
+                });
             });
             ui.menu_button("Layer", |ui| {
                 let several = self.editor.as_ref().is_some_and(|e| e.several_selected());
@@ -3172,6 +3188,23 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             if let Some(mask) = editor.doc.layer(editor.active).and_then(|l| l.mask.as_ref()) {
                 editor.set_selection("Load Selection", Selection::from_mask(&mask.pixels), Combine::Replace);
             }
+        }
+        Command::Rotate180
+        | Command::Rotate90Cw
+        | Command::Rotate90Ccw
+        | Command::FlipCanvasHorizontal
+        | Command::FlipCanvasVertical => {
+            let (label, orientation) = match cmd {
+                Command::Rotate180 => ("Rotate 180°", Orientation::Rotate180),
+                Command::Rotate90Cw => ("Rotate 90° Clockwise", Orientation::Rotate90Cw),
+                Command::Rotate90Ccw => ("Rotate 90° Counter Clockwise", Orientation::Rotate90Ccw),
+                Command::FlipCanvasHorizontal => ("Flip Canvas Horizontal", Orientation::FlipHorizontal),
+                Command::FlipCanvasVertical => ("Flip Canvas Vertical", Orientation::FlipVertical),
+                _ => unreachable!(),
+            };
+            editor.edit(label, |doc, _| {
+                doc.apply_orientation(orientation);
+            });
         }
         Command::ZoomIn => editor.canvas.step_zoom(true),
         Command::ZoomOut => editor.canvas.step_zoom(false),
@@ -6441,6 +6474,75 @@ mod tests {
         assert_eq!((eraser.settings().size, eraser.settings().hardness), (42.0, 0.5));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_rotation_90_cw_and_undo_redo_updates_canvas_and_fits_view() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let (w, h) = (600, 400);
+
+        let canvas_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        app.editor.as_mut().unwrap().canvas.lay_out_for_test(canvas_rect, 1.0);
+
+        assert_eq!(app.editor.as_ref().unwrap().doc.width, w);
+        assert_eq!(app.editor.as_ref().unwrap().doc.height, h);
+        assert_eq!(app.editor.as_ref().unwrap().canvas.width(), w);
+        assert_eq!(app.editor.as_ref().unwrap().canvas.height(), h);
+
+        app.run(Command::Rotate90Cw, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.undo_label(), Some("Rotate 90° Clockwise"));
+        assert_eq!((editor.doc.width, editor.doc.height), (h, w));
+        assert_eq!((editor.canvas.width(), editor.canvas.height()), (h, w));
+        assert_eq!(editor.canvas.levels()[0], (h, w));
+
+        app.run(Command::Undo, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!((editor.doc.width, editor.doc.height), (w, h));
+        assert_eq!((editor.canvas.width(), editor.canvas.height()), (w, h));
+        assert_eq!(editor.canvas.levels()[0], (w, h));
+
+        app.run(Command::Redo, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!((editor.doc.width, editor.doc.height), (h, w));
+        assert_eq!((editor.canvas.width(), editor.canvas.height()), (h, w));
+        assert_eq!(editor.canvas.levels()[0], (h, w));
+    }
+
+    #[test]
+    fn rotation_commits_free_transform_in_progress() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let background = crate::tools::grey(app.tools.background);
+        app.editor.as_mut().unwrap().begin_transform(background).unwrap();
+        assert!(app.editor.as_ref().unwrap().transform().is_some());
+
+        app.run(Command::Rotate180, &ctx);
+        assert!(app.editor.as_ref().unwrap().transform().is_none());
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Rotate 180°"));
+    }
+
+    #[test]
+    fn all_rotation_and_flip_commands_run_and_undo() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let commands = [
+            (Command::Rotate180, "Rotate 180°", 600, 400),
+            (Command::Rotate90Cw, "Rotate 90° Clockwise", 400, 600),
+            (Command::Rotate90Ccw, "Rotate 90° Counter Clockwise", 400, 600),
+            (Command::FlipCanvasHorizontal, "Flip Canvas Horizontal", 600, 400),
+            (Command::FlipCanvasVertical, "Flip Canvas Vertical", 600, 400),
+        ];
+        for (cmd, label, exp_w, exp_h) in commands {
+            app.run(cmd, &ctx);
+            assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some(label));
+            assert_eq!(
+                (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height),
+                (exp_w, exp_h)
+            );
+            app.run(Command::Undo, &ctx);
+        }
     }
 }
 

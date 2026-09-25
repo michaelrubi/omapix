@@ -45,6 +45,11 @@ fn main() {
     let _ = Tiled::from_raster(&doc.composite());
     println!("stamp visible   {:>8.0?}", t.elapsed());
 
+    let t = Instant::now();
+    let mut rot = doc.clone();
+    rot.apply_orientation(omapix_engine::tiled::Orientation::Rotate90Cw);
+    println!("rotate 90cw     {:>8.0?}", t.elapsed());
+
     let dir = std::env::temp_dir().join(format!("omapix-bench-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let t = Instant::now();

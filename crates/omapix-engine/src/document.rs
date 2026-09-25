@@ -191,6 +191,25 @@ impl Document {
             .find(|name| !self.layers.iter().any(|l| &l.name == name))
             .expect("some number is free")
     }
+
+    /// Rotate or flip the whole document: every layer's pixels (including groups
+    /// and adjustment layers' masks), every layer mask, the selection (rebuilding outlines),
+    /// and saved alpha channels. Rotating 90° swaps the document's width and height.
+    pub fn apply_orientation(&mut self, orientation: crate::tiled::Orientation) {
+        (self.width, self.height) = orientation.dimensions(self.width, self.height);
+        for layer in &mut self.layers {
+            layer.pixels = layer.pixels.oriented(orientation);
+            if let Some(mask) = &mut layer.mask {
+                mask.pixels = mask.pixels.oriented(orientation);
+            }
+        }
+        if let Some(sel) = &self.selection {
+            self.selection = Some(Selection::from_coverage(sel.coverage.oriented(orientation)));
+        }
+        for ch in &mut self.channels {
+            ch.pixels = ch.pixels.oriented(orientation);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +246,149 @@ mod tests {
         assert_ne!(first, second);
         let saved = &doc.channel(first).unwrap().pixels;
         assert_eq!((saved.get(1, 1), saved.get(6, 1)), (65535, 0));
+    }
+
+    #[test]
+    fn small_asymmetric_image_rotation_and_flips() {
+        use crate::tiled::Orientation;
+        let (w, h) = (3, 2);
+        let pixels: Vec<Pixel> = vec![
+            [10, 0, 0, 65535], [20, 0, 0, 65535], [30, 0, 0, 65535],
+            [40, 0, 0, 65535], [50, 0, 0, 65535], [60, 0, 0, 65535],
+        ];
+        let image = Raster::new(w, h, pixels);
+        let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        let mask_vals: Vec<u16> = vec![100, 200, 300, 400, 500, 600];
+        doc.layers[0].mask = Some(crate::layer::Mask {
+            pixels: Tiled::from_slice(w, h, 0, &mask_vals),
+            enabled: true,
+        });
+        let sel_vals: Vec<u16> = vec![1000, 2000, 3000, 4000, 5000, 6000];
+        doc.selection = Some(Selection::from_coverage(Tiled::from_slice(w, h, 0, &sel_vals)));
+        doc.channels.push(AlphaChannel {
+            id: 99,
+            name: "Alpha 1".into(),
+            pixels: Tiled::from_slice(w, h, 0, &sel_vals),
+        });
+
+        let orientations = [
+            (
+                Orientation::Rotate180,
+                3, 2,
+                vec![60, 50, 40, 30, 20, 10],
+            ),
+            (
+                Orientation::Rotate90Cw,
+                2, 3,
+                vec![40, 10, 50, 20, 60, 30],
+            ),
+            (
+                Orientation::Rotate90Ccw,
+                2, 3,
+                vec![30, 60, 20, 50, 10, 40],
+            ),
+            (
+                Orientation::FlipHorizontal,
+                3, 2,
+                vec![30, 20, 10, 60, 50, 40],
+            ),
+            (
+                Orientation::FlipVertical,
+                3, 2,
+                vec![40, 50, 60, 10, 20, 30],
+            ),
+        ];
+
+        for (orient, ew, eh, expected_r) in orientations {
+            let mut d = doc.clone();
+            d.apply_orientation(orient);
+            assert_eq!((d.width, d.height), (ew, eh));
+            for y in 0..eh {
+                for x in 0..ew {
+                    let idx = (y * ew + x) as usize;
+                    let exp = expected_r[idx];
+                    assert_eq!(d.layers[0].pixels.get(x, y)[0], exp);
+                    assert_eq!(d.layers[0].mask.as_ref().unwrap().pixels.get(x, y), exp * 10);
+                    assert_eq!(d.selection.as_ref().unwrap().coverage.get(x, y), exp * 100);
+                    assert_eq!(d.channels[0].pixels.get(x, y), exp * 100);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_tile_image_rotation_and_round_trip() {
+        use crate::tiled::Orientation;
+        let (w, h) = (600, 500);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let x = (i % w) as u16;
+                let y = (i / w) as u16;
+                [x, y, (x * 7 + y) % 65535, 65535]
+            })
+            .collect();
+        let image = Raster::new(w, h, px);
+        let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        let mask_px: Vec<u16> = (0..w * h).map(|i| (i % 65521) as u16).collect();
+        doc.layers[0].mask = Some(crate::layer::Mask {
+            pixels: Tiled::from_slice(w, h, 0, &mask_px),
+            enabled: true,
+        });
+        doc.selection = Some(Selection::rectangle(w, h, (100.0, 100.0), (400.0, 350.0)));
+        doc.channels.push(AlphaChannel {
+            id: 1,
+            name: "Alpha 1".into(),
+            pixels: Tiled::from_slice(w, h, 0, &mask_px),
+        });
+
+        for orient in [
+            Orientation::Rotate180,
+            Orientation::Rotate90Cw,
+            Orientation::Rotate90Ccw,
+            Orientation::FlipHorizontal,
+            Orientation::FlipVertical,
+        ] {
+            let mut d = doc.clone();
+            d.apply_orientation(orient);
+            let (ew, eh) = orient.dimensions(w, h);
+            assert_eq!((d.width, d.height), (ew, eh));
+            for &(x, y) in &[(0, 0), (ew - 1, 0), (0, eh - 1), (ew - 1, eh - 1), (150, 200), (300, 400)] {
+                let (sx, sy) = orient.source_coords(x, y, w, h);
+                assert_eq!(d.layers[0].pixels.get(x, y), doc.layers[0].pixels.get(sx, sy));
+                assert_eq!(
+                    d.layers[0].mask.as_ref().unwrap().pixels.get(x, y),
+                    doc.layers[0].mask.as_ref().unwrap().pixels.get(sx, sy)
+                );
+                assert_eq!(
+                    d.selection.as_ref().unwrap().coverage.get(x, y),
+                    doc.selection.as_ref().unwrap().coverage.get(sx, sy)
+                );
+                assert_eq!(
+                    d.channels[0].pixels.get(x, y),
+                    doc.channels[0].pixels.get(sx, sy)
+                );
+            }
+            assert!(!d.selection.as_ref().unwrap().outlines.is_empty());
+        }
+
+        let mut d = doc.clone();
+        for _ in 0..4 {
+            d.apply_orientation(Orientation::Rotate90Cw);
+        }
+        assert_eq!((d.width, d.height), (w, h));
+        assert_eq!(d.layers[0].pixels.to_vec(), doc.layers[0].pixels.to_vec());
+        assert_eq!(
+            d.layers[0].mask.as_ref().unwrap().pixels.to_vec(),
+            doc.layers[0].mask.as_ref().unwrap().pixels.to_vec()
+        );
+        assert_eq!(
+            d.selection.as_ref().unwrap().coverage.to_vec(),
+            doc.selection.as_ref().unwrap().coverage.to_vec()
+        );
+        assert_eq!(
+            d.channels[0].pixels.to_vec(),
+            doc.channels[0].pixels.to_vec()
+        );
     }
 
     #[test]

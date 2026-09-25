@@ -98,6 +98,10 @@ Over the canvas, selection tools (Rectangular & Elliptical Marquee, Lasso, Magic
 
 A collapsible strip above the right panel's tabs holding Navigator and Histogram, as in Photoshop. Window › Navigator and Window › Histogram toggle the strip, and clicking the active tab collapses it to nothing. The Navigator shows a whole-image thumbnail from the smallest pyramid level with a red rectangle for the visible canvas area (clicking or dragging centres the view), plus zoom slider, zoom field, and Fit / 100 % buttons using the canvas zoom steps. The Histogram draws the composite image's RGB histogram (overlaid with grey/white overlap in Colors view, plus Luminosity), computed off the UI thread and throttled on document edits, with mean, std dev, median and pixel count underneath.
 
+### ~~Image rotation and canvas flips~~ (done)
+
+Photoshop's Image › Image Rotation submenu: 180°, 90° Clockwise, 90° Counter Clockwise, Flip Canvas Horizontal, and Flip Canvas Vertical. Flips and rotations permute document pixels directly with no resampling, operating tile by tile in parallel with rayon and keeping untouched tiles empty. Each command rotates or flips every layer's pixels (including groups and adjustment layers' masks), every layer mask, the selection (rebuilding outlines), and saved alpha channels in a single undo step. 90° rotations swap document dimensions and resize the canvas pyramid while keeping the view fitted to the window, fully preserved through undo and redo.
+
 
 ## 2. Hand-testing checklist
 
@@ -171,6 +175,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Object Selection: W then Shift+W, click a face, a dress and a prop, drag boxes, Shift and Alt, the first use (model loading) and after editing (analysed again), and how the edges look at 100 %
 - [ ] Navigator and Histogram panels: Window menu toggles strip, Navigator thumbnail drag pans canvas, zoom slider and field, and Histogram Colors and Luminosity views with statistics
 - [ ] Gradient tool: `G` shortcut, dragging linear and radial gradients on pixels and masks, Shift constraint to 45°, Foreground to Background and Foreground to Transparent, Reverse, Opacity with number keys, within a selection, and one undo step
+- [ ] Image rotation (180°, 90° CW, 90° CCW) and canvas flips (horizontal, vertical): layers, masks, selections, alpha channels, canvas fit, and undo/redo
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing

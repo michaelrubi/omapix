@@ -328,6 +328,42 @@ impl Canvas {
         self.dirty.clear();
     }
 
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[cfg(test)]
+    pub fn levels(&self) -> &[(u32, u32)] {
+        &self.levels
+    }
+
+    /// Rebuild state when the document size changes (e.g. 90° rotation, undo/redo).
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if self.width == width && self.height == height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.levels = level_sizes(width, height);
+        self.render = None;
+        self.textures.clear();
+        self.dirty.clear();
+        self.in_flight.clear();
+        self.live = None;
+        self.generation += 1;
+        self.stale_before = self.generation;
+        self.fresh = false;
+        self.view.fit = true;
+        if self.rect.is_positive() {
+            let z = self.fit_zoom(self.rect, self.ppp);
+            self.center_at(z, self.rect, self.ppp);
+        }
+    }
+
     /// Document colour to display colour.
     pub fn transform(&self) -> &DisplayTransform {
         &self.transform
