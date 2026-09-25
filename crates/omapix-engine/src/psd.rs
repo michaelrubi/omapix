@@ -88,7 +88,8 @@ fn load_layers(
     }
     let mut layers = Vec::with_capacity(psd_layers.len());
 
-    for (idx, psd_layer) in psd_layers.iter().enumerate() {
+    // The `psd` crate lists layers top first; Omapix keeps them bottom first.
+    for (idx, psd_layer) in psd_layers.iter().rev().enumerate() {
         let rgba8 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| psd_layer.rgba())).ok()?;
         if rgba8.len() != (width * height * 4) as usize {
             return None;
@@ -98,7 +99,9 @@ fn load_layers(
 
         let mut layer = Layer::from_pixels((idx + 1) as u64, psd_layer.name(), tiled);
         layer.opacity = (psd_layer.opacity() as f32 / 255.0).clamp(0.0, 1.0);
-        layer.visible = psd_layer.visible();
+        // Photoshop sets flag bit 1 when a layer is hidden; the `psd` crate
+        // reads it as visible.
+        layer.visible = !psd_layer.visible();
         layer.blend = map_blend_mode(psd_layer.blend_mode() as u8);
         layer.clipped = psd_layer.is_clipping_mask();
         layers.push(layer);
@@ -285,11 +288,11 @@ mod tests {
         out.extend_from_slice(&0u32.to_be_bytes());
 
         // Layer & Mask section
-        // Note: In PSD files, layers are stored in reverse (top to bottom) order.
+        // Photoshop stores layers bottom first.
         let mut records_data = Vec::new();
         let mut channels_data = Vec::new();
 
-        for layer in layers.iter().rev() {
+        for layer in layers {
             let lw = (layer.right - layer.left) as usize;
             let lh = (layer.bottom - layer.top) as usize;
             assert_eq!(layer.pixels.len(), lw * lh);
@@ -320,7 +323,7 @@ mod tests {
             records_data.extend_from_slice(layer.blend.as_bytes());
             records_data.push(layer.opacity);
             records_data.push(0); // clipping base
-            records_data.push(if layer.visible { 2 } else { 0 }); // visible flag bit 1
+            records_data.push(if layer.visible { 0 } else { 2 }); // bit 1: hidden
             records_data.push(0); // filler
 
             // Extra data: mask (0), blend range (0), name (Pascal string padded to 4)
@@ -457,6 +460,19 @@ mod tests {
         // Only at offset (2, 1) should pixels exist; (0, 0) should be transparent
         assert_eq!(l1.pixels.get(0, 0), [0, 0, 0, 0]);
         assert_eq!(l1.pixels.get(2, 1), [widen(50), widen(150), widen(250), widen(200)]);
+    }
+
+    #[test]
+    fn a_photoshop_file_opens_in_order_visible_and_blended() {
+        // Saved by Photoshop, from the `psd` crate's test files (MIT or
+        // Apache-2.0): a 50 % red layer over a 50 % blue one, in Multiply.
+        let bytes = include_bytes!("../testdata/blue-red-1x1-multiply.psd");
+        let doc = load_from_bytes(bytes, Path::new("multiply.psd")).unwrap();
+        let names: Vec<_> = doc.layers.iter().map(|l| (l.name.as_str(), l.blend, l.visible)).collect();
+        assert_eq!(names, [("Bottom Layer", BlendMode::Normal, true), ("Top Layer", BlendMode::Multiply, true)]);
+        // What the `psd` crate's own test expects Photoshop to show.
+        let pixel = doc.composite().get(0, 0).map(|v| (v as u32 * 255 + 32767) / 65535);
+        assert_eq!(pixel, [85, 0, 85, 192]);
     }
 
     #[test]
