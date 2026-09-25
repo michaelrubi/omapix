@@ -16,5 +16,6 @@ log = "0.4.34"
 omapix-engine = { version = "0.1.0", path = "../omapix-engine" }
 rayon = "1.12.0"
 rfd = "0.17.2"
+smithay-clipboard = "0.7.3"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"

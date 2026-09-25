@@ -109,7 +109,6 @@ The UI has been tested through the same code paths with scripts
 - [x] Tool cursor modifier badges: Shift (+), Alt (-), and Shift+Alt (×) with selection tools, and Alt copy badge with the Move tool
 - [x] Eyedroppers in Curves and Levels: set black, gray and white points with crosshair cursor, one undo step per click, and Esc to disarm
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
-- [ ] Dropping a file onto the window
 - [ ] Switching the Omarchy theme while Omapix is open
 - [x] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
@@ -127,6 +126,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Live GPU Move tool drags on a 24 MP retouch (pasted patch under a Dodge & Burn group and Curves), at fit and at 100 %: smooth, looks the same as the CPU render, no flash when released
 - [ ] Custom hotkeys: override command shortcuts and tool letters in ~/.config/omapix/hotkeys.toml, menu labels and tooltips update, and startup warnings for clashes
 - [ ] Live GPU slider drags on a 24 MP retouch: opacity, Curves and Levels, Hue/Saturation, and opacity or blend mode in Blending Options, at fit and at 100 %: smooth, no flash when released
+- [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -189,8 +189,8 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - **darktable round trip:** "Edit in Omapix" from darktable, and export back to a TIFF next to the raw file.
 - **Batch export:** apply a saved action (for example "resize, sharpen, JPEG") to many files.
 - ~~**Recent files** and reopening the last document~~ (done).
-- **Close document** (Ctrl+W, File › Close): close the open image without quitting, asking to save unsaved changes first, back to the empty start screen.
-- **Dropping files onto the window:** with no document open, an image opens; with one open, it's placed as a new layer above the selected one, centred, as Photoshop's Place does (a `.cube` file already becomes a Color Lookup layer). Shift+drop opens it instead.
+- ~~**Close document**~~ (done): Ctrl+W (File › Close) closes the open image and returns to the empty start state, asking to save unsaved changes first.
+- ~~**Dropping files onto the window**~~ (done): dropping an image onto an open document places it centred as a new layer named after the file; Shift+drop or dropping with nothing open opens it instead.
 - **PSD import**, at least flattened and simple layers, for old Photoshop work.
 - ~~**History panel:** a list of undo steps you can click back to~~ (done).
 - ~~**Custom hotkeys**~~ (done): override any command's shortcut or tool letter from `~/.config/omapix/hotkeys.toml`, with Photoshop's shortcuts as defaults and startup warnings for clashes.

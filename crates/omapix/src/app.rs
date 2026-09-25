@@ -46,6 +46,12 @@ enum Then {
     Quit,
     Open,
     OpenFile(PathBuf),
+    Close,
+}
+
+struct PendingClip {
+    clip: Clip,
+    name: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -232,8 +238,10 @@ pub struct App {
     /// the real UI without a mouse; see [`ScriptStep`].
     script: VecDeque<ScriptStep>,
     clipboard: Clipboard,
-    /// An image being read from the system clipboard to paste.
-    pasting: Option<Receiver<Result<Clip, String>>>,
+    /// An image being read from the system clipboard or dropped to paste or place.
+    pasting: Option<Receiver<Result<PendingClip, String>>>,
+    /// Dropped files queued to place once opening finishes.
+    pending_drops: Vec<PathBuf>,
     /// Whether V is held, for spotting Ctrl+V (see [`Command::pressed`]).
     v_down: bool,
 }
@@ -247,6 +255,7 @@ impl App {
         if let Some(render_state) = &cc.wgpu_render_state {
             crate::gpu::install(render_state);
         }
+        crate::drop::listen(ctx.clone());
         let theme = Theme::load();
         ctx.set_visuals(theme.visuals());
 
@@ -256,7 +265,7 @@ impl App {
             editor: None,
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
-            history: HistoryPanel::default(),
+            history: HistoryPanel,
             recent: RecentStore::load(),
             right_tab: RightTab::default(),
             drawing: None,
@@ -290,6 +299,7 @@ impl App {
                 .collect(),
             clipboard: Clipboard::new(std::env::var_os("WAYLAND_DISPLAY").is_some()),
             pasting: None,
+            pending_drops: Vec::new(),
             v_down: false,
         };
         let warnings = crate::hotkeys::load();
@@ -331,6 +341,22 @@ impl App {
             ctx.request_repaint();
         });
         self.opening = Some((path, rx));
+    }
+
+    fn place_files(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            for path in paths {
+                let res = load_clip(&path).map(|(clip, name)| PendingClip {
+                    clip,
+                    name: Some(name),
+                });
+                let _ = tx.send(res);
+                ctx.request_repaint();
+            }
+        });
+        self.pasting = Some(rx);
     }
 
     fn pick(&mut self, purpose: Purpose, ctx: &egui::Context) {
@@ -442,7 +468,21 @@ impl App {
             }
             Then::Open => self.pick(Purpose::Open, ctx),
             Then::OpenFile(path) => self.open(path, ctx),
+            Then::Close => self.close_document(),
         }
+    }
+
+    fn close_document(&mut self) {
+        self.editor = None;
+        self.separation_radius = None;
+        self.layers = LayersPanel::default();
+        self.properties = PropertiesPanel::default();
+        self.history = HistoryPanel;
+        self.drawing = None;
+        self.move_from = None;
+        self.pasting = None;
+        self.dialog = None;
+        self.pending_drops.clear();
     }
 
     /// Pick up results from background work.
@@ -478,8 +518,13 @@ impl App {
                     }
                     self.editor = Some(editor);
                     self.separation_radius = None;
+                    if !self.pending_drops.is_empty() {
+                        let paths = std::mem::take(&mut self.pending_drops);
+                        self.place_files(paths, ctx);
+                    }
                 }
                 Err(err) => {
+                    self.pending_drops.clear();
                     self.recent.remove(&path);
                     self.message(format!("Couldn't open {}: {err}", path.display()), true);
                 }
@@ -506,46 +551,65 @@ impl App {
         }
         if let Some(rx) = &self.pasting
             && self.editor.as_ref().is_some_and(|e| e.busy().is_none())
-            && let Ok(result) = rx.try_recv()
         {
-            self.pasting = None;
-            match result {
-                Ok(clip) => {
+            match rx.try_recv() {
+                Ok(Ok(item)) => {
                     if let Some(editor) = &mut self.editor {
-                        paste(editor, Arc::new(clip), ctx);
+                        paste(editor, Arc::new(item.clip), item.name, ctx);
                     }
                 }
-                Err(err) => self.message(err, true),
+                Ok(Err(err)) => self.message(err, true),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pasting = None,
             }
         }
-        let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
-        if let Some(path) = dropped {
-            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cube")) {
-                if let Some(editor) = &mut self.editor {
-                    let mut lut = omapix_engine::adjust::ColorLookup::default();
-                    match lut.load_cube_file(&path) {
-                        Ok(()) => {
-                            let adj = omapix_engine::adjust::Adjustment::ColorLookup(lut);
-                            let label = format!("New {} Layer", adj.name());
-                            let (w, h) = (editor.doc.width, editor.doc.height);
-                            let index = editor.active_index().unwrap_or(0);
-                            editor.edit(&label, |doc, active| {
-                                let new = doc.next_layer_id();
-                                doc.insert_above(index, omapix_engine::Layer::adjustment(new, adj, w, h));
-                                *active = new;
-                            });
-                            editor.target = Target::Mask;
+        let (dropped_paths, shift) = ctx.input(|i| {
+            (
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .collect::<Vec<PathBuf>>(),
+                i.modifiers.shift,
+            )
+        });
+        if !dropped_paths.is_empty() {
+            let mut image_files = Vec::new();
+            for path in dropped_paths {
+                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cube")) {
+                    if let Some(editor) = &mut self.editor {
+                        let mut lut = omapix_engine::adjust::ColorLookup::default();
+                        match lut.load_cube_file(&path) {
+                            Ok(()) => {
+                                let adj = omapix_engine::adjust::Adjustment::ColorLookup(lut);
+                                let label = format!("New {} Layer", adj.name());
+                                let (w, h) = (editor.doc.width, editor.doc.height);
+                                let index = editor.active_index().unwrap_or(0);
+                                editor.edit(&label, |doc, active| {
+                                    let new = doc.next_layer_id();
+                                    doc.insert_above(index, omapix_engine::Layer::adjustment(new, adj, w, h));
+                                    *active = new;
+                                });
+                                editor.target = Target::Mask;
+                            }
+                            Err(err) => self.message(format!("Failed to load LUT: {err}"), true),
                         }
-                        Err(err) => self.message(format!("Failed to load LUT: {err}"), true),
                     }
+                } else {
+                    image_files.push(path);
                 }
-            } else if self.modified() {
-                self.message(
-                    "Save or close the current image before opening another",
-                    true,
-                );
-            } else {
-                self.open(path, ctx);
+            }
+            if !image_files.is_empty() {
+                if shift {
+                    let first = image_files.remove(0);
+                    self.guard(Then::OpenFile(first), ctx);
+                } else if self.editor.is_some() {
+                    self.place_files(image_files, ctx);
+                } else {
+                    let first = image_files.remove(0);
+                    self.open(first, ctx);
+                    self.pending_drops = image_files;
+                }
             }
         }
         // Closing the window with unsaved changes asks first.
@@ -641,6 +705,7 @@ impl App {
         }
         match cmd {
             Command::Open => self.guard(Then::Open, ctx),
+            Command::Close => self.guard(Then::Close, ctx),
             Command::ReopenLast => {
                 if let Some(path) = self.recent.last().cloned() {
                     self.guard(Then::OpenFile(path), ctx);
@@ -757,12 +822,16 @@ impl App {
                     return;
                 };
                 match self.clipboard.current() {
-                    Some(clip) => paste(editor, clip, ctx),
+                    Some(clip) => paste(editor, clip, None, ctx),
                     None => {
                         let (tx, rx) = channel();
                         let ctx = ctx.clone();
                         std::thread::spawn(move || {
-                            let _ = tx.send(crate::clipboard::read_system());
+                            let res = crate::clipboard::read_system().map(|clip| PendingClip {
+                                clip,
+                                name: None,
+                            });
+                            let _ = tx.send(res);
                             ctx.request_repaint();
                         });
                         self.pasting = Some(rx);
@@ -971,6 +1040,7 @@ impl App {
                     }
                 });
                 self.menu_item(ui, Command::ReopenLast, None);
+                self.menu_item(ui, Command::Close, None);
                 ui.separator();
                 self.menu_item(ui, Command::Save, None);
                 self.menu_item(ui, Command::SaveAs, None);
@@ -2090,15 +2160,40 @@ fn copy(editor: &Editor, merged: bool) -> Option<Clip> {
     (!clip.is_empty()).then_some(clip)
 }
 
-/// Paste `clip` as a new layer above the active one.
-fn paste(editor: &mut Editor, clip: Arc<Clip>, ctx: &egui::Context) {
+fn load_clip(path: &Path) -> Result<(Clip, String), String> {
+    let mut doc = omapix_engine::io::load(path).map_err(|e| e.to_string())?;
+    let _ = ops::prepare_for_editing(&mut doc);
+    let raster = doc.composite();
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Layer".into());
+    let clip = Clip {
+        bounds: [0, 0, raster.width(), raster.height()],
+        pixels: Tiled::from_raster(&raster),
+        profile: doc.profile,
+        in_place: false,
+    };
+    Ok((clip, name))
+}
+
+/// Paste or place `clip` as a new layer above the active one.
+fn paste(editor: &mut Editor, clip: Arc<Clip>, name: Option<String>, ctx: &egui::Context) {
     let index = editor.active_index().unwrap_or(0);
     editor.target = Target::Pixels;
+    let label = if name.is_some() { "Place" } else { "Paste" };
     editor.edit_in_background(
-        "Paste",
+        label,
         move |doc, active| match clip::paste(doc, &clip, index) {
-            Ok(id) => *active = id,
-            Err(e) => log::error!("paste failed: {e}"),
+            Ok(id) => {
+                *active = id;
+                if let Some(name) = name
+                    && let Some(layer) = doc.layer_mut(id)
+                {
+                    layer.name = name;
+                }
+            }
+            Err(e) => log::error!("{label} failed: {e}"),
         },
         ctx,
     );
@@ -2431,6 +2526,10 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::drop::take(raw_input);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         // While a text field (layer rename) has focus, keys edit the text.
@@ -2698,7 +2797,7 @@ mod tests {
         assert_eq!(editor.doc.layers[0].pixels.get(150, 150)[3], 0);
         assert_eq!(editor.doc.layers[0].pixels.get(250, 150)[3], 65535);
 
-        paste(&mut editor, Arc::new(clip), &ctx);
+        paste(&mut editor, Arc::new(clip), None, &ctx);
         while editor.busy().is_some() {
             std::thread::sleep(Duration::from_millis(1));
             editor.update(&ctx);
@@ -2952,7 +3051,7 @@ mod tests {
             editor: Some(editor_with_selection()),
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
-            history: HistoryPanel::default(),
+            history: HistoryPanel,
             recent: RecentStore::default(),
             right_tab: RightTab::default(),
             tools: Tools::default(),
@@ -2975,6 +3074,7 @@ mod tests {
             script: VecDeque::new(),
             clipboard: Clipboard::new(false),
             pasting: None,
+            pending_drops: Vec::new(),
             v_down: false,
         }
     }
@@ -4436,6 +4536,223 @@ mod tests {
         app.run(Command::LoadSelectionRed, &ctx);
         assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Load Selection"));
+    }
+
+    #[test]
+    fn close_without_unsaved_changes_closes_editor() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().modified = false;
+        assert!(app.editor.is_some());
+        assert!(app.enabled(Command::Close));
+        assert!(!app.modified());
+
+        app.run(Command::Close, &ctx);
+
+        assert!(app.editor.is_none());
+        assert!(!app.enabled(Command::Close));
+        assert!(app.dialog.is_none());
+        assert!(app.separation_radius.is_none());
+    }
+
+    #[test]
+    fn close_with_unsaved_changes_shows_dialog_and_proceeds() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().modified = true;
+        assert!(app.modified());
+
+        app.run(Command::Close, &ctx);
+
+        assert!(matches!(app.dialog, Some(Dialog::UnsavedChanges { then: Then::Close })));
+        assert!(app.editor.is_some());
+
+        app.proceed(Then::Close, &ctx);
+        assert!(app.editor.is_none());
+        assert!(!app.enabled(Command::Close));
+    }
+
+    fn write_test_png(path: &Path, w: u32, h: u32) {
+        let clip = Clip {
+            bounds: [0, 0, w, h],
+            pixels: Tiled::new(w, h, [20000, 30000, 40000, 65535]),
+            profile: omapix_engine::ColorProfile::srgb(),
+            in_place: false,
+        };
+        let png = clip.to_png().expect("encode png");
+        std::fs::write(path, png).expect("write png");
+    }
+
+    #[test]
+    fn dropped_image_places_as_new_layer_centred_with_undo() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix_test_place_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dropped_layer.png");
+        write_test_png(&path, 16, 16);
+
+        let initial_layers = app.editor.as_ref().unwrap().doc.layers.len();
+        let doc_w = app.editor.as_ref().unwrap().doc.width;
+        let doc_h = app.editor.as_ref().unwrap().doc.height;
+
+        let raw = egui::RawInput {
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path.clone()))],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));
+        output.textures_delta.clear();
+
+        let started = Instant::now();
+        while app.pasting.is_some() || app.editor.as_ref().is_some_and(|e| e.busy().is_some()) {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| app.poll(ctx));
+            out.textures_delta.clear();
+            if let Some(editor) = &mut app.editor {
+                editor.update(&ctx);
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("timed out waiting for place to complete");
+            }
+        }
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.doc.layers.len(), initial_layers + 1);
+        let new_layer = editor.doc.layers.last().unwrap();
+        assert_eq!(new_layer.name, "dropped_layer");
+        assert_eq!(editor.undo_label(), Some("Place"));
+
+        // Centred: (doc_w - 16) / 2, (doc_h - 16) / 2
+        let cx = (doc_w - 16) / 2;
+        let cy = (doc_h - 16) / 2;
+        assert_eq!(new_layer.pixels.get(cx, cy)[3], 65535);
+        assert_eq!(new_layer.pixels.get(0, 0)[3], 0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn dropped_image_with_no_document_opens() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor = None;
+        assert!(app.editor.is_none());
+
+        let dir = std::env::temp_dir().join(format!("omapix_test_open_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("open_test.png");
+        write_test_png(&path, 32, 24);
+
+        let raw = egui::RawInput {
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path.clone()))],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));
+        output.textures_delta.clear();
+
+        let started = Instant::now();
+        while app.opening.is_some() {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| app.poll(ctx));
+            out.textures_delta.clear();
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("timed out waiting for open to complete");
+            }
+        }
+
+        assert!(app.editor.is_some());
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.doc.width, 32);
+        assert_eq!(editor.doc.height, 24);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn dropped_image_with_shift_held_opens_instead_of_placing() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().modified = false;
+
+        let dir = std::env::temp_dir().join(format!("omapix_test_shift_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shift_open.png");
+        write_test_png(&path, 40, 30);
+
+        let modifiers = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let raw = egui::RawInput {
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path.clone()))],
+            events: vec![egui::Event::ModifiersChanged(modifiers)],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));
+        output.textures_delta.clear();
+
+        let started = Instant::now();
+        while app.opening.is_some() {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| app.poll(ctx));
+            out.textures_delta.clear();
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("timed out waiting for open");
+            }
+        }
+
+        assert!(app.editor.is_some());
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.doc.width, 40);
+        assert_eq!(editor.doc.height, 30);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn several_dropped_images_place_each_layer() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix_test_multi_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path1 = dir.join("layer_a.png");
+        let path2 = dir.join("layer_b.png");
+        write_test_png(&path1, 16, 16);
+        write_test_png(&path2, 20, 20);
+
+        let initial_layers = app.editor.as_ref().unwrap().doc.layers.len();
+
+        let raw = egui::RawInput {
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path1.clone())), Arc::new(crate::drop::DroppedPath(path2.clone()))],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));
+        output.textures_delta.clear();
+
+        let started = Instant::now();
+        while app.pasting.is_some() || app.editor.as_ref().is_some_and(|e| e.busy().is_some()) {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| app.poll(ctx));
+            out.textures_delta.clear();
+            if let Some(editor) = &mut app.editor {
+                editor.update(&ctx);
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("timed out waiting for multi-place to complete");
+            }
+        }
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.doc.layers.len(), initial_layers + 2);
+        assert_eq!(editor.doc.layers[initial_layers].name, "layer_a");
+        assert_eq!(editor.doc.layers[initial_layers + 1].name, "layer_b");
+
+        let _ = std::fs::remove_file(&path1);
+        let _ = std::fs::remove_file(&path2);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
 
