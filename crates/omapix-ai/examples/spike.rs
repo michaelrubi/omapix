@@ -28,10 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let encoded = sam.encode(&srgb, w, h)?;
         let encode = t.elapsed();
         let t = Instant::now();
-        let logits = sam.select(&encoded, prompt)?;
+        let logits = sam.select(&encoded, &prompt, None)?;
         let select = t.elapsed();
         let t = Instant::now();
-        let coverage = omapix_engine::refine::mask_coverage(&logits, MASK_SIZE, MASK_SIZE, &image);
+        let coverage = omapix_engine::refine::mask_coverage(&logits, MASK_SIZE, MASK_SIZE, 0.0, &image);
         println!("encode {encode:?}, select {select:?}, refine {:?}", t.elapsed());
         let (ow, oh) = (900u32, 900 * h / w);
         let mut img = image::RgbImage::new(ow, oh);

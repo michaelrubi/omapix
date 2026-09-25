@@ -12,11 +12,12 @@ use crate::tiled::{TILE, Tiled};
 /// size would cost far more and look the same once scaled up.
 const WORKING: usize = 2048;
 
-/// `logits` (`lw` × `lh`, stretched over the whole image, positive inside
-/// the object) as selection coverage the size of `image`: its outline
-/// interpolated smoothly, snapped to the edges of the image's luminance
-/// with a guided filter, then scaled up to full size.
-pub fn mask_coverage(logits: &[f32], lw: usize, lh: usize, image: &Raster) -> Tiled<u16> {
+/// `logits` (`lw` × `lh`, stretched over the whole image, above
+/// `threshold` inside the object; the model's own cut-off is 0) as
+/// selection coverage the size of `image`: its outline interpolated
+/// smoothly, snapped to the edges of the image's luminance with a guided
+/// filter, then scaled up to full size.
+pub fn mask_coverage(logits: &[f32], lw: usize, lh: usize, threshold: f32, image: &Raster) -> Tiled<u16> {
     let (width, height) = (image.width() as usize, image.height() as usize);
     let k = (width.max(height) as f32 / WORKING as f32).max(1.0);
     let (gw, gh) = (((width as f32 / k).round() as usize).max(1), ((height as f32 / k).round() as usize).max(1));
@@ -46,7 +47,7 @@ pub fn mask_coverage(logits: &[f32], lw: usize, lh: usize, image: &Raster) -> Ti
         .into_par_iter()
         .map(|i| {
             let v = sample(logits, lw, lh, centre(i % gw, gw, lw), centre(i / gw, gh, lh));
-            if v > 0.0 { 1.0 } else { 0.0 }
+            if v > threshold { 1.0 } else { 0.0 }
         })
         .collect();
 
@@ -109,7 +110,7 @@ mod tests {
                 if (190.0..400.0).contains(&x) && (100.0..300.0).contains(&y) { 5.0 } else { -5.0 }
             })
             .collect();
-        let coverage = mask_coverage(&logits, lw, lh, &image);
+        let coverage = mask_coverage(&logits, lw, lh, 0.0, &image);
         assert_eq!(coverage.get(300, 200), 65535);
         assert_eq!(coverage.get(50, 50), 0);
         // Between the guess's edge and the square's, it follows the square.

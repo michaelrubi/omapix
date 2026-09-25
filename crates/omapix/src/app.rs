@@ -548,15 +548,13 @@ impl App {
             ctx.set_visuals(theme.visuals());
             self.theme = theme;
         }
-        if let Some(editor) = &mut self.editor
-            && let Some(found) = self.objects.poll(ctx, editor)
-        {
-            match found {
-                Ok(found) => {
-                    let selection = Selection::from_coverage(found.coverage);
-                    editor.set_selection("Object Selection", selection, found.how);
-                }
-                Err(e) => self.message(e, true),
+        if let Some(editor) = &mut self.editor {
+            // The threshold slider cuts the last AI selection again.
+            if let Some(commit) = self.tools.threshold_moved.take() {
+                self.objects.threshold(editor, self.tools.ai_threshold, commit);
+            }
+            if let Some(e) = self.objects.poll(ctx, editor) {
+                self.message(e, true);
             }
         }
         if let Some((purpose, rx)) = &self.picking
@@ -2126,6 +2124,17 @@ self.filters.remember(&filter);
         let Some(editor) = &mut self.editor else {
             return;
         };
+        let threshold = self.tools.ai_threshold;
+        if self.tools.tool == crate::tools::Tool::QuickSelection {
+            let how = Combine::from_modifiers(modifiers.shift, modifiers.alt);
+            match input {
+                ToolInput::StrokeBegin(p) => self.objects.begin_stroke(editor, p, how, threshold),
+                ToolInput::StrokeMove(p) => self.objects.paint(p, self.tools.settings().size / 2.0, threshold),
+                ToolInput::StrokeEnd => self.objects.end_stroke(threshold),
+                ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
+            }
+            return;
+        }
         match input {
             ToolInput::StrokeBegin(p) => {
                 let how = Combine::from_modifiers(modifiers.shift, modifiers.alt);
@@ -2157,7 +2166,7 @@ self.filters.remember(&filter);
                 let (w, h) = (editor.doc.width, editor.doc.height);
                 if self.tools.tool == crate::tools::Tool::ObjectSelection {
                     let prompt = crate::object_selection::prompt(points[0], *points.last().expect("a point"));
-                    self.objects.ask(prompt, how);
+                    self.objects.click(editor, prompt, how, threshold);
                     return;
                 }
                 if self.tools.tool == crate::tools::Tool::MagicWand {
@@ -3210,14 +3219,13 @@ impl eframe::App for App {
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
                 let idle = editor.busy().is_none();
+                // An AI selection being painted or its threshold dragged
+                // shows as it will be.
+                let selection = self.objects.preview.as_ref().or(editor.doc.selection.as_ref());
                 let outlines = if editor.hide_selection_edges || editor.view() == View::QuickMask {
                     &[][..]
                 } else {
-                    editor
-                        .doc
-                        .selection
-                        .as_ref()
-                        .map_or(&[][..], |s| &s.outlines[..])
+                    selection.map_or(&[][..], |s| &s.outlines[..])
                 };
                 let modifiers = ui.input(|i| i.modifiers);
                 // An armed Curves or Levels eyedropper, or Free Transform, takes the
@@ -3228,7 +3236,7 @@ impl eframe::App for App {
                     tool: idle,
                     alt_samples: !tools_off && tool.paints(),
                     samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
-                    brush: (!tools_off && tool.paints()).then_some(brush.size),
+                    brush: (!tools_off && tool.has_brush()).then_some(brush.size),
                     moves: !tools_off && tool == crate::tools::Tool::Move,
                     source,
                     selection: outlines,
