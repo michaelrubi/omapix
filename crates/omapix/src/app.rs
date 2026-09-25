@@ -263,7 +263,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, round_trip: bool) -> Self {
         let ctx = &cc.egui_ctx;
         // Ctrl+= / Ctrl+- zoom the image, not the interface.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -330,8 +330,10 @@ impl App {
             app.message(warnings.join("; "), true);
         }
 
-        if let Some(path) = path {
-            app.open(path, ctx);
+        match path {
+            Some(path) if round_trip => app.open_with(path, omapix_engine::io::load_round_trip, ctx),
+            Some(path) => app.open(path, ctx),
+            None => {}
         }
         app
     }
@@ -345,12 +347,22 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.open_with(path, omapix_engine::io::load, ctx);
+    }
+
+    /// Open `path` with `load` in the background.
+    fn open_with(
+        &mut self,
+        path: PathBuf,
+        load: fn(&Path) -> omapix_engine::Result<Document>,
+        ctx: &egui::Context,
+    ) {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         let target = path.clone();
         std::thread::spawn(move || {
             let started = Instant::now();
-            let result = omapix_engine::io::load(&target)
+            let result = load(&target)
                 .and_then(|mut doc| {
                     let converted = ops::prepare_for_editing(&mut doc)?;
                     Ok((doc, converted))
@@ -448,7 +460,10 @@ impl App {
             let result = match purpose {
                 Purpose::ExportTiff => export::tiff(&doc, &path).map(|_| false),
                 Purpose::ExportJpeg => export::jpeg(&doc, &path, JPEG_QUALITY).map(|_| false),
-                _ => ora::save(&doc, &path).map(|_| true),
+                // A round trip from darktable also updates its TIFF.
+                _ => ora::save(&doc, &path)
+                    .and_then(|_| doc.round_trip.as_ref().map_or(Ok(()), |tiff| export::tiff(&doc, tiff)))
+                    .map(|_| true),
             };
             log::info!("wrote {} in {:?}", path.display(), started.elapsed());
             let _ = tx.send(
@@ -566,7 +581,12 @@ impl App {
                     }
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     let verb = if native { "Saved" } else { "Exported" };
-                    self.message(format!("{verb} {name}"), false);
+                    let mut text = format!("{verb} {name}");
+                    let round_trip = self.editor.as_ref().and_then(|e| e.doc.round_trip.as_ref());
+                    if native && let Some(tiff) = round_trip.and_then(|t| t.file_name()) {
+                        text += &format!(", and {} for darktable", tiff.to_string_lossy());
+                    }
+                    self.message(text, false);
                 }
                 Err(err) => self.message(format!("{label} failed: {err}"), true),
             }
@@ -5052,6 +5072,29 @@ mod tests {
         app.run(Command::LoadSelectionRed, &ctx);
         assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Load Selection"));
+    }
+
+    #[test]
+    fn saving_a_round_trip_also_writes_the_tiff_for_darktable() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix-app-round-trip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ora, tiff) = (dir.join("IMG.ora"), dir.join("IMG.tif"));
+        let editor = app.editor.as_mut().unwrap();
+        editor.doc.saved_path = Some(ora.clone());
+        editor.doc.round_trip = Some(tiff.clone());
+
+        app.run(Command::Save, &ctx);
+        while app.file_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        assert!(ora.exists() && tiff.exists());
+        let flat = omapix_engine::io::load(&tiff).unwrap();
+        assert_eq!((flat.width, flat.height, flat.layers.len()), (600, 400, 1));
+        assert_eq!(app.status.as_ref().unwrap().0, "Saved IMG.ora, and IMG.tif for darktable");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

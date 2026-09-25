@@ -145,6 +145,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] PSD import: a flattened 16-bit .psd and a layered one (layers, groups, masks and colours as in Photoshop), and Ctrl+S asking where to save rather than overwriting the .psd
 - [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
 - [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, and how smooth it is on a 24 MP layer
+- [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -208,7 +209,9 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 
 ## 5. Workflow and files
 
-- **darktable round trip:** "Edit in Omapix" from darktable, and export back to a TIFF next to the raw file.
+- ~~**darktable round trip**~~ (done): in darktable's export module, choose the target storage "edit in Omapix" (16-bit TIFF). The image is exported beside its raw and opened in Omapix; Ctrl+S saves the layers to a .ora beside the TIFF and writes the flattened image back to the TIFF, and when Omapix quits the TIFF is imported into darktable, grouped with its raw. To retouch it again, select the TIFF and press "edit in Omapix" in the selected image[s] module: Omapix opens the layers from the .ora, and darktable redraws the thumbnail afterwards. The .ora remembers its TIFF, so saving it however it's opened keeps the TIFF up to date. `make install` adds the darktable script (`assets/darktable/omapix.lua`, loaded from `~/.config/darktable/luarc`); restart darktable to pick it up.
+  - Omapix is opened as `omapix --round-trip image.tif`, which other apps can use too.
+  - Later: opening several exports in one Omapix window, and a darkroom shortcut.
 - **Batch export:** apply a saved action (for example "resize, sharpen, JPEG") to many files.
 - ~~**Recent files** and reopening the last document~~ (done).
 - ~~**Close document**~~ (done): Ctrl+W (File › Close) closes the open image and returns to the empty start state, asking to save unsaved changes first.
