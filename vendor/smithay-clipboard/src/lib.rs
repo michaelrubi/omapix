@@ -93,6 +93,13 @@ impl Clipboard {
     }
 }
 
+/// Calls `f` with the `text/uri-list` of everything dropped on the
+/// application's windows, from the clipboard's thread. Until it's set, drops
+/// are refused. Only the first call counts.
+pub fn on_drop(f: impl Fn(String) + Send + Sync + 'static) {
+    let _ = state::ON_DROP.set(Box::new(f));
+}
+
 impl Drop for Clipboard {
     fn drop(&mut self) {
         // Shutdown smithay-clipboard.

@@ -4,9 +4,10 @@ use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::mem;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
-use sctk::data_device_manager::data_device::{DataDevice, DataDeviceHandler};
+use sctk::data_device_manager::data_device::{DataDevice, DataDeviceData, DataDeviceHandler};
 use sctk::data_device_manager::data_offer::{DataOfferError, DataOfferHandler, DragOffer};
 use sctk::data_device_manager::data_source::{CopyPasteSource, DataSourceHandler};
 use sctk::data_device_manager::{DataDeviceManagerState, WritePipe};
@@ -38,6 +39,11 @@ use sctk::reexports::protocols::wp::primary_selection::zv1::client::{
 use wayland_backend::client::ObjectId;
 
 use crate::mime::{ALLOWED_MIME_TYPES, MimeType, normalize_to_lf};
+
+/// Takes the `text/uri-list` of each drop; see [`crate::on_drop`].
+pub static ON_DROP: OnceLock<Box<dyn Fn(String) + Send + Sync>> = OnceLock::new();
+
+const URI_LIST: &str = "text/uri-list";
 
 pub struct State {
     pub primary_selection_manager_state: Option<PrimarySelectionManagerState>,
@@ -393,18 +399,52 @@ impl DataDeviceHandler for State {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &WlDataDevice,
+        device: &WlDataDevice,
         _: f64,
         _: f64,
         _: &WlSurface,
     ) {
+        let Some(offer) = device.data::<DataDeviceData>().and_then(|d| d.drag_offer()) else {
+            return;
+        };
+        let files = ON_DROP.get().is_some()
+            && offer.with_mime_types(|types| types.iter().any(|t| t == URI_LIST));
+        offer.accept_mime_type(offer.serial, files.then(|| URI_LIST.to_owned()));
+        let action = if files { DndAction::Copy } else { DndAction::None };
+        offer.set_actions(action, action);
     }
 
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
 
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
 
-    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
+        let Some(offer) = device.data::<DataDeviceData>().and_then(|d| d.drag_offer()) else {
+            return;
+        };
+        let Some(on_drop) = ON_DROP.get() else { return };
+        let Ok(read_pipe) = offer.receive(URI_LIST.to_owned()) else { return };
+        if set_non_blocking(read_pipe.as_raw_fd()).is_err() {
+            return;
+        }
+        let mut reader_buffer = [0; 4096];
+        let mut content = Vec::new();
+        let _ = self.loop_handle.insert_source(read_pipe, move |_, file, _| {
+            let file = unsafe { file.get_mut() };
+            loop {
+                match file.read(&mut reader_buffer) {
+                    Ok(0) => {
+                        on_drop(String::from_utf8_lossy(&content).into_owned());
+                        offer.finish();
+                        break PostAction::Remove;
+                    },
+                    Ok(n) => content.extend_from_slice(&reader_buffer[..n]),
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break PostAction::Continue,
+                    Err(_) => break PostAction::Remove,
+                }
+            }
+        });
+    }
 
     // The selection is finished and ready to be used.
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}

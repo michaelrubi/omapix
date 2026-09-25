@@ -255,6 +255,7 @@ impl App {
         if let Some(render_state) = &cc.wgpu_render_state {
             crate::gpu::install(render_state);
         }
+        crate::drop::listen(ctx.clone());
         let theme = Theme::load();
         ctx.set_visuals(theme.visuals());
 
@@ -2525,6 +2526,10 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::drop::take(raw_input);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         // While a text field (layer rename) has focus, keys edit the text.
@@ -4567,19 +4572,6 @@ mod tests {
         assert!(!app.enabled(Command::Close));
     }
 
-    #[derive(Debug)]
-    struct MockDrop(PathBuf);
-
-    impl egui::DroppedFile for MockDrop {
-        fn path(&self) -> &Path {
-            &self.0
-        }
-
-        fn bytes(&self) -> Result<Vec<u8>, String> {
-            std::fs::read(&self.0).map_err(|e| e.to_string())
-        }
-    }
-
     fn write_test_png(path: &Path, w: u32, h: u32) {
         let clip = Clip {
             bounds: [0, 0, w, h],
@@ -4605,7 +4597,7 @@ mod tests {
         let doc_h = app.editor.as_ref().unwrap().doc.height;
 
         let raw = egui::RawInput {
-            dropped_files: vec![Arc::new(MockDrop(path.clone()))],
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path.clone()))],
             ..Default::default()
         };
         let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));
@@ -4653,7 +4645,7 @@ mod tests {
         write_test_png(&path, 32, 24);
 
         let raw = egui::RawInput {
-            dropped_files: vec![Arc::new(MockDrop(path.clone()))],
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path.clone()))],
             ..Default::default()
         };
         let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));
@@ -4694,7 +4686,7 @@ mod tests {
             ..Default::default()
         };
         let raw = egui::RawInput {
-            dropped_files: vec![Arc::new(MockDrop(path.clone()))],
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path.clone()))],
             events: vec![egui::Event::ModifiersChanged(modifiers)],
             ..Default::default()
         };
@@ -4734,7 +4726,7 @@ mod tests {
         let initial_layers = app.editor.as_ref().unwrap().doc.layers.len();
 
         let raw = egui::RawInput {
-            dropped_files: vec![Arc::new(MockDrop(path1.clone())), Arc::new(MockDrop(path2.clone()))],
+            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path1.clone())), Arc::new(crate::drop::DroppedPath(path2.clone()))],
             ..Default::default()
         };
         let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));

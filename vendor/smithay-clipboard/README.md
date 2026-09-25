@@ -21,3 +21,10 @@ The documentation for the releases can be found on [docs.rs](https://docs.rs/smi
 
 If you have questions or want to discuss the project with us, join our chatroom on matrix:
 [#sctk:matrix.org](https://matrix.to/#/#sctk:matrix.org).
+
+## Omapix
+
+Vendored from smithay-clipboard 0.7.3 for one change: `on_drop`, which takes
+files dropped on the window. winit 0.30 doesn't implement Wayland drag and
+drop, and Hyprland gives drags only to a client's first data device, which is
+this crate's, so it's the one place a drop can be accepted.

@@ -3,6 +3,7 @@ mod blending_options;
 mod canvas;
 mod clipboard;
 mod commands;
+mod drop;
 mod editor;
 mod gpu;
 mod history_panel;
