@@ -1880,6 +1880,7 @@ dependencies = [
 name = "omapix-engine"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "image",
  "lcms2",
  "quick-xml 0.42.0",

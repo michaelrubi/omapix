@@ -130,6 +130,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Live GPU slider drags on a 24 MP retouch: opacity, Curves and Levels, Hue/Saturation, and opacity or blend mode in Blending Options, at fit and at 100 %: smooth, no flash when released
 - [ ] Channels panel: view Red, Green and Blue (click and Ctrl+2…5), Ctrl+click with Shift/Alt to load them and RGB's luminosity, Save Selection as Alpha 1 and 2, view, load and delete them, and reopen the .ora with them kept
 - [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
+- [ ] PSD import: a flattened 16-bit .psd and a layered one (layers, groups, masks and colours as in Photoshop), and Ctrl+S asking where to save rather than overwriting the .psd
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -195,7 +196,9 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - ~~**Recent files** and reopening the last document~~ (done).
 - ~~**Close document**~~ (done): Ctrl+W (File › Close) closes the open image and returns to the empty start state, asking to save unsaved changes first.
 - ~~**Dropping files onto the window**~~ (done): dropping an image onto an open document places it centred as a new layer named after the file; Shift+drop or dropping with nothing open opens it instead.
-- **PSD import**, at least flattened and simple layers, for old Photoshop work.
+- ~~**PSD import**~~ (done): opens 8- and 16-bit RGB and greyscale .psd files with their colour profile: pixel layers (names, position, opacity, visibility, blend modes, clipping and layer masks) and groups, or the flattened image for files saved without layers. Ctrl+S asks where to save, so the .psd is never overwritten.
+  - Adjustment and fill layers, text and effects aren't read. When a file has them, Photoshop's flattened image comes in as a hidden "Photoshop composite" layer on top, unless Photoshop saved it blank (Maximize Compatibility off).
+  - Later: turning Photoshop's Curves, Levels and Hue/Saturation layers into Omapix's.
 - ~~**History panel:** a list of undo steps you can click back to~~ (done).
 - ~~**Custom hotkeys**~~ (done): override any command's shortcut or tool letter from `~/.config/omapix/hotkeys.toml`, with Photoshop's shortcuts as defaults and startup warnings for clashes.
   - When there's no `hotkeys.toml` (or it's empty), Omapix writes one listing every command and tool with its default shortcut, commented out, so what can be changed is there to see and edit.
