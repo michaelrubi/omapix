@@ -745,7 +745,13 @@ impl App {
             Command::LockPosition | Command::LockAll => layer.is_some(),
             Command::LoadSelectionTransparency => !no_pixels,
             Command::LoadSelectionLayerMask => has_mask,
-            Command::Deselect | Command::InvertSelection | Command::Feather => {
+            Command::Deselect
+            | Command::InvertSelection
+            | Command::BorderSelection
+            | Command::SmoothSelection
+            | Command::ExpandSelection
+            | Command::ContractSelection
+            | Command::Feather => {
                 editor.doc.selection.is_some()
             }
             Command::FillForeground
@@ -877,10 +883,15 @@ impl App {
                     preview: true,
                 });
             }
-            Command::Feather => {
+            Command::BorderSelection
+            | Command::SmoothSelection
+            | Command::ExpandSelection
+            | Command::ContractSelection
+            | Command::Feather => {
+                let radius = modify_radius(&mut self.filters, cmd).map_or(1.0, |r| *r);
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
-                    radius: self.filters.feather_radius,
+                    radius,
                     preview: None,
                 });
             }
@@ -1074,14 +1085,33 @@ self.filters.remember(&filter);
         };
         let index = editor.active_index().unwrap_or(0);
         match command {
-            Command::Feather => {
-                self.filters.feather_radius = radius;
+            Command::BorderSelection
+            | Command::SmoothSelection
+            | Command::ExpandSelection
+            | Command::ContractSelection
+            | Command::Feather => {
+                if let Some(remembered) = modify_radius(&mut self.filters, command) {
+                    *remembered = radius;
+                }
                 self.filters.save();
                 editor.hide_selection_edges = false;
+                let label = match command {
+                    Command::BorderSelection => "Border Selection",
+                    Command::SmoothSelection => "Smooth Selection",
+                    Command::ExpandSelection => "Expand Selection",
+                    Command::ContractSelection => "Contract Selection",
+                    _ => "Feather",
+                };
                 editor.edit_in_background(
-                    "Feather",
+                    label,
                     move |doc, _| {
-                        doc.selection = doc.selection.as_ref().map(|s| s.feather(radius));
+                        doc.selection = doc.selection.as_ref().map(|s| match command {
+                            Command::BorderSelection => s.border(radius),
+                            Command::SmoothSelection => s.smooth(radius),
+                            Command::ExpandSelection => s.expand(radius),
+                            Command::ContractSelection => s.contract(radius),
+                            _ => s.feather(radius),
+                        });
                     },
                     ctx,
                 );
@@ -1258,7 +1288,13 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::Deselect, None);
                 self.menu_item(ui, Command::InvertSelection, None);
                 ui.separator();
-                self.menu_item(ui, Command::Feather, None);
+                ui.menu_button("Modify", |ui| {
+                    self.menu_item(ui, Command::BorderSelection, None);
+                    self.menu_item(ui, Command::SmoothSelection, None);
+                    self.menu_item(ui, Command::ExpandSelection, None);
+                    self.menu_item(ui, Command::ContractSelection, None);
+                    self.menu_item(ui, Command::Feather, None);
+                });
                 ui.separator();
                 ui.menu_button("Load Selection", |ui| {
                     self.menu_item(ui, Command::LoadSelectionRed, None);
@@ -1500,7 +1536,14 @@ self.filters.remember(&filter);
                         });
                         ui.add_space(4.0);
                     }
-                    radius_field(ui, radius);
+                    let (label, range) = match command {
+                        Command::BorderSelection => ("Width", 1.0..=200.0),
+                        Command::SmoothSelection
+                        | Command::ExpandSelection
+                        | Command::ContractSelection => ("Radius", 1.0..=100.0),
+                        _ => ("Radius", 0.1..=250.0),
+                    };
+                    radius_field(ui, radius, label, range);
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let ok = ui.button("OK").clicked()
@@ -1511,6 +1554,10 @@ self.filters.remember(&filter);
                         if ui.button("Defaults").clicked() {
                             *radius = match command {
                                 Command::Feather => defaults.feather_radius,
+                                Command::BorderSelection => defaults.border_width,
+                                Command::SmoothSelection => defaults.smooth_radius,
+                                Command::ExpandSelection => defaults.expand_radius,
+                                Command::ContractSelection => defaults.contract_radius,
                                 Command::FrequencySeparation => {
                                     defaults.separation_radius.or(auto_separation).unwrap_or(*radius)
                                 }
@@ -1531,7 +1578,7 @@ self.filters.remember(&filter);
                     ui.add_space(8.0);
                     match filter {
                         LayerFilter::GaussianBlur { radius } | LayerFilter::HighPass { radius } => {
-                            radius_field(ui, radius);
+                            radius_field(ui, radius, "Radius", 0.1..=250.0);
                         }
                         LayerFilter::UnsharpMask {
                             amount,
@@ -1547,7 +1594,7 @@ self.filters.remember(&filter);
                                 ui.add(slider);
                             });
                             *amount = percent / 100.0;
-                            radius_field(ui, radius);
+                            radius_field(ui, radius, "Radius", 0.1..=250.0);
                             ui.horizontal(|ui| {
                                 ui.label("Threshold");
                                 let slider = egui::Slider::new(threshold, 0.0..=255.0)
@@ -2409,7 +2456,7 @@ fn smart_sharpen_controls(ui: &mut Ui, options: &mut SmartSharpenOptions, hint: 
                 .fixed_decimals(0),
         );
     });
-    radius_field(ui, &mut options.radius);
+    radius_field(ui, &mut options.radius, "Radius", 0.1..=250.0);
     ui.horizontal(|ui| {
         ui.label("Reduce Noise");
         ui.add(
@@ -2516,12 +2563,25 @@ fn separation_radius(editor: &Editor) -> f32 {
     (longest / 700.0 * 10.0).round() / 10.0
 }
 
-/// A radius in pixels, for filter and radius dialogs.
-fn radius_field(ui: &mut Ui, radius: &mut f32) {
+/// Select › Modify's remembered radius (Border's width) for `command`.
+fn modify_radius(filters: &mut FilterSettings, command: Command) -> Option<&mut f32> {
+    Some(match command {
+        Command::BorderSelection => &mut filters.border_width,
+        Command::SmoothSelection => &mut filters.smooth_radius,
+        Command::ExpandSelection => &mut filters.expand_radius,
+        Command::ContractSelection => &mut filters.contract_radius,
+        Command::Feather => &mut filters.feather_radius,
+        _ => return None,
+    })
+}
+
+/// A radius (or with `label`, a width) in pixels, for filter and radius
+/// dialogs.
+fn radius_field(ui: &mut Ui, radius: &mut f32, label: &str, range: std::ops::RangeInclusive<f32>) {
     ui.horizontal(|ui| {
-        ui.label("Radius");
+        ui.label(label);
         let value = egui::DragValue::new(radius)
-            .range(0.1..=250.0)
+            .range(range)
             .speed(0.1)
             .suffix(" px")
             .fixed_decimals(1);
@@ -5045,6 +5105,79 @@ mod tests {
         }
         app.run(Command::FrequencySeparation, &ctx);
         assert!(matches!(app.dialog, Some(Dialog::Radius { radius, .. }) if radius == 3.5));
+
+        // Modify commands restore their defaults.
+        app.defaults.border_width = 25.0;
+        app.filters.border_width = 12.0;
+        app.dialog = None;
+        app.run(Command::BorderSelection, &ctx);
+        frame(&mut app, None);
+        let button = frame(&mut app, None).expect("a Defaults button");
+        frame(&mut app, Some(button));
+        frame(&mut app, Some(button));
+        assert!(matches!(app.dialog, Some(Dialog::Radius { radius, .. }) if radius == 25.0));
+    }
+
+    #[test]
+    fn select_modify_commands_run_through_dialogs() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let commands = [
+            (Command::BorderSelection, 10.0, 15.0, "Border Selection"),
+            (Command::SmoothSelection, 5.0, 8.0, "Smooth Selection"),
+            (Command::ExpandSelection, 5.0, 12.0, "Expand Selection"),
+            (Command::ContractSelection, 5.0, 6.0, "Contract Selection"),
+            (Command::Feather, 10.0, 4.0, "Feather"),
+        ];
+
+        let press_enter = |app: &mut App| {
+            let input = egui::RawInput::default();
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+        };
+
+        for (cmd, default_radius, custom_radius, undo_label) in commands {
+            assert!(app.enabled(cmd));
+            app.run(cmd, &ctx);
+            assert!(
+                matches!(app.dialog, Some(Dialog::Radius { command, radius, .. }) if command == cmd && radius == default_radius),
+                "expected dialog for {cmd:?} with radius {default_radius}"
+            );
+
+            if let Some(Dialog::Radius { radius, .. }) = &mut app.dialog {
+                *radius = custom_radius;
+            }
+
+            press_enter(&mut app);
+            assert!(app.dialog.is_none());
+
+            let editor = app.editor.as_mut().unwrap();
+            while editor.busy().is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+                editor.update(&ctx);
+            }
+
+            assert_eq!(editor.undo_label(), Some(undo_label));
+
+            match cmd {
+                Command::BorderSelection => assert_eq!(app.filters.border_width, custom_radius),
+                Command::SmoothSelection => assert_eq!(app.filters.smooth_radius, custom_radius),
+                Command::ExpandSelection => assert_eq!(app.filters.expand_radius, custom_radius),
+                Command::ContractSelection => assert_eq!(app.filters.contract_radius, custom_radius),
+                Command::Feather => assert_eq!(app.filters.feather_radius, custom_radius),
+                _ => {}
+            }
+        }
     }
 
     #[test]

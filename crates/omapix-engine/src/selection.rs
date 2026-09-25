@@ -265,6 +265,19 @@ impl Selection {
     /// Soften the edge (Photoshop's Select › Modify › Feather), `radius`
     /// being the blur's standard deviation in pixels.
     pub fn feather(&self, radius: f32) -> Selection {
+        if radius < 0.1 || self.width() == 0 || self.height() == 0 {
+            return self.clone();
+        }
+        let values: Vec<u16> = self
+            .blur_coverage(radius)
+            .into_par_iter()
+            .map(|v| v.round().clamp(0.0, MAX) as u16)
+            .collect();
+        Selection::from_coverage(Tiled::from_slice(self.width(), self.height(), 0, &values))
+    }
+
+    /// Blur the selection's coverage buffer with standard deviation `radius`.
+    fn blur_coverage(&self, radius: f32) -> Vec<f32> {
         let (w, h) = (self.width() as usize, self.height() as usize);
         let buf: Vec<[f32; 4]> = self
             .coverage
@@ -273,11 +286,91 @@ impl Selection {
             .map(|v| [f32::from(v), 0.0, 0.0, 0.0])
             .collect();
         let blurred = crate::filters::blur_buffer(buf, w, h, radius);
-        let values: Vec<u16> = blurred
+        blurred.into_par_iter().map(|v| v[0]).collect()
+    }
+
+    /// Round off jagged corners and remove specks smaller than `radius`
+    /// (Photoshop's Select › Modify › Smooth).
+    pub fn smooth(&self, radius: f32) -> Selection {
+        if radius < 0.1 || self.width() == 0 || self.height() == 0 {
+            return self.clone();
+        }
+        let values: Vec<u16> = self
+            .blur_coverage(radius)
             .into_par_iter()
-            .map(|v| v[0].round().clamp(0.0, MAX) as u16)
+            .map(|v| if v >= HALF { u16::MAX } else { 0 })
             .collect();
         Selection::from_coverage(Tiled::from_slice(self.width(), self.height(), 0, &values))
+    }
+
+    /// Grow the selection by `radius` pixels with a round structuring element
+    /// (Photoshop's Select › Modify › Expand).
+    pub fn expand(&self, radius: f32) -> Selection {
+        if radius <= 0.0 || radius.is_nan() || self.width() == 0 || self.height() == 0 {
+            return self.clone();
+        }
+        let (w, h) = (self.width() as usize, self.height() as usize);
+        let orig_cov = self.coverage.to_vec();
+
+        // Binary feature map of seeds (> 50% coverage).
+        let mut buf: Vec<f32> = orig_cov
+            .par_iter()
+            .map(|&v| if f32::from(v) > HALF { 0.0 } else { f32::INFINITY })
+            .collect();
+
+        // 2D Euclidean distance transform via separable 1D passes:
+        // Pass 1: columns (transposed so each column is a contiguous row).
+        let mut t = transpose_f32(&buf, w, h);
+        edt_rows(&mut t, h);
+
+        // Pass 2: rows.
+        buf = transpose_f32(&t, h, w);
+        edt_rows(&mut buf, w);
+
+        let values: Vec<u16> = buf
+            .into_par_iter()
+            .zip(orig_cov)
+            .map(|(d_sq, orig)| {
+                let val = if d_sq <= 0.0 {
+                    u16::MAX
+                } else {
+                    let d = d_sq.sqrt();
+                    if d <= radius - 0.5 {
+                        u16::MAX
+                    } else if d >= radius + 0.5 {
+                        0
+                    } else {
+                        let t = radius + 0.5 - d;
+                        (t.clamp(0.0, 1.0) * MAX).round() as u16
+                    }
+                };
+                val.max(orig)
+            })
+            .collect();
+
+        Selection::from_coverage(Tiled::from_slice(self.width(), self.height(), 0, &values))
+    }
+
+    /// Shrink the selection by `radius` pixels with a round structuring element
+    /// (Photoshop's Select › Modify › Contract).
+    pub fn contract(&self, radius: f32) -> Selection {
+        self.invert().expand(radius).invert()
+    }
+
+    /// A band `width` pixels wide centred on the edge with softened edges
+    /// (Photoshop's Select › Modify › Border).
+    pub fn border(&self, width: f32) -> Selection {
+        if width <= 0.0 || width.is_nan() || self.width() == 0 || self.height() == 0 || self.is_empty() {
+            return Selection::from_coverage(Tiled::new(self.width(), self.height(), 0));
+        }
+        let half = width * 0.5;
+        let ring = self.expand(half).combine(&self.contract(half), Combine::Subtract);
+        let soften = (half * 0.5).min(1.0);
+        if soften >= 0.1 {
+            ring.feather(soften)
+        } else {
+            ring
+        }
     }
 
     /// Magic Wand: select similar colours starting from `start = (x, y)`.
@@ -811,6 +904,86 @@ fn fill_ellipse(width: u32, height: u32, cx: f32, cy: f32, rx: f32, ry: f32) -> 
     out
 }
 
+/// Transpose a row-major 2D single-channel buffer of size `w` × `h` to `h` × `w`.
+fn transpose_f32(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
+    const BLOCK: usize = 64;
+    out.par_chunks_mut(h * BLOCK)
+        .enumerate()
+        .for_each(|(bi, block)| {
+            let x0 = bi * BLOCK;
+            let count = (w - x0).min(BLOCK);
+            for y in 0..h {
+                let line = &src[y * w..(y + 1) * w];
+                for (dx, out_row) in block.chunks_mut(h).take(count).enumerate() {
+                    out_row[y] = line[x0 + dx];
+                }
+            }
+        });
+    out
+}
+
+/// 1D Euclidean distance transform along every row in parallel.
+fn edt_rows(buf: &mut [f32], len: usize) {
+    buf.par_chunks_mut(len).for_each(|row| {
+        let mut v = vec![0usize; len];
+        let mut z = vec![0.0f64; len + 1];
+        let mut d = vec![0.0f32; len];
+        edt_1d(row, &mut d, &mut v, &mut z);
+        row.copy_from_slice(&d);
+    });
+}
+
+/// 1D squared Euclidean distance transform (Felzenszwalb & Huttenlocher).
+fn edt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f64]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let Some(first_q) = f.iter().position(|v| v.is_finite()) else {
+        d.fill(f32::INFINITY);
+        return;
+    };
+
+    let mut k: usize = 0;
+    v[0] = first_q;
+    z[0] = f64::NEG_INFINITY;
+    z[1] = f64::INFINITY;
+
+    for q in (first_q + 1)..n {
+        let f_q = f[q];
+        if !f_q.is_finite() {
+            continue;
+        }
+        let f_q = f_q as f64;
+        let q_f = q as f64;
+        let vk = v[k];
+        let mut s = ((f_q + q_f * q_f) - (f[vk] as f64 + (vk as f64).powi(2)))
+            / (2.0 * (q_f - vk as f64));
+        while k > 0 && s <= z[k] {
+            k -= 1;
+            let vk = v[k];
+            s = ((f_q + q_f * q_f) - (f[vk] as f64 + (vk as f64).powi(2)))
+                / (2.0 * (q_f - vk as f64));
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f64::INFINITY;
+    }
+
+    let mut k = 0;
+    for (q, out) in d.iter_mut().enumerate() {
+        let q_f = q as f64;
+        while z[k + 1] < q_f {
+            k += 1;
+        }
+        let vk = v[k];
+        let diff = q_f - vk as f64;
+        *out = (diff * diff + f[vk] as f64) as f32;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1194,5 +1367,88 @@ mod tests {
         let rect = Selection::rectangle(w, h, (50.0, 50.0), (100.0, 100.0));
         assert!(!rect.is_empty());
         assert!(!rect.is_all());
+    }
+
+    #[test]
+    fn expand_and_contract_change_disc_size() {
+        // Circle centered at (50.5, 50.5) with radius 20 (bounding box 30.5 to 70.5).
+        let s = Selection::ellipse(100, 100, (30.5, 30.5), (70.5, 70.5));
+        assert_eq!(s.at(50, 50), 1.0);
+        let orig_edge = s.at(50, 30);
+        assert!(orig_edge > 0.0 && orig_edge < 1.0, "orig edge: {orig_edge}");
+
+        // Expand by 10 px -> radius 30 (bounding box 20.5 to 80.5)
+        let expanded = s.expand(10.0);
+        assert_eq!(expanded.at(50, 50), 1.0);
+        assert_eq!(expanded.at(50, 30), 1.0); // Previously on edge, now inside
+        assert_eq!(expanded.at(50, 25), 1.0); // Inside new radius 30
+        let exp_edge = expanded.at(50, 20);
+        assert!(exp_edge > 0.3 && exp_edge < 0.7, "expanded edge: {exp_edge}");
+        assert_eq!(expanded.at(50, 15), 0.0); // Outside new radius 30
+
+        // Contract by 5 px -> radius 15 (bounding box 35.5 to 65.5)
+        let contracted = s.contract(5.0);
+        assert_eq!(contracted.at(50, 50), 1.0);
+        assert_eq!(contracted.at(50, 40), 1.0); // Inside radius 15
+        assert_eq!(contracted.at(50, 36), 1.0); // Inside radius 15
+        let con_edge = contracted.at(50, 35);
+        assert!(con_edge > 0.0 && con_edge < 1.0, "contracted edge: {con_edge}");
+        assert_eq!(contracted.at(50, 34), 0.0); // Outside radius 15
+        assert_eq!(contracted.at(50, 30), 0.0); // Outside radius 15
+
+        // Check outline radii: original ~20 px, expanded ~30 px, contracted ~15 px
+        assert_eq!(expanded.outlines.len(), 1);
+        for &(x, y) in &expanded.outlines[0] {
+            let r = (x - 50.0).hypot(y - 50.0);
+            assert!((r - 30.0).abs() < 1.5, "expanded outline point ({x}, {y}) r={r}");
+        }
+        assert_eq!(contracted.outlines.len(), 1);
+        for &(x, y) in &contracted.outlines[0] {
+            let r = (x - 50.0).hypot(y - 50.0);
+            assert!((r - 15.0).abs() < 1.5, "contracted outline point ({x}, {y}) r={r}");
+        }
+    }
+
+    #[test]
+    fn smooth_removes_specks_and_rounds_corners() {
+        let mut coverage = Tiled::new(100, 100, 0u16);
+        // 2x2 speck at (10, 10)
+        coverage.tile_mut(0, 0)[10 * TILE as usize + 10] = u16::MAX;
+        coverage.tile_mut(0, 0)[10 * TILE as usize + 11] = u16::MAX;
+        coverage.tile_mut(0, 0)[11 * TILE as usize + 10] = u16::MAX;
+        coverage.tile_mut(0, 0)[11 * TILE as usize + 11] = u16::MAX;
+
+        let s = Selection::from_coverage(coverage);
+        let rect = Selection::rectangle(100, 100, (40.0, 40.0), (70.0, 70.0));
+        let combined = s.combine(&rect, Combine::Add);
+        assert_eq!(combined.at(10, 10), 1.0);
+        assert_eq!(combined.at(55, 55), 1.0);
+
+        let smoothed = combined.smooth(4.0);
+        // Specks removed
+        assert_eq!(smoothed.at(10, 10), 0.0);
+        assert_eq!(smoothed.at(11, 11), 0.0);
+        // Interior of square still selected
+        assert_eq!(smoothed.at(55, 55), 1.0);
+        // Sharp 90-degree corner at (40, 40) is rounded off
+        assert_eq!(smoothed.at(40, 40), 0.0);
+    }
+
+    #[test]
+    fn border_is_a_ring() {
+        // Circle centered at (50.5, 50.5) with radius 20
+        let s = Selection::ellipse(100, 100, (30.5, 30.5), (70.5, 70.5));
+        let b = s.border(10.0);
+
+        // Center should be empty (hollow hole in the ring)
+        assert_eq!(b.at(50, 50), 0.0);
+        // Outside the outer border should be empty
+        assert_eq!(b.at(50, 15), 0.0);
+        assert_eq!(b.at(50, 85), 0.0);
+        // On the original edge (radius 20), coverage should be high
+        assert!(b.at(50, 30) > 0.8, "edge coverage: {}", b.at(50, 30));
+        assert!(b.at(50, 70) > 0.8, "edge coverage: {}", b.at(50, 70));
+        // Ring should have both an outer outline and an inner hole outline
+        assert_eq!(b.outlines.len(), 2, "outlines: {:?}", b.outlines);
     }
 }
