@@ -75,11 +75,7 @@ impl HistoryPanel {
                         theme.dark_foreground
                     };
 
-                    let text_colour = if is_active {
-                        theme.foreground
-                    } else if response.hovered() {
-                        theme.foreground
-                    } else if is_future {
+                    let text_colour = if is_future && !is_active && !response.hovered() {
                         theme.dark_foreground
                     } else {
                         theme.foreground

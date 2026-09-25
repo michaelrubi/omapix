@@ -54,6 +54,12 @@ pub enum Command {
     LoadSelectionLuminosity,
     LoadSelectionTransparency,
     LoadSelectionLayerMask,
+    SaveSelection,
+    DeleteChannel,
+    ViewComposite,
+    ViewRed,
+    ViewGreen,
+    ViewBlue,
     FillForeground,
     FillBackground,
     Clear,
@@ -79,6 +85,7 @@ pub enum Command {
     ActualPixels,
     ReopenLast,
     ShowLayers,
+    ShowChannels,
     ShowHistory,
 }
 
@@ -149,6 +156,12 @@ impl Command {
         Command::LoadSelectionLuminosity,
         Command::LoadSelectionTransparency,
         Command::LoadSelectionLayerMask,
+        Command::SaveSelection,
+        Command::DeleteChannel,
+        Command::ViewComposite,
+        Command::ViewRed,
+        Command::ViewGreen,
+        Command::ViewBlue,
         Command::FillForeground,
         Command::FillBackground,
         Command::Clear,
@@ -174,6 +187,7 @@ impl Command {
         Command::ActualPixels,
         Command::ReopenLast,
         Command::ShowLayers,
+        Command::ShowChannels,
         Command::ShowHistory,
     ];
 
@@ -240,6 +254,10 @@ impl Command {
         Command::ZoomOut,
         Command::FitOnScreen,
         Command::ActualPixels,
+        Command::ViewComposite,
+        Command::ViewRed,
+        Command::ViewGreen,
+        Command::ViewBlue,
     ];
 
     pub fn label(self) -> &'static str {
@@ -294,6 +312,12 @@ impl Command {
             Command::LoadSelectionLuminosity => "Luminosity",
             Command::LoadSelectionTransparency => "Transparency",
             Command::LoadSelectionLayerMask => "Layer Mask",
+            Command::SaveSelection => "Save Selection",
+            Command::DeleteChannel => "Delete Channel",
+            Command::ViewComposite => "RGB",
+            Command::ViewRed => "Red",
+            Command::ViewGreen => "Green",
+            Command::ViewBlue => "Blue",
             Command::FillForeground => "Fill with Foreground",
             Command::FillBackground => "Fill with Background",
             Command::Clear => "Clear",
@@ -318,6 +342,7 @@ impl Command {
             Command::FitOnScreen => "Fit on Screen",
             Command::ActualPixels => "100%",
             Command::ShowLayers => "Layers",
+            Command::ShowChannels => "Channels",
             Command::ShowHistory => "History",
         }
     }
@@ -373,6 +398,10 @@ impl Command {
             Command::ZoomOut => s(CMD, Key::Minus),
             Command::FitOnScreen => s(CMD, Key::Num0),
             Command::ActualPixels => s(CMD, Key::Num1),
+            Command::ViewComposite => s(CMD, Key::Num2),
+            Command::ViewRed => s(CMD, Key::Num3),
+            Command::ViewGreen => s(CMD, Key::Num4),
+            Command::ViewBlue => s(CMD, Key::Num5),
             _ => None,
         }
     }

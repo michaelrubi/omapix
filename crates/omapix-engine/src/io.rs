@@ -116,8 +116,7 @@ pub fn decode_image(bytes: &[u8]) -> Result<(Raster, ColorProfile)> {
 fn decode<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<(Raster, ColorProfile, u8)> {
     let mut decoder = reader.into_decoder()?;
     let icc = decoder.icc_profile()?;
-    let source_bits =
-        (decoder.color_type().bytes_per_pixel() / decoder.color_type().channel_count() * 8) as u8;
+    let source_bits = decoder.color_type().bytes_per_pixel() / decoder.color_type().channel_count() * 8;
     let image = image::DynamicImage::from_decoder(decoder)?.into_rgba16();
     let (width, height) = image.dimensions();
     let pixels = image.pixels().map(|p| p.0).collect();
