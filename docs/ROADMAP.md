@@ -118,6 +118,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
 - [x] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
 - [x] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
+- [ ] Layer locks: Lock All (`Ctrl+/`), Lock Image Pixels and Lock Position: buttons and shortcuts, refusing edits with messages, Move tool blocked, and OpenRaster round trip
 - [x] Alt+click on a group's triangle: opens or closes that group and every group inside it, and Alt+click between rows still clips
 - [x] Add Noise: dialog controls (Amount, Uniform/Gaussian, Monochromatic, Grain Size, Roughness, shadow/highlight falloff), live preview, and the new Grain layer in Overlay mode
 - [x] Selection edges: Ctrl+H hides marching ants while keeping selection, status bar notes it, Omapix goes idle, and a new selection shows them again
@@ -137,7 +138,8 @@ The UI has been tested through the same code paths with scripts
 - ~~**Retouching setups as groups**~~ (done): Retouch › Frequency Separation now puts its two layers in a Pass Through "Frequency Separation" group, so hiding the group shows the image before. Retouch › Dodge & Burn Curves makes the pro setup in one step: a "Dodge & Burn" group with a "Dodge" Curves layer (midtones 50 % → 65 %) above a "Burn" one (50 % → 35 %), each with a black mask. It selects the Dodge mask, ready to paint white with a soft, low-opacity brush; select Burn to darken. The grey Soft Light Dodge & Burn Layer is still there too.
   - Later: choosing how strong the curves are, and Luminosity mode for either layer if darkening shifts colour too much (both can be set by hand for now).
 - ~~**Lock transparent pixels**~~ (done): `/` (Layer › Lock Transparent Pixels, or the lock button under Opacity) locks the selected layers' transparency, as in Photoshop. Brushes, clone and healing then change only colour, as if the pixels were opaque, keeping each pixel's transparency; fills do the same. The eraser and Delete paint the background colour instead. Locked rows show a lock. Saved in OpenRaster as `omapix:lock-alpha`.
-  - Later: Lock All, Lock Image Pixels and Lock Position; filters and the Move tool keeping transparency too.
+  - ~~Lock All, Lock Image Pixels and Lock Position~~ (done).
+  - Later: filters and the Move tool keeping transparency too.
 - ~~**Elliptical marquee**~~ (done): Shift+M switches between the rectangular and elliptical marquees, and Shift constrains either to a square or circle.
 - ~~**Magic Wand**~~ (done): `W` picks the Magic Wand (grouped with Object Selection). Click to select similar colours, with Tolerance (0–255), Anti-alias, Contiguous and Sample All Layers in the options bar, and Shift/Alt to add, subtract and intersect as with the marquees. Click outside the canvas deselects. Smooth anti-aliased edges feed Feather and layer masks directly.
 - **Object Selection** (Photoshop's "smart" select, `W`): drag a rough box or lasso around something (a person, a face, hair) and it selects just that object. Needs a local segmentation model such as SAM run through ONNX Runtime, so it shares groundwork with the AI retouching in section 7 and is best built alongside it.

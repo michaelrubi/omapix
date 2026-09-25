@@ -28,6 +28,10 @@ const CARET_RIGHT: &str = "\u{f0da}";
 const CARET_DOWN: &str = "\u{f0d7}";
 const CLIPPED: &str = "\u{f149}";
 const LOCK: &str = "\u{f023}";
+const LOCK_OUTLINE: &str = "\u{f0340}";
+const LOCK_TRANSPARENT: &str = "\u{f0128}";
+const LOCK_PIXELS: &str = "\u{f1fc}";
+const LOCK_POSITION: &str = "\u{f047}";
 
 /// How far each level of group nesting is indented, in points.
 const INDENT: f32 = 14.0;
@@ -269,28 +273,32 @@ impl LayersPanel {
         let mut opacity = layer.opacity * 100.0;
         let id = editor.active;
         let is_group = layer.is_group;
-        let (lockable, locked) = (layer.has_pixels(), layer.lock_alpha);
+        let can_modify = layer.can_modify();
+        let locks = layer.locks;
+        let has_pixels = layer.has_pixels();
 
-        ComboBox::from_id_salt("blend-mode")
-            .selected_text(blend.name())
-            .width(ui.available_width())
-            .height(600.0)
-            .show_ui(ui, |ui| {
-                if is_group {
-                    let mode = BlendMode::PassThrough;
-                    ui.selectable_value(&mut blend, mode, mode.name());
-                    ui.separator();
-                }
-                for (i, group) in BlendMode::MENU.iter().enumerate() {
-                    if i > 0 {
+        ui.add_enabled_ui(can_modify, |ui| {
+            ComboBox::from_id_salt("blend-mode")
+                .selected_text(blend.name())
+                .width(ui.available_width())
+                .height(600.0)
+                .show_ui(ui, |ui| {
+                    if is_group {
+                        let mode = BlendMode::PassThrough;
+                        ui.selectable_value(&mut blend, mode, mode.name());
                         ui.separator();
                     }
-                    for &mode in *group {
-                        ui.selectable_value(&mut blend, mode, mode.name());
+                    for (i, group) in BlendMode::MENU.iter().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        for &mode in *group {
+                            ui.selectable_value(&mut blend, mode, mode.name());
+                        }
                     }
-                }
-            });
-        if blend != layer.blend {
+                });
+        });
+        if can_modify && blend != layer.blend {
             editor.edit("Blend Mode", |doc, _| {
                 if let Some(l) = doc.layer_mut(id) {
                     l.blend = blend;
@@ -298,28 +306,34 @@ impl LayersPanel {
             });
         }
 
-        ui.horizontal(|ui| {
-            ui.label("Opacity");
-            let slider = Slider::new(&mut opacity, 0.0..=100.0)
-                .suffix("%")
-                .fixed_decimals(0);
-            if ui.add(slider).changed() {
-                editor.edit_live("Opacity", |doc| {
-                    if let Some(l) = doc.layer_mut(id) {
-                        l.opacity = opacity / 100.0;
-                    }
-                });
-            }
+        ui.add_enabled_ui(can_modify, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Opacity");
+                let slider = Slider::new(&mut opacity, 0.0..=100.0)
+                    .suffix("%")
+                    .fixed_decimals(0);
+                if ui.add(slider).changed() {
+                    editor.edit_live("Opacity", |doc| {
+                        if let Some(l) = doc.layer_mut(id) {
+                            l.opacity = opacity / 100.0;
+                        }
+                    });
+                }
+            });
         });
         ui.horizontal(|ui| {
             ui.label("Lock");
-            let button = Button::selectable(locked, LOCK);
-            if ui
-                .add_enabled(lockable, button)
-                .on_hover_text("Lock transparent pixels (/)")
-                .clicked()
-            {
-                self.command = Some(Command::LockTransparent);
+            let buttons = [
+                (LOCK_TRANSPARENT, locks.transparency, has_pixels, "Lock transparent pixels (/)", Command::LockTransparent),
+                (LOCK_PIXELS, locks.pixels, has_pixels, "Lock image pixels", Command::LockPixels),
+                (LOCK_POSITION, locks.position, true, "Lock position", Command::LockPosition),
+                (LOCK, locks.all, true, "Lock all (Ctrl+/)", Command::LockAll),
+            ];
+            for (icon, locked, enabled, tip, cmd) in buttons {
+                let button = Button::selectable(locked, icon);
+                if ui.add_enabled(enabled, button).on_hover_text(tip).clicked() {
+                    self.command = Some(cmd);
+                }
             }
         });
     }
@@ -454,7 +468,7 @@ impl LayersPanel {
         let depth = editor.doc.depth(id);
         let clipped = editor.doc.clip_base(id).is_some();
         let clip_base = editor.doc.is_clip_base(id);
-        let locked = editor.doc.layer(id).is_some_and(|l| l.lock_alpha);
+        let locks = editor.doc.layer(id).map(|l| l.locks).unwrap_or_default();
         // Shown only if every group it's in is shown too.
         let doc = &editor.doc;
         let shown = visible && ancestors(doc, id).all(|g| doc.layer(g).is_some_and(|l| l.visible));
@@ -654,14 +668,19 @@ impl LayersPanel {
 
                         let name_response =
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if locked {
+                                if locks.any() {
+                                    let (icon, tooltip) = if locks.all {
+                                        (LOCK, "All locked")
+                                    } else {
+                                        (LOCK_OUTLINE, "Partially locked")
+                                    };
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(LOCK).small().color(theme.dark_foreground),
+                                            RichText::new(icon).small().color(theme.dark_foreground),
                                         )
                                         .selectable(false),
                                     )
-                                    .on_hover_text("Transparent pixels locked");
+                                    .on_hover_text(tooltip);
                                 }
                                 if blend != BlendMode::Normal && blend != BlendMode::PassThrough {
                                     ui.add(

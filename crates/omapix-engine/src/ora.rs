@@ -25,7 +25,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::blend::BlendMode;
-use crate::layer::{Layer, Mask};
+use crate::layer::{Layer, Locks, Mask};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::{ColorProfile, Document, Error, Pixel, Result};
 
@@ -172,8 +172,17 @@ fn write_stack(xml: &mut String, doc: &Document, encoded: &[Encoded], parent: Op
         if layer.clipped {
             xml.push_str(" omapix:clipped=\"true\"");
         }
-        if layer.lock_alpha {
+        if layer.locks.transparency {
             xml.push_str(" omapix:lock-alpha=\"true\"");
+        }
+        if layer.locks.pixels {
+            xml.push_str(" omapix:lock-pixels=\"true\"");
+        }
+        if layer.locks.position {
+            xml.push_str(" omapix:lock-position=\"true\"");
+        }
+        if layer.locks.all {
+            xml.push_str(" omapix:lock-all=\"true\"");
         }
         if let Some(blend_if) = layer.blend_if.filter(|b| !b.is_neutral()) {
             let json = serde_json::to_string(&blend_if).expect("blend-if always serialises");
@@ -330,7 +339,7 @@ struct LayerEntry {
     adjustment: Option<crate::adjust::Adjustment>,
     blend_if: Option<crate::layer::BlendIf>,
     clipped: bool,
-    lock_alpha: bool,
+    locks: Locks,
     /// The entry of the group it's in.
     parent: Option<usize>,
 }
@@ -420,7 +429,12 @@ fn parse_stack(xml: &str) -> Result<(u32, u32, Vec<LayerEntry>)> {
                 .get("omapix:blend-if")
                 .and_then(|json| serde_json::from_str(json).ok()),
             clipped: attrs.get("omapix:clipped").is_some_and(|v| v == "true"),
-            lock_alpha: attrs.get("omapix:lock-alpha").is_some_and(|v| v == "true"),
+            locks: Locks {
+                transparency: attrs.get("omapix:lock-alpha").is_some_and(|v| v == "true"),
+                pixels: attrs.get("omapix:lock-pixels").is_some_and(|v| v == "true"),
+                position: attrs.get("omapix:lock-position").is_some_and(|v| v == "true"),
+                all: attrs.get("omapix:lock-all").is_some_and(|v| v == "true"),
+            },
             parent: open.last().copied().flatten(),
         });
         if is_group && has_children {
@@ -518,7 +532,7 @@ pub fn load(path: &Path) -> Result<Document> {
                 layer.adjustment = e.adjustment.clone();
                 layer.blend_if = e.blend_if;
                 layer.clipped = e.clipped;
-                layer.lock_alpha = e.lock_alpha;
+                layer.locks = e.locks;
                 if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
                     let (mw, mh, samples, _) = decode_png(mask_png, false)?;
                     let area = (
@@ -596,7 +610,10 @@ mod tests {
             h,
         ));
         doc.layers.last_mut().unwrap().clipped = true;
-        doc.layers[1].lock_alpha = true;
+        doc.layers[0].locks.transparency = true;
+        doc.layers[1].locks.pixels = true;
+        doc.layers[2].locks.position = true;
+        doc.layers[3].locks.all = true;
         // A small, empty-ish layer to exercise cropping and empty layers.
         let id = doc.next_layer_id();
         doc.layers.push(Layer::empty(id, "Empty", w, h));
@@ -619,7 +636,7 @@ mod tests {
             assert_eq!(a.mask.is_some(), b.mask.is_some());
             assert_eq!(a.adjustment, b.adjustment);
             assert_eq!(a.blend_if, b.blend_if);
-            assert_eq!(a.lock_alpha, b.lock_alpha);
+            assert_eq!(a.locks, b.locks);
             assert_eq!(a.clipped, b.clipped);
             if let (Some(ma), Some(mb)) = (&a.mask, &b.mask) {
                 assert_eq!(ma.enabled, mb.enabled);
