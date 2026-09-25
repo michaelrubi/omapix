@@ -94,6 +94,10 @@ Alt+click on the mask button adds a black mask that hides the whole layer (Photo
 
 Over the canvas, selection tools (Rectangular & Elliptical Marquee, Lasso, Magic Wand) show a small badge at the lower right of the crosshair: `+` while holding Shift (add), `-` while holding Alt (subtract), and `×` while holding Shift+Alt (intersect), matching the mode applied when clicking or dragging. The Move tool shows a copy badge while holding Alt (Alt+drag copy).
 
+### ~~Histogram and Navigator panels~~ (done)
+
+A collapsible strip above the right panel's tabs holding Navigator and Histogram, as in Photoshop. Window › Navigator and Window › Histogram toggle the strip, and clicking the active tab collapses it to nothing. The Navigator shows a whole-image thumbnail from the smallest pyramid level with a red rectangle for the visible canvas area (clicking or dragging centres the view), plus zoom slider, zoom field, and Fit / 100 % buttons using the canvas zoom steps. The Histogram draws the composite image's RGB histogram (overlaid with grey/white overlap in Colors view, plus Luminosity), computed off the UI thread and throttled on document edits, with mean, std dev, median and pixel count underneath.
+
 
 ## 2. Hand-testing checklist
 
@@ -157,6 +161,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit
 - [ ] Filter settings kept between runs: apply a few filters, quit, reopen and check their dialogs
 - [ ] Object Selection: W then Shift+W, click a face, a dress and a prop, drag boxes, Shift and Alt, the first use (model loading) and after editing (analysed again), and how the edges look at 100 %
+- [ ] Navigator and Histogram panels: Window menu toggles strip, Navigator thumbnail drag pans canvas, zoom slider and field, and Histogram Colors and Luminosity views with statistics
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing

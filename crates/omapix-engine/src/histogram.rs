@@ -6,6 +6,15 @@ use crate::composite;
 use crate::layer::Layer;
 use crate::raster::Raster;
 
+/// Summary statistics for a single histogram channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HistogramStats {
+    pub mean: f64,
+    pub std_dev: f64,
+    pub median: u8,
+    pub pixels: u64,
+}
+
 /// A 256-bin histogram for red, green, blue, and luminance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Histogram {
@@ -51,6 +60,58 @@ impl Histogram {
     /// True if no pixels are counted.
     pub fn is_empty(&self) -> bool {
         self.total() == 0
+    }
+
+    /// Summary statistics for the channel: 0 = Luminance/RGB, 1 = Red, 2 = Green, 3 = Blue.
+    pub fn stats(&self, ch: usize) -> HistogramStats {
+        Self::stats_for_bins(self.channel(ch))
+    }
+
+    /// Compute mean, standard deviation, median, and pixel count for 256 bins.
+    pub fn stats_for_bins(bins: &[u32; 256]) -> HistogramStats {
+        let pixels: u64 = bins.iter().map(|&c| c as u64).sum();
+        if pixels == 0 {
+            return HistogramStats {
+                mean: 0.0,
+                std_dev: 0.0,
+                median: 0,
+                pixels: 0,
+            };
+        }
+        let sum: f64 = bins
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (i as f64) * (c as f64))
+            .sum();
+        let mean = sum / (pixels as f64);
+        let variance: f64 = bins
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                let diff = (i as f64) - mean;
+                (c as f64) * diff * diff
+            })
+            .sum::<f64>()
+            / (pixels as f64);
+        let std_dev = variance.sqrt();
+
+        let half = pixels.div_ceil(2);
+        let mut cum = 0u64;
+        let mut median = 0u8;
+        for (i, &c) in bins.iter().enumerate() {
+            cum += c as u64;
+            if cum >= half {
+                median = i as u8;
+                break;
+            }
+        }
+
+        HistogramStats {
+            mean,
+            std_dev,
+            median,
+            pixels,
+        }
     }
 
     /// Combine another histogram into this one.
@@ -171,5 +232,41 @@ mod tests {
         assert_eq!(hist.green[128], w * h);
         assert_eq!(hist.blue[128], w * h);
         assert_eq!(hist.luminance[128], w * h);
+    }
+
+    #[test]
+    fn statistics_from_known_uniform_raster() {
+        let val = 128u16 << 8;
+        let pixel: Pixel = [val, val, val, u16::MAX];
+        let raster = Raster::new(2, 2, vec![pixel; 4]);
+        let h = Histogram::from_raster(&raster);
+        let stats = h.stats(0);
+        assert_eq!(stats.pixels, 4);
+        assert_eq!(stats.mean, 128.0);
+        assert_eq!(stats.std_dev, 0.0);
+        assert_eq!(stats.median, 128);
+    }
+
+    #[test]
+    fn statistics_from_known_two_tone_raster() {
+        let low: Pixel = [50u16 << 8, 50u16 << 8, 50u16 << 8, u16::MAX];
+        let high: Pixel = [150u16 << 8, 150u16 << 8, 150u16 << 8, u16::MAX];
+        let raster = Raster::new(2, 2, vec![low, low, high, high]);
+        let h = Histogram::from_raster(&raster);
+        let stats = h.stats(0);
+        assert_eq!(stats.pixels, 4);
+        assert_eq!(stats.mean, 100.0);
+        assert!((stats.std_dev - 50.0).abs() < 1e-4);
+        assert_eq!(stats.median, 50);
+    }
+
+    #[test]
+    fn statistics_empty_histogram() {
+        let h = Histogram::default();
+        let stats = h.stats(0);
+        assert_eq!(stats.pixels, 0);
+        assert_eq!(stats.mean, 0.0);
+        assert_eq!(stats.std_dev, 0.0);
+        assert_eq!(stats.median, 0);
     }
 }

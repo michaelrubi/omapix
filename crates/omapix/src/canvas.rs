@@ -27,7 +27,7 @@ use crate::gpu::LiveDraw;
 use crate::live::LiveFrame;
 
 /// Photoshop's zoom presets, as fractions.
-const ZOOM_STEPS: [f32; 21] = [
+pub const ZOOM_STEPS: [f32; 21] = [
     1.0 / 32.0,
     1.0 / 24.0,
     1.0 / 16.0,
@@ -95,6 +95,13 @@ impl Render {
 
     pub fn with_image<R>(&self, f: impl FnOnce(&Raster) -> R) -> Option<R> {
         self.data.read().ok().map(|d| f(&d.image))
+    }
+
+    /// The smallest pyramid level, suitable for thumbnails.
+    pub fn smallest_level(&self) -> Raster {
+        let data = self.data.read().expect("render lock");
+        let level = data.pyramid.len().saturating_sub(1);
+        data.level(level).clone()
     }
 
     #[cfg(test)]
@@ -455,6 +462,24 @@ impl Canvas {
         self.view.zoom = 1.0;
         self.view.fit = false;
         self.view.origin = self.rect.size() * 0.5 - p.to_vec2() / self.ppp;
+    }
+
+    pub fn zoom(&self) -> f32 {
+        self.view.zoom
+    }
+
+    pub fn set_zoom(&mut self, zoom: f32) {
+        let canvas = self.rect;
+        self.zoom_to(zoom, canvas.center(), canvas);
+    }
+
+    /// Centre the view on image point `p` (in image pixels) at the current zoom.
+    pub fn center_on(&mut self, p: Pos2) {
+        if self.view.fit {
+            self.view.zoom = self.fit_zoom(self.rect, self.ppp);
+            self.view.fit = false;
+        }
+        self.view.origin = self.rect.size() * 0.5 - p.to_vec2() * (self.view.zoom / self.ppp);
     }
 
     pub fn step_zoom(&mut self, zoom_in: bool) {

@@ -95,6 +95,8 @@ pub enum Command {
     ShowLayers,
     ShowChannels,
     ShowHistory,
+    ShowNavigator,
+    ShowHistogram,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -205,6 +207,8 @@ impl Command {
         Command::ShowLayers,
         Command::ShowChannels,
         Command::ShowHistory,
+        Command::ShowNavigator,
+        Command::ShowHistogram,
     ];
 
     /// Look a command up by its name in code, e.g. "FrequencySeparation".
@@ -372,6 +376,8 @@ impl Command {
             Command::ShowLayers => "Layers",
             Command::ShowChannels => "Channels",
             Command::ShowHistory => "History",
+            Command::ShowNavigator => "Navigator",
+            Command::ShowHistogram => "Histogram",
         }
     }
 
