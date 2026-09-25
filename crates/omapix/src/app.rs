@@ -19,6 +19,7 @@ use omapix_engine::{
 
 use crate::canvas::ToolInput;
 use crate::settings::FilterSettings;
+use crate::tablet::Tablet;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
@@ -283,6 +284,8 @@ pub struct App {
     pending_drops: Vec<PathBuf>,
     /// Whether V is held, for spotting Ctrl+V (see [`Command::pressed`]).
     v_down: bool,
+    /// A pen tablet, on Wayland.
+    tablet: Option<Tablet>,
 }
 
 impl App {
@@ -341,6 +344,7 @@ impl App {
             pasting: None,
             pending_drops: Vec::new(),
             v_down: false,
+            tablet: Tablet::connect(cc),
         };
         let warnings = crate::hotkeys::load();
         if !warnings.is_empty() {
@@ -1966,6 +1970,7 @@ self.filters.remember(&filter);
             self.gradient_input(input, modifiers);
             return;
         }
+        let pressure = self.tablet.as_ref().map_or(1.0, Tablet::pressure);
         match input {
             ToolInput::StrokeBegin(p) => {
                 let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p)
@@ -1988,10 +1993,10 @@ self.filters.remember(&filter);
                 }
                 let (settings, sample) = (self.tools.settings(), self.tools.sample);
                 if editor.begin_stroke(settings, paint, sample) {
-                    editor.stroke_to(p.x, p.y);
+                    editor.stroke_to(p.x, p.y, pressure);
                 }
             }
-            ToolInput::StrokeMove(p) => editor.stroke_to(p.x, p.y),
+            ToolInput::StrokeMove(p) => editor.stroke_to(p.x, p.y, pressure),
             ToolInput::StrokeEnd => editor.end_stroke(),
             // Handled before the tools.
             ToolInput::BrushDrag { .. } => {}
@@ -3087,8 +3092,11 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
 }
 
 impl eframe::App for App {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::drop::take(raw_input);
+        if let Some(tablet) = &mut self.tablet {
+            tablet.take(raw_input, ctx.zoom_factor(), ctx.input(|i| i.modifiers));
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -3329,6 +3337,9 @@ impl eframe::App for App {
         }
         let ctx = ui.ctx().clone();
         self.dialogs(&ctx);
+        if let Some(tablet) = &self.tablet {
+            tablet.set_cursor(ctx.output(|o| o.cursor_icon));
+        }
     }
 }
 
@@ -3523,7 +3534,7 @@ mod tests {
         fill(&mut editor, "Fill", Some([255, 0, 0]), [255, 255, 255]);
         let settings = omapix_engine::brush::BrushSettings::default();
         assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), crate::tools::Sample::Current));
-        editor.stroke_to(300.0, 300.0);
+        editor.stroke_to(300.0, 300.0, 1.0);
         editor.end_stroke();
         let pixels = &editor.doc.layer(empty).unwrap().pixels;
         assert_eq!((pixels.get(150, 150)[3], pixels.get(300, 300)[3]), (0, 0));
@@ -3752,6 +3763,7 @@ mod tests {
             pasting: None,
             pending_drops: Vec::new(),
             v_down: false,
+            tablet: None,
         }
     }
 

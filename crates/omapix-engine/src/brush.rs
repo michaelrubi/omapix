@@ -31,6 +31,12 @@ pub struct BrushSettings {
     pub opacity: f32,
     /// Coverage each dab adds, 0–1.
     pub flow: f32,
+    /// A pen's pressure sets the size of each dab (Photoshop's pressure
+    /// button beside Size).
+    pub size_pressure: bool,
+    /// A pen's pressure sets how far each dab's coverage can build up
+    /// (beside Opacity).
+    pub opacity_pressure: bool,
 }
 
 impl Default for BrushSettings {
@@ -40,6 +46,8 @@ impl Default for BrushSettings {
             hardness: 0.0,
             opacity: 1.0,
             flow: 1.0,
+            size_pressure: true,
+            opacity_pressure: true,
         }
     }
 }
@@ -91,7 +99,8 @@ pub struct Stroke {
     keep_alpha: bool,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
-    last: Option<(f32, f32)>,
+    /// The last point, and the pen's pressure there.
+    last: Option<(f32, f32, f32)>,
     /// Distance travelled since the last dab.
     carried: f32,
 }
@@ -166,40 +175,55 @@ impl Stroke {
         src.get(sx as u32, sy as u32)
     }
 
-    fn spacing(&self) -> f32 {
-        (self.settings.size * 0.1).max(0.5)
+    /// The distance between dabs at `pressure`.
+    fn spacing(&self, pressure: f32) -> f32 {
+        (self.diameter(pressure) * 0.1).max(0.5)
     }
 
-    /// Continue the stroke to (x, y) in image pixels, laying evenly spaced
-    /// dabs along the way. Returns the tiles whose coverage changed.
-    pub fn add_point(&mut self, x: f32, y: f32) -> Vec<(u32, u32)> {
+    fn diameter(&self, pressure: f32) -> f32 {
+        if self.settings.size_pressure {
+            self.settings.size * pressure
+        } else {
+            self.settings.size
+        }
+    }
+
+    /// Continue the stroke to (x, y) in image pixels, with a pen's
+    /// `pressure` there (0–1; 1 for a mouse), laying evenly spaced dabs
+    /// along the way. Returns the tiles whose coverage changed.
+    pub fn add_point(&mut self, x: f32, y: f32, pressure: f32) -> Vec<(u32, u32)> {
         let mut touched = Vec::new();
+        let pressure = pressure.clamp(0.0, 1.0);
         match self.last {
-            None => self.dab(x, y, &mut touched),
-            Some((lx, ly)) => {
+            None => self.dab(x, y, pressure, &mut touched),
+            Some((lx, ly, lp)) => {
                 let (dx, dy) = (x - lx, y - ly);
                 let length = (dx * dx + dy * dy).sqrt();
-                let spacing = self.spacing();
-                let mut t = spacing - self.carried;
+                let mut t = self.spacing(lp) - self.carried;
+                let mut spaced = self.spacing(lp);
                 while t <= length {
                     let f = t / length;
-                    self.dab(lx + dx * f, ly + dy * f, &mut touched);
-                    t += spacing;
+                    let p = lp + (pressure - lp) * f;
+                    self.dab(lx + dx * f, ly + dy * f, p, &mut touched);
+                    spaced = self.spacing(p);
+                    t += spaced;
                 }
-                self.carried = length - (t - spacing);
+                self.carried = length - (t - spaced);
             }
         }
-        self.last = Some((x, y));
+        self.last = Some((x, y, pressure));
         touched.sort_unstable();
         touched.dedup();
         touched
     }
 
-    fn dab(&mut self, cx: f32, cy: f32, touched: &mut Vec<(u32, u32)>) {
+    fn dab(&mut self, cx: f32, cy: f32, pressure: f32, touched: &mut Vec<(u32, u32)>) {
         let (w, h) = self.original.size();
-        let r = self.settings.size / 2.0;
+        let r = self.diameter(pressure) / 2.0;
         let hardness = self.settings.hardness.clamp(0.0, 0.999);
         let flow = self.settings.flow;
+        // Coverage builds up to this.
+        let most = if self.settings.opacity_pressure { pressure } else { 1.0 };
         let x0 = (cx - r).floor().max(0.0) as u32;
         let y0 = (cy - r).floor().max(0.0) as u32;
         let x1 = ((cx + r).ceil() as u32).min(w);
@@ -226,7 +250,7 @@ impl Stroke {
                             continue;
                         }
                         let c = &mut cov[((py - ty) * TILE + (px - tx)) as usize];
-                        *c += (1.0 - *c) * flow * shape;
+                        *c += (most - *c).max(0.0) * flow * shape;
                         hit = true;
                     }
                 }
@@ -569,7 +593,7 @@ mod tests {
         let mut s = Stroke::new(settings, paint, surface.clone());
         let mut out = surface.clone();
         for &(x, y) in points {
-            let tiles = s.add_point(x, y);
+            let tiles = s.add_point(x, y, 1.0);
             s.apply(&mut out, &tiles);
         }
         out
@@ -596,6 +620,40 @@ mod tests {
     }
 
     #[test]
+    fn pen_pressure_thins_and_lightens_the_stroke() {
+        let surface = Surface::Pixels(white(400, 100));
+        let press = |settings: BrushSettings| {
+            let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), surface.clone());
+            let mut out = surface.clone();
+            for (x, p) in [(50.0, 1.0), (350.0, 0.25)] {
+                let tiles = s.add_point(x, 50.0, p);
+                s.apply(&mut out, &tiles);
+            }
+            let Surface::Pixels(out) = out else { unreachable!() };
+            out
+        };
+        let hard = BrushSettings {
+            size: 40.0,
+            hardness: 1.0,
+            ..Default::default()
+        };
+        let out = press(hard);
+        // Full pressure: wide and black. Light pressure: thin and grey.
+        assert_eq!(out.get(50, 65)[0], 0);
+        assert_eq!(out.get(345, 65)[0], 65535);
+        let grey = out.get(345, 50)[0];
+        assert!((40000..55000).contains(&grey), "{grey}");
+
+        let out = press(BrushSettings {
+            size_pressure: false,
+            opacity_pressure: false,
+            ..hard
+        });
+        assert_eq!(out.get(345, 65)[0], 0);
+        assert_eq!(out.get(345, 50)[0], 0);
+    }
+
+    #[test]
     fn keeping_alpha_changes_only_colour() {
         // Opaque, half-transparent and transparent white columns.
         let px: Vec<Pixel> = (0..30 * 10)
@@ -611,7 +669,7 @@ mod tests {
         let run = |paint| {
             let mut s = Stroke::new(settings, paint, surface.clone()).keeping_alpha();
             let mut out = surface.clone();
-            let tiles = s.add_point(15.0, 5.0);
+            let tiles = s.add_point(15.0, 5.0, 1.0);
             s.apply(&mut out, &tiles);
             let Surface::Pixels(out) = out else { unreachable!() };
             [5, 15, 25].map(|x| out.get(x, 5))
@@ -633,7 +691,7 @@ mod tests {
             size: 30.0,
             hardness: 1.0,
             opacity: 0.5,
-            flow: 1.0,
+            ..Default::default()
         };
         let path = [(50.0, 50.0), (250.0, 50.0), (50.0, 50.0), (250.0, 50.0)];
         let Surface::Pixels(out) =
@@ -655,8 +713,8 @@ mod tests {
         let settings = BrushSettings {
             size: 30.0,
             hardness: 1.0,
-            opacity: 1.0,
             flow: 0.2,
+            ..Default::default()
         };
         // Passing back and forth over a spot darkens it further each time.
         let once = [(50.0, 100.0), (150.0, 100.0)];
@@ -743,7 +801,7 @@ mod tests {
         let mut s = Stroke::new(settings, Paint::Clone { dx: 0, dy: 50 }, surface.clone())
             .sampling(img.clone());
         let mut out = surface;
-        let tiles = s.add_point(150.0, 100.0);
+        let tiles = s.add_point(150.0, 100.0, 1.0);
         s.apply(&mut out, &tiles);
         let Surface::Pixels(out) = out else {
             unreachable!()
@@ -764,7 +822,7 @@ mod tests {
         let mut s = Stroke::new(settings, Paint::Heal { dx: -60, dy: 0 }, surface.clone())
             .sampling(img.clone());
         let mut out = surface;
-        let tiles = s.add_point(150.0, 100.0);
+        let tiles = s.add_point(150.0, 100.0, 1.0);
         s.apply(&mut out, &tiles);
         let tiles = s.finish(&mut out);
         assert!(!tiles.is_empty());
@@ -796,7 +854,7 @@ mod tests {
         let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), surface.clone())
             .within(selection.coverage);
         let mut out = surface;
-        let tiles = s.add_point(100.0, 50.0);
+        let tiles = s.add_point(100.0, 50.0, 1.0);
         s.apply(&mut out, &tiles);
         let Surface::Pixels(out) = out else {
             unreachable!()
@@ -825,7 +883,7 @@ mod tests {
         };
         let mut s = Stroke::new(settings, Paint::SpotHeal, surface.clone()).sampling(img.clone());
         let mut out = surface;
-        let tiles = s.add_point(150.0, 100.0);
+        let tiles = s.add_point(150.0, 100.0, 1.0);
         s.apply(&mut out, &tiles);
         let tiles = s.finish(&mut out);
         assert!(!tiles.is_empty());
