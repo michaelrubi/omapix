@@ -180,6 +180,8 @@ struct LiveView {
     stack: Option<Arc<LiveStack>>,
     /// How far the drag has moved, in image pixels.
     offset: (i32, i32),
+    /// For a Free Transform: the transform showing.
+    transform: Option<Affine>,
     /// For an edit: the subject's adjustment and its lookup table, kept
     /// while the adjustment is unchanged.
     edit: Option<Option<(Adjustment, Table)>>,
@@ -945,6 +947,7 @@ impl Editor {
         };
         let [x, y, w, h] = bounds.ok_or("Could not transform because the selected area is empty")?;
         let (x, y, w, h) = (f64::from(x), f64::from(y), f64::from(w), f64::from(h));
+        let whole = lift.is_none();
         self.transforming = Some(Transforming {
             original: layer.clone(),
             selection: self.doc.selection.clone(),
@@ -954,7 +957,20 @@ impl Editor {
             wanted: Affine::IDENTITY,
             started: false,
         });
+        if whole {
+            self.show_transform_live();
+        }
         Ok(())
+    }
+
+    /// Show the whole-layer Free Transform in progress live on the GPU, if
+    /// it can be.
+    fn show_transform_live(&mut self) {
+        let wanted = self.transforming.as_ref().map(|t| t.wanted);
+        self.live_view = self.start_live_view(true).map(|live| LiveView {
+            transform: wanted,
+            ..live
+        });
     }
 
     /// The Free Transform in progress: what's transformed, before it was
@@ -971,7 +987,9 @@ impl Editor {
             return;
         };
         transforming.wanted = t;
-        if self.rendering.as_ref().is_none_or(|r| r.visible) {
+        // Shown live, it doesn't wait for renders.
+        let live = self.live_view.as_ref().is_some_and(|l| l.transform.is_some() && l.until.is_none());
+        if live || self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_transform(Resampling::Bilinear);
         }
     }
@@ -987,6 +1005,11 @@ impl Editor {
             return;
         }
         transforming.applied = None;
+        // Shown live until the CPU's render of it is on screen.
+        let until = self.revision + 1;
+        if let Some(live) = self.live_view.as_mut().filter(|l| l.transform.is_some()) {
+            live.until = Some(until);
+        }
         self.apply_transform(Resampling::Bicubic);
         self.transforming = None;
     }
@@ -996,6 +1019,9 @@ impl Editor {
         let Some(transforming) = self.transforming.take() else {
             return;
         };
+        if self.live_view.as_ref().is_some_and(|l| l.transform.is_some()) {
+            self.live_view = None;
+        }
         if !transforming.started {
             return;
         }
@@ -1011,6 +1037,13 @@ impl Editor {
         };
         let t = transforming.wanted;
         if transforming.applied == Some(t) {
+            return;
+        }
+        // Shown live, it's made only when it's applied.
+        if resampling == Resampling::Bilinear
+            && let Some(live) = self.live_view.as_mut().filter(|l| l.transform.is_some() && l.until.is_none())
+        {
+            live.transform = Some(t);
             return;
         }
         if !transforming.started {
@@ -1166,6 +1199,7 @@ impl Editor {
             rx: Some(rx),
             stack: None,
             offset: (0, 0),
+            transform: None,
             edit: (!moving).then_some(None),
             until: None,
         })
@@ -1353,6 +1387,16 @@ impl Editor {
             self.apply_transform(Resampling::Bilinear);
         }
         self.update_live_view();
+        // A live transform whose view went (zoomed or scrolled away) is
+        // shown live again from where it's on screen now.
+        if self
+            .transforming
+            .as_ref()
+            .is_some_and(|t| t.lift.is_none() && !t.started)
+            && self.live_view.is_none()
+        {
+            self.show_transform_live();
+        }
         // One render at a time. Once what's on screen is drawn, a render
         // that's out of date stops, and the latest state is rendered next,
         // so fast slider drags skip intermediate states.
@@ -1438,6 +1482,7 @@ impl Editor {
         self.canvas.live = live.stack.as_ref().map(|s| LiveFrame {
             stack: Arc::clone(s),
             offset: live.offset,
+            transform: live.transform,
             settings,
         });
     }
@@ -3041,6 +3086,71 @@ mod live_tests {
         assert!(e.canvas.live.is_some());
         e.undo();
         assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0), [65535, 0, 0, 65535]);
+    }
+
+    #[test]
+    fn free_transform_shows_live_and_is_made_once_applied() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        e.begin_transform(0).unwrap();
+        settle(&mut e, &ctx);
+        let t = Affine::scale_about(4.0, 4.0, (0.0, 0.0));
+        e.transform_to(Affine::scale_about(2.0, 2.0, (0.0, 0.0)));
+        e.transform_to(t);
+        e.update(&ctx);
+        // Shown live: the layer hasn't changed, the canvas shows it transformed.
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(2, 2)[3], 0);
+        assert_eq!(e.undo_label(), None);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.transform, Some(t));
+        e.commit_transform();
+        // Made for real, as one undo step, while the live view stays up
+        // until the canvas has drawn it.
+        assert!(e.doc.layer(patch).unwrap().pixels.get(2, 2)[3] > 0);
+        assert_eq!(e.undo_label(), Some("Free Transform"));
+        e.update(&ctx);
+        assert!(e.canvas.live.is_some());
+    }
+
+    #[test]
+    fn cancelling_a_live_free_transform_changes_nothing() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let before = e.doc.layer(e.active).unwrap().pixels.clone();
+        e.begin_transform(0).unwrap();
+        settle(&mut e, &ctx);
+        e.transform_to(Affine::rotate_about(0.5, (0.0, 0.0)));
+        e.update(&ctx);
+        e.cancel_transform();
+        e.update(&ctx);
+        assert!(e.canvas.live.is_none());
+        assert!(e.doc.layer(e.active).unwrap().pixels.same_tiles(&before));
+        assert_eq!(e.undo_label(), None);
+    }
+
+    #[test]
+    fn a_live_free_transform_follows_the_zoom() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        e.begin_transform(0).unwrap();
+        settle(&mut e, &ctx);
+        let t = Affine::translate(3.5, 1.0);
+        e.transform_to(t);
+        // Zoomed out to 50 %, it's shown live again from level 1.
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
+        e.canvas.lay_out_for_test(rect, 0.5);
+        e.update(&ctx);
+        settle(&mut e, &ctx);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!((frame.stack.level, frame.transform), (1, Some(t)));
+        assert_eq!(e.undo_label(), None);
+        // With a selection, it's transformed on the CPU as before.
+        e.cancel_transform();
+        e.edit("Marquee", |doc, _| doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (8.0, 8.0))));
+        e.begin_transform(0).unwrap();
+        assert!(e.live_view.is_none());
     }
 
     #[test]

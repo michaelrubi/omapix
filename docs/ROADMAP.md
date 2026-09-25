@@ -45,7 +45,9 @@ Double-clicking a layer name or choosing Rename from the context menu focuses th
 ### ~~Free Transform~~ (done)
 
 Ctrl+T (Edit › Free Transform) puts a box with eight handles round the active layer's pixels, or round the selection, which transforms just the selected pixels (or mask values, with the mask targeted) and the selection with them. As in Photoshop: dragging a corner scales in proportion (Shift for free), a side stretches one way, Alt scales about the centre, dragging inside moves (Shift keeps it straight), and dragging outside rotates (Shift in 15° steps). The status bar shows the width, height and angle. Enter applies it, resampled bicubic, as one undo step; Esc or Ctrl+Z cancels. The layer's mask goes with it. Saving, exporting or closing applies it first.
-- The preview while dragging is resampled bilinear on the CPU: quick for a pasted patch, about a quarter of a second a step for a whole 24 MP layer. Next: show it live on the GPU, as Move tool drags are.
+- ~~Shown live on the GPU~~ (done): transforming a whole layer (no selection) is drawn live, as Move tool drags are: the layer and its mask are sampled through the transform in the shader (`live.wgsl`), and the document changes only when Enter applies it, resampled bicubic on the CPU, with the live view up until that's on screen. Zooming or scrolling meanwhile builds the live view again. A GPU test checks it against the CPU's bilinear preview in every blend mode.
+  - Transforming a selection, and layers the live view can't show (in groups, clipping masks, Blend If), still preview on the CPU.
+  - Applying a whole 24 MP layer takes about half a second (the bicubic resampling); later, doing that in the background.
 - Later: several layers or a group at once, typed values in an options bar, moving the reference point, Skew/Distort/Perspective/Warp (Ctrl+drag a corner), Flip and Rotate 90°, and double-click to apply.
 
 ### ~~Cut, Copy and Paste~~ (done)
@@ -148,6 +150,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
 - [ ] PSD import: a flattened 16-bit .psd and a layered one (layers, groups, masks and colours as in Photoshop), and Ctrl+S asking where to save rather than overwriting the .psd
 - [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
+- [ ] Free Transform live on the GPU: dragging handles on a whole 24 MP layer at fit and at 100 %, zooming mid-transform, Enter with no flash, and Esc
 - [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, and how smooth it is on a 24 MP layer
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates
 - [ ] Paste Special: Paste in Place (Ctrl+Shift+V), and Paste Into (Ctrl+Alt+Shift+V) a copy from elsewhere in the image and from another app

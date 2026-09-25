@@ -939,6 +939,7 @@ impl Canvas {
             LiveDraw {
                 frame: LiveFrame {
                     offset: ((dx as f32 / k).round() as i32, (dy as f32 / k).round() as i32),
+                    transform: frame.transform.map(|t| t.in_units(k.into())),
                     ..frame.clone()
                 },
                 display_lut: Arc::clone(lut),

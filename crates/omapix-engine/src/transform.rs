@@ -67,6 +67,17 @@ impl Affine {
         (sx, det / sx, d.atan2(a))
     }
 
+    /// (a, b, c, d, e, f): (x, y) goes to (a·x + b·y + c, d·x + e·y + f).
+    pub fn coefficients(&self) -> [f64; 6] {
+        self.0
+    }
+
+    /// The same transform in units `k` pixels wide (a pyramid level).
+    pub fn in_units(&self, k: f64) -> Affine {
+        let [a, b, c, d, e, f] = self.0;
+        Affine([a, b, c / k, d, e, f / k])
+    }
+
     /// The whole-pixel move it is, if that's all it is.
     fn whole_pixel_move(&self) -> Option<(i32, i32)> {
         let [a, b, c, d, e, f] = self.0;

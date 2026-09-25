@@ -1,4 +1,5 @@
-//! Showing a Move drag, or a slider dragged on one layer, live on the GPU.
+//! Showing a Move drag, a Free Transform, or a slider dragged on one
+//! layer, live on the GPU.
 //!
 //! Moving a layer on the CPU means translating it, compositing every tile
 //! and rebuilding the display pyramid, many times a second; so does
@@ -23,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use omapix_engine::composite;
 use omapix_engine::layer::Layer;
 use omapix_engine::tiled::{TILE, Tiled};
+use omapix_engine::transform::Affine;
 use omapix_engine::{BlendMode, Document, Pixel};
 
 /// Points per side of an adjustment's 3D lookup table.
@@ -86,6 +88,8 @@ pub struct LiveFrame {
     pub stack: Arc<LiveStack>,
     /// How far the subject has moved, in image pixels.
     pub offset: (i32, i32),
+    /// Free Transform's transform of the subject, in image pixels.
+    pub transform: Option<Affine>,
     pub settings: Option<Settings>,
 }
 
