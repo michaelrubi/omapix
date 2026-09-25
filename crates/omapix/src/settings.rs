@@ -35,6 +35,8 @@ pub struct FilterSettings {
     pub smooth_radius: f32,
     pub border_width: f32,
     pub mask_density: f32,
+    pub select_and_mask: omapix_engine::refine::EdgeOptions,
+    pub select_and_mask_output: crate::select_and_mask::Output,
     /// Frequency Separation's radius; unset, it's worked out from the
     /// image's size.
     pub separation_radius: Option<f32>,
@@ -60,6 +62,8 @@ impl Default for FilterSettings {
             smooth_radius: 5.0,
             border_width: 10.0,
             mask_density: 100.0,
+            select_and_mask: Default::default(),
+            select_and_mask_output: Default::default(),
             separation_radius: None,
             // A moderate sharpening for a 24 MP portrait.
             unsharp_mask: UnsharpMask {

@@ -482,7 +482,7 @@ fn transpose(src: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
 }
 
 /// Single-pass 2D box filter of radius `r` using running sums.
-fn box_filter_2d(mut buf: Vec<[f32; 4]>, w: usize, h: usize, r: usize) -> Vec<[f32; 4]> {
+pub(crate) fn box_filter_2d(mut buf: Vec<[f32; 4]>, w: usize, h: usize, r: usize) -> Vec<[f32; 4]> {
     if r == 0 || w == 0 || h == 0 {
         return buf;
     }

@@ -120,6 +120,7 @@ enum Dialog {
         then: Then,
     },
     BlendingOptions(crate::blending_options::BlendingOptions),
+    SelectAndMask(crate::select_and_mask::SelectAndMask),
 }
 
 /// Result of a background save or export: the document revision written,
@@ -773,6 +774,7 @@ impl App {
                 editor.doc.selection.is_some()
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
+            Command::SelectAndMask => editor.doc.selection.is_some(),
             Command::FillForeground
             | Command::FillBackground
             | Command::Clear
@@ -921,6 +923,14 @@ impl App {
                         crate::blending_options::BlendingOptions::new(editor.active),
                     ));
                 }
+            }
+            Command::SelectAndMask => {
+                let (options, output) = (self.filters.select_and_mask, self.filters.select_and_mask_output);
+                self.dialog = self
+                    .editor
+                    .as_ref()
+                    .and_then(|editor| crate::select_and_mask::SelectAndMask::open(ctx, editor, options, output))
+                    .map(Dialog::SelectAndMask);
             }
             Command::ContentAwareFill => {
                 if let Some(editor) = &self.editor
@@ -1202,6 +1212,7 @@ self.filters.remember(&filter);
             self.menu_item(ui, Command::Deselect, None);
             self.menu_item(ui, Command::InvertSelection, Some("Select Inverse".into()));
             self.menu_item(ui, Command::Feather, None);
+            self.menu_item(ui, Command::SelectAndMask, None);
             self.menu_item(ui, Command::SaveSelection, None);
             ui.separator();
             self.menu_item(ui, Command::ContentAwareFill, None);
@@ -1338,6 +1349,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::Deselect, None);
                 self.menu_item(ui, Command::InvertSelection, None);
                 ui.separator();
+                self.menu_item(ui, Command::SelectAndMask, None);
                 ui.menu_button("Modify", |ui| {
                     self.menu_item(ui, Command::BorderSelection, None);
                     self.menu_item(ui, Command::SmoothSelection, None);
@@ -1442,6 +1454,9 @@ self.filters.remember(&filter);
                         Some("Viewing layer mask — Alt+click the mask or press Esc to return")
                     }
                     View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
+                    View::QuickMask if editor.previewing_selection() => {
+                        Some("Select and Mask — red shows what isn't selected")
+                    }
                     View::QuickMask => Some("Quick Mask — press Q to exit"),
                     View::Channel(_) | View::Alpha(_) => {
                         Some("Viewing one channel — click RGB in Channels, or press Ctrl+2 or Esc to return")
@@ -1531,6 +1546,20 @@ self.filters.remember(&filter);
             if closed {
                 self.dialog = None;
             }
+            return;
+        }
+        if let (Some(Dialog::SelectAndMask(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
+            match dialog.show(ctx, editor, &self.defaults.select_and_mask, &self.theme) {
+                Some(true) => {
+                    dialog.apply(editor);
+                    self.filters.select_and_mask = dialog.options;
+                    self.filters.select_and_mask_output = dialog.output;
+                    self.filters.save();
+                }
+                Some(false) => dialog.cancel(editor),
+                None => return,
+            }
+            self.dialog = None;
             return;
         }
         let defaults = &self.defaults;
@@ -1726,7 +1755,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) => {}
+                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -5354,6 +5383,67 @@ mod tests {
         let texts = frame(&mut app, vec![]);
         assert!(texts.iter().any(|t| t == "Select All"), "{texts:?}");
         assert!(!texts.iter().any(|t| t == "Content-Aware Fill"), "{texts:?}");
+    }
+
+    #[test]
+    fn select_and_mask_previews_in_red_then_applies_cancels_or_makes_a_mask() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Frames until the preview for the current settings is on screen.
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+        };
+        let open = |app: &mut App, output| {
+            app.filters.select_and_mask.feather = 5.0;
+            app.filters.select_and_mask_output = output;
+            app.run(Command::SelectAndMask, &ctx);
+            for _ in 0..500 {
+                run(app, vec![]);
+                if let Some(Dialog::SelectAndMask(d)) = &app.dialog
+                    && d.ready().is_some()
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("no preview");
+        };
+        // Cancelled, nothing changes.
+        open(&mut app, crate::select_and_mask::Output::Selection);
+        assert_eq!(app.editor.as_ref().unwrap().view(), View::QuickMask);
+        run(&mut app, vec![key(egui::Key::Escape)]);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(app.dialog.is_none());
+        assert_eq!(editor.view(), View::Image);
+        let selection = editor.doc.selection.as_ref().unwrap();
+        assert_eq!((selection.at(99, 150), selection.at(150, 150)), (0.0, 1.0));
+        assert_eq!(editor.undo_label(), Some("Rectangular Marquee"));
+
+        // OK'd, the selection's feathered, as one step.
+        open(&mut app, crate::select_and_mask::Output::Selection);
+        run(&mut app, vec![key(egui::Key::Enter)]);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.view(), View::Image);
+        assert_eq!(editor.undo_label(), Some("Select and Mask"));
+        let edge = editor.doc.selection.as_ref().unwrap().at(99, 150);
+        assert!(edge > 0.1 && edge < 0.9, "{edge}");
+
+        // To a layer mask: the layer gets it and the selection goes.
+        open(&mut app, crate::select_and_mask::Output::LayerMask);
+        run(&mut app, vec![key(egui::Key::Enter)]);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.doc.selection.is_none());
+        let mask = editor.doc.layer(editor.active).unwrap().mask.as_ref().unwrap();
+        assert!(mask.pixels.get(150, 150) > 60000 && mask.pixels.get(50, 50) == 0);
     }
 
     struct SelectionEdgesHarness {
