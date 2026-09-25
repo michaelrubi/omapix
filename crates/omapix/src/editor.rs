@@ -854,6 +854,15 @@ impl Editor {
             && !self.doc.layer(self.active).is_some_and(|l| l.has_pixels())
         {
             Selection::from_coverage(Tiled::new(w, h, 0))
+        } else if let Some(selection) = (sample == Sample::All)
+            .then(|| self.canvas.render())
+            .flatten()
+            .and_then(|r| {
+                // All layers are already flattened on screen.
+                r.with_image(|img| Selection::magic_wand_raster(img, start, tolerance, contiguous, anti_alias))
+            })
+        {
+            selection
         } else {
             let source = self.sample_source(sample);
             Selection::magic_wand_tiled(&source, start, tolerance, contiguous, anti_alias)
@@ -1312,18 +1321,21 @@ impl Editor {
             return None;
         }
         let r = size.radius();
-        let source = self.sample_source(sample);
+        // All layers are already flattened on screen; read that rather than
+        // compositing again.
+        let source = (sample != Sample::All).then(|| self.sample_source(sample));
+        let at = |x, y| match &source {
+            Some(source) => Some(source.get(x, y)),
+            None => self.canvas.sample(x, y),
+        };
         let (x0, x1) = (x.saturating_sub(r), (x + r).min(w - 1));
         let (y0, y1) = (y.saturating_sub(r), (y + r).min(h - 1));
         let (mut sum, mut count) = ([0u64; 4], 0u64);
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let p = source.get(x, y);
-                for c in 0..4 {
-                    sum[c] += u64::from(p[c]);
-                }
-                count += 1;
+        for p in (y0..=y1).flat_map(|y| (x0..=x1).filter_map(move |x| at(x, y))) {
+            for c in 0..4 {
+                sum[c] += u64::from(p[c]);
             }
+            count += 1;
         }
         (count > 0).then(|| sum.map(|v| ((v + count / 2) / count) as u16))
     }
@@ -2336,6 +2348,8 @@ mod tests {
             doc.layers.push(top);
             *active = 2;
         });
+        // All Layers reads the image on screen, as rendered after an edit.
+        e.canvas.set_render(Arc::new(Render::new(e.doc.composite())));
         // With top layer active:
         assert_eq!(
             e.sample(0, 0, SampleSize::Point, Sample::Current),
