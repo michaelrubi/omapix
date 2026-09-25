@@ -920,6 +920,9 @@ impl Editor {
         if self.job.is_some() {
             return Err("Omapix is busy");
         }
+        if self.target == Target::QuickMask {
+            return Err("Leave Quick Mask (Q) to transform");
+        }
         self.end_gesture();
         let layer = self.doc.layer(self.active).ok_or("There's no layer to transform")?;
         if !layer.can_move() {
@@ -2235,6 +2238,7 @@ mod tests {
         e.enter_quick_mask();
         assert_eq!(e.view(), View::QuickMask);
         assert_eq!(e.target, Target::QuickMask);
+        assert!(e.begin_transform(0).is_err());
 
         // Outside rectangle (unselected) shows red overlay; inside (selected) shows clear image.
         let (render, _) = render_view(&e.doc, View::QuickMask, RED, None);
