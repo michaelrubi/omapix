@@ -6,6 +6,7 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     Open,
+    Close,
     Save,
     SaveAs,
     ExportTiff,
@@ -100,6 +101,7 @@ impl Command {
     /// Every command.
     pub const ALL: &[Command] = &[
         Command::Open,
+        Command::Close,
         Command::Save,
         Command::SaveAs,
         Command::ExportTiff,
@@ -202,6 +204,7 @@ impl Command {
         Command::SendToBack,
         Command::ReopenLast,
         Command::Open,
+        Command::Close,
         Command::Save,
         Command::Quit,
         Command::Undo,
@@ -242,6 +245,7 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Command::Open => "Open…",
+            Command::Close => "Close",
             Command::ReopenLast => "Reopen Last Document",
             Command::Save => "Save",
             Command::SaveAs => "Save As…",
@@ -322,6 +326,7 @@ impl Command {
         let s = |m, k| Some(KeyboardShortcut::new(m, k));
         match self {
             Command::Open => s(CMD, Key::O),
+            Command::Close => s(CMD, Key::W),
             Command::ReopenLast => s(CMD_SHIFT, Key::O),
             Command::Save => s(CMD, Key::S),
             Command::SaveAs => s(CMD_SHIFT, Key::S),
