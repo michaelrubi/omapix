@@ -182,14 +182,8 @@ pub fn mask_density(image: &Tiled<Pixel>, density: f32) -> Tiled<Pixel> {
     if d >= 1.0 {
         return image.clone();
     }
-    image.map(|p| {
-        let map_val = |v: u16| {
-            (MAX - d * (MAX - f32::from(v)))
-                .round()
-                .clamp(0.0, MAX) as u16
-        };
-        [map_val(p[0]), map_val(p[1]), map_val(p[2]), p[3]]
-    })
+    let lift = |v: u16| (MAX - d * (MAX - f32::from(v))).round() as u16;
+    image.map(|p| [lift(p[0]), lift(p[1]), lift(p[2]), p[3]])
 }
 
 /// Photoshop's Add Noise applied to the pixels themselves: each moves by
