@@ -27,7 +27,10 @@ pub mod tiles;
 pub use blend::BlendMode;
 pub use color::{ColorProfile, DisplayTransform};
 pub use document::{AlphaChannel, Document};
-pub use filters::{generate_grain, NoiseDistribution, NoiseOptions, SharpenRemove, SmartSharpenOptions};
+pub use filters::{
+    generate_grain, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
+    SmartSharpenOptions,
+};
 pub use histogram::Histogram;
 pub use layer::{Layer, Locks, Mask};
 pub use ops::{add_noise_layer, grain_layer};
