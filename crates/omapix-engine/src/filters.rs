@@ -112,6 +112,30 @@ impl Default for SmartSharpenOptions {
     }
 }
 
+/// Settings for Photoshop's Reduce Noise filter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReduceNoiseOptions {
+    /// Noise reduction strength (0–10).
+    pub strength: f32,
+    /// Percentage of detail to preserve (0–100 %). Lowers regularization.
+    pub preserve_details: f32,
+    /// Percentage of colour noise reduction (0–100 %).
+    pub reduce_color_noise: f32,
+    /// Percentage of details to sharpen (0–100 %).
+    pub sharpen_details: f32,
+}
+
+impl Default for ReduceNoiseOptions {
+    fn default() -> Self {
+        Self {
+            strength: 5.0,
+            preserve_details: 10.0,
+            reduce_color_noise: 25.0,
+            sharpen_details: 0.0,
+        }
+    }
+}
+
 /// A filter from the Filter menu, applied to one layer's pixels, with its
 /// settings (so it can be previewed live, then applied).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -124,6 +148,7 @@ pub enum LayerFilter {
     /// its own layer); used on masks.
     AddNoise(NoiseOptions),
     SmartSharpen(SmartSharpenOptions),
+    ReduceNoise(ReduceNoiseOptions),
 }
 
 impl LayerFilter {
@@ -134,6 +159,7 @@ impl LayerFilter {
             Self::UnsharpMask { .. } => "Unsharp Mask",
             Self::AddNoise(_) => "Add Noise",
             Self::SmartSharpen(_) => "Smart Sharpen",
+            Self::ReduceNoise(_) => "Reduce Noise",
         }
     }
 
@@ -148,6 +174,7 @@ impl LayerFilter {
             } => unsharp_mask(image, amount, radius, threshold),
             Self::AddNoise(options) => add_noise(image, &options),
             Self::SmartSharpen(options) => smart_sharpen(image, &options),
+            Self::ReduceNoise(options) => reduce_noise(image, &options),
         }
     }
 }
@@ -412,6 +439,149 @@ fn transpose(src: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
             }
         });
     out
+}
+
+/// Single-pass 2D box filter of radius `r` using running sums.
+fn box_filter_2d(mut buf: Vec<[f32; 4]>, w: usize, h: usize, r: usize) -> Vec<[f32; 4]> {
+    if r == 0 || w == 0 || h == 0 {
+        return buf;
+    }
+    blur_rows(&mut buf, w, &[r]);
+    let mut t = transpose(&buf, w, h);
+    blur_rows(&mut t, h, &[r]);
+    transpose(&t, h, w)
+}
+
+/// Edge-preserving self-guided filter (He et al.) using box filters.
+fn guided_filter(y: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
+    if r == 0 || eps <= 1e-8 || w == 0 || h == 0 {
+        return y.to_vec();
+    }
+    let r = r.min(w.saturating_sub(1)).min(h.saturating_sub(1));
+    if r == 0 {
+        return y.to_vec();
+    }
+    let buf: Vec<[f32; 4]> = y.par_iter().map(|&v| [v, v * v, 0.0, 0.0]).collect();
+    let mean_buf = box_filter_2d(buf, w, h, r);
+
+    let ab_buf: Vec<[f32; 4]> = mean_buf
+        .into_par_iter()
+        .map(|[mean_y, mean_yy, _, _]| {
+            let var = (mean_yy - mean_y * mean_y).max(0.0);
+            let a = var / (var + eps);
+            let b = (1.0 - a) * mean_y;
+            [a, b, 0.0, 0.0]
+        })
+        .collect();
+
+    let mean_ab = box_filter_2d(ab_buf, w, h, r);
+
+    mean_ab
+        .into_par_iter()
+        .zip(y)
+        .map(|([mean_a, mean_b, _, _], &y_val)| (mean_a * y_val + mean_b).clamp(0.0, 1.0))
+        .collect()
+}
+
+/// Photoshop's Reduce Noise filter: edge-preserving guided filter on luminance,
+/// chroma smoothing for colour noise, and unsharp masking for detail sharpening.
+pub fn reduce_noise(image: &Tiled<Pixel>, options: &ReduceNoiseOptions) -> Tiled<Pixel> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    if w == 0 || h == 0 {
+        return image.clone();
+    }
+    if options.strength <= 0.0
+        && options.reduce_color_noise <= 0.0
+        && options.sharpen_details <= 0.0
+    {
+        return image.clone();
+    }
+
+    let pixels = image.to_vec();
+
+    // 1. Luminance filtering with Guided Filter (He et al.) using itself as the guide.
+    // Strength sets regularization (epsilon), and Preserve Details lowers it.
+    let y_filtered: Vec<f32> = if options.strength > 0.0 {
+        let s = (options.strength / 10.0).clamp(0.0, 1.0);
+        let detail_factor = 1.0 - 0.9 * (options.preserve_details / 100.0).clamp(0.0, 1.0);
+        let eps = s * s * 0.005 * detail_factor;
+        let y_norm: Vec<f32> = pixels.par_iter().map(|p| pixel_luma(p) / MAX).collect();
+        let guided = guided_filter(&y_norm, w, h, 2, eps);
+        guided.into_par_iter().map(|v| v * MAX).collect()
+    } else {
+        pixels.par_iter().map(pixel_luma).collect()
+    };
+
+    // 2. Colour noise: smooth chroma (colour difference from luminance) with a larger
+    // radius (6.0 px), scaled by Reduce Color Noise, keeping luminance.
+    let k_chroma = (options.reduce_color_noise / 100.0).clamp(0.0, 1.0);
+    let smoothed_chroma = if k_chroma > 0.0 {
+        let chroma_buf: Vec<[f32; 4]> = pixels
+            .par_iter()
+            .map(|p| {
+                let y = pixel_luma(p);
+                let a = f32::from(p[3]) / MAX;
+                [
+                    (f32::from(p[0]) - y) * a,
+                    (f32::from(p[1]) - y) * a,
+                    (f32::from(p[2]) - y) * a,
+                    a,
+                ]
+            })
+            .collect();
+        let blurred = blur_buffer(chroma_buf, w, h, 6.0);
+        Some(
+            blurred
+                .into_par_iter()
+                .map(|[cr, cg, cb, a]| {
+                    if a > 1e-6 {
+                        [cr / a, cg / a, cb / a]
+                    } else {
+                        [0.0, 0.0, 0.0]
+                    }
+                })
+                .collect::<Vec<[f32; 3]>>(),
+        )
+    } else {
+        None
+    };
+
+    // 3. Reconstruct pixels with filtered luminance and smoothed chroma, keeping alpha.
+    let out_pixels: Vec<Pixel> = pixels
+        .into_par_iter()
+        .zip(y_filtered)
+        .enumerate()
+        .map(|(i, (p, y))| {
+            if p[3] == 0 {
+                return p;
+            }
+            let y_orig = pixel_luma(&p);
+            let ocr = f32::from(p[0]) - y_orig;
+            let ocg = f32::from(p[1]) - y_orig;
+            let ocb = f32::from(p[2]) - y_orig;
+            let (cr, cg, cb) = if let Some(ref smoothed) = smoothed_chroma {
+                let [scr, scg, scb] = smoothed[i];
+                (
+                    ocr + k_chroma * (scr - ocr),
+                    ocg + k_chroma * (scg - ocg),
+                    ocb + k_chroma * (scb - ocb),
+                )
+            } else {
+                (ocr, ocg, ocb)
+            };
+            let c = |v: f32| v.round().clamp(0.0, MAX) as u16;
+            [c(y + cr), c(y + cg), c(y + cb), p[3]]
+        })
+        .collect();
+
+    let out = Tiled::from_slice(image.width(), image.height(), [0; 4], &out_pixels);
+
+    // 4. Sharpen details: reuse existing unsharp-mask luminance code.
+    if options.sharpen_details > 0.0 {
+        unsharp_mask(&out, options.sharpen_details / 100.0, 1.0, 0.0)
+    } else {
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -971,4 +1141,191 @@ mod tests {
         assert!(midtone_var > shadow_var * 2.0, "midtone noise should exceed shadow noise");
         assert!(midtone_var > highlight_var * 2.0, "midtone noise should exceed highlight noise");
     }
+
+    #[test]
+    fn reduce_noise_flat_image_with_noise_gets_lower_std_dev() {
+        let (w, h) = (60u32, 60u32);
+        let flat = Tiled::from_slice(
+            w,
+            h,
+            [0; 4],
+            &vec![[30000, 30000, 30000, 65535]; (w * h) as usize],
+        );
+        let noisy = add_noise(
+            &flat,
+            &NoiseOptions {
+                amount: 15.0,
+                distribution: NoiseDistribution::Uniform,
+                monochromatic: true,
+                grain_size: 1.0,
+                roughness: 0.5,
+                tonal_falloff: false,
+                seed: 42,
+            },
+        );
+
+        let std_dev = |img: &Tiled<Pixel>| -> f64 {
+            let px = img.to_vec();
+            let n = px.len() as f64;
+            let mean: f64 = px.iter().map(|p| f64::from(p[0])).sum::<f64>() / n;
+            let var: f64 = px
+                .iter()
+                .map(|p| {
+                    let diff = f64::from(p[0]) - mean;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / n;
+            var.sqrt()
+        };
+
+        let dev_before = std_dev(&noisy);
+        let denoised = reduce_noise(
+            &noisy,
+            &ReduceNoiseOptions {
+                strength: 7.0,
+                preserve_details: 0.0,
+                reduce_color_noise: 0.0,
+                sharpen_details: 0.0,
+            },
+        );
+        let dev_after = std_dev(&denoised);
+        assert!(
+            dev_after < dev_before * 0.5,
+            "std dev after ({dev_after}) should be significantly lower than before ({dev_before})"
+        );
+    }
+
+    #[test]
+    fn reduce_noise_hard_edge_stays_sharp() {
+        let (w, h) = (100u32, 20u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                if i % w < 50 {
+                    [20000, 20000, 20000, 65535]
+                } else {
+                    [45000, 45000, 45000, 65535]
+                }
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        let orig_step = 45000 - 20000;
+        let denoised = reduce_noise(
+            &img,
+            &ReduceNoiseOptions {
+                strength: 5.0,
+                preserve_details: 20.0,
+                reduce_color_noise: 0.0,
+                sharpen_details: 0.0,
+            },
+        );
+
+        let p_left = denoised.get(49, 10)[0];
+        let p_right = denoised.get(50, 10)[0];
+        let step = p_right as i32 - p_left as i32;
+
+        let tolerance = (orig_step as f32 * 0.10) as i32;
+        assert!(
+            (step - orig_step).abs() <= tolerance,
+            "hard edge step {step} deviated too much from {orig_step} (tolerance: {tolerance})"
+        );
+    }
+
+    #[test]
+    fn reduce_noise_strength_zero_changes_nothing() {
+        let (w, h) = (60u32, 20u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let v = ((i * 12345) % 65535) as u16;
+                [v, v.wrapping_add(1000), v.wrapping_sub(1000), 65535]
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        let out = reduce_noise(
+            &img,
+            &ReduceNoiseOptions {
+                strength: 0.0,
+                preserve_details: 0.0,
+                reduce_color_noise: 0.0,
+                sharpen_details: 0.0,
+            },
+        );
+        assert_eq!(out.to_vec(), img.to_vec());
+    }
+
+    #[test]
+    fn reduce_noise_color_noise_reduces_chroma_variance_keeping_mean_colour() {
+        let (w, h) = (80u32, 40u32);
+        let n = (w * h) as usize;
+        let mut px: Vec<Pixel> = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = (i as u32) % w;
+            let y = (i as u32) / w;
+            let d = match (x + y) % 4 {
+                0 => (1500i32, -1000i32, -500i32),
+                1 => (-1500i32, 1000i32, 500i32),
+                2 => (800i32, -400i32, -400i32),
+                _ => (-800i32, 400i32, 400i32),
+            };
+            let r = (32768 + d.0).clamp(0, 65535) as u16;
+            let g = (32768 + d.1).clamp(0, 65535) as u16;
+            let b = (32768 + d.2).clamp(0, 65535) as u16;
+            px.push([r, g, b, 65535]);
+        }
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+
+        let chroma_variance = |t: &Tiled<Pixel>| -> f64 {
+            let pixels = t.to_vec();
+            let mut var_sum = 0.0;
+            for p in &pixels {
+                let y = pixel_luma(p);
+                let cr = f64::from(p[0]) - f64::from(y);
+                let cg = f64::from(p[1]) - f64::from(y);
+                let cb = f64::from(p[2]) - f64::from(y);
+                var_sum += cr * cr + cg * cg + cb * cb;
+            }
+            var_sum / (pixels.len() as f64)
+        };
+
+        let mean_colour = |t: &Tiled<Pixel>| -> [f64; 3] {
+            let pixels = t.to_vec();
+            let n = pixels.len() as f64;
+            let mr = pixels.iter().map(|p| f64::from(p[0])).sum::<f64>() / n;
+            let mg = pixels.iter().map(|p| f64::from(p[1])).sum::<f64>() / n;
+            let mb = pixels.iter().map(|p| f64::from(p[2])).sum::<f64>() / n;
+            [mr, mg, mb]
+        };
+
+        let var_before = chroma_variance(&img);
+        let mean_before = mean_colour(&img);
+
+        let denoised = reduce_noise(
+            &img,
+            &ReduceNoiseOptions {
+                strength: 0.0,
+                preserve_details: 0.0,
+                reduce_color_noise: 100.0,
+                sharpen_details: 0.0,
+            },
+        );
+
+        let var_after = chroma_variance(&denoised);
+        let mean_after = mean_colour(&denoised);
+
+        assert!(
+            var_after < var_before * 0.1,
+            "chroma variance after ({var_after}) should be far less than before ({var_before})"
+        );
+        for c in 0..3 {
+            assert!(
+                (mean_after[c] - mean_before[c]).abs() <= 1.0,
+                "channel {c} mean colour shifted: {} vs {}",
+                mean_after[c],
+                mean_before[c]
+            );
+        }
+    }
 }
+

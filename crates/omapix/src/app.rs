@@ -13,8 +13,8 @@ use omapix_engine::layer::{Layer, Locks, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{
-    Document, NoiseDistribution, NoiseOptions, SharpenRemove, SmartSharpenOptions, export, ops,
-    ora,
+    Document, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
+    SmartSharpenOptions, export, ops, ora,
 };
 
 use crate::canvas::ToolInput;
@@ -231,6 +231,7 @@ pub struct App {
     blur_radius: f32,
     unsharp_mask: LayerFilter,
     smart_sharpen: LayerFilter,
+    reduce_noise: LayerFilter,
     feather_radius: f32,
     separation_radius: Option<f32>,
     high_pass_radius: f32,
@@ -288,6 +289,7 @@ impl App {
             blur_radius: 2.0,
             unsharp_mask: DEFAULT_UNSHARP_MASK,
             smart_sharpen: DEFAULT_SMART_SHARPEN,
+            reduce_noise: DEFAULT_REDUCE_NOISE,
             high_pass_radius: 2.0,
             feather_radius: 10.0,
             separation_radius: None,
@@ -692,7 +694,8 @@ impl App {
             Command::GaussianBlur
             | Command::HighPass
             | Command::UnsharpMask
-            | Command::SmartSharpen => {
+            | Command::SmartSharpen
+            | Command::ReduceNoise => {
                 if editor.target == Target::Mask {
                     has_mask
                 } else {
@@ -747,7 +750,8 @@ impl App {
             Command::GaussianBlur
             | Command::HighPass
             | Command::UnsharpMask
-            | Command::SmartSharpen => {
+            | Command::SmartSharpen
+            | Command::ReduceNoise => {
                 if let Some(editor) = &self.editor
                     && editor.target == Target::Pixels
                     && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
@@ -764,6 +768,7 @@ impl App {
                     },
                     Command::UnsharpMask => self.unsharp_mask,
                     Command::SmartSharpen => self.smart_sharpen,
+                    Command::ReduceNoise => self.reduce_noise,
                     _ => unreachable!(),
                 };
                 self.dialog = Some(Dialog::Filter {
@@ -923,6 +928,7 @@ impl App {
             LayerFilter::UnsharpMask { .. } => self.unsharp_mask = filter,
             LayerFilter::AddNoise(options) => self.noise_options = options,
             LayerFilter::SmartSharpen(_) => self.smart_sharpen = filter,
+            LayerFilter::ReduceNoise(_) => self.reduce_noise = filter,
         }
         let Some(editor) = &mut self.editor else {
             return;
@@ -1155,6 +1161,7 @@ impl App {
             ui.menu_button("Filter", |ui| {
                 ui.menu_button("Noise", |ui| {
                     self.menu_item(ui, Command::AddNoise, None);
+                    self.menu_item(ui, Command::ReduceNoise, None);
                 });
                 self.menu_item(ui, Command::GaussianBlur, None);
                 ui.menu_button("Sharpen", |ui| {
@@ -1391,6 +1398,9 @@ impl App {
                         LayerFilter::AddNoise(options) => noise_controls(ui, options),
                         LayerFilter::SmartSharpen(options) => {
                             smart_sharpen_controls(ui, options, hint);
+                        }
+                        LayerFilter::ReduceNoise(options) => {
+                            reduce_noise_controls(ui, options, hint);
                         }
                     }
                     ui.add_space(4.0);
@@ -1993,6 +2003,14 @@ const DEFAULT_SMART_SHARPEN: LayerFilter = LayerFilter::SmartSharpen(SmartSharpe
     highlight_fade: 0.0,
 });
 
+/// Reduce Noise's settings until it's first used.
+const DEFAULT_REDUCE_NOISE: LayerFilter = LayerFilter::ReduceNoise(ReduceNoiseOptions {
+    strength: 5.0,
+    preserve_details: 10.0,
+    reduce_color_noise: 25.0,
+    sharpen_details: 0.0,
+});
+
 /// Add Noise's settings, for its dialog and for noise on a mask.
 fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     ui.horizontal(|ui| {
@@ -2076,6 +2094,45 @@ fn smart_sharpen_controls(ui: &mut Ui, options: &mut SmartSharpenOptions, hint: 
     });
     ui.label(
         RichText::new("Sharpens luminance only. Judge it at 100 %.")
+            .color(hint),
+    );
+}
+
+/// Reduce Noise's settings, for its dialog.
+fn reduce_noise_controls(ui: &mut Ui, options: &mut ReduceNoiseOptions, hint: egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.label("Strength");
+        ui.add(
+            egui::Slider::new(&mut options.strength, 0.0..=10.0)
+                .fixed_decimals(0),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Preserve Details");
+        ui.add(
+            egui::Slider::new(&mut options.preserve_details, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Reduce Color Noise");
+        ui.add(
+            egui::Slider::new(&mut options.reduce_color_noise, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Sharpen Details");
+        ui.add(
+            egui::Slider::new(&mut options.sharpen_details, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+    });
+    ui.label(
+        RichText::new("Smooths noise while preserving edges. Judge it at 100 %.")
             .color(hint),
     );
 }
@@ -3084,6 +3141,7 @@ mod tests {
             blur_radius: 2.0,
             unsharp_mask: DEFAULT_UNSHARP_MASK,
             smart_sharpen: DEFAULT_SMART_SHARPEN,
+            reduce_noise: DEFAULT_REDUCE_NOISE,
             high_pass_radius: 2.0,
             feather_radius: 5.0,
             separation_radius: None,
@@ -3186,6 +3244,48 @@ mod tests {
     }
 
     #[test]
+    fn reduce_noise_previews_then_applies_and_remembers_its_settings() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active = app.editor.as_ref().unwrap().active;
+        app.run(Command::ReduceNoise, &ctx);
+        let Some(Dialog::Filter { filter, preview }) = &mut app.dialog else {
+            panic!("no filter dialog");
+        };
+        assert!(*preview);
+        assert_eq!(*filter, DEFAULT_REDUCE_NOISE);
+        let custom = LayerFilter::ReduceNoise(ReduceNoiseOptions {
+            strength: 7.0,
+            preserve_details: 30.0,
+            reduce_color_noise: 50.0,
+            sharpen_details: 20.0,
+        });
+        *filter = custom;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+        output.textures_delta.clear();
+        let view = app.editor.as_ref().unwrap().view();
+        assert_eq!(
+            view,
+            View::Filter {
+                layer: active,
+                filter: custom,
+                mask: false,
+            }
+        );
+
+        app.dialog = None;
+        app.apply_filter(custom, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Reduce Noise"));
+        app.run(Command::ReduceNoise, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == custom));
+    }
+
+    #[test]
     fn filters_on_a_targeted_mask_change_the_mask_not_the_pixels() {
         let ctx = egui::Context::default();
         let mut app = test_app();
@@ -3232,6 +3332,22 @@ mod tests {
             editor.update(&ctx);
         }
         assert_eq!(editor.undo_label(), Some("Smart Sharpen"));
+        let layer = editor.doc.layer(id).unwrap();
+        assert_eq!(layer.pixels.to_vec(), pixels);
+
+        // Reduce Noise on a mask also changes the mask, not the pixels.
+        app.run(Command::ReduceNoise, &ctx);
+        let Some(Dialog::Filter { filter, .. }) = app.dialog.take() else {
+            panic!("no filter dialog");
+        };
+        assert!(matches!(filter, LayerFilter::ReduceNoise(_)));
+        app.apply_filter(filter, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Reduce Noise"));
         let layer = editor.doc.layer(id).unwrap();
         assert_eq!(layer.pixels.to_vec(), pixels);
     }

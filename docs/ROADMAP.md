@@ -112,6 +112,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Switching the Omarchy theme while Omapix is open
 - [x] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
+- [ ] Reduce Noise at 100 % on a portrait: Strength, Preserve Details, Reduce Color Noise, and Sharpen Details with live preview
 - [x] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
 - [x] Smart Sharpen at 100 % on a portrait: Amount, Radius, Reduce Noise, Remove (Gaussian Blur or Lens Blur), and Shadows/Highlights Fade Amount with live preview
 - [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
@@ -175,7 +176,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - **Denoise** (Filter › Noise › Reduce Noise…), the first step.
   - AI denoising with the NIND model darktable already installed here (`denoise-nind`: 768 px tiles, GPL-3.0 like Omapix), found through the shared model folders and run on the GPU with the same runtime as section 7 ([AI.md](AI.md)).
   - Separate luminance and colour noise amounts. The result goes on a **Denoise** layer above the image.
-  - A classical fallback on the CPU (wavelet or non-local means) when there's no model.
+  - ~~A classical fallback on the CPU~~ (done): Filter › Noise › Reduce Noise… with Strength (0–10), Preserve Details, Reduce Color Noise, and Sharpen Details, using an edge-preserving guided filter on luminance, chroma smoothing, and luminance unsharp masking.
   - For raws, darktable's raw denoise before export is better still. Omapix's is for files that arrive already developed.
 - **Sharpen** (Filter › Sharpen), near the end.
   - ~~Photoshop's **Unsharp Mask**~~ (done): Filter › Sharpen › Unsharp Mask… with Amount, Radius and Threshold, on luminance only (the same offset goes to red, green and blue), so edges don't get colour fringes. Previewed live on the canvas; settings are remembered.
