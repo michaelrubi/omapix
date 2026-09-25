@@ -1862,11 +1862,13 @@ dependencies = [
 name = "omapix"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui",
  "env_logger",
  "log",
  "omapix-engine",
+ "pollster 1.0.1",
  "rayon",
  "rfd",
  "serde",

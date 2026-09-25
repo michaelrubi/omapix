@@ -17,6 +17,7 @@ use omapix_engine::{
 };
 
 use crate::canvas::{Canvas, Render};
+use crate::live::{self, LiveStack};
 use crate::tools::SampleSize;
 
 /// Undo steps kept. Snapshots share unchanged tiles, so this mostly costs
@@ -126,6 +127,18 @@ struct Moving {
     wanted: (i32, i32),
 }
 
+/// A Move drag shown live on the GPU (see live.rs), and once it ends,
+/// until the CPU render of the move is on screen.
+struct LiveMove {
+    /// The stack being made in the background, then made.
+    rx: Option<Receiver<Option<LiveStack>>>,
+    stack: Option<Arc<LiveStack>>,
+    /// How far the drag has moved, in image pixels.
+    offset: (i32, i32),
+    /// Once the move is made: the revision to wait for.
+    until: Option<u64>,
+}
+
 struct Job {
     label: String,
     rx: Receiver<(Document, u64)>,
@@ -174,6 +187,10 @@ pub struct Editor {
     stroke: Option<(Stroke, u64)>,
     /// The Move tool drag in progress.
     moving: Option<Moving>,
+    live_move: Option<LiveMove>,
+    /// The largest GPU texture side for live moves, or `None` to move on
+    /// the CPU (see gpu.rs).
+    pub live_limit: Option<u32>,
     /// Last revision drawn straight into the canvas by a brush stroke.
     /// Background renders of older revisions are thrown away.
     painted: u64,
@@ -216,6 +233,8 @@ impl Editor {
             canvas,
             stroke: None,
             moving: None,
+            live_move: None,
+            live_limit: crate::gpu::max_side(),
             painted: 0,
             overlay_colour,
             hide_selection_edges: false,
@@ -699,6 +718,8 @@ impl Editor {
             self.doc.outermost(&self.selected())
         };
         let (original, contents) = moving_layers(&self.doc, self.active, &roots);
+        let simple = !copy && self.doc.selection.is_none() && roots == [self.active];
+        self.live_move = simple.then(|| self.start_live_move()).flatten();
         self.moving = Some(Moving {
             label: label.to_owned(),
             original,
@@ -724,15 +745,26 @@ impl Editor {
             return;
         };
         moving.wanted = (dx, dy);
-        if self.rendering.as_ref().is_none_or(|r| r.visible) {
+        // Shown live, it doesn't wait for renders.
+        let live = self.live_move.as_ref().is_some_and(|l| l.until.is_none());
+        if live || self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_move();
         }
     }
 
     /// Finish the move at the last offset asked for.
     pub fn end_move(&mut self) {
+        // Made for real now; the live view stays up until it's on screen.
+        let until = self.revision + 1;
+        if let Some(live) = &mut self.live_move {
+            live.until = Some(until);
+        }
         self.apply_move();
         self.moving = None;
+        if self.revision < until {
+            // Nothing moved.
+            self.live_move = None;
+        }
     }
 
     /// Magic Wand: click to select similar colours, combining with the
@@ -822,11 +854,55 @@ impl Editor {
     }
 
     /// Put the moving layer (or its selected part) at the offset asked for.
+    /// Show a move of the active layer live on the GPU, if it can be: the
+    /// stack is made in the background.
+    fn start_live_move(&self) -> Option<LiveMove> {
+        let limit = self.live_limit?;
+        let (level, (x0, y0, x1, y1)) = self.canvas.visible_area()?;
+        if self.view != View::Image || !live::can_show(&self.doc, self.active) {
+            return None;
+        }
+        let scale = 1u32 << level;
+        if self.doc.width.div_ceil(scale) > limit || self.doc.height.div_ceil(scale) > limit {
+            return None;
+        }
+        let region = (
+            x0 / scale,
+            y0 / scale,
+            x1.div_ceil(scale) - x0 / scale,
+            y1.div_ceil(scale) - y0 / scale,
+        );
+        let (doc, id, reduced) = (self.doc.clone(), self.active, Arc::clone(&self.reduced));
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let layers = if level == 0 {
+                doc.layers.clone()
+            } else {
+                reduced.lock().expect("reduced layers").layers(&doc.layers, level as u32)
+            };
+            let _ = tx.send(live::build(&doc, &layers, id, level, region));
+        });
+        Some(LiveMove {
+            rx: Some(rx),
+            stack: None,
+            offset: (0, 0),
+            until: None,
+        })
+    }
+
     fn apply_move(&mut self) {
         let Some(moving) = &self.moving else {
             return;
         };
         let (dx, dy) = moving.wanted;
+        // Shown live, the move is made only when it ends.
+        let live = match &mut self.live_move {
+            Some(live) if live.until.is_none() => {
+                live.offset = (dx, dy);
+                true
+            }
+            _ => false,
+        };
         if moving.applied == (dx, dy) {
             return;
         }
@@ -864,6 +940,9 @@ impl Editor {
                 moving.roots = copies.clone();
                 self.select_layers(active, copies);
             }
+        }
+        if live {
+            return;
         }
         let moving = self.moving.as_mut().expect("still moving");
         moving.applied = (dx, dy);
@@ -975,6 +1054,7 @@ impl Editor {
         if self.rendering.as_ref().is_none_or(|r| r.visible) {
             self.apply_move();
         }
+        self.update_live_move();
         // One render at a time. Once what's on screen is drawn, a render
         // that's out of date stops, and the latest state is rendered next,
         // so fast slider drags skip intermediate states.
@@ -988,6 +1068,49 @@ impl Editor {
         if self.rendering.is_none() && self.rendered != current && self.stroke.is_none() {
             self.start_render(ctx);
         }
+    }
+
+    /// Pick up a live move's stack once made, drop it once the move is on
+    /// screen, and show it on the canvas meanwhile. If it can't be shown
+    /// (or the view changes under it), the move goes on on the CPU.
+    fn update_live_move(&mut self) {
+        let Some(live) = &mut self.live_move else {
+            self.canvas.live = None;
+            return;
+        };
+        if let Some(rx) = &live.rx {
+            match rx.try_recv() {
+                Ok(stack) => {
+                    live.rx = None;
+                    live.stack = stack.map(Arc::new);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => live.rx = None,
+            }
+        }
+        let area = self.canvas.visible_area();
+        let (level, (x0, y0, x1, y1)) = area.unwrap_or((usize::MAX, (0, 0, 0, 0)));
+        let covers = live.stack.as_ref().is_some_and(|s| {
+            let (rx, ry, rw, rh) = s.region;
+            let k = 1u32 << s.level;
+            s.level == level && x0 / k >= rx && y0 / k >= ry && x1.div_ceil(k) <= rx + rw && y1.div_ceil(k) <= ry + rh
+        });
+        let failed = live.rx.is_none() && !covers;
+        // Once the move's render is on screen and the canvas's tiles show it.
+        let caught_up = live.until.is_some_and(|until| {
+            let rendered = self.rendered.0 >= until
+                || self
+                    .rendering
+                    .as_ref()
+                    .is_some_and(|r| r.visible && r.target.0 >= until);
+            rendered && self.canvas.fresh
+        });
+        if failed || caught_up {
+            self.live_move = None;
+            self.canvas.live = None;
+            return;
+        }
+        self.canvas.live = live.stack.as_ref().map(|s| (Arc::clone(s), live.offset));
     }
 
     /// Render the current state in the background: in place over what the
@@ -1064,9 +1187,6 @@ impl Editor {
         }
     }
 
-    /// Sample a pixel value (Point, 3×3, 5×5, 11×11 average), either from
-    /// all layers composite or the active layer. Averaging ignores pixels
-    /// outside the image.
     /// The colour at (x, y) for the eyedropper: the average over `size`
     /// (ignoring pixels outside the image) of the visible image, or with
     /// `sample_all` false of the active layer. `None` outside the image.
@@ -2114,5 +2234,154 @@ mod tests {
             e.sample(0, 0, SampleSize::Point, true),
             Some([0, 0, 0, 65535])
         );
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use omapix_engine::{ColorProfile, Raster};
+
+    /// A 600 × 400 grey image and a red patch layer above it, laid out on
+    /// screen as if a GPU could show moves live.
+    fn editor() -> Editor {
+        let (w, h) = (600, 400);
+        let image = Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
+        let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        let id = doc.next_layer_id();
+        let mut patch = Layer::empty(id, "Patch", w, h);
+        patch.pixels.tile_mut(0, 0)[0] = [65535, 0, 0, 65535];
+        doc.layers.push(patch);
+        let mut e = Editor::new(doc).unwrap();
+        e.live_limit = Some(16384);
+        e.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0)));
+        e
+    }
+
+    fn settle(e: &mut Editor, ctx: &egui::Context) {
+        for _ in 0..500 {
+            e.update(ctx);
+            if e.live_move.as_ref().is_none_or(|l| l.rx.is_none()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_live_move_is_made_once_when_it_ends() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(10, 5);
+        settle(&mut e, &ctx);
+        e.move_to(20, 7);
+        e.update(&ctx);
+        // Shown live: the layer hasn't moved yet, the canvas shows it moved.
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0), [65535, 0, 0, 65535]);
+        let (stack, offset) = e.canvas.live.clone().expect("shown live");
+        assert_eq!((stack.level, offset), (0, (20, 7)));
+        e.end_move();
+        // Made for real, as one undo step, while the live view stays up
+        // until the canvas has drawn it.
+        let layer = e.doc.layer(patch).unwrap();
+        assert_eq!(layer.pixels.get(20, 7), [65535, 0, 0, 65535]);
+        assert_eq!(layer.pixels.get(0, 0)[3], 0);
+        assert_eq!(e.undo_label(), Some("Move"));
+        e.update(&ctx);
+        assert!(e.canvas.live.is_some());
+        e.undo();
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0), [65535, 0, 0, 65535]);
+    }
+
+    #[test]
+    fn moves_the_gpu_cant_show_are_made_as_they_go() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        e.doc.layer_mut(patch).unwrap().clipped = true;
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(10, 5);
+        e.update(&ctx);
+        assert!(e.canvas.live.is_none());
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(10, 5), [65535, 0, 0, 65535]);
+        e.end_move();
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    //! `cargo test --release -p omapix bench -- --ignored --nocapture`
+    use super::*;
+    use omapix_engine::adjust::{Adjustment, Curves};
+    use omapix_engine::{ColorProfile, Raster, ops, tiles};
+    use std::time::Instant;
+
+    #[test]
+    #[ignore]
+    fn slider_drag_stages_24mp() {
+        let (w, h) = (6000u32, 4000u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                [(x * 10) as u16, (y * 15) as u16, ((x + y) * 5) as u16, 65535]
+            })
+            .collect();
+        let doc = Document::from_image("b.tif".into(), &Raster::new(w, h, px), ColorProfile::srgb(), 16);
+        let mut doc = doc;
+        ops::dodge_and_burn_layer(&mut doc, 0);
+        let id = doc.next_layer_id();
+        doc.layers.push(Layer::adjustment(id, Adjustment::Curves(Curves::default()), w, h));
+        // Best of three, so first-touch costs don't count.
+        let time = |name: &str, f: &mut dyn FnMut()| {
+            let best = (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::MAX, f64::min);
+            println!("{name:<44} {best:>7.1} ms");
+        };
+        // What a 2560×1440 window shows at 100 %: 10×6 tiles of 256.
+        let tiles: Vec<(u32, u32)> = (0..6).flat_map(|r| (0..10).map(move |c| (c, r))).collect();
+        let groups = GroupCache::default();
+        let mut data = Vec::new();
+        time("composite visible tiles at 100 %", &mut || {
+            data = draw_tiles(&doc.layers, View::Image, [0; 4], &tiles, Some(&groups))
+        });
+        let render = Render::new(Raster::new(w, h, vec![[0; 4]; (w * h) as usize]));
+        time("write tiles + update pyramid", &mut || {
+            render.write_tiles(0, &tiles, &data, None);
+        });
+        let transform = DisplayTransform::to_srgb(&doc.profile).unwrap();
+        render.with_image(|image| {
+            time("convert display tiles to sRGB (15 × 512, par)", &mut || {
+                use rayon::prelude::*;
+                let keys: Vec<(u32, u32)> = (0..3).flat_map(|r| (0..5).map(move |c| (c, r))).collect();
+                keys.par_iter().for_each(|&(c, r)| {
+                    let b = tiles::bounds(image.width(), image.height(), c, r);
+                    std::hint::black_box(tiles::render(image, &transform, b));
+                });
+            });
+        });
+        let base = &doc.layers[0].pixels;
+        time("translate a 24 MP layer by (7, 3) (Move step)", &mut || {
+            std::hint::black_box(base.translated(7, 3, base.fill()));
+        });
+        let patch = doc.layers[0].id;
+        time("live stack for a move at 100 % (2560×1440)", &mut || {
+            std::hint::black_box(live::build(&doc, &doc.layers, patch, 0, (1000, 1000, 2560, 1440)));
+        });
+        // Zoomed out to fit: level 2 (1500×1000), whole image on screen.
+        let mut reduced = Reduced::default();
+        let mut shrunk = Vec::new();
+        time("shrink layers to level 2 (first time)", &mut || shrunk = reduced.layers(&doc.layers, 2));
+        time("shrink layers to level 2 (kept)", &mut || shrunk = reduced.layers(&doc.layers, 2));
+        let small: Vec<(u32, u32)> = (0..4).flat_map(|r| (0..6).map(move |c| (c, r))).collect();
+        time("composite level 2 (fit), all tiles", &mut || {
+            data = draw_tiles(&shrunk, View::Image, [0; 4], &small, Some(&groups))
+        });
     }
 }
