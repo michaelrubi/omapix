@@ -159,7 +159,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates
 - [ ] Paste Special: Paste in Place (Ctrl+Shift+V), and Paste Into (Ctrl+Alt+Shift+V) a copy from elsewhere in the image and from another app
 - [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit
-- [ ] Filter settings kept between runs: apply a few filters, quit, reopen and check their dialogs
+- [ ] Filter settings kept between runs: apply a few filters and Frequency Separation, quit, reopen and check their dialogs; the Defaults buttons; and a default changed in defaults.toml
 - [ ] Object Selection: W then Shift+W, click a face, a dress and a prop, drag boxes, Shift and Alt, the first use (model loading) and after editing (analysed again), and how the edges look at 100 %
 - [ ] Navigator and Histogram panels: Window menu toggles strip, Navigator thumbnail drag pans canvas, zoom slider and field, and Histogram Colors and Luminosity views with statistics
 - [ ] Gradient tool: `G` shortcut, dragging linear and radial gradients on pixels and masks, Shift constraint to 45°, Foreground to Background and Foreground to Transparent, Reverse, Opacity with number keys, within a selection, and one undo step
@@ -240,7 +240,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - Adjustment and fill layers, text and effects aren't read. When a file has them, Photoshop's flattened image comes in as a hidden "Photoshop composite" layer on top, unless Photoshop saved it blank (Maximize Compatibility off).
   - Later: turning Photoshop's Curves, Levels and Hue/Saturation layers into Omapix's.
 - ~~**History panel:** a list of undo steps you can click back to~~ (done).
-- ~~**Filter settings remembered between runs**~~ (done): each filter's settings as last applied (Gaussian Blur, Smart Blur, High Pass, Unsharp Mask, Smart Sharpen, Reduce Noise, Add Noise, Mask Density, Feather and High Pass Sharpening) are saved to `~/.config/omapix/filters.toml` and come back next time, as in Photoshop. Frequency Separation's radius still starts from the image's size.
+- ~~**Filter and retouching settings remembered between runs**~~ (done): each filter's and retouching setup's settings as last applied (Gaussian Blur, Smart Blur, High Pass, Unsharp Mask, Smart Sharpen, Reduce Noise, Add Noise, Mask Density, Feather, High Pass Sharpening and Frequency Separation's radius) are saved to `~/.config/omapix/filters.toml` and come back next time, as in Photoshop. Every one of their dialogs has a Defaults button. The defaults are Omapix's own unless changed in `~/.config/omapix/defaults.toml`, which Omapix writes on first run with every setting listed and commented out, to uncomment and edit (like `hotkeys.toml`). Frequency Separation's radius starts from the image's size until it's set.
 - ~~**Custom hotkeys**~~ (done): override any command's shortcut or tool letter from `~/.config/omapix/hotkeys.toml`, with Photoshop's shortcuts as defaults and startup warnings for clashes.
   - When there's no `hotkeys.toml` (or it's empty), Omapix writes one listing every command and tool with its default shortcut, commented out, so what can be changed is there to see and edit.
 

@@ -259,7 +259,8 @@ pub struct App {
     status: Option<(String, bool, Instant)>,
     /// Filter settings as last used, kept between runs.
     filters: FilterSettings,
-    separation_radius: Option<f32>,
+    /// What the dialogs' Defaults buttons go back to.
+    defaults: FilterSettings,
     /// The user chose to discard changes, so the next close goes through.
     allow_close: bool,
     title: String,
@@ -297,6 +298,7 @@ impl App {
         let theme = Theme::load();
         ctx.set_visuals(theme.visuals());
 
+        let (filters, defaults) = FilterSettings::load();
         let mut app = Self {
             theme,
             theme_rx: theme::watch(ctx.clone()),
@@ -319,8 +321,8 @@ impl App {
             file_job: None,
             dialog: None,
             status: None,
-            filters: FilterSettings::load(),
-            separation_radius: None,
+            filters,
+            defaults,
             allow_close: false,
             title: String::new(),
             script: std::env::var("OMAPIX_SCRIPT")
@@ -529,7 +531,6 @@ impl App {
 
     fn close_document(&mut self) {
         self.editor = None;
-        self.separation_radius = None;
         self.layers = LayersPanel::default();
         self.properties = PropertiesPanel::default();
         self.history = HistoryPanel;
@@ -584,7 +585,6 @@ impl App {
                         self.message(format!("Converted {original} to {now} for editing"), false);
                     }
                     self.editor = Some(editor);
-                    self.separation_radius = None;
                     if !self.pending_drops.is_empty() {
                         let paths = std::mem::take(&mut self.pending_drops);
                         self.place_files(paths, ctx);
@@ -864,17 +864,14 @@ impl App {
                     self.message("Could not use the filter because the layer is locked", true);
                     return;
                 }
+                let settings = &self.filters;
                 let filter = match cmd {
-                    Command::GaussianBlur => LayerFilter::GaussianBlur {
-                        radius: self.filters.blur_radius,
-                    },
-                    Command::SmartBlur => self.filters.smart_blur,
-                    Command::HighPass => LayerFilter::HighPass {
-                        radius: self.filters.high_pass_radius,
-                    },
-                    Command::UnsharpMask => self.filters.unsharp_mask,
-                    Command::SmartSharpen => self.filters.smart_sharpen,
-                    Command::ReduceNoise => self.filters.reduce_noise,
+                    Command::GaussianBlur => LayerFilter::GaussianBlur { radius: settings.blur_radius },
+                    Command::SmartBlur => LayerFilter::SmartBlur(settings.smart_blur),
+                    Command::HighPass => LayerFilter::HighPass { radius: settings.high_pass_radius },
+                    Command::UnsharpMask => settings.unsharp_mask.into(),
+                    Command::SmartSharpen => LayerFilter::SmartSharpen(settings.smart_sharpen),
+                    Command::ReduceNoise => LayerFilter::ReduceNoise(settings.reduce_noise),
                     _ => unreachable!(),
                 };
                 self.dialog = Some(Dialog::Filter {
@@ -976,10 +973,7 @@ impl App {
             }
             Command::FrequencySeparation => {
                 let Some(editor) = &self.editor else { return };
-                // ~8.6 px on a 24 MP frame, scaling with resolution.
-                let longest = editor.doc.width.max(editor.doc.height) as f32;
-                let default = (longest / 700.0 * 10.0).round() / 10.0;
-                let radius = self.separation_radius.unwrap_or(default);
+                let radius = self.filters.separation_radius.unwrap_or_else(|| separation_radius(editor));
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius,
@@ -1050,17 +1044,7 @@ impl App {
     /// Apply a Filter menu filter to the active layer (within the
     /// selection), remembering its settings for next time.
     fn apply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
-        match filter {
-            LayerFilter::GaussianBlur { radius } => self.filters.blur_radius = radius,
-            LayerFilter::HighPass { radius } => self.filters.high_pass_radius = radius,
-            LayerFilter::UnsharpMask { .. } => self.filters.unsharp_mask = filter,
-            LayerFilter::AddNoise(options) => self.filters.noise = options,
-            LayerFilter::SmartSharpen(_) => self.filters.smart_sharpen = filter,
-            LayerFilter::ReduceNoise(_) => self.filters.reduce_noise = filter,
-            LayerFilter::MaskDensity { density } => self.filters.mask_density = density,
-            LayerFilter::SmartBlur(_) => self.filters.smart_blur = filter,
-        }
-        self.filters.save();
+self.filters.remember(&filter);
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1115,7 +1099,8 @@ impl App {
                 );
             }
             Command::FrequencySeparation => {
-                self.separation_radius = Some(radius);
+                self.filters.separation_radius = Some(radius);
+                self.filters.save();
                 editor.target = Target::Pixels;
                 editor.edit_in_background(
                     "Frequency Separation",
@@ -1460,6 +1445,8 @@ impl App {
             }
             return;
         }
+        let defaults = &self.defaults;
+        let auto_separation = self.editor.as_ref().map(separation_radius);
         let Some(dialog) = &mut self.dialog else {
             return;
         };
@@ -1522,6 +1509,15 @@ impl App {
                             || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
+                        }
+                        if ui.button("Defaults").clicked() {
+                            *radius = match command {
+                                Command::Feather => defaults.feather_radius,
+                                Command::FrequencySeparation => {
+                                    defaults.separation_radius.or(auto_separation).unwrap_or(*radius)
+                                }
+                                _ => defaults.high_pass_radius,
+                            };
                         }
                         if ok {
                             let (command, radius) = (*command, *radius);
@@ -1596,6 +1592,9 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
+                        if ui.button("Defaults").clicked() {
+                            *filter = defaults.filter(filter);
+                        }
                         if ok {
                             let filter = *filter;
                             action = Some(Box::new(move |app, ctx| app.apply_filter(filter, ctx)));
@@ -1615,6 +1614,9 @@ impl App {
                             || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
+                        }
+                        if ui.button("Defaults").clicked() {
+                            *options = defaults.noise;
                         }
                         if ok {
                             let options = *options;
@@ -2498,6 +2500,13 @@ fn smart_blur_controls(ui: &mut Ui, options: &mut SmartBlurOptions, hint: egui::
     );
 }
 
+/// Frequency Separation's radius until one's chosen: about 8.6 px on a
+/// 24 MP frame, scaling with the image's size.
+fn separation_radius(editor: &Editor) -> f32 {
+    let longest = editor.doc.width.max(editor.doc.height) as f32;
+    (longest / 700.0 * 10.0).round() / 10.0
+}
+
 /// A radius in pixels, for filter and radius dialogs.
 fn radius_field(ui: &mut Ui, radius: &mut f32) {
     ui.horizontal(|ui| {
@@ -3307,7 +3316,6 @@ fn ellipse_points(a: Pos2, b: Pos2) -> Vec<Pos2> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{DEFAULT_REDUCE_NOISE, DEFAULT_SMART_BLUR, DEFAULT_SMART_SHARPEN, DEFAULT_UNSHARP_MASK};
     use crate::editor::render_view;
 
     fn editor_with_selection() -> Editor {
@@ -3664,7 +3672,7 @@ mod tests {
             dialog: None,
             status: None,
             filters: FilterSettings::default(),
-            separation_radius: None,
+            defaults: FilterSettings::default(),
             allow_close: false,
             title: String::new(),
             drawing: None,
@@ -3689,7 +3697,7 @@ mod tests {
             panic!("no filter dialog");
         };
         assert!(*preview);
-        assert_eq!(*filter, DEFAULT_UNSHARP_MASK);
+        assert_eq!(*filter, LayerFilter::from(FilterSettings::default().unsharp_mask));
         let stronger = LayerFilter::UnsharpMask {
             amount: 2.0,
             radius: 3.0,
@@ -3730,7 +3738,7 @@ mod tests {
             panic!("no filter dialog");
         };
         assert!(*preview);
-        assert_eq!(*filter, DEFAULT_SMART_SHARPEN);
+        assert_eq!(*filter, LayerFilter::SmartSharpen(FilterSettings::default().smart_sharpen));
         let custom = LayerFilter::SmartSharpen(SmartSharpenOptions {
             amount: 250.0,
             radius: 2.5,
@@ -3774,7 +3782,7 @@ mod tests {
             panic!("no filter dialog");
         };
         assert!(*preview);
-        assert_eq!(*filter, DEFAULT_REDUCE_NOISE);
+        assert_eq!(*filter, LayerFilter::ReduceNoise(FilterSettings::default().reduce_noise));
         let custom = LayerFilter::ReduceNoise(ReduceNoiseOptions {
             strength: 7.0,
             preserve_details: 30.0,
@@ -4051,7 +4059,7 @@ mod tests {
             panic!("no filter dialog");
         };
         assert!(*preview);
-        assert_eq!(*filter, DEFAULT_SMART_BLUR);
+        assert_eq!(*filter, LayerFilter::SmartBlur(FilterSettings::default().smart_blur));
         let custom = LayerFilter::SmartBlur(SmartBlurOptions {
             radius: 5.0,
             threshold: 30.0,
@@ -4975,6 +4983,63 @@ mod tests {
     }
 
     #[test]
+    fn dialogs_go_back_to_the_defaults_and_frequency_separation_remembers() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.defaults.blur_radius = 6.0;
+        app.filters.blur_radius = 1.0;
+        // A frame of the dialog, clicking at `at` if given; where "Defaults" is.
+        let frame = |app: &mut App, at: Option<egui::Pos2>| {
+            let events = at.map_or_else(Vec::new, |pos| {
+                [true, false]
+                    .map(|pressed| egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    })
+                    .into_iter()
+                    .chain([egui::Event::PointerMoved(pos)])
+                    .collect()
+            });
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            fn find(shape: &egui::Shape) -> Option<egui::Rect> {
+                match shape {
+                    egui::Shape::Text(t) if t.galley.text() == "Defaults" => Some(t.visual_bounding_rect()),
+                    egui::Shape::Vec(v) => v.iter().find_map(find),
+                    _ => None,
+                }
+            }
+            out.shapes.iter().find_map(|s| find(&s.shape)).map(|r| r.center())
+        };
+
+        app.run(Command::GaussianBlur, &ctx);
+        // A modal is laid out, unseen, on its first frame.
+        frame(&mut app, None);
+        let button = frame(&mut app, None).expect("a Defaults button");
+        frame(&mut app, Some(button));
+        frame(&mut app, Some(button));
+        assert!(matches!(app.dialog, Some(Dialog::Filter { filter: LayerFilter::GaussianBlur { radius }, .. }) if radius == 6.0));
+
+        // Frequency Separation starts from the image's size, then from the
+        // radius last used.
+        app.dialog = None;
+        app.run(Command::FrequencySeparation, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Radius { radius, .. }) if radius == 0.9));
+        app.dialog = None;
+        app.apply_radius(Command::FrequencySeparation, 3.5, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        app.run(Command::FrequencySeparation, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Radius { radius, .. }) if radius == 3.5));
+    }
+
+    #[test]
     fn eyedropper_escape_key_disarms() {
         use omapix_engine::adjust::{Adjustment, Curves, Eyedropper};
 
@@ -5535,7 +5600,6 @@ mod tests {
         assert!(app.editor.is_none());
         assert!(!app.enabled(Command::Close));
         assert!(app.dialog.is_none());
-        assert!(app.separation_radius.is_none());
     }
 
     #[test]
