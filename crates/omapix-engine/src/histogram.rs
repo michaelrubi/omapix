@@ -167,9 +167,9 @@ mod tests {
         let hist = Histogram::from_layers(&[layer], w, h);
         assert_eq!(hist.total(), (w * h) as u64);
         // 32768 >> 8 = 128
-        assert_eq!(hist.red[128], (w * h) as u32);
-        assert_eq!(hist.green[128], (w * h) as u32);
-        assert_eq!(hist.blue[128], (w * h) as u32);
-        assert_eq!(hist.luminance[128], (w * h) as u32);
+        assert_eq!(hist.red[128], w * h);
+        assert_eq!(hist.green[128], w * h);
+        assert_eq!(hist.blue[128], w * h);
+        assert_eq!(hist.luminance[128], w * h);
     }
 }

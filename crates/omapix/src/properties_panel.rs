@@ -717,9 +717,9 @@ mod tests {
         assert!(shown, "panel should show for curves adjustment");
         let hist = panel.histogram.as_ref().expect("histogram computed for curves");
         assert!(!hist.is_empty(), "histogram should not be empty");
-        assert_eq!(hist.red[40000 >> 8], (w * h) as u32);
-        assert_eq!(hist.green[20000 >> 8], (w * h) as u32);
-        assert_eq!(hist.blue[10000 >> 8], (w * h) as u32);
+        assert_eq!(hist.red[40000 >> 8], w * h);
+        assert_eq!(hist.green[20000 >> 8], w * h);
+        assert_eq!(hist.blue[10000 >> 8], w * h);
 
         // Target Levels layer
         editor.active = 102;
