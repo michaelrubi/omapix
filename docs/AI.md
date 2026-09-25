@@ -111,8 +111,13 @@ goes in the engine, where it can be tested without models.
   run time, as darktable does, from `OMAPIX_ORT_LIBRARY` or else
   `/usr/lib/libonnxruntime.so`. Nothing is bundled, so the binary stays
   small, and the system package brings the CUDA provider.
-  - **To check in the first spike:** that the `ort` release we pick
-    accepts ONNX Runtime 1.29's C API.
+  - Checked in the spike (2026-09-25): `ort` 2.0.0-rc.13 (built for
+    1.28's API) loads the system's 1.29 and runs darktable's models.
+  - Arch's `onnxruntime-cuda` 1.29 builds its CUDA provider without
+    linking cuDNN, so loading it fails with `undefined symbol:
+    cudnnGetConvolutionBackwardDataAlgorithm_v7`. Omapix opens
+    `libcudnn.so.9` (globally) before asking for CUDA, which fixes it;
+    otherwise it falls back to the CPU.
 - Provider: CUDA if the library has it, else CPU. No setting unless one is
   needed.
 - One `Session` per model, created on first use. Sessions not used for two
@@ -490,8 +495,8 @@ the spike:
 |---|---|---|
 | Face analysis (detect, points, skin/hair) | < 0.3 s | < 2 s |
 | Guided filter refine, per mask at 24 MP | < 0.3 s (CPU, parallel) | same |
-| SAM 2.1 encoder, once per image | < 0.5 s | several s |
-| SAM 2.1 per click | < 30 ms | < 200 ms |
+| SAM 2.1 encoder, once per image | < 0.5 s (measured: 0.14 s, 0.47 s the first time) | several s (measured: 1.1 s) |
+| SAM 2.1 per click | < 30 ms (measured: 8 ms) | < 200 ms (measured: 40 ms) |
 | Blemish detection | < 0.3 s (CPU) | same |
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) | same |
 | Auto Retouch end to end, per face | < 3 s | < 10 s |
@@ -533,12 +538,11 @@ the spike:
 
 Each is useful on its own and ends with `make install` and hand testing.
 
-0. **Spike (1–2 days).**
-   - The `ort` crate loads `/usr/lib/libonnxruntime.so` 1.29 with CUDA
-     from Omapix.
-   - Run darktable's SAM 2.1 files on a portrait and measure the timings
-     above.
-   - Decide the `ort` version.
+0. ~~**Spike**~~ (done, 2026-09-25): `ort` 2.0.0-rc.13 with
+   `load-dynamic` runs darktable's SAM 2.1 (small) from Omapix's new
+   `omapix-ai` crate, on the CPU and with CUDA (once cuDNN is loaded
+   first, see Runtime). One click on a portrait's face selects its skin.
+   `crates/omapix-ai/examples/spike.rs` does it again.
 1. **Groundwork and Object Selection.**
    - `omapix-ai`, the model registry (shared folders, matched by checksum),
      `fetch-models.sh`, and the model input/output path with the guided
