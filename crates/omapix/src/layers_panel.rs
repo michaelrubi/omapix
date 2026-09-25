@@ -249,7 +249,7 @@ impl LayersPanel {
                 (FOLDER, Command::NewGroup, "New group (Ctrl+G groups the layer)"),
                 (PLUS, Command::NewLayer, "New layer (Ctrl+Shift+N)"),
                 (COPY, Command::DuplicateLayer, "Duplicate layer (Ctrl+J)"),
-                (MASK, Command::AddMask, "Add layer mask"),
+                (MASK, Command::AddMask, "Add layer mask (Alt+click: hide all)"),
                 (TRASH, Command::DeleteLayer, "Delete layer"),
             ];
             for (icon, cmd, tip) in buttons {
@@ -258,7 +258,9 @@ impl LayersPanel {
                     .on_hover_text(tip)
                     .clicked()
                 {
-                    command = Some(cmd);
+                    // Alt+click adds a black mask, as in Photoshop.
+                    let hide = cmd == Command::AddMask && ui.input(|i| i.modifiers.alt);
+                    command = Some(if hide { Command::AddMaskHideAll } else { cmd });
                 }
             }
         });
@@ -619,11 +621,7 @@ impl LayersPanel {
                                 let (command, shift, alt) =
                                     ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
                                 if command {
-                                    if let Some(mask) = editor.doc.layer(id).and_then(|l| l.mask.as_ref()) {
-                                        let how = Combine::from_modifiers(shift, alt);
-                                        let sel = Selection::from_mask(&mask.pixels);
-                                        editor.set_selection("Load Selection", sel, how);
-                                    }
+                                    load_mask(editor, id, Combine::from_modifiers(shift, alt));
                                 } else if alt {
                                     // Alt+click shows the mask on its own, or goes back.
                                     editor.active = id;
@@ -1007,6 +1005,27 @@ fn mask_menu_items(
         editor.active = id;
         *command = Some(Command::MaskOverlay);
     });
+
+    ui.separator();
+
+    let has_selection = editor.doc.selection.is_some();
+    let loads = [
+        ("Add Mask to Selection", Combine::Add, true),
+        ("Subtract Mask from Selection", Combine::Subtract, has_selection),
+        ("Intersect Mask with Selection", Combine::Intersect, has_selection),
+    ];
+    for (label, how, enabled) in loads {
+        menu_item(ui, label, None, enabled, || load_mask(editor, id, how));
+    }
+}
+
+/// Load layer `id`'s mask as a selection, combined with the current one
+/// (Ctrl+click on the mask thumbnail, or its context menu).
+fn load_mask(editor: &mut Editor, id: u64, how: Combine) {
+    if let Some(mask) = editor.doc.layer(id).and_then(|l| l.mask.as_ref()) {
+        let sel = Selection::from_mask(&mask.pixels);
+        editor.set_selection("Load Selection", sel, how);
+    }
 }
 
 fn mask_context_menu(
@@ -1401,6 +1420,56 @@ mod tests {
             mask_context_menu(ui, &mut h.editor, &mut command, CURVES, true);
         });
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn alt_clicking_the_mask_button_hides_all() {
+        let mut h = Harness::new();
+        // The buttons are the row of clickable widgets below the layers:
+        // group, new, duplicate, mask, delete.
+        let bottom = h.ctx.read_response(row_id(h.background())).unwrap().rect.bottom();
+        let mut buttons: Vec<egui::Rect> = h.ctx.viewport(|v| {
+            v.prev_pass
+                .widgets
+                .layers()
+                .flat_map(|(_, w)| w)
+                .filter(|w| w.sense.senses_click() && w.rect.top() > bottom)
+                .map(|w| w.rect)
+                .collect()
+        });
+        buttons.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        let mask = buttons[3].center();
+
+        assert_eq!(h.click(mask), Some(Command::AddMask));
+        h.modifiers = egui::Modifiers::ALT;
+        assert_eq!(h.click(mask), Some(Command::AddMaskHideAll));
+    }
+
+    #[test]
+    fn mask_menu_combines_the_mask_with_the_selection() {
+        let mut h = Harness::new();
+        let (w, hh) = (60, 40);
+        // The Curves mask reveals the left half.
+        let left = Selection::rectangle(w, hh, (0.0, 0.0), (30.0, 40.0));
+        h.editor.doc.layer_mut(CURVES).unwrap().mask.as_mut().unwrap().pixels = left.coverage.clone();
+        let top = Selection::rectangle(w, hh, (0.0, 0.0), (60.0, 20.0));
+        let selected = |h: &Harness, x, y| h.editor.doc.selection.as_ref().map(|s| s.coverage.get(x, y));
+
+        h.editor.doc.selection = Some(top.clone());
+        load_mask(&mut h.editor, CURVES, Combine::Add);
+        assert_eq!(selected(&h, 10, 30), Some(u16::MAX));
+        assert_eq!(selected(&h, 50, 30), Some(0));
+
+        h.editor.doc.selection = Some(top.clone());
+        load_mask(&mut h.editor, CURVES, Combine::Subtract);
+        assert_eq!(selected(&h, 10, 10), Some(0));
+        assert_eq!(selected(&h, 50, 10), Some(u16::MAX));
+
+        h.editor.doc.selection = Some(top);
+        load_mask(&mut h.editor, CURVES, Combine::Intersect);
+        assert_eq!(selected(&h, 10, 10), Some(u16::MAX));
+        assert_eq!(selected(&h, 50, 10), Some(0));
+        assert_eq!(selected(&h, 10, 30), Some(0));
     }
 
     #[test]
