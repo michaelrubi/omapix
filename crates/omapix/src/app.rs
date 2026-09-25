@@ -238,9 +238,6 @@ pub struct App {
     v_down: bool,
 }
 
-#[cfg(test)]
-pub(crate) use tests::test_app;
-
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
         let ctx = &cc.egui_ctx;
@@ -901,7 +898,7 @@ impl App {
             .is_some_and(|l| l.clipped)
     }
 
-    pub(crate) fn menu_item(&mut self, ui: &mut Ui, cmd: Command, label: Option<String>) {
+    fn menu_item(&mut self, ui: &mut Ui, cmd: Command, label: Option<String>) {
         let text = label.unwrap_or_else(|| cmd.label().to_owned());
         let mut button = Button::new(text);
         if let Some(shortcut) = cmd.shortcut() {
@@ -2761,7 +2758,7 @@ mod tests {
         assert_eq!(editor.target, Target::Mask);
     }
 
-    pub(crate) fn test_app() -> App {
+    fn test_app() -> App {
         let (_tx, rx) = channel();
         App {
             theme: Theme::default(),

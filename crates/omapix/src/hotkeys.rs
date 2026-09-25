@@ -16,19 +16,23 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 use serde::Deserialize;
 
 use crate::commands::Command;
-use crate::tools::{Tool, ToolGroup};
+use crate::tools::ToolGroup;
 
-static HOTKEYS: RwLock<Option<Hotkeys>> = RwLock::new(None);
+/// Loaded once at startup (see [`load`]); Photoshop's defaults until then,
+/// and in tests.
+static HOTKEYS: OnceLock<Hotkeys> = OnceLock::new();
 
-#[cfg(test)]
-pub(crate) static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The shortcuts in use.
+pub(crate) fn current() -> &'static Hotkeys {
+    HOTKEYS.get_or_init(Hotkeys::default)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Hotkeys {
@@ -235,57 +239,14 @@ pub(crate) fn parse_tool_key(s: &str) -> Result<Option<Key>, String> {
     Key::from_name(s).map(Some).ok_or_else(|| format!("unknown key {s:?}"))
 }
 
-pub(crate) fn parse_command(name: &str) -> Option<Command> {
-    let clean = name.trim();
-    if let Some(cmd) = Command::from_name(clean) {
-        return Some(cmd);
-    }
-    let normalized = clean.replace(['_', '-'], "");
-    Command::ALL.iter().copied().find(|c| {
-        let debug_name = format!("{c:?}");
-        debug_name.eq_ignore_ascii_case(clean) || debug_name.eq_ignore_ascii_case(&normalized)
-    })
-}
-
-pub(crate) fn parse_tool_group(name: &str) -> Option<ToolGroup> {
-    let clean = name.trim();
-    let normalized = clean.replace(['_', '-', ' '], "");
-    for &group in ToolGroup::ALL {
-        let g_str = format!("{group:?}");
-        if g_str.eq_ignore_ascii_case(clean) || g_str.eq_ignore_ascii_case(&normalized) {
-            return Some(group);
-        }
-    }
-    for &tool in &[
-        Tool::Move,
-        Tool::Brush,
-        Tool::Eraser,
-        Tool::CloneStamp,
-        Tool::SpotHealing,
-        Tool::Healing,
-        Tool::Marquee,
-        Tool::EllipticalMarquee,
-        Tool::Lasso,
-        Tool::MagicWand,
-        Tool::Eyedropper,
-    ] {
-        let t_str = format!("{tool:?}");
-        let n_str = tool.name();
-        if t_str.eq_ignore_ascii_case(clean)
-            || t_str.eq_ignore_ascii_case(&normalized)
-            || n_str.eq_ignore_ascii_case(clean)
-            || n_str.replace(['_', '-', ' '], "").eq_ignore_ascii_case(&normalized)
-        {
-            return Some(tool.group());
-        }
-    }
-    match clean.to_ascii_lowercase().as_str() {
-        "clone" => Some(ToolGroup::CloneStamp),
-        "heal" | "spotheal" => Some(ToolGroup::Healing),
-        "ellipse" => Some(ToolGroup::Marquee),
-        "wand" => Some(ToolGroup::Wand),
-        _ => None,
-    }
+/// A tool, by its name in OMAPIX_SCRIPT (e.g. "Eyedropper", "MagicWand"),
+/// as the group whose letter picks it.
+fn parse_tool_group(name: &str) -> Option<ToolGroup> {
+    ToolGroup::ALL
+        .iter()
+        .flat_map(|g| g.tools())
+        .find(|t| format!("{t:?}") == name.trim())
+        .map(|t| t.group())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -312,7 +273,7 @@ pub(crate) fn parse_file(s: &str) -> (Hotkeys, Vec<String>) {
     let mut warnings = Vec::new();
 
     for (key, val) in &file.commands {
-        match parse_command(key) {
+        match Command::from_name(key.trim()) {
             Some(cmd) => match parse_shortcut(val) {
                 Ok(sc) => {
                     command_overrides.insert(cmd, sc);
@@ -355,80 +316,24 @@ pub(crate) fn default_path() -> Option<PathBuf> {
     crate::recent::config_dir().map(|d| d.join("hotkeys.toml"))
 }
 
+/// Load `hotkeys.toml` from the config folder, if there is one. Returns
+/// warnings about problems in it, which leave the defaults in place.
 pub(crate) fn load() -> Vec<String> {
-    match default_path() {
-        Some(path) => load_from(&path),
-        None => Vec::new(),
-    }
-}
-
-pub(crate) fn load_from(path: &Path) -> Vec<String> {
-    if !path.exists() {
-        let mut guard = HOTKEYS.write().unwrap();
-        *guard = Some(Hotkeys::default());
-        return Vec::new();
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            let mut guard = HOTKEYS.write().unwrap();
-            *guard = Some(Hotkeys::default());
-            return vec![format!("Hotkeys: failed to read {}: {e}", path.display())];
-        }
+    let text = match default_path().map(std::fs::read_to_string) {
+        None => return Vec::new(),
+        Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Some(Err(e)) => return vec![format!("Hotkeys: failed to read hotkeys.toml: {e}")],
+        Some(Ok(text)) => text,
     };
-    load_from_str(&content)
-}
-
-pub(crate) fn load_from_str(s: &str) -> Vec<String> {
-    let (hotkeys, warnings) = parse_file(s);
-    let mut guard = HOTKEYS.write().unwrap();
-    *guard = Some(hotkeys);
+    let (hotkeys, warnings) = parse_file(&text);
+    let _ = HOTKEYS.set(hotkeys);
     warnings
-}
-
-pub(crate) fn command_shortcut(cmd: Command) -> Option<KeyboardShortcut> {
-    let guard = HOTKEYS.read().unwrap();
-    match &*guard {
-        Some(h) => h.command(cmd),
-        None => cmd.default_shortcut(),
-    }
-}
-
-pub(crate) fn tool_group_key(group: ToolGroup) -> Option<Key> {
-    let guard = HOTKEYS.read().unwrap();
-    match &*guard {
-        Some(h) => h.tool_group(group),
-        None => group.default_key(),
-    }
-}
-
-pub(crate) fn with_keyboard_order<R>(f: impl FnOnce(&[Command]) -> R) -> R {
-    let guard = HOTKEYS.read().unwrap();
-    match &*guard {
-        Some(h) => f(h.keyboard_order()),
-        None => f(Command::KEYBOARD_ORDER),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn with_test_hotkeys<R>(toml: &str, f: impl FnOnce() -> R) -> R {
-    let _guard = TEST_MUTEX.lock().unwrap();
-    let prev = { HOTKEYS.read().unwrap().clone() };
-    load_from_str(toml);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    {
-        let mut guard = HOTKEYS.write().unwrap();
-        *guard = prev;
-    }
-    match result {
-        Ok(val) => val,
-        Err(err) => std::panic::resume_unwind(err),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Tool;
 
     #[test]
     fn parse_shortcuts_modifiers_brackets_functions_symbols_and_empty() {
@@ -586,101 +491,41 @@ StampVisible = ""
 [tools]
 Eyedropper = "U"
 "#;
-        with_test_hotkeys(toml, || {
-            // Verify command shortcuts overridden
-            let merge_sc = Command::MergeDown.shortcut().expect("MergeDown shortcut");
-            assert_eq!(merge_sc.logical_key, Key::M);
-            assert!(merge_sc.modifiers.command);
-            assert!(merge_sc.modifiers.shift);
-            assert!(!merge_sc.modifiers.alt);
+        let (hotkeys, warnings) = parse_file(toml);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let merge = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::M);
+        assert_eq!(hotkeys.command(Command::MergeDown), Some(merge));
+        assert_eq!(hotkeys.command(Command::StampVisible), None);
+        assert_eq!(hotkeys.command(Command::Undo), Command::Undo.default_shortcut());
+        assert_eq!(hotkeys.tool_group(Tool::Eyedropper.group()), Some(Key::U));
 
-            let curves_sc = Command::NewCurves.shortcut().expect("NewCurves shortcut");
-            assert_eq!(curves_sc.logical_key, Key::M);
-            assert!(curves_sc.modifiers.command);
-            assert!(curves_sc.modifiers.alt);
-            assert!(!curves_sc.modifiers.shift);
-
-            // StampVisible empty string -> no shortcut
-            assert_eq!(Command::StampVisible.shortcut(), None);
-
-            // Tool letter overridden
-            assert_eq!(Tool::Eyedropper.shortcut_letter(), Some("U"));
-
-            // Verify matching in Command::pressed
-            let ctx = egui::Context::default();
-            let press = |modifiers: Modifiers, key: Key| -> Vec<Command> {
-                let mut v_down = false;
-                let events = vec![
-                    egui::Event::ModifiersChanged(modifiers),
-                    egui::Event::Key {
-                        key,
-                        physical_key: None,
-                        pressed: true,
-                        repeat: false,
-                        modifiers,
-                    },
-                ];
-                let input = egui::RawInput {
-                    events,
-                    ..Default::default()
-                };
-                let mut pressed = Vec::new();
-                let mut out = ctx.run_ui(input, |ui| {
-                    pressed = Command::pressed(ui.ctx(), &mut v_down);
-                });
-                out.textures_delta.clear();
-                pressed
-            };
-
-            // Pressing old default Ctrl+E should NOT trigger MergeDown
-            let pressed = press(Modifiers::COMMAND, Key::E);
-            assert!(!pressed.contains(&Command::MergeDown));
-
-            // Pressing new shortcut Ctrl+Shift+M SHOULD trigger MergeDown
-            let pressed = press(
-                Modifiers {
-                    shift: true,
-                    ..Modifiers::COMMAND
-                },
-                Key::M,
-            );
-            assert_eq!(pressed, vec![Command::MergeDown]);
-
-            // Pressing tool key U selects Eyedropper
-            let mut tools = crate::tools::Tools::default();
-            assert_ne!(tools.tool, Tool::Eyedropper);
-            let input = egui::RawInput {
-                events: vec![egui::Event::Key {
-                    key: Key::U,
+        let ctx = egui::Context::default();
+        let press = |modifiers: Modifiers, key: Key| -> Vec<Command> {
+            let events = vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key {
+                    key,
                     physical_key: None,
                     pressed: true,
                     repeat: false,
-                    modifiers: Modifiers::NONE,
-                }],
+                    modifiers,
+                },
+            ];
+            let input = egui::RawInput {
+                events,
                 ..Default::default()
             };
+            let mut pressed = Vec::new();
             let mut out = ctx.run_ui(input, |ui| {
-                tools.keys(ui.ctx());
+                pressed = Command::pressed_with(ui.ctx(), &mut false, &hotkeys);
             });
             out.textures_delta.clear();
-            assert_eq!(tools.tool, Tool::Eyedropper);
-
-            // Test menu text formatting matches the override
-            assert_eq!(ctx.format_shortcut(&merge_sc), "Ctrl+Shift+M");
-            assert_eq!(ctx.format_shortcut(&curves_sc), "Ctrl+Alt+M");
-
-            // Test rendering menu item button displays overridden shortcut text
-            let mut app = crate::app::test_app();
-            let raw = egui::RawInput::default();
-            let mut output = ctx.run_ui(raw, |ui| {
-                app.menu_item(ui, Command::MergeDown, None);
-            });
-            output.textures_delta.clear();
-            let found = output.shapes.iter().any(|s| match &s.shape {
-                egui::Shape::Text(t) => t.galley.text().contains("Ctrl+Shift+M"),
-                _ => false,
-            });
-            assert!(found, "Menu item button should display overridden shortcut text");
-        });
+            pressed
+        };
+        // The old shortcut does nothing; the new one merges, ahead of the
+        // Ctrl+M (Curves) it would otherwise also match.
+        assert!(!press(Modifiers::COMMAND, Key::E).contains(&Command::MergeDown));
+        assert_eq!(press(Modifiers::COMMAND | Modifiers::SHIFT, Key::M), [Command::MergeDown]);
+        assert_eq!(press(Modifiers::COMMAND | Modifiers::ALT, Key::M), [Command::NewCurves]);
     }
 }

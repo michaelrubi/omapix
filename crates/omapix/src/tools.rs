@@ -80,7 +80,7 @@ impl ToolGroup {
     }
 
     pub fn key(self) -> Option<Key> {
-        crate::hotkeys::tool_group_key(self)
+        crate::hotkeys::current().tool_group(self)
     }
 }
 
