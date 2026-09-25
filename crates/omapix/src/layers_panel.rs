@@ -970,6 +970,11 @@ fn mask_menu_items(
         *command = Some(Command::ToggleMask);
     });
 
+    menu_item(ui, Command::MaskDensity.label(), None, true, || {
+        editor.active = id;
+        *command = Some(Command::MaskDensity);
+    });
+
     menu_item(
         ui,
         "Invert Mask",

@@ -30,7 +30,7 @@ pub use color::{ColorProfile, DisplayTransform};
 pub use document::{AlphaChannel, Document};
 pub use filters::{
     generate_grain, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
-    SmartSharpenOptions,
+    SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions,
 };
 pub use histogram::Histogram;
 pub use layer::{Layer, Locks, Mask};
