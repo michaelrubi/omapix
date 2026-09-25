@@ -119,6 +119,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Reduce Noise at 100 % on a portrait: Strength, Preserve Details, Reduce Color Noise, and Sharpen Details with live preview
 - [x] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
 - [x] Smart Sharpen at 100 % on a portrait: Amount, Radius, Reduce Noise, Remove (Gaussian Blur or Lens Blur), and Shadows/Highlights Fade Amount with live preview
+- [ ] Smart Blur at 100 % on a portrait: Radius, Threshold, Quality (Low, Medium, High), and Mode (Normal, Edge Only, Overlay Edge) with live preview
 - [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
 - [ ] Mask Density: slider 0–100 %, live preview, within a selection, from Layer menu and mask context menu, and undo
 - [x] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
@@ -187,6 +188,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - Separate luminance and colour noise amounts. The result goes on a **Denoise** layer above the image.
   - ~~A classical fallback on the CPU~~ (done): Filter › Noise › Reduce Noise… with Strength (0–10), Preserve Details, Reduce Color Noise, and Sharpen Details, using an edge-preserving guided filter on luminance, chroma smoothing, and luminance unsharp masking.
   - For raws, darktable's raw denoise before export is better still. Omapix's is for files that arrive already developed.
+- ~~Photoshop's **Smart Blur**~~ (done): Filter › Blur › Smart Blur… with Radius, Threshold, Quality (Low, Medium, High) and Mode (Normal, Edge Only, Overlay Edge). It blurs only among pixels of similar tone, so skin smooths while edges and texture stay sharp. Previewed live, on pixels or a mask; settings are remembered. Takes about 0.2 s at 24 MP for small radii and under 1 s at 100 px, since big radii are sampled more sparsely.
 - **Sharpen** (Filter › Sharpen), near the end.
   - ~~Photoshop's **Unsharp Mask**~~ (done): Filter › Sharpen › Unsharp Mask… with Amount, Radius and Threshold, on luminance only (the same offset goes to red, green and blue), so edges don't get colour fringes. Previewed live on the canvas; settings are remembered.
   - ~~**Smart Sharpen**~~ (done): Filter › Sharpen › Smart Sharpen… with Amount, Radius, Reduce Noise, Gaussian or Lens Blur removal, and shadow/highlight fading, on luminance only. Previewed live on the canvas; settings are remembered.

@@ -14,7 +14,7 @@ use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{
     Document, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
-    SmartSharpenOptions, export, ops, ora,
+    SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions, export, ops, ora,
 };
 
 use crate::canvas::ToolInput;
@@ -232,6 +232,7 @@ pub struct App {
     unsharp_mask: LayerFilter,
     smart_sharpen: LayerFilter,
     reduce_noise: LayerFilter,
+    smart_blur: LayerFilter,
     feather_radius: f32,
     separation_radius: Option<f32>,
     high_pass_radius: f32,
@@ -291,6 +292,7 @@ impl App {
             unsharp_mask: DEFAULT_UNSHARP_MASK,
             smart_sharpen: DEFAULT_SMART_SHARPEN,
             reduce_noise: DEFAULT_REDUCE_NOISE,
+            smart_blur: DEFAULT_SMART_BLUR,
             high_pass_radius: 2.0,
             mask_density: 100.0,
             feather_radius: 10.0,
@@ -698,6 +700,7 @@ impl App {
             | Command::MaskOverlay
             | Command::MaskDensity => has_mask,
             Command::GaussianBlur
+            | Command::SmartBlur
             | Command::HighPass
             | Command::UnsharpMask
             | Command::SmartSharpen
@@ -765,6 +768,7 @@ impl App {
                 });
             }
             Command::GaussianBlur
+            | Command::SmartBlur
             | Command::HighPass
             | Command::UnsharpMask
             | Command::SmartSharpen
@@ -780,6 +784,7 @@ impl App {
                     Command::GaussianBlur => LayerFilter::GaussianBlur {
                         radius: self.blur_radius,
                     },
+                    Command::SmartBlur => self.smart_blur,
                     Command::HighPass => LayerFilter::HighPass {
                         radius: self.high_pass_radius,
                     },
@@ -947,6 +952,7 @@ impl App {
             LayerFilter::SmartSharpen(_) => self.smart_sharpen = filter,
             LayerFilter::ReduceNoise(_) => self.reduce_noise = filter,
             LayerFilter::MaskDensity { density } => self.mask_density = density,
+            LayerFilter::SmartBlur(_) => self.smart_blur = filter,
         }
         let Some(editor) = &mut self.editor else {
             return;
@@ -1185,7 +1191,10 @@ impl App {
                     self.menu_item(ui, Command::AddNoise, None);
                     self.menu_item(ui, Command::ReduceNoise, None);
                 });
-                self.menu_item(ui, Command::GaussianBlur, None);
+                ui.menu_button("Blur", |ui| {
+                    self.menu_item(ui, Command::GaussianBlur, None);
+                    self.menu_item(ui, Command::SmartBlur, None);
+                });
                 ui.menu_button("Sharpen", |ui| {
                     self.menu_item(ui, Command::UnsharpMask, None);
                     self.menu_item(ui, Command::SmartSharpen, None);
@@ -1433,6 +1442,9 @@ impl App {
                                         .fixed_decimals(0),
                                 );
                             });
+                        }
+                        LayerFilter::SmartBlur(options) => {
+                            smart_blur_controls(ui, options, hint);
                         }
                     }
                     ui.add_space(4.0);
@@ -2043,6 +2055,14 @@ const DEFAULT_REDUCE_NOISE: LayerFilter = LayerFilter::ReduceNoise(ReduceNoiseOp
     sharpen_details: 0.0,
 });
 
+/// Smart Blur's settings until it's first used.
+const DEFAULT_SMART_BLUR: LayerFilter = LayerFilter::SmartBlur(SmartBlurOptions {
+    radius: 3.0,
+    threshold: 25.0,
+    quality: SmartBlurQuality::Medium,
+    mode: SmartBlurMode::Normal,
+});
+
 /// Add Noise's settings, for its dialog and for noise on a mask.
 fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     ui.horizontal(|ui| {
@@ -2151,6 +2171,43 @@ fn reduce_noise_controls(ui: &mut Ui, options: &mut ReduceNoiseOptions, hint: eg
     }
     ui.label(
         RichText::new("Smooths noise while preserving edges. Judge it at 100 %.")
+            .color(hint),
+    );
+}
+
+/// Smart Blur's settings, for its dialog.
+fn smart_blur_controls(ui: &mut Ui, options: &mut SmartBlurOptions, hint: egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.label("Radius");
+        ui.add(
+            egui::Slider::new(&mut options.radius, 0.1..=100.0)
+                .suffix(" px")
+                .fixed_decimals(1),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Threshold");
+        ui.add(
+            egui::Slider::new(&mut options.threshold, 0.1..=100.0)
+                .fixed_decimals(1),
+        );
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Quality:");
+        ui.radio_value(&mut options.quality, SmartBlurQuality::Low, "Low");
+        ui.radio_value(&mut options.quality, SmartBlurQuality::Medium, "Medium");
+        ui.radio_value(&mut options.quality, SmartBlurQuality::High, "High");
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Mode:");
+        ui.radio_value(&mut options.mode, SmartBlurMode::Normal, "Normal");
+        ui.radio_value(&mut options.mode, SmartBlurMode::EdgeOnly, "Edge Only");
+        ui.radio_value(&mut options.mode, SmartBlurMode::OverlayEdge, "Overlay Edge");
+    });
+    ui.label(
+        RichText::new("Blurs areas of similar tone, keeping edges sharp.")
             .color(hint),
     );
 }
@@ -3165,6 +3222,7 @@ mod tests {
             unsharp_mask: DEFAULT_UNSHARP_MASK,
             smart_sharpen: DEFAULT_SMART_SHARPEN,
             reduce_noise: DEFAULT_REDUCE_NOISE,
+            smart_blur: DEFAULT_SMART_BLUR,
             high_pass_radius: 2.0,
             mask_density: 100.0,
             feather_radius: 5.0,
@@ -3374,6 +3432,22 @@ mod tests {
         assert_eq!(editor.undo_label(), Some("Reduce Noise"));
         let layer = editor.doc.layer(id).unwrap();
         assert_eq!(layer.pixels.to_vec(), pixels);
+
+        // Smart Blur on a mask also changes the mask, not the pixels.
+        app.run(Command::SmartBlur, &ctx);
+        let Some(Dialog::Filter { filter, .. }) = app.dialog.take() else {
+            panic!("no filter dialog");
+        };
+        assert!(matches!(filter, LayerFilter::SmartBlur(_)));
+        app.apply_filter(filter, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Smart Blur"));
+        let layer = editor.doc.layer(id).unwrap();
+        assert_eq!(layer.pixels.to_vec(), pixels);
     }
 
     #[test]
@@ -3526,6 +3600,48 @@ mod tests {
         output.textures_delta.clear();
         assert!(app.dialog.is_none());
         assert_eq!(app.editor.as_ref().unwrap().view(), View::Image);
+    }
+
+    #[test]
+    fn smart_blur_previews_then_applies_and_remembers_its_settings() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let active = app.editor.as_ref().unwrap().active;
+        app.run(Command::SmartBlur, &ctx);
+        let Some(Dialog::Filter { filter, preview }) = &mut app.dialog else {
+            panic!("no filter dialog");
+        };
+        assert!(*preview);
+        assert_eq!(*filter, DEFAULT_SMART_BLUR);
+        let custom = LayerFilter::SmartBlur(SmartBlurOptions {
+            radius: 5.0,
+            threshold: 30.0,
+            quality: SmartBlurQuality::High,
+            mode: SmartBlurMode::EdgeOnly,
+        });
+        *filter = custom;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| app.dialogs(ctx));
+        output.textures_delta.clear();
+        let view = app.editor.as_ref().unwrap().view();
+        assert_eq!(
+            view,
+            View::Filter {
+                layer: active,
+                filter: custom,
+                mask: false,
+            }
+        );
+
+        app.dialog = None;
+        app.apply_filter(custom, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Smart Blur"));
+        app.run(Command::SmartBlur, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == custom));
     }
 
     #[test]
