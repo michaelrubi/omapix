@@ -80,7 +80,7 @@ fn crop<T: Copy + PartialEq + Send + Sync>(
 }
 
 /// Paste a row-major rectangle into a new tiled image of the given size.
-fn uncrop<T: Copy + PartialEq + Send + Sync>(
+pub(crate) fn uncrop<T: Copy + PartialEq + Send + Sync>(
     width: u32,
     height: u32,
     fill: T,
