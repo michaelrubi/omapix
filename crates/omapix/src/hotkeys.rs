@@ -319,20 +319,85 @@ pub(crate) fn default_path() -> Option<PathBuf> {
 /// Load `hotkeys.toml` from the config folder, if there is one. Returns
 /// warnings about problems in it, which leave the defaults in place.
 pub(crate) fn load() -> Vec<String> {
-    let text = match default_path().map(std::fs::read_to_string) {
-        None => return Vec::new(),
-        Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Some(Err(e)) => return vec![format!("Hotkeys: failed to read hotkeys.toml: {e}")],
-        Some(Ok(text)) => text,
+    let Some(path) = default_path() else {
+        return Vec::new();
     };
+    let text = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return vec![format!("Hotkeys: failed to read hotkeys.toml: {e}")],
+        Ok(text) => text,
+    };
+    // With no file yet (or an empty one), write one listing everything that
+    // can be changed, all commented out, so there's something to edit.
+    if text.trim().is_empty() {
+        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, template()));
+        if let Err(e) = written {
+            log::warn!("Hotkeys: couldn't write {}: {e}", path.display());
+        }
+        return Vec::new();
+    }
     let (hotkeys, warnings) = parse_file(&text);
     let _ = HOTKEYS.set(hotkeys);
     warnings
 }
 
+/// A `hotkeys.toml` listing every command and tool with its default
+/// shortcut, all commented out.
+fn template() -> String {
+    let quoted = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut out = String::from(
+        "# Omapix keyboard shortcuts.\n\
+         #\n\
+         # Every command and tool is listed with its Photoshop shortcut, which\n\
+         # Omapix uses unless you change it here. To change one, remove the # at\n\
+         # the start of its line and edit the shortcut; \"\" removes it. Restart\n\
+         # Omapix to apply. Problems are shown in the status bar at startup.\n\
+         #\n\
+         # A shortcut is Ctrl, Alt and Shift joined to a key with +, such as\n\
+         # \"Ctrl+Shift+Z\", \"Alt+[\", \"F7\", \"/\" or \"\\\\\".\n\n[commands]\n",
+    );
+    for &cmd in Command::ALL {
+        let shortcut = cmd.default_shortcut().map_or(String::new(), |s| format_shortcut(&s));
+        out.push_str(&format!("# {cmd:?} = {}  # {}\n", quoted(&shortcut), cmd.label()));
+    }
+    out.push_str("\n# A tool's letter picks it; with Shift, the next tool in its group.\n[tools]\n");
+    for &group in ToolGroup::ALL {
+        let tools = group.tools();
+        let key = group.default_key().map_or("", |k| k.symbol_or_name());
+        let mut line = format!("# {:?} = {}", tools[0], quoted(key));
+        if tools.len() > 1 {
+            let others: Vec<String> = tools[1..].iter().map(|t| format!("{t:?}")).collect();
+            line.push_str(&format!("  # also {}", others.join(", ")));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_template_lists_every_default_and_reads_back_as_them() {
+        let text = template();
+        let (hotkeys, warnings) = parse_file(&text);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(hotkeys, Hotkeys::default());
+        // Uncommented, every line reads back as the default it shows.
+        let uncommented: String = text
+            .lines()
+            .map(|l| l.strip_prefix("# ").filter(|l| l.contains(" = ")).unwrap_or(l))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let (hotkeys, warnings) = parse_file(&uncommented);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(hotkeys, Hotkeys::default());
+        for &cmd in Command::ALL {
+            assert!(text.contains(&format!("# {cmd:?} = ")), "{cmd:?} missing");
+        }
+    }
     use crate::tools::Tool;
 
     #[test]

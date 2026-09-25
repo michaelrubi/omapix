@@ -305,6 +305,7 @@ impl Canvas {
     /// their replacements are converted.
     pub fn set_render(&mut self, render: Arc<Render>) {
         self.render = Some(render);
+        self.fresh = false;
         self.generation += 1;
         self.stale_before = self.generation;
         self.dirty.clear();
@@ -324,13 +325,13 @@ impl Canvas {
         self.render.as_ref()
     }
 
-    /// Lay the canvas out at 100 % over `rect`, as a frame would.
+    /// Lay the canvas out at `zoom` over `rect`, as a frame would.
     #[cfg(test)]
-    pub fn lay_out_for_test(&mut self, rect: Rect) {
+    pub fn lay_out_for_test(&mut self, rect: Rect, zoom: f32) {
         self.rect = rect;
         self.ppp = 1.0;
         self.view.fit = false;
-        self.view.zoom = 1.0;
+        self.view.zoom = zoom;
     }
 
     /// The pyramid level drawn at the current zoom, and the part of the
@@ -353,6 +354,8 @@ impl Canvas {
     /// Mark display tiles covering 256 px tiles (col, row) of pyramid level
     /// `level` as out of date, after [`Render::write_tiles`].
     pub fn invalidate_tiles(&mut self, level: usize, tiles: &[(u32, u32)]) {
+        // Not fresh again until a frame has drawn the new tiles.
+        self.fresh = false;
         self.generation += 1;
         let (w, h) = (self.width, self.height);
         for &(col, row) in tiles {

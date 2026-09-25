@@ -761,6 +761,9 @@ impl Editor {
         let until = self.revision + 1;
         if let Some(live) = &mut self.live_move {
             live.until = Some(until);
+            if let (Some(moving), Some(_)) = (&mut self.moving, &live.stack) {
+                moving.wanted = live.offset;
+            }
         }
         self.apply_move();
         self.moving = None;
@@ -898,10 +901,14 @@ impl Editor {
             return;
         };
         let (dx, dy) = moving.wanted;
-        // Shown live, the move is made only when it ends.
+        // Shown live, the move is made only when it ends. Zoomed out, it
+        // goes in whole pixels of the level on screen, so the move made
+        // lands exactly where the live view showed it.
         let live = match &mut self.live_move {
             Some(live) if live.until.is_none() => {
-                live.offset = (dx, dy);
+                let k = live.stack.as_ref().map_or(1, |s| 1i32 << s.level);
+                let snap = |d: i32| (d as f32 / k as f32).round() as i32 * k;
+                live.offset = (snap(dx), snap(dy));
                 true
             }
             _ => false,
@@ -2257,7 +2264,7 @@ mod live_tests {
         doc.layers.push(patch);
         let mut e = Editor::new(doc).unwrap();
         e.live_limit = Some(16384);
-        e.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0)));
+        e.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0)), 1.0);
         e
     }
 
@@ -2296,6 +2303,42 @@ mod live_tests {
         assert!(e.canvas.live.is_some());
         e.undo();
         assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0), [65535, 0, 0, 65535]);
+    }
+
+    #[test]
+    fn the_live_view_waits_for_the_canvas_to_draw_the_move() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(10, 5);
+        settle(&mut e, &ctx);
+        e.end_move();
+        // The canvas's tiles were fresh before the move's render changed
+        // them; that mustn't count.
+        e.canvas.fresh = true;
+        e.canvas.invalidate_tiles(0, &[(0, 0)]);
+        assert!(!e.canvas.fresh);
+        e.update(&ctx);
+        assert!(e.canvas.live.is_some(), "still shown live");
+    }
+
+    #[test]
+    fn zoomed_out_live_moves_land_on_the_levels_pixels() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        // At 50 %, level 1 is shown: 2 image pixels to a screen pixel.
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
+        e.canvas.lay_out_for_test(rect, 0.5);
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(1, 1);
+        settle(&mut e, &ctx);
+        e.move_to(5, 3);
+        e.update(&ctx);
+        let (stack, offset) = e.canvas.live.clone().expect("shown live");
+        assert_eq!((stack.level, offset), (1, (6, 4)));
+        e.end_move();
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(6, 4), [65535, 0, 0, 65535]);
     }
 
     #[test]
