@@ -237,6 +237,35 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
         out
     }
 
+    /// Copy of the area at (x0, y0), `w` × `h`, row-major. Parts outside
+    /// the image read as the fill value.
+    pub fn crop(&self, x0: u32, y0: u32, w: u32, h: u32) -> Vec<T> {
+        let mut out = vec![self.fill; w as usize * h as usize];
+        let x_end = (x0 + w).min(self.width);
+        out.par_chunks_mut(w.max(1) as usize)
+            .enumerate()
+            .for_each(|(dy, line)| {
+                let y = y0 + dy as u32;
+                if y >= self.height {
+                    return;
+                }
+                let (row, ty) = (y / TILE, (y % TILE) as usize);
+                let mut x = x0;
+                while x < x_end {
+                    let col = x / TILE;
+                    let end = ((col + 1) * TILE).min(x_end);
+                    if let Some(tile) = self.tile(col, row) {
+                        let at = ty * TILE as usize + (x % TILE) as usize;
+                        let n = (end - x) as usize;
+                        let o = (x - x0) as usize;
+                        line[o..o + n].copy_from_slice(&tile[at..at + n]);
+                    }
+                    x = end;
+                }
+            });
+        out
+    }
+
     /// Tile the contents of a contiguous row-major buffer. Tiles that
     /// consist entirely of the fill value are left empty.
     pub fn from_slice(width: u32, height: u32, fill: T, pixels: &[T]) -> Self {
@@ -270,6 +299,23 @@ impl Tiled<crate::Pixel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_copies_across_tiles_and_fills_outside() {
+        let (w, h) = (600u32, 300u32);
+        let px: Vec<u32> = (0..w * h).collect();
+        let t = Tiled::from_slice(w, h, u32::MAX, &px);
+        let out = t.crop(250, 240, 20, 30);
+        for dy in 0..30 {
+            for dx in 0..20 {
+                assert_eq!(out[(dy * 20 + dx) as usize], (240 + dy) * w + 250 + dx);
+            }
+        }
+        // Past the right and bottom edges: the fill value.
+        let edge = t.crop(590, 290, 20, 20);
+        assert_eq!(edge[0], 290 * w + 590);
+        assert_eq!((edge[10], edge[19 * 20 + 19]), (u32::MAX, u32::MAX));
+    }
 
     #[test]
     fn round_trips_through_contiguous_buffer() {

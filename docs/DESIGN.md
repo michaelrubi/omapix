@@ -83,6 +83,13 @@ unit tests, and leaves room to replace the UI toolkit later.
   tiles kept until their layer's tiles change. The full-size render then
   replaces the preview. Brush strokes recomposite only the tiles they
   touch, in place.
+- Move tool drags are shown live on the GPU where they can be
+  (`live.rs`, `gpu.rs`, `live.wgsl`): what's below the moving layer is
+  composited once, then it, the moving layer and the layers above are
+  blended each frame by a shader, a render pass per layer, into a 32-bit
+  float texture drawn through the display transform as a 3D lookup table
+  (adjustments go through lookup tables too). The move is made on the CPU
+  once, when the drag ends.
 - Blend modes follow Photoshop's formulas (Soft Light included), plus
   GIMP/Krita's Grain Extract/Merge for frequency separation.
 - Layer groups keep the stack one flat list, as PSD files do: a group's

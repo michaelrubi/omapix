@@ -73,6 +73,18 @@ pub enum Prepared {
 }
 
 impl Prepared {
+    /// This adjustment sampled on an `n` × `n` × `n` grid over RGB 0–1, red
+    /// varying fastest, for a GPU to interpolate.
+    pub fn lut(&self, n: usize) -> Vec<[f32; 3]> {
+        let step = 1.0 / (n - 1) as f32;
+        (0..n * n * n)
+            .map(|i| {
+                let at = |k: usize| k as f32 * step;
+                self.apply([at(i % n), at(i / n % n), at(i / (n * n))])
+            })
+            .collect()
+    }
+
     #[inline]
     pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
         match self {
@@ -1372,5 +1384,21 @@ mod tests {
         assert!(close(p.apply(black_sample), [0.0, 0.0, 0.0], 2e-3));
         assert!(close(p.apply(white_sample), [1.0, 1.0, 1.0], 2e-3));
     }
-}
 
+    #[test]
+    fn lut_samples_the_adjustment_on_a_grid() {
+        let mut curves = Curves::default();
+        curves.master.points.insert(1, (0.5, 0.7));
+        curves.red.points.insert(1, (0.25, 0.1));
+        let prepared = Adjustment::Curves(curves).prepare();
+        let n = 9;
+        let lut = prepared.lut(n);
+        assert_eq!(lut.len(), n * n * n);
+        let at = |r: usize, g: usize, b: usize| lut[r + g * n + b * n * n];
+        let step = 1.0 / (n - 1) as f32;
+        for (r, g, b) in [(0, 0, 0), (8, 8, 8), (2, 4, 6), (7, 1, 3)] {
+            let c = [r as f32 * step, g as f32 * step, b as f32 * step];
+            assert!(close(at(r, g, b), prepared.apply(c), 1e-6));
+        }
+    }
+}

@@ -242,6 +242,9 @@ impl App {
         // Ctrl+= / Ctrl+- zoom the image, not the interface.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         theme::install_font(ctx);
+        if let Some(render_state) = &cc.wgpu_render_state {
+            crate::gpu::install(render_state);
+        }
         let theme = Theme::load();
         ctx.set_visuals(theme.visuals());
 
