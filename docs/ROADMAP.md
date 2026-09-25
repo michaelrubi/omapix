@@ -114,14 +114,14 @@ The UI has been tested through the same code paths with scripts
 - [x] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
 - [x] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
-- [ ] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
-- [ ] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
+- [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
+- [x] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
 - [x] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
 - [x] Alt+click on a group's triangle: opens or closes that group and every group inside it, and Alt+click between rows still clips
 - [x] Add Noise: dialog controls (Amount, Uniform/Gaussian, Monochromatic, Grain Size, Roughness, shadow/highlight falloff), live preview, and the new Grain layer in Overlay mode
 - [x] Selection edges: Ctrl+H hides marching ants while keeping selection, status bar notes it, Omapix goes idle, and a new selection shows them again
-- [ ] Eyedropper tool: click or drag sets foreground colour live, Alt+click sets background, Sample Size averages across edges, and Current Layer vs All Layers
-- [ ] Load selection: Ctrl+click layer thumbnail for transparency, mask thumbnail for mask (with Shift/Alt/Shift+Alt), Select › Load Selection (RGB, Luminosity, Transparency, Mask), and edges show again if hidden
+- [x] Eyedropper tool: click or drag sets foreground colour live, Alt+click sets background, Sample Size averages across edges, and Current Layer vs All Layers
+- [x] Load selection: Ctrl+click layer thumbnail for transparency, mask thumbnail for mask (with Shift/Alt/Shift+Alt), Select › Load Selection (RGB, Luminosity, Transparency, Mask), and edges show again if hidden
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
