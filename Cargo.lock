@@ -1934,9 +1934,11 @@ name = "omapix-ai"
 version = "0.1.0"
 dependencies = [
  "image",
- "ndarray",
+ "libloading 0.9.0",
+ "log",
  "omapix-engine",
  "ort",
+ "rayon",
 ]
 
 [[package]]

@@ -20,6 +20,7 @@ pub mod ora;
 pub mod psd;
 pub mod pyramid;
 pub mod raster;
+pub mod refine;
 pub mod reduced;
 pub mod selection;
 pub mod tiled;

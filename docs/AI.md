@@ -123,6 +123,11 @@ goes in the engine, where it can be tested without models.
 - One `Session` per model, created on first use. Sessions not used for two
   minutes are dropped, to give GPU memory back (to darktable, or to GPU
   compositing later).
+  - Not yet: dropping a CUDA session (ONNX Runtime 1.29, cuDNN 9.25,
+    driver's `libcuda`) corrupts the heap, and the process aborts in
+    `libcuda` as it exits, about half the time (7 in 12 runs). Kept for
+    the whole run, 0 in 12. So for now sessions live until Omapix quits;
+    try unloading again with newer ONNX Runtime or drivers.
 - All inference runs on background threads through the existing
   `Editor::edit_in_background` / job mechanism, with the status bar showing
   what's running. The first CUDA run of a model is slower while the runtime

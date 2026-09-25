@@ -492,24 +492,26 @@ fn box_filter_2d(mut buf: Vec<[f32; 4]>, w: usize, h: usize, r: usize) -> Vec<[f
     transpose(&t, h, w)
 }
 
-/// Edge-preserving self-guided filter (He et al.) using box filters.
-fn guided_filter(y: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
+/// Guided filter (He et al.) using box filters: `input` smoothed so its
+/// edges follow `guide`'s, both row-major `w` × `h` values in 0–1. With the
+/// input as its own guide, it's an edge-preserving blur.
+pub fn guided_filter(guide: &[f32], input: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
     if r == 0 || eps <= 1e-8 || w == 0 || h == 0 {
-        return y.to_vec();
+        return input.to_vec();
     }
     let r = r.min(w.saturating_sub(1)).min(h.saturating_sub(1));
     if r == 0 {
-        return y.to_vec();
+        return input.to_vec();
     }
-    let buf: Vec<[f32; 4]> = y.par_iter().map(|&v| [v, v * v, 0.0, 0.0]).collect();
-    let mean_buf = box_filter_2d(buf, w, h, r);
+    let buf: Vec<[f32; 4]> = guide.par_iter().zip(input).map(|(&i, &p)| [i, p, i * i, i * p]).collect();
+    let means = box_filter_2d(buf, w, h, r);
 
-    let ab_buf: Vec<[f32; 4]> = mean_buf
+    let ab_buf: Vec<[f32; 4]> = means
         .into_par_iter()
-        .map(|[mean_y, mean_yy, _, _]| {
-            let var = (mean_yy - mean_y * mean_y).max(0.0);
-            let a = var / (var + eps);
-            let b = (1.0 - a) * mean_y;
+        .map(|[mean_i, mean_p, mean_ii, mean_ip]| {
+            let var = (mean_ii - mean_i * mean_i).max(0.0);
+            let a = (mean_ip - mean_i * mean_p) / (var + eps);
+            let b = mean_p - a * mean_i;
             [a, b, 0.0, 0.0]
         })
         .collect();
@@ -518,8 +520,8 @@ fn guided_filter(y: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> 
 
     mean_ab
         .into_par_iter()
-        .zip(y)
-        .map(|([mean_a, mean_b, _, _], &y_val)| (mean_a * y_val + mean_b).clamp(0.0, 1.0))
+        .zip(guide)
+        .map(|([mean_a, mean_b, _, _], &i)| (mean_a * i + mean_b).clamp(0.0, 1.0))
         .collect()
 }
 
@@ -546,7 +548,7 @@ pub fn reduce_noise(image: &Tiled<Pixel>, options: &ReduceNoiseOptions) -> Tiled
         let detail_factor = 1.0 - 0.9 * (options.preserve_details / 100.0).clamp(0.0, 1.0);
         let eps = s * s * 0.005 * detail_factor;
         let y_norm: Vec<f32> = pixels.par_iter().map(|p| pixel_luma(p) / MAX).collect();
-        let guided = guided_filter(&y_norm, w, h, 2, eps);
+        let guided = guided_filter(&y_norm, &y_norm, w, h, 2, eps);
         guided.into_par_iter().map(|v| v * MAX).collect()
     } else {
         pixels.par_iter().map(pixel_luma).collect()
