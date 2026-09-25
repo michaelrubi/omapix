@@ -521,7 +521,7 @@ impl Canvas {
         ui: &mut Ui,
         pasteboard: Color32,
         overlay: Overlay<'_>,
-    ) -> Option<ToolInput> {
+    ) -> (Option<ToolInput>, egui::Response) {
         let Overlay {
             tool,
             alt_samples,
@@ -599,7 +599,7 @@ impl Canvas {
                 }
             }
         }
-        input
+        (input, response)
     }
 
     /// Image pixels per screen point, at the current zoom.
@@ -812,6 +812,12 @@ impl Canvas {
             CursorBadge::Intersect => draw_lines(&[
                 [pos2(c.x - 2.5, c.y - 2.5), pos2(c.x + 2.5, c.y + 2.5)],
                 [pos2(c.x - 2.5, c.y + 2.5), pos2(c.x + 2.5, c.y - 2.5)],
+            ]),
+            // A pipette: a slanted tube with a bulb at its top.
+            CursorBadge::Eyedropper => draw_lines(&[
+                [pos2(c.x - 4.0, c.y + 4.0), pos2(c.x + 2.0, c.y - 2.0)],
+                [pos2(c.x + 0.5, c.y - 3.5), pos2(c.x + 3.5, c.y - 0.5)],
+                [pos2(c.x + 2.0, c.y - 2.0), pos2(c.x + 4.0, c.y - 4.0)],
             ]),
             CursorBadge::Copy => {
                 let back = Rect::from_min_size(c - vec2(3.5, 3.5), vec2(5.0, 5.0));

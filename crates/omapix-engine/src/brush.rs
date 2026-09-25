@@ -38,6 +38,9 @@ pub struct BrushSettings {
     /// A pen's pressure sets how far each dab's coverage can build up
     /// (beside Opacity).
     pub opacity_pressure: bool,
+    /// A pen's pressure scales each dab's flow, so light strokes build up
+    /// slowly (Photoshop's Transfer › Flow Jitter › Pen Pressure).
+    pub flow_pressure: bool,
 }
 
 impl Default for BrushSettings {
@@ -49,6 +52,7 @@ impl Default for BrushSettings {
             flow: 1.0,
             size_pressure: true,
             opacity_pressure: true,
+            flow_pressure: false,
         }
     }
 }
@@ -222,7 +226,7 @@ impl Stroke {
         let (w, h) = self.original.size();
         let r = self.diameter(pressure) / 2.0;
         let hardness = self.settings.hardness.clamp(0.0, 0.999);
-        let flow = self.settings.flow;
+        let flow = self.settings.flow * if self.settings.flow_pressure { pressure } else { 1.0 };
         // Coverage builds up to this.
         let most = if self.settings.opacity_pressure { pressure } else { 1.0 };
         let x0 = (cx - r).floor().max(0.0) as u32;
@@ -652,6 +656,18 @@ mod tests {
         });
         assert_eq!(out.get(345, 65)[0], 0);
         assert_eq!(out.get(345, 50)[0], 0);
+
+        // Pressure on flow: light pressure builds up only part way, even
+        // with no cap on opacity.
+        let out = press(BrushSettings {
+            size_pressure: false,
+            opacity_pressure: false,
+            flow_pressure: true,
+            ..hard
+        });
+        assert_eq!(out.get(60, 50)[0], 0);
+        let light = out.get(345, 50)[0];
+        assert!((1000..60000).contains(&light), "{light}");
     }
 
     #[test]

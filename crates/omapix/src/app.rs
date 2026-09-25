@@ -1195,6 +1195,29 @@ self.filters.remember(&filter);
         }
     }
 
+    /// Right-clicking the image, as in Photoshop: what's handy for the
+    /// selection, or with none, for the layer.
+    fn canvas_menu(&mut self, ui: &mut Ui) {
+        if self.editor.as_ref().is_some_and(|e| e.doc.selection.is_some()) {
+            self.menu_item(ui, Command::Deselect, None);
+            self.menu_item(ui, Command::InvertSelection, Some("Select Inverse".into()));
+            self.menu_item(ui, Command::Feather, None);
+            self.menu_item(ui, Command::SaveSelection, None);
+            ui.separator();
+            self.menu_item(ui, Command::ContentAwareFill, None);
+            self.menu_item(ui, Command::FillForeground, None);
+            self.menu_item(ui, Command::FillBackground, None);
+            self.menu_item(ui, Command::Clear, None);
+            ui.separator();
+            self.menu_item(ui, Command::Copy, None);
+            self.menu_item(ui, Command::Cut, None);
+        } else {
+            self.menu_item(ui, Command::SelectAll, Some("Select All".into()));
+            self.menu_item(ui, Command::Paste, None);
+        }
+        self.menu_item(ui, Command::FreeTransform, None);
+    }
+
     fn menu_bar(&mut self, ui: &mut Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -3325,6 +3348,7 @@ impl eframe::App for App {
             _ => points.clone(),
         });
         let mut input = None;
+        let mut menu_on = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             if let Some(editor) = &mut self.editor {
                 let idle = editor.busy().is_none();
@@ -3345,7 +3369,12 @@ impl eframe::App for App {
                     tool: idle,
                     alt_samples: !tools_off && tool.paints(),
                     samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
-                    brush: (!tools_off && tool.has_brush()).then_some(brush.size),
+                    // Holding Alt picks up a colour: a crosshair, not the brush,
+                    // unless Alt+right-dragging to resize it.
+                    brush: (!tools_off
+                        && tool.has_brush()
+                        && !(modifiers.alt && tool.alt_picks_colour() && !ui.input(|i| i.pointer.secondary_down())))
+                    .then_some(brush.size),
                     moves: !tools_off && tool == crate::tools::Tool::Move,
                     source,
                     selection: outlines,
@@ -3366,7 +3395,10 @@ impl eframe::App for App {
                         (crate::free_transform::corners(bounds, &t), cursor)
                     }),
                 };
-                input = editor.canvas.show(ui, pasteboard, overlay);
+                let (tool_input, response) = editor.canvas.show(ui, pasteboard, overlay);
+                input = tool_input;
+                // Alt+right-drag resizes the brush instead.
+                menu_on = (!tools_off && !modifiers.alt).then_some(response);
             } else {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, pasteboard);
                 self.empty_state(ui);
@@ -3375,6 +3407,9 @@ impl eframe::App for App {
         if let Some(input) = input {
             let modifiers = ui.input(|i| i.modifiers);
             self.tool_input(input, modifiers);
+        }
+        if let Some(response) = menu_on {
+            response.context_menu(|ui| self.canvas_menu(ui));
         }
         let ctx = ui.ctx().clone();
         self.dialogs(&ctx);
@@ -5266,6 +5301,56 @@ mod tests {
         });
         out.textures_delta.clear();
         assert_eq!(app.properties.eyedropper, None);
+    }
+
+    #[test]
+    fn right_clicking_the_image_offers_selection_commands_or_layer_ones() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let mut time = 0.0;
+        let mut frame = |app: &mut App, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let response = ui.allocate_rect(ui.max_rect(), egui::Sense::click_and_drag());
+                response.context_menu(|ui| app.canvas_menu(ui));
+            });
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(t) => texts.push(t.galley.text().to_owned()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, texts)),
+                    _ => {}
+                }
+            }
+            out.shapes.iter().for_each(|s| collect(&s.shape, &mut texts));
+            texts
+        };
+        let right_click = |pressed| egui::Event::PointerButton {
+            pos: egui::pos2(400.0, 300.0),
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(egui::pos2(400.0, 300.0))]);
+        frame(&mut app, vec![right_click(true)]);
+        frame(&mut app, vec![right_click(false)]);
+        let texts = frame(&mut app, vec![]);
+        for item in ["Content-Aware Fill", "Select Inverse", "Deselect", "Free Transform"] {
+            assert!(texts.iter().any(|t| t == item), "{item} in {texts:?}");
+        }
+
+        // With nothing selected: the layer's commands.
+        app.editor.as_mut().unwrap().doc.selection = None;
+        let texts = frame(&mut app, vec![]);
+        assert!(texts.iter().any(|t| t == "Select All"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "Content-Aware Fill"), "{texts:?}");
     }
 
     struct SelectionEdgesHarness {

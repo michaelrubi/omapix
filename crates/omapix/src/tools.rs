@@ -9,6 +9,8 @@ use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
 use crate::editor::Target;
 use crate::theme::Theme;
 
+/// A tool key held longer than this (seconds) is spring-loaded.
+const SPRING: f64 = 0.4;
 const MOVE_ICON: &str = "\u{f047}";
 const BRUSH_ICON: &str = "\u{f1fc}";
 const ERASER_ICON: &str = "\u{f12d}";
@@ -195,6 +197,11 @@ impl Tool {
     pub fn copies(self) -> bool {
         matches!(self, Tool::CloneStamp | Tool::Healing)
     }
+
+    /// Tools where holding Alt picks up a colour, as the Eyedropper does.
+    pub fn alt_picks_colour(self) -> bool {
+        self.paints() && !self.copies()
+    }
 }
 
 /// Eyedropper sample size presets matching Photoshop.
@@ -264,6 +271,8 @@ pub enum CursorBadge {
     Subtract,
     Intersect,
     Copy,
+    /// Holding Alt picks up a colour.
+    Eyedropper,
 }
 
 /// Badge shown at the cursor when modifier keys change what a click or drag does.
@@ -277,6 +286,8 @@ pub fn cursor_badge(tool: Tool, modifiers: Modifiers) -> Option<CursorBadge> {
         }
     } else if tool == Tool::Move && modifiers.alt {
         Some(CursorBadge::Copy)
+    } else if tool.alt_picks_colour() && modifiers.alt {
+        Some(CursorBadge::Eyedropper)
     } else {
         None
     }
@@ -316,6 +327,9 @@ pub struct Tools {
     last_healing: Tool,
     #[serde(skip)]
     last_wand: Tool,
+    /// The tool key being held, the tool before it, and when it went down.
+    #[serde(skip)]
+    held: Option<(Key, Tool, f64)>,
     brush: BrushSettings,
     eraser: BrushSettings,
     clone: BrushSettings,
@@ -362,6 +376,7 @@ impl Default for Tools {
             last_marquee: Tool::Marquee,
             last_healing: Tool::SpotHealing,
             last_wand: Tool::MagicWand,
+            held: None,
             brush: BrushSettings::default(),
             eraser: BrushSettings {
                 hardness: 0.5,
@@ -604,8 +619,23 @@ impl Tools {
                         self.cycle_group(group);
                     }
                     if i.consume_key(Modifiers::NONE, key) {
+                        let before = self.tool;
                         self.select(self.group_tool(group));
+                        // Key repeats while held don't count as new presses.
+                        if self.held.is_none_or(|(held, ..)| held != key) {
+                            self.held = Some((key, before, i.time));
+                        }
                     }
+                }
+            }
+            // Photoshop's spring-loaded tools: a tool key held down (rather
+            // than tapped) switches back to the tool before when let go.
+            if let Some((key, before, since)) = self.held
+                && !i.key_down(key)
+            {
+                self.held = None;
+                if i.time - since > SPRING {
+                    self.select(before);
                 }
             }
             if i.consume_key(Modifiers::NONE, Key::X) {
@@ -854,6 +884,8 @@ impl Tools {
             ui.toggle_value(&mut s.opacity_pressure, "✒")
                 .on_hover_text("A pen's pressure sets the opacity");
             percent(ui, "Flow", &mut s.flow);
+            ui.toggle_value(&mut s.flow_pressure, "✒")
+                .on_hover_text("A pen's pressure sets the flow");
             ui.toggle_value(&mut s.size_pressure, "⊙")
                 .on_hover_text("A pen's pressure sets the size");
             ui.separator();
@@ -1245,6 +1277,38 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_key_held_down_switches_back_when_let_go() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+        let key = |pressed: bool, key: Key, time: f64, tools: &mut Tools| {
+            let raw = egui::RawInput {
+                time: Some(time),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |_| {});
+            out.textures_delta.clear();
+            tools.keys(&ctx);
+        };
+        assert_eq!(tools.tool, Tool::Brush);
+        // Held: the Eyedropper while I is down, then the Brush again.
+        key(true, Key::I, 1.0, &mut tools);
+        assert_eq!(tools.tool, Tool::Eyedropper);
+        key(false, Key::I, 2.0, &mut tools);
+        assert_eq!(tools.tool, Tool::Brush);
+        // Tapped: it stays.
+        key(true, Key::I, 3.0, &mut tools);
+        key(false, Key::I, 3.1, &mut tools);
+        assert_eq!(tools.tool, Tool::Eyedropper);
+    }
+
+    #[test]
     fn g_selects_gradient_and_number_keys_set_opacity() {
         let mut tools = Tools::default();
         let ctx = egui::Context::default();
@@ -1562,9 +1626,11 @@ mod tests {
         for tool in other_tools {
             assert_eq!(cursor_badge(tool, none), None);
             assert_eq!(cursor_badge(tool, shift), None);
-            assert_eq!(cursor_badge(tool, alt), None);
-            assert_eq!(cursor_badge(tool, shift_alt), None);
             assert_eq!(cursor_badge(tool, ctrl), None);
+            // Alt picks up a colour, except where it sets a clone source.
+            let alt_badge = (!tool.copies()).then_some(CursorBadge::Eyedropper);
+            assert_eq!(cursor_badge(tool, alt), alt_badge);
+            assert_eq!(cursor_badge(tool, shift_alt), alt_badge);
         }
     }
 }
