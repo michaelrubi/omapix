@@ -32,6 +32,8 @@ pub struct Document {
     pub profile: ColorProfile,
     /// Bits per channel in the file it was loaded from (pixels are always held at 16).
     pub source_bits: u8,
+    /// Raw EXIF metadata blob preserved across saves and exports.
+    pub exif: Option<Vec<u8>>,
     /// Bottom layer first.
     pub layers: Vec<Layer>,
     /// The active selection; `None` means everything (Photoshop's
@@ -63,6 +65,7 @@ impl Document {
             height,
             profile,
             source_bits,
+            exif: None,
             layers,
             next_id,
         }
