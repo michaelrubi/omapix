@@ -211,8 +211,8 @@ pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
     let mut encoder = JpegEncoder::new_with_quality(create(path)?, quality);
     let srgb = lcms2::Profile::new_srgb().icc().map_err(Error::Color)?;
     let _ = encoder.set_icc_profile(srgb);
-    if let Some(exif) = &doc.exif {
-        let _ = encoder.set_exif_metadata(exif.clone());
+    if let Some(exif) = doc.exif.as_deref().and_then(fit_jpeg_exif) {
+        let _ = encoder.set_exif_metadata(exif);
     }
     encoder.write_image(
         &rgb,
@@ -221,6 +221,33 @@ pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
         image::ExtendedColorType::Rgb8,
     )?;
     Ok(())
+}
+
+/// The most EXIF one JPEG APP1 segment holds: 65535, less the length field
+/// and the "Exif\0\0" header. The encoder silently wraps the segment length
+/// past this, corrupting the file.
+const MAX_JPEG_EXIF: usize = 65535 - 2 - 6;
+
+/// EXIF small enough for a JPEG. A darktable TIFF's metadata carries its
+/// XMP edit history and the camera's maker notes, which together can pass
+/// 64 KB, so drop those bulky blobs if needed, or all of it as a last resort.
+fn fit_jpeg_exif(exif: &[u8]) -> Option<Vec<u8>> {
+    if exif.len() <= MAX_JPEG_EXIF {
+        return Some(exif.to_vec());
+    }
+    let parsed = exif::Reader::new().read_raw(exif.to_vec()).ok()?;
+    let mut writer = exif::experimental::Writer::new();
+    // XMP, IPTC, PrintIM and MakerNote.
+    for f in parsed
+        .fields()
+        .filter(|f| !matches!(f.tag.number(), 0x02bc | 0x83bb | 0xc4a5 | 0x927c))
+    {
+        writer.push_field(f);
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    writer.write(&mut buf, parsed.little_endian()).ok()?;
+    let slim = buf.into_inner();
+    (slim.len() <= MAX_JPEG_EXIF).then_some(slim)
 }
 
 #[cfg(test)]
@@ -251,5 +278,57 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(back.composite().pixels(), &px[..]);
         assert_eq!((jpeg_back.width, jpeg_back.height), (w, h));
+    }
+
+    /// Walk a JPEG's segments up to the scan: a wrapped length lands off a
+    /// marker.
+    fn segments_ok(bytes: &[u8]) -> bool {
+        let mut i = 2;
+        while i + 4 <= bytes.len() && bytes[i] == 0xff {
+            if bytes[i + 1] == 0xda {
+                return true;
+            }
+            i += 2 + usize::from(u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]));
+        }
+        false
+    }
+
+    #[test]
+    fn jpeg_with_oversized_exif_stays_valid() {
+        // Like a darktable TIFF: a date worth keeping plus 70 KB of XMP.
+        let date = exif::Field {
+            tag: exif::Tag::DateTimeOriginal,
+            ifd_num: exif::In::PRIMARY,
+            value: exif::Value::Ascii(vec![b"2024:02:13 15:58:41".to_vec()]),
+        };
+        let xmp = exif::Field {
+            tag: exif::Tag(exif::Context::Tiff, 0x02bc),
+            ifd_num: exif::In::PRIMARY,
+            value: exif::Value::Byte(vec![b'x'; 70_000]),
+        };
+        let mut writer = exif::experimental::Writer::new();
+        writer.push_field(&date);
+        writer.push_field(&xmp);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        writer.write(&mut buf, true).unwrap();
+
+        let mut doc = Document::from_image(
+            "x.tif".into(),
+            &Raster::new(8, 8, vec![[30000; 4]; 64]),
+            ColorProfile::srgb(),
+            16,
+        );
+        doc.exif = Some(buf.into_inner());
+        let dir = std::env::temp_dir().join(format!("omapix-bigexif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.jpg");
+        jpeg(&doc, &path, 90).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let parsed = exif::Reader::new()
+            .read_from_container(&mut std::io::Cursor::new(&bytes))
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(segments_ok(&bytes));
+        assert!(parsed.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY).is_some());
     }
 }
