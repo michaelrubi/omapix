@@ -16,6 +16,7 @@ const CLONE_ICON: &str = "\u{f24d}";
 const HEAL_ICON: &str = "\u{f0fa}";
 const SPOT_ICON: &str = "\u{f462}";
 const WAND_ICON: &str = "\u{f0d0}";
+const OBJECT_ICON: &str = "\u{f05b}";
 const EYEDROPPER_ICON: &str = "\u{f1fb}";
 const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
@@ -55,7 +56,7 @@ impl ToolGroup {
             ToolGroup::Move => &[Tool::Move],
             ToolGroup::Marquee => &[Tool::Marquee, Tool::EllipticalMarquee],
             ToolGroup::Lasso => &[Tool::Lasso],
-            ToolGroup::Wand => &[Tool::MagicWand],
+            ToolGroup::Wand => &[Tool::ObjectSelection, Tool::MagicWand],
             ToolGroup::Eyedropper => &[Tool::Eyedropper],
             ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
             ToolGroup::Brush => &[Tool::Brush],
@@ -96,6 +97,7 @@ pub enum Tool {
     EllipticalMarquee,
     Lasso,
     MagicWand,
+    ObjectSelection,
     Eyedropper,
 }
 
@@ -112,6 +114,7 @@ impl Tool {
             Tool::EllipticalMarquee => "Elliptical Marquee",
             Tool::Lasso => "Lasso",
             Tool::MagicWand => "Magic Wand",
+            Tool::ObjectSelection => "Object Selection",
             Tool::Eyedropper => "Eyedropper",
         }
     }
@@ -128,6 +131,7 @@ impl Tool {
             Tool::EllipticalMarquee => ELLIPSE_ICON,
             Tool::Lasso => LASSO_ICON,
             Tool::MagicWand => WAND_ICON,
+            Tool::ObjectSelection => OBJECT_ICON,
             Tool::Eyedropper => EYEDROPPER_ICON,
         }
     }
@@ -141,7 +145,7 @@ impl Tool {
             Tool::Move => ToolGroup::Move,
             Tool::Marquee | Tool::EllipticalMarquee => ToolGroup::Marquee,
             Tool::Lasso => ToolGroup::Lasso,
-            Tool::MagicWand => ToolGroup::Wand,
+            Tool::MagicWand | Tool::ObjectSelection => ToolGroup::Wand,
             Tool::Eyedropper => ToolGroup::Eyedropper,
             Tool::SpotHealing | Tool::Healing => ToolGroup::Healing,
             Tool::Brush => ToolGroup::Brush,
@@ -154,7 +158,7 @@ impl Tool {
     pub fn selects(self) -> bool {
         matches!(
             self,
-            Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso | Tool::MagicWand
+            Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso | Tool::MagicWand | Tool::ObjectSelection
         )
     }
 
@@ -331,6 +335,7 @@ impl Tools {
             | Tool::EllipticalMarquee
             | Tool::Lasso
             | Tool::MagicWand
+            | Tool::ObjectSelection
             | Tool::Eyedropper => self.brush,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
@@ -355,6 +360,7 @@ impl Tools {
             | Tool::EllipticalMarquee
             | Tool::Lasso
             | Tool::MagicWand
+            | Tool::ObjectSelection
             | Tool::Eyedropper => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
@@ -460,7 +466,7 @@ impl Tools {
         match self.tool {
             Tool::Marquee | Tool::EllipticalMarquee => self.last_marquee = self.tool,
             Tool::SpotHealing | Tool::Healing => self.last_healing = self.tool,
-            Tool::MagicWand => self.last_wand = self.tool,
+            Tool::MagicWand | Tool::ObjectSelection => self.last_wand = self.tool,
             _ => {}
         }
     }
@@ -617,6 +623,11 @@ impl Tools {
                 self.sample_options(ui);
                 ui.separator();
                 let hint = "Click or drag to sample foreground colour · Alt sets background";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
+            if self.tool == Tool::ObjectSelection {
+                let hint = "Click an object, or drag a box round it · Shift adds · Alt subtracts";
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
                 return;
             }

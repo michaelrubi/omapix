@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/omapix-engine", "crates/omapix"]
+members = ["crates/omapix-engine", "crates/omapix-ai", "crates/omapix"]
 exclude = ["vendor"]
 
 [workspace.package]

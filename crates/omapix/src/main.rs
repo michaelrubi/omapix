@@ -12,6 +12,7 @@ mod history_panel;
 mod hotkeys;
 mod layers_panel;
 mod live;
+mod object_selection;
 mod properties_panel;
 mod recent;
 mod settings;
