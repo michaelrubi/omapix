@@ -18,6 +18,7 @@ mod navigator_panel;
 mod object_selection;
 mod properties_panel;
 mod recent;
+mod select_and_mask;
 mod settings;
 mod tablet;
 mod theme;

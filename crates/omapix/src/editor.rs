@@ -252,6 +252,9 @@ pub struct Editor {
     /// Ctrl+H: the selection's marching ants are hidden. A new selection
     /// shows them again.
     pub hide_selection_edges: bool,
+    /// While a refined selection is previewed: the real selection, and
+    /// the view to go back to.
+    previewing: Option<(Option<Selection>, View)>,
     /// Cached source images for sampling (Current & Below and All Layers).
     sample_cache: Mutex<SampleCache>,
 }
@@ -301,6 +304,7 @@ impl Editor {
             overlay_colour,
             quick_mask_layer: None,
             hide_selection_edges: false,
+            previewing: None,
             sample_cache: Mutex::new(SampleCache::default()),
         })
     }
@@ -1332,6 +1336,7 @@ impl Editor {
         }
         // Selecting another layer or targeting a layer mask leaves Quick Mask.
         if self.view == View::QuickMask
+            && self.previewing.is_none()
             && (self.target != Target::QuickMask || self.quick_mask_layer != Some(self.active))
         {
             self.exit_quick_mask();
@@ -1580,6 +1585,31 @@ impl Editor {
         }
         self.hide_selection_edges = false;
         self.changed();
+    }
+
+    /// Show `selection` over the image in Quick Mask's red, in place of the
+    /// real one, until [`Editor::end_selection_preview`] (Select and Mask).
+    pub fn preview_selection(&mut self, selection: Selection) {
+        if self.previewing.is_none() {
+            self.previewing = Some((self.doc.selection.clone(), self.view));
+            self.set_view(View::QuickMask);
+        }
+        self.doc.selection = Some(selection);
+        self.view_generation += 1;
+    }
+
+    /// Whether a refined selection is being previewed.
+    pub fn previewing_selection(&self) -> bool {
+        self.previewing.is_some()
+    }
+
+    /// Put back the real selection and the view after a preview.
+    pub fn end_selection_preview(&mut self) {
+        if let Some((selection, view)) = self.previewing.take() {
+            self.doc.selection = selection;
+            self.set_view(view);
+            self.view_generation += 1;
+        }
     }
 
     /// Toggle Quick Mask mode (`Q`).
