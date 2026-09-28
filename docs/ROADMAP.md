@@ -155,6 +155,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates
 - [ ] Paste Special: Paste in Place (Ctrl+Shift+V), and Paste Into (Ctrl+Alt+Shift+V) a copy from elsewhere in the image and from another app
 - [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit
+- [ ] Filter settings kept between runs: apply a few filters, quit, reopen and check their dialogs
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -229,6 +230,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - Adjustment and fill layers, text and effects aren't read. When a file has them, Photoshop's flattened image comes in as a hidden "Photoshop composite" layer on top, unless Photoshop saved it blank (Maximize Compatibility off).
   - Later: turning Photoshop's Curves, Levels and Hue/Saturation layers into Omapix's.
 - ~~**History panel:** a list of undo steps you can click back to~~ (done).
+- ~~**Filter settings remembered between runs**~~ (done): each filter's settings as last applied (Gaussian Blur, Smart Blur, High Pass, Unsharp Mask, Smart Sharpen, Reduce Noise, Add Noise, Mask Density, Feather and High Pass Sharpening) are saved to `~/.config/omapix/filters.toml` and come back next time, as in Photoshop. Frequency Separation's radius still starts from the image's size.
 - ~~**Custom hotkeys**~~ (done): override any command's shortcut or tool letter from `~/.config/omapix/hotkeys.toml`, with Photoshop's shortcuts as defaults and startup warnings for clashes.
   - When there's no `hotkeys.toml` (or it's empty), Omapix writes one listing every command and tool with its default shortcut, commented out, so what can be changed is there to see and edit.
 

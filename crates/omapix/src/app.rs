@@ -18,6 +18,7 @@ use omapix_engine::{
 };
 
 use crate::canvas::ToolInput;
+use crate::settings::FilterSettings;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
@@ -232,16 +233,9 @@ pub struct App {
     dialog: Option<Dialog>,
     /// A transient message for the status bar, and whether it's an error.
     status: Option<(String, bool, Instant)>,
-    blur_radius: f32,
-    unsharp_mask: LayerFilter,
-    smart_sharpen: LayerFilter,
-    reduce_noise: LayerFilter,
-    smart_blur: LayerFilter,
-    feather_radius: f32,
+    /// Filter settings as last used, kept between runs.
+    filters: FilterSettings,
     separation_radius: Option<f32>,
-    high_pass_radius: f32,
-    mask_density: f32,
-    noise_options: NoiseOptions,
     /// The user chose to discard changes, so the next close goes through.
     allow_close: bool,
     title: String,
@@ -295,16 +289,8 @@ impl App {
             file_job: None,
             dialog: None,
             status: None,
-            blur_radius: 2.0,
-            unsharp_mask: DEFAULT_UNSHARP_MASK,
-            smart_sharpen: DEFAULT_SMART_SHARPEN,
-            reduce_noise: DEFAULT_REDUCE_NOISE,
-            smart_blur: DEFAULT_SMART_BLUR,
-            high_pass_radius: 2.0,
-            mask_density: 100.0,
-            feather_radius: 10.0,
+            filters: FilterSettings::load(),
             separation_radius: None,
-            noise_options: NoiseOptions::default(),
             allow_close: false,
             title: String::new(),
             script: std::env::var("OMAPIX_SCRIPT")
@@ -797,13 +783,13 @@ impl App {
             // Grain layer.
             Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target == Target::Mask) => {
                 self.dialog = Some(Dialog::Filter {
-                    filter: LayerFilter::AddNoise(self.noise_options),
+                    filter: LayerFilter::AddNoise(self.filters.noise),
                     preview: true,
                 });
             }
             Command::AddNoise => {
                 self.dialog = Some(Dialog::AddNoise {
-                    options: self.noise_options,
+                    options: self.filters.noise,
                     preview: true,
                 });
             }
@@ -813,7 +799,7 @@ impl App {
                 }
                 self.dialog = Some(Dialog::Filter {
                     filter: LayerFilter::MaskDensity {
-                        density: self.mask_density,
+                        density: self.filters.mask_density,
                     },
                     preview: true,
                 });
@@ -833,15 +819,15 @@ impl App {
                 }
                 let filter = match cmd {
                     Command::GaussianBlur => LayerFilter::GaussianBlur {
-                        radius: self.blur_radius,
+                        radius: self.filters.blur_radius,
                     },
-                    Command::SmartBlur => self.smart_blur,
+                    Command::SmartBlur => self.filters.smart_blur,
                     Command::HighPass => LayerFilter::HighPass {
-                        radius: self.high_pass_radius,
+                        radius: self.filters.high_pass_radius,
                     },
-                    Command::UnsharpMask => self.unsharp_mask,
-                    Command::SmartSharpen => self.smart_sharpen,
-                    Command::ReduceNoise => self.reduce_noise,
+                    Command::UnsharpMask => self.filters.unsharp_mask,
+                    Command::SmartSharpen => self.filters.smart_sharpen,
+                    Command::ReduceNoise => self.filters.reduce_noise,
                     _ => unreachable!(),
                 };
                 self.dialog = Some(Dialog::Filter {
@@ -852,7 +838,7 @@ impl App {
             Command::Feather => {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
-                    radius: self.feather_radius,
+                    radius: self.filters.feather_radius,
                     preview: None,
                 });
             }
@@ -937,7 +923,7 @@ impl App {
             Command::HighPassSharpening => {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
-                    radius: self.high_pass_radius,
+                    radius: self.filters.high_pass_radius,
                     preview: None,
                 });
             }
@@ -1001,7 +987,8 @@ impl App {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        self.noise_options = options;
+        self.filters.noise = options;
+        self.filters.save();
         let index = editor.active_index().unwrap_or(0);
         editor.target = Target::Pixels;
         editor.edit_in_background(
@@ -1017,15 +1004,16 @@ impl App {
     /// selection), remembering its settings for next time.
     fn apply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
         match filter {
-            LayerFilter::GaussianBlur { radius } => self.blur_radius = radius,
-            LayerFilter::HighPass { radius } => self.high_pass_radius = radius,
-            LayerFilter::UnsharpMask { .. } => self.unsharp_mask = filter,
-            LayerFilter::AddNoise(options) => self.noise_options = options,
-            LayerFilter::SmartSharpen(_) => self.smart_sharpen = filter,
-            LayerFilter::ReduceNoise(_) => self.reduce_noise = filter,
-            LayerFilter::MaskDensity { density } => self.mask_density = density,
-            LayerFilter::SmartBlur(_) => self.smart_blur = filter,
+            LayerFilter::GaussianBlur { radius } => self.filters.blur_radius = radius,
+            LayerFilter::HighPass { radius } => self.filters.high_pass_radius = radius,
+            LayerFilter::UnsharpMask { .. } => self.filters.unsharp_mask = filter,
+            LayerFilter::AddNoise(options) => self.filters.noise = options,
+            LayerFilter::SmartSharpen(_) => self.filters.smart_sharpen = filter,
+            LayerFilter::ReduceNoise(_) => self.filters.reduce_noise = filter,
+            LayerFilter::MaskDensity { density } => self.filters.mask_density = density,
+            LayerFilter::SmartBlur(_) => self.filters.smart_blur = filter,
         }
+        self.filters.save();
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1058,7 +1046,8 @@ impl App {
         let index = editor.active_index().unwrap_or(0);
         match command {
             Command::Feather => {
-                self.feather_radius = radius;
+                self.filters.feather_radius = radius;
+                self.filters.save();
                 editor.hide_selection_edges = false;
                 editor.edit_in_background(
                     "Feather",
@@ -1069,7 +1058,8 @@ impl App {
                 );
             }
             Command::HighPassSharpening => {
-                self.high_pass_radius = radius;
+                self.filters.high_pass_radius = radius;
+                self.filters.save();
                 editor.target = Target::Pixels;
                 editor.edit_in_background(
                     "High Pass Sharpening",
@@ -2171,39 +2161,6 @@ impl App {
     }
 }
 
-/// Unsharp Mask's settings until it's first used: a moderate sharpening
-/// for a 24 MP portrait.
-const DEFAULT_UNSHARP_MASK: LayerFilter = LayerFilter::UnsharpMask {
-    amount: 0.8,
-    radius: 1.5,
-    threshold: 2.0,
-};
-
-/// Smart Sharpen's settings until it's first used.
-const DEFAULT_SMART_SHARPEN: LayerFilter = LayerFilter::SmartSharpen(SmartSharpenOptions {
-    amount: 100.0,
-    radius: 1.5,
-    reduce_noise: 10.0,
-    remove: SharpenRemove::GaussianBlur,
-    shadow_fade: 0.0,
-    highlight_fade: 0.0,
-});
-
-/// Reduce Noise's settings until it's first used.
-const DEFAULT_REDUCE_NOISE: LayerFilter = LayerFilter::ReduceNoise(ReduceNoiseOptions {
-    strength: 5.0,
-    preserve_details: 10.0,
-    reduce_color_noise: 25.0,
-    sharpen_details: 0.0,
-});
-
-/// Smart Blur's settings until it's first used.
-const DEFAULT_SMART_BLUR: LayerFilter = LayerFilter::SmartBlur(SmartBlurOptions {
-    radius: 3.0,
-    threshold: 25.0,
-    quality: SmartBlurQuality::Medium,
-    mode: SmartBlurMode::Normal,
-});
 
 /// Add Noise's settings, for its dialog and for noise on a mask.
 fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
@@ -3119,6 +3076,7 @@ fn ellipse_points(a: Pos2, b: Pos2) -> Vec<Pos2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{DEFAULT_REDUCE_NOISE, DEFAULT_SMART_BLUR, DEFAULT_SMART_SHARPEN, DEFAULT_UNSHARP_MASK};
     use crate::editor::render_view;
 
     fn editor_with_selection() -> Editor {
@@ -3471,16 +3429,8 @@ mod tests {
             file_job: None,
             dialog: None,
             status: None,
-            blur_radius: 2.0,
-            unsharp_mask: DEFAULT_UNSHARP_MASK,
-            smart_sharpen: DEFAULT_SMART_SHARPEN,
-            reduce_noise: DEFAULT_REDUCE_NOISE,
-            smart_blur: DEFAULT_SMART_BLUR,
-            high_pass_radius: 2.0,
-            mask_density: 100.0,
-            feather_radius: 5.0,
+            filters: FilterSettings::default(),
             separation_radius: None,
-            noise_options: NoiseOptions::default(),
             allow_close: false,
             title: String::new(),
             drawing: None,
@@ -3769,7 +3719,7 @@ mod tests {
         let mask = &layer.mask.as_ref().unwrap().pixels;
         assert_eq!(mask.get(0, 0), 32768);
         assert_eq!(mask.get(w / 2, h / 2), 32768);
-        assert_eq!(app.mask_density, 50.0);
+        assert_eq!(app.filters.mask_density, 50.0);
 
         // Undo restores black mask.
         app.run(Command::Undo, &ctx);
