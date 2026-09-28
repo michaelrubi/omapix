@@ -3164,6 +3164,9 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        if let Some(editor) = &self.editor {
+            self.tools.follow_target(editor.target);
+        }
         // While a text field (layer rename) has focus, keys edit the text.
         if self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
             for cmd in Command::pressed(ctx, &mut self.v_down) {
