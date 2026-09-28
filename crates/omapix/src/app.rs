@@ -2086,7 +2086,7 @@ self.filters.remember(&filter);
                     let background = editor.doc.profile.from_srgb8(self.tools.background);
                     paint = Paint::Color(background.unwrap_or([65535; 4]));
                 }
-                let (settings, sample) = (self.tools.settings(), self.tools.sample);
+                let (settings, sample) = (self.tools.settings(), self.tools.sample_from());
                 if editor.begin_stroke(settings, paint, sample) {
                     editor.stroke_to(p.x, p.y, pressure);
                 }
@@ -2103,7 +2103,7 @@ self.filters.remember(&filter);
                         p.x as u32,
                         p.y as u32,
                         self.tools.sample_size,
-                        self.tools.sample,
+                        self.tools.sample_from(),
                     )
                 {
                     let is_bg = self.tools.tool == crate::tools::Tool::Eyedropper && modifiers.alt;
@@ -2338,7 +2338,7 @@ self.filters.remember(&filter);
                         omapix_engine::raster::widen(self.tools.wand_tolerance),
                         self.tools.wand_contiguous,
                         self.tools.wand_anti_alias,
-                        self.tools.sample,
+                        self.tools.wand_sample,
                         how,
                     ) {
                         editor.hide_selection_edges = false;
@@ -6314,7 +6314,7 @@ mod tests {
 
         // Set tool to Clone Stamp with Current & Below
         app.tools.select(crate::tools::Tool::CloneStamp);
-        app.tools.sample = crate::tools::Sample::CurrentAndBelow;
+        app.tools.clone_sample = crate::tools::Sample::CurrentAndBelow;
 
         // Alt+click to set source at (100.0, 100.0)
         app.tool_input(
@@ -6342,7 +6342,7 @@ mod tests {
         assert_eq!(active_pixel, red);
 
         // With All Layers, cloning stamps Blue from the top layer
-        app.tools.sample = crate::tools::Sample::All;
+        app.tools.clone_sample = crate::tools::Sample::All;
         app.tool_input(
             ToolInput::Sample(egui::pos2(100.0, 100.0)),
             egui::Modifiers::ALT,
