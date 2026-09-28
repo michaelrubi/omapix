@@ -32,7 +32,7 @@ use crate::navigator_panel::NavigatorPanel;
 use crate::properties_panel::PropertiesPanel;
 use crate::recent::RecentStore;
 use crate::theme::{self, Theme};
-use crate::tools::Tools;
+use crate::tools::{Sample, Tools};
 
 const OPEN_EXTENSIONS: [&str; 7] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd"];
 const JPEG_QUALITY: u8 = 92;
@@ -241,6 +241,7 @@ impl ScriptStep {
                 "Wand" | "MagicWand" => ScriptStep::Tool(crate::tools::Tool::MagicWand),
                 "Eyedropper" => ScriptStep::Tool(crate::tools::Tool::Eyedropper),
                 "Gradient" => ScriptStep::Tool(crate::tools::Tool::Gradient),
+                "PaintBucket" | "Bucket" => ScriptStep::Tool(crate::tools::Tool::PaintBucket),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -2233,6 +2234,10 @@ self.filters.remember(&filter);
             self.gradient_input(input, modifiers);
             return;
         }
+        if self.tools.tool == crate::tools::Tool::PaintBucket {
+            self.paint_bucket_input(input);
+            return;
+        }
         let pressure = self.tablet.as_ref().map_or(1.0, Tablet::pressure);
         match input {
             ToolInput::StrokeBegin(p) => {
@@ -2323,6 +2328,24 @@ self.filters.remember(&filter);
         }
     }
 
+    /// Whether the active layer (or its mask, when targeted) can't be filled
+    /// with `tool`, saying so.
+    fn refuse_locked(&mut self, tool: &str) -> bool {
+        let Some(editor) = &self.editor else {
+            return true;
+        };
+        let layer = editor.doc.layer(editor.active);
+        let locked = match editor.target {
+            Target::Pixels => layer.is_some_and(|l| !l.can_paint_pixels()),
+            Target::Mask => layer.is_some_and(|l| l.mask.is_none() || l.locks.all),
+            Target::QuickMask => false,
+        };
+        if locked {
+            self.message(format!("Could not use {tool} tool because the layer is locked"), true);
+        }
+        locked
+    }
+
     /// Dragging with the Gradient tool to fill pixels or a mask.
     fn gradient_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
         let Some(editor) = &mut self.editor else {
@@ -2330,16 +2353,7 @@ self.filters.remember(&filter);
         };
         match input {
             ToolInput::StrokeBegin(p) => {
-                if editor.target == Target::Pixels
-                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
-                {
-                    self.message("Could not use the gradient tool because the layer is locked", true);
-                    return;
-                }
-                if editor.target == Target::Mask
-                    && editor.doc.layer(editor.active).is_some_and(|l| l.mask.is_none() || l.locks.all)
-                {
-                    self.message("Could not use the gradient tool because the layer is locked", true);
+                if self.refuse_locked("the gradient") {
                     return;
                 }
                 self.drawing = Some((vec![p], Combine::Replace));
@@ -2441,6 +2455,40 @@ self.filters.remember(&filter);
             }
             ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
         }
+    }
+
+    /// Clicking with the Paint Bucket fills the similar colours round the
+    /// click with the foreground colour, within the selection.
+    fn paint_bucket_input(&mut self, input: ToolInput) {
+        let ToolInput::StrokeBegin(p) = input else {
+            return;
+        };
+        if self.refuse_locked("the paint bucket") {
+            return;
+        }
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if p.x < 0.0 || p.y < 0.0 {
+            return;
+        }
+        let t = &self.tools;
+        let sample = if t.bucket_all_layers { Sample::All } else { Sample::Current };
+        let tolerance = omapix_engine::raster::widen(t.bucket_tolerance);
+        let start = (p.x as u32, p.y as u32);
+        let Some(mut area) = editor.wand_region(start, tolerance, t.bucket_contiguous, t.bucket_anti_alias, sample)
+        else {
+            return;
+        };
+        if let Some(selection) = &editor.doc.selection
+            && editor.target != Target::QuickMask
+        {
+            area = area.combine(selection, Combine::Intersect);
+        }
+        let (w, h) = (editor.doc.width, editor.doc.height);
+        let opacity = Tiled::new(w, h, (t.bucket_opacity.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16);
+        let area = area.combine(&Selection::from_coverage(opacity), Combine::Intersect);
+        fill_within(editor, "Paint Bucket", Some(t.foreground), t.background, Some(area));
     }
 
     /// Drawing a selection with the marquee or lasso.
@@ -2614,7 +2662,10 @@ self.filters.remember(&filter);
             ScriptStep::Tool(tool) => self.tools.select(tool),
             ScriptStep::Size(n) => self.tools.set_size(n),
             ScriptStep::Opacity(o) => self.tools.set_opacity(o),
-            ScriptStep::Tolerance(t) => self.tools.wand_tolerance = t,
+            ScriptStep::Tolerance(t) => {
+                self.tools.wand_tolerance = t;
+                self.tools.bucket_tolerance = t;
+            }
             ScriptStep::Color(c) => self.tools.foreground = c,
             ScriptStep::Source(p) => self.tools.set_source(p),
             ScriptStep::BlendIf(under, range) => {
@@ -2902,6 +2953,18 @@ fn lock_flag(locks: &mut Locks, cmd: Command) -> &mut bool {
 /// (Delete): pixels to transparency, masks to the background colour's grey,
 /// as Photoshop does.
 fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [u8; 3]) {
+    fill_within(editor, label, colour, background, None);
+}
+
+/// `fill`, but only within `area` (partly where it's partly covered)
+/// rather than the selection, when given.
+fn fill_within(
+    editor: &mut Editor,
+    label: &str,
+    colour: Option<[u8; 3]>,
+    background: [u8; 3],
+    area: Option<Selection>,
+) {
     let id = editor.active;
     let target = editor.target;
     let profile = editor.doc.profile.clone();
@@ -2910,10 +2973,10 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
             let (w, h) = (doc.width, doc.height);
             let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
             let grey = crate::tools::grey(colour.unwrap_or(background));
-            sel.coverage = ops::fill_mask(&sel.coverage, grey, None);
+            sel.coverage = ops::fill_mask(&sel.coverage, grey, area.as_ref());
             return;
         }
-        let selection = doc.selection.clone();
+        let selection = area.or_else(|| doc.selection.clone());
         let Some(layer) = doc.layer_mut(id) else {
             return;
         };
@@ -6619,6 +6682,98 @@ mod tests {
     }
 
     #[test]
+    fn paint_bucket_fill_on_pixels_selection_and_mask() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.tools.select(crate::tools::Tool::PaintBucket);
+        app.tools.foreground = [255, 0, 0]; // Red
+        let active = app.editor.as_ref().unwrap().active;
+
+        // 1. Fill on pixels with a selection (test_app has rect selection 100..200).
+        // Initial layer has [30000, 30000, 30000, 65535].
+        // Click at (150, 150) inside selection:
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Paint Bucket"));
+        let layer = app.editor.as_ref().unwrap().doc.layer(active).unwrap();
+        // Inside selection: filled with foreground (red)
+        assert_eq!(layer.pixels.get(150, 150), [65535, 0, 0, 65535]);
+        // Outside selection: untouched
+        assert_eq!(layer.pixels.get(50, 50), [30000, 30000, 30000, 65535]);
+
+        // 2. Clear selection and test contiguous vs non-contiguous fill.
+        app.editor.as_mut().unwrap().doc.selection = None;
+        // Paint a dividing green barrier separating the canvas at x=300
+        let green = [0, 65535, 0, 65535];
+        let (w, h) = (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height);
+        app.editor.as_mut().unwrap().edit("Divide", |doc, _| {
+            let l = doc.layer_mut(active).unwrap();
+            let barrier = Selection::rectangle(w, h, (300.0, 0.0), (301.0, h as f32));
+            l.pixels = ops::fill_pixels(&l.pixels, Some(green), Some(&barrier));
+        });
+
+        // Click on the left side (x=50, y=50) with contiguous = true.
+        app.tools.foreground = [0, 0, 255]; // Blue
+        app.tools.bucket_contiguous = true;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+
+        let layer = app.editor.as_ref().unwrap().doc.layer(active).unwrap();
+        // Left side: blue
+        assert_eq!(layer.pixels.get(50, 50), [0, 0, 65535, 65535]);
+        // Right side (x=400): untouched because contiguous stopped at the green barrier
+        assert_eq!(layer.pixels.get(400, 50), [30000, 30000, 30000, 65535]);
+
+        // Undo, and fill with non-contiguous
+        app.run(Command::Undo, &ctx);
+        app.tools.bucket_contiguous = false;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+
+        let layer = app.editor.as_ref().unwrap().doc.layer(active).unwrap();
+        // Left side: blue
+        assert_eq!(layer.pixels.get(50, 50), [0, 0, 65535, 65535]);
+        // Right side: ALSO blue because non-contiguous filled all matching pixels
+        assert_eq!(layer.pixels.get(400, 50), [0, 0, 65535, 65535]);
+
+        // 3. Fill on a mask
+        app.run(Command::AddMask, &ctx);
+        app.editor.as_mut().unwrap().target = Target::Mask;
+        app.tools.foreground = [0, 0, 0]; // Black -> mask value 0
+        app.tools.bucket_contiguous = true;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Paint Bucket"));
+        let mask = app.editor.as_ref().unwrap().doc.layer(active).unwrap().mask.as_ref().unwrap();
+        assert_eq!(mask.pixels.get(50, 50), 0);
+
+        // 4. Click outside canvas does nothing
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(-10.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        // Undo label unchanged
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Paint Bucket"));
+
+        // 5. Locked layer check
+        app.editor.as_mut().unwrap().target = Target::Pixels;
+        app.editor.as_mut().unwrap().doc.layer_mut(active).unwrap().locks.pixels = true;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("Could not use the paint bucket tool because the layer is locked")
+        );
+
+        // 6. Opacity: half red over the blue.
+        app.editor.as_mut().unwrap().doc.layer_mut(active).unwrap().locks.pixels = false;
+        app.tools.bucket_opacity = 0.5;
+        app.tools.foreground = [255, 0, 0];
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        let [r, g, b, a] = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(50, 50);
+        assert!(r.abs_diff(32768) <= 1 && g == 0 && b.abs_diff(32768) <= 1 && a == 65535, "{r} {g} {b} {a}");
+    }
+
+    #[test]
     fn changing_brush_size_in_tools_saves_once() {
         let dir = std::env::temp_dir().join(format!("omapix-tool-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6666,9 +6821,22 @@ mod tests {
         assert!(!path.exists(), "must not write again when settings haven't changed");
 
         // A file with only some settings keeps the defaults for the rest.
-        std::fs::write(&path, "wand_tolerance = 12\n[eraser]\nsize = 42.0\n").unwrap();
+        std::fs::write(
+            &path,
+            "wand_tolerance = 12\nbucket_opacity = 0.75\nbucket_tolerance = 48\nbucket_anti_alias = false\nbucket_contiguous = false\nbucket_all_layers = true\n[eraser]\nsize = 42.0\n",
+        ).unwrap();
         let loaded: Tools = crate::settings::load_from(&path, &Tools::default());
         assert_eq!((loaded.wand_tolerance, loaded.gradient_opacity), (12, 1.0));
+        assert_eq!(
+            (
+                loaded.bucket_opacity,
+                loaded.bucket_tolerance,
+                loaded.bucket_anti_alias,
+                loaded.bucket_contiguous,
+                loaded.bucket_all_layers,
+            ),
+            (0.75, 48, false, false, true)
+        );
         let mut eraser = loaded.clone();
         eraser.tool = crate::tools::Tool::Eraser;
         assert_eq!((eraser.settings().size, eraser.settings().hardness), (42.0, 0.5));
