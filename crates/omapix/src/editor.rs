@@ -370,9 +370,30 @@ impl Editor {
         self.redo.clear();
     }
 
+    fn check_size_changed(&mut self) {
+        if self.doc.width != self.canvas.width() || self.doc.height != self.canvas.height() {
+            self.canvas.resize(self.doc.width, self.doc.height);
+            self.reduced = Arc::default();
+            self.groups = Arc::default();
+            self.preview_groups = Arc::default();
+            self.separation_base = None;
+            if let Ok(mut cache) = self.sample_cache.lock() {
+                *cache = SampleCache::default();
+            }
+            self.live_view = None;
+            self.moving = None;
+            self.transforming = None;
+            if let Some(rendering) = self.rendering.take() {
+                rendering.cancel.store(true, Ordering::Release);
+            }
+            self.rendered = (0, u64::MAX);
+        }
+    }
+
     fn changed(&mut self) {
         self.revision += 1;
         self.modified = true;
+        self.check_size_changed();
     }
 
     /// Apply an edit as one undo step. Returns false if a background job is

@@ -41,6 +41,7 @@ pub use layer::{Layer, Locks, Mask};
 pub use ops::{GradientParams, GradientType, add_noise_layer, grain_layer};
 pub use raster::{Pixel, Raster};
 pub use selection::{Channel, Combine, Selection};
+pub use tiled::Orientation;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

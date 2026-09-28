@@ -17,6 +17,36 @@ use crate::Raster;
 pub const TILE: u32 = 256;
 pub const TILE_PIXELS: usize = (TILE * TILE) as usize;
 
+/// Whole-document rotation or flip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    Rotate180,
+    Rotate90Cw,
+    Rotate90Ccw,
+    FlipHorizontal,
+    FlipVertical,
+}
+
+impl Orientation {
+    pub fn dimensions(self, w: u32, h: u32) -> (u32, u32) {
+        match self {
+            Self::Rotate90Cw | Self::Rotate90Ccw => (h, w),
+            Self::Rotate180 | Self::FlipHorizontal | Self::FlipVertical => (w, h),
+        }
+    }
+
+    #[inline]
+    pub fn source_coords(self, x: u32, y: u32, orig_w: u32, orig_h: u32) -> (u32, u32) {
+        match self {
+            Self::Rotate180 => (orig_w - 1 - x, orig_h - 1 - y),
+            Self::Rotate90Cw => (y, orig_h - 1 - x),
+            Self::Rotate90Ccw => (orig_w - 1 - y, x),
+            Self::FlipHorizontal => (orig_w - 1 - x, y),
+            Self::FlipVertical => (x, orig_h - 1 - y),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Tiled<T> {
     width: u32,
@@ -183,6 +213,49 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
                         None => line[at].fill(fill),
                     }
                     x += run;
+                }
+            }
+            tile.iter().any(|&p| p != fill).then_some(tile)
+        })
+    }
+
+    /// A copy rotated or flipped by `orientation`. Untouched (fill-only) tiles stay empty.
+    pub fn oriented(&self, orientation: Orientation) -> Self {
+        let (orig_w, orig_h) = (self.width, self.height);
+        let (new_w, new_h) = orientation.dimensions(orig_w, orig_h);
+        let fill = self.fill;
+        Self::from_tiles(new_w, new_h, fill, |col, row| {
+            let x0 = col * TILE;
+            let y0 = row * TILE;
+            let x1 = (x0 + TILE).min(new_w);
+            let y1 = (y0 + TILE).min(new_h);
+            if x0 >= x1 || y0 >= y1 {
+                return None;
+            }
+            let corners = [
+                orientation.source_coords(x0, y0, orig_w, orig_h),
+                orientation.source_coords(x1 - 1, y0, orig_w, orig_h),
+                orientation.source_coords(x0, y1 - 1, orig_w, orig_h),
+                orientation.source_coords(x1 - 1, y1 - 1, orig_w, orig_h),
+            ];
+            let sx0 = corners.iter().map(|c| c.0).min().unwrap();
+            let sx1 = corners.iter().map(|c| c.0).max().unwrap();
+            let sy0 = corners.iter().map(|c| c.1).min().unwrap();
+            let sy1 = corners.iter().map(|c| c.1).max().unwrap();
+
+            let empty = (sy0 / TILE..=sy1 / TILE).all(|r| {
+                (sx0 / TILE..=sx1 / TILE).all(|c| self.tile(c, r).is_none())
+            });
+            if empty {
+                return None;
+            }
+
+            let mut tile = vec![fill; TILE_PIXELS];
+            for y in y0..y1 {
+                let dst_offset = ((y - y0) * TILE) as usize;
+                for x in x0..x1 {
+                    let (sx, sy) = orientation.source_coords(x, y, orig_w, orig_h);
+                    tile[dst_offset + (x - x0) as usize] = self.get(sx, sy);
                 }
             }
             tile.iter().any(|&p| p != fill).then_some(tile)

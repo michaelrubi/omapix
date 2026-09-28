@@ -103,6 +103,11 @@ pub enum Command {
     ShowHistory,
     ShowNavigator,
     ShowHistogram,
+    Rotate180,
+    Rotate90Cw,
+    Rotate90Ccw,
+    FlipCanvasHorizontal,
+    FlipCanvasVertical,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -221,6 +226,11 @@ impl Command {
         Command::ShowHistory,
         Command::ShowNavigator,
         Command::ShowHistogram,
+        Command::Rotate180,
+        Command::Rotate90Cw,
+        Command::Rotate90Ccw,
+        Command::FlipCanvasHorizontal,
+        Command::FlipCanvasVertical,
     ];
 
     /// Look a command up by its name in code, e.g. "FrequencySeparation".
@@ -397,6 +407,11 @@ impl Command {
             Command::ShowHistory => "History",
             Command::ShowNavigator => "Navigator",
             Command::ShowHistogram => "Histogram",
+            Command::Rotate180 => "180°",
+            Command::Rotate90Cw => "90° Clockwise",
+            Command::Rotate90Ccw => "90° Counter Clockwise",
+            Command::FlipCanvasHorizontal => "Flip Canvas Horizontal",
+            Command::FlipCanvasVertical => "Flip Canvas Vertical",
         }
     }
 
