@@ -728,6 +728,22 @@ impl ColorLookup {
         parse_cube(content, title_fallback)
     }
 
+    /// The LUT as a .cube file (Adobe's format, which `parse_cube` reads).
+    pub fn to_cube(&self) -> String {
+        let kind = if self.is_3d { "3D" } else { "1D" };
+        let [r0, g0, b0] = self.domain_min;
+        let [r1, g1, b1] = self.domain_max;
+        let mut cube = format!(
+            "TITLE \"{}\"\nLUT_{kind}_SIZE {}\nDOMAIN_MIN {r0} {g0} {b0}\nDOMAIN_MAX {r1} {g1} {b1}\n",
+            self.title.replace('"', "'"),
+            self.size,
+        );
+        for [r, g, b] in &self.table {
+            cube += &format!("{r:.6} {g:.6} {b:.6}\n");
+        }
+        cube
+    }
+
     pub fn prepare(&self) -> PreparedColorLookup {
         if self.is_empty() {
             return PreparedColorLookup::Identity;
@@ -1049,6 +1065,13 @@ impl PreparedColorLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lut_written_as_cube_reads_back_the_same() {
+        let cube = "TITLE \"Warm\"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n0.5 0.25 1\n";
+        let lut = ColorLookup::from_cube_str(cube, "x").unwrap();
+        assert_eq!(ColorLookup::from_cube_str(&lut.to_cube(), "y").unwrap(), lut);
+    }
 
     fn close(a: [f32; 3], b: [f32; 3], tol: f32) -> bool {
         a.iter().zip(&b).all(|(x, y)| (x - y).abs() < tol)

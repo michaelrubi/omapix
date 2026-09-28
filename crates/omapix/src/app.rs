@@ -36,6 +36,8 @@ use crate::tools::Tools;
 
 const OPEN_EXTENSIONS: [&str; 7] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd"];
 const JPEG_QUALITY: u8 = 92;
+/// Points a side of an exported LUT (33 is the usual size).
+const LUT_SIZE: usize = 33;
 /// How near Free Transform's handles the pointer grabs them, in points.
 const HANDLE_REACH: f32 = 8.0;
 
@@ -46,6 +48,7 @@ enum Purpose {
     SaveAs,
     ExportTiff,
     ExportJpeg,
+    ExportLut,
 }
 
 /// Something to do once unsaved changes are dealt with.
@@ -473,6 +476,10 @@ impl App {
                 .set_title("Export as JPEG")
                 .add_filter("JPEG", &["jpg", "jpeg"])
                 .set_file_name(format!("{stem}.jpg")),
+            Purpose::ExportLut => dialog
+                .set_title("Export Adjustments as LUT")
+                .add_filter("Cube LUT", &["cube"])
+                .set_file_name(format!("{}.cube", self.preset_name())),
         };
         let (tx, rx) = channel();
         let ctx = ctx.clone();
@@ -594,6 +601,7 @@ impl App {
                 match purpose {
                     Purpose::Open => self.open(path, ctx),
                     Purpose::SaveAs => self.write(purpose, path.with_extension("ora"), ctx),
+                    Purpose::ExportLut => self.export_lut(&path.with_extension("cube")),
                     _ => self.write(purpose, path, ctx),
                 }
             }
@@ -744,7 +752,9 @@ impl App {
             | Command::ShowNavigator
             | Command::ShowHistogram => true,
             Command::SaveSelection => editor.doc.selection.is_some(),
-            Command::SaveAdjustmentPreset => Preset::from_layers(doc, &editor.selected()).is_some(),
+            Command::SaveAdjustmentPreset | Command::ExportAdjustmentLut => {
+                Preset::from_layers(doc, &editor.selected()).is_some()
+            }
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
             Command::FreeTransform => layer.is_some() && editor.transform().is_none(),
@@ -867,6 +877,7 @@ impl App {
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
             Command::ExportTiff => self.pick(Purpose::ExportTiff, ctx),
             Command::ExportJpeg => self.pick(Purpose::ExportJpeg, ctx),
+            Command::ExportAdjustmentLut => self.pick(Purpose::ExportLut, ctx),
             // On a mask, noise goes straight into it; on pixels, onto a
             // Grain layer.
             Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target == Target::Mask) => {
@@ -949,11 +960,9 @@ impl App {
                     .map(Dialog::SelectAndMask);
             }
             Command::SaveAdjustmentPreset => {
-                if let Some(editor) = &self.editor {
-                    let top = editor.selected().last().copied().unwrap_or(editor.active);
-                    let name = editor.doc.layer(top).map(|l| l.name.clone()).unwrap_or_default();
-                    self.dialog = Some(Dialog::SavePreset { name });
-                }
+                self.dialog = Some(Dialog::SavePreset {
+                    name: self.preset_name(),
+                });
             }
             Command::ContentAwareFill => {
                 if let Some(editor) = &self.editor
@@ -1282,6 +1291,29 @@ self.filters.remember(&filter);
         });
     }
 
+    /// A name for a preset or LUT of the selected layers: the top one's.
+    fn preset_name(&self) -> String {
+        let Some(editor) = &self.editor else {
+            return String::new();
+        };
+        let top = editor.selected().last().copied().unwrap_or(editor.active);
+        editor.doc.layer(top).map(|l| l.name.replace('/', "-")).unwrap_or_default()
+    }
+
+    /// Bake the selected adjustment layers into a .cube LUT at `path`.
+    fn export_lut(&mut self, path: &Path) {
+        let Some(editor) = &self.editor else { return };
+        let Some(preset) = Preset::from_layers(&editor.doc, &editor.selected()) else {
+            return;
+        };
+        let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let cube = preset.lut(&editor.doc.profile, LUT_SIZE, &title).to_cube();
+        match std::fs::write(path, cube) {
+            Ok(()) => self.message(format!("Exported {}", path.display()), false),
+            Err(e) => self.message(format!("Could not export the LUT: {e}"), true),
+        }
+    }
+
     fn save_preset(&mut self, name: &str) {
         let Some(editor) = &self.editor else { return };
         let (Some(preset), Some(path)) = (Preset::from_layers(&editor.doc, &editor.selected()), crate::presets::path(name))
@@ -1488,6 +1520,7 @@ self.filters.remember(&filter);
                     ui.separator();
                     self.presets_menu(ui);
                     self.menu_item(ui, Command::SaveAdjustmentPreset, None);
+                    self.menu_item(ui, Command::ExportAdjustmentLut, None);
                     ui.separator();
                     self.menu_item(ui, Command::Invert, None);
                 });
@@ -4038,6 +4071,14 @@ mod tests {
         assert_eq!(editor.doc.index_of(editor.active), Some(1), "just above the background");
         assert_eq!(editor.target, Target::Mask);
         assert_eq!(editor.undo_label(), Some("Preset Warm"));
+
+        // The same layers baked into a .cube.
+        let path = std::env::temp_dir().join(format!("omapix-lut-{}.cube", std::process::id()));
+        app.export_lut(&path);
+        let mut lut = omapix_engine::adjust::ColorLookup::default();
+        assert_eq!(lut.load_cube_file(&path), Ok(()));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((lut.size, lut.table.len()), (33, 33 * 33 * 33));
     }
 
     fn test_app() -> App {

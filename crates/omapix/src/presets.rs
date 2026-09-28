@@ -5,9 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use omapix_engine::adjust::Adjustment;
+use omapix_engine::adjust::{Adjustment, ColorLookup};
 use omapix_engine::layer::BlendIf;
-use omapix_engine::{BlendMode, Document, Layer};
+use omapix_engine::{BlendMode, ColorProfile, Document, Layer, Raster};
 
 /// The layers of a preset, bottom first, as in a document.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -125,6 +125,37 @@ impl Preset {
         ids.last().copied()
     }
 
+    /// The preset baked into a 3D LUT with `size` points a side (Image ›
+    /// Adjustments › Export Adjustments as LUT…): what its layers do to each
+    /// colour, in `profile`, found by adding them to an image with one pixel
+    /// of each colour. Blend modes, opacity, groups and clipping bake in;
+    /// masks don't.
+    pub fn lut(&self, profile: &ColorProfile, size: usize, title: &str) -> ColorLookup {
+        let n = size as u32;
+        let level = |v: u32| (v * u32::from(u16::MAX) / (n - 1)) as u16;
+        let colours = n * n * n;
+        let pixels = (0..colours)
+            .map(|i| [level(i % n), level(i / n % n), level(i / (n * n)), u16::MAX])
+            .collect();
+        let image = Raster::new(n * n, n, pixels);
+        let mut doc = Document::from_image(title.into(), &image, profile.clone(), 16);
+        self.apply(&mut doc, 0);
+        let graded = doc.composite();
+        let table = (0..colours)
+            .map(|i| {
+                let p = graded.get(i % (n * n), i / (n * n));
+                [0, 1, 2].map(|c| f32::from(p[c]) / f32::from(u16::MAX))
+            })
+            .collect();
+        ColorLookup {
+            title: title.to_owned(),
+            size,
+            is_3d: true,
+            table,
+            ..ColorLookup::default()
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         toml::from_str(&text).map_err(|e| e.to_string())
@@ -216,5 +247,31 @@ mod tests {
         let top = preset.apply(&mut doc, 4).unwrap();
         assert_eq!(doc.index_of(top), Some(4));
         assert_eq!(doc.layer(top).unwrap().parent, Some(13));
+    }
+
+    #[test]
+    fn a_baked_lut_does_what_the_layers_do() {
+        let (source, group) = graded();
+        let mut preset = Preset::from_layers(&source, &[group]).unwrap();
+        // A red-only curve, so mixing up the channels' order shows.
+        let Some(Adjustment::Curves(c)) = &mut preset.layers[0].adjustment else {
+            panic!("a Curves layer");
+        };
+        c.red.points.insert(1, (0.25, 0.1));
+        let lut = preset.lut(&ColorProfile::srgb(), 5, "Grade");
+        let lut = ColorLookup::from_cube_str(&lut.to_cube(), "").unwrap().prepare();
+
+        // A colour on the LUT's grid, graded by the layers themselves.
+        let colour = [0.25, 0.5, 0.75];
+        let image = Raster::new(1, 1, vec![[16384, 32768, 49151, 65535]]);
+        let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
+        preset.apply(&mut doc, 0);
+        let p = doc.composite().get(0, 0);
+        let expected = [0, 1, 2].map(|c| f32::from(p[c]) / 65535.0);
+        let got = lut.apply(colour);
+        for c in 0..3 {
+            assert!((got[c] - expected[c]).abs() < 0.002, "{got:?} vs {expected:?}");
+        }
+        assert!((expected[0] - 0.25).abs() > 0.02, "the grade changes it: {expected:?}");
     }
 }
