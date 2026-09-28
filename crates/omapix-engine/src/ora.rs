@@ -270,8 +270,13 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
         format!(" omapix:round-trip=\"{}\"", xml_escape(&name.to_string_lossy()))
     });
     let round_trip = round_trip.unwrap_or_default();
+    let exif_attr = if doc.exif.is_some() {
+        " omapix:exif=\"metadata/exif.bin\""
+    } else {
+        ""
+    };
     let mut xml = format!(
-        "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{w}\" h=\"{h}\" xmlns:omapix=\"{NAMESPACE}\"{round_trip}>\n<stack>\n"
+        "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{w}\" h=\"{h}\" xmlns:omapix=\"{NAMESPACE}\"{round_trip}{exif_attr}>\n<stack>\n"
     );
     write_stack(&mut xml, doc, &encoded, None);
     xml.push_str("</stack>\n");
@@ -319,6 +324,9 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
     }
     write(&mut zip, "mergedimage.png", &merged_png, stored)?;
     write(&mut zip, "Thumbnails/thumbnail.png", &thumbnail, stored)?;
+    if let Some(exif) = &doc.exif {
+        write(&mut zip, "metadata/exif.bin", exif, stored)?;
+    }
     let mut inner = zip.finish().map_err(zip_error)?;
     inner.flush().map_err(|e| io_error(&tmp, e))?;
     drop(inner);
@@ -382,12 +390,14 @@ struct Stack {
     layers: Vec<LayerEntry>,
     channels: Vec<ChannelEntry>,
     round_trip: Option<String>,
+    exif: Option<String>,
 }
 
 fn parse_stack(xml: &str) -> Result<Stack> {
     let mut reader = quick_xml::Reader::from_str(xml);
     let (mut w, mut h) = (0, 0);
     let mut round_trip = None;
+    let mut exif = None;
     let mut layers = Vec::new();
     let mut channels = Vec::new();
     // The stacks we're inside: `None` for the image's own stack, or the
@@ -422,6 +432,7 @@ fn parse_stack(xml: &str) -> Result<Stack> {
                 w = num("w").unwrap_or(0.0) as u32;
                 h = num("h").unwrap_or(0.0) as u32;
                 round_trip = attrs.get("omapix:round-trip").cloned();
+                exif = attrs.get("omapix:exif").cloned();
                 continue;
             }
             "stack" if open.is_empty() => {
@@ -501,6 +512,7 @@ fn parse_stack(xml: &str) -> Result<Stack> {
         layers,
         channels,
         round_trip,
+        exif,
     })
 }
 
@@ -552,6 +564,7 @@ pub fn load(path: &Path) -> Result<Document> {
         layers: entries,
         channels: channel_entries,
         round_trip,
+        exif: exif_path,
     } = parse_stack(&xml)?;
 
     // Read compressed data sequentially, then decode in parallel.
@@ -627,6 +640,9 @@ pub fn load(path: &Path) -> Result<Document> {
     let mut doc = Document::new(path.to_path_buf(), profile, 16, width, height, layers);
     doc.saved_path = Some(path.to_path_buf());
     doc.round_trip = round_trip.map(|name| path.parent().unwrap_or(Path::new("")).join(name));
+    if let Some(ref path) = exif_path {
+        doc.exif = read_entry(&mut zip, path).ok();
+    }
     for (name, src, at, fill) in channel_entries {
         let pixels = decode_grey(&read_entry(&mut zip, &src)?, at, fill, width, height)?;
         let id = doc.next_layer_id();

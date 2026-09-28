@@ -176,6 +176,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Navigator and Histogram panels: Window menu toggles strip, Navigator thumbnail drag pans canvas, zoom slider and field, and Histogram Colors and Luminosity views with statistics
 - [ ] Gradient tool: `G` shortcut, dragging linear and radial gradients on pixels and masks, Shift constraint to 45°, Foreground to Background and Foreground to Transparent, Reverse, Opacity with number keys, within a selection, and one undo step
 - [ ] Image rotation (180°, 90° CW, 90° CCW) and canvas flips (horizontal, vertical): layers, masks, selections, alpha channels, canvas fit, and undo/redo
+- [ ] EXIF metadata preservation: open a camera JPEG/TIFF with capture date, camera and lens, save to .ora, reopen, export JPEG/TIFF, and verify with exiftool that DateTimeOriginal, camera and lens survive
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -252,6 +253,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
 - ~~**darktable round trip**~~ (done): in darktable's export module, choose the target storage "edit in Omapix" (16-bit TIFF). The image is exported beside its raw and opened in Omapix; Ctrl+S saves the layers to a .ora beside the TIFF and writes the flattened image back to the TIFF, and when Omapix quits the TIFF is imported into darktable, grouped with its raw. To retouch it again, select the TIFF and press "edit in Omapix" in the selected image[s] module: Omapix opens the layers from the .ora, and darktable redraws the thumbnail afterwards. The .ora remembers its TIFF, so saving it however it's opened keeps the TIFF up to date. `make install` adds the darktable script (`assets/darktable/omapix.lua`, loaded from `~/.config/darktable/luarc`); restart darktable to pick it up.
   - Omapix is opened as `omapix --round-trip image.tif`, which other apps can use too.
   - Later: opening several exports in one Omapix window, and a darkroom shortcut.
+- ~~**Keep EXIF metadata on export and save**~~ (done): raw EXIF metadata (camera make and model, lens, exposure, and capture date / `DateTimeOriginal`) is read when loading TIFF and JPEG files and preserved through .ora saves (`metadata/exif.bin` in the zip, referenced via `omapix:exif` in `stack.xml`), flattened TIFF and JPEG exports, and the darktable round-trip TIFF. Image orientation in the EXIF block is normalized to 1 (normal) so viewers display upright pixels correctly.
 - **Batch export:** apply a saved action (for example "resize, sharpen, JPEG") to many files.
 - ~~**Recent files** and reopening the last document~~ (done).
 - ~~**Close document**~~ (done): Ctrl+W (File › Close) closes the open image and returns to the empty start state, asking to save unsaved changes first.
