@@ -21,6 +21,7 @@ const EYEDROPPER_ICON: &str = "\u{f1fb}";
 const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
 const LASSO_ICON: &str = "\u{f0c4}";
+const GRADIENT_ICON: &str = "\u{f069b}";
 
 const MIN_SIZE: f32 = 1.0;
 const MAX_SIZE: f32 = 5000.0;
@@ -36,6 +37,7 @@ pub enum ToolGroup {
     Brush,
     CloneStamp,
     Eraser,
+    Gradient,
 }
 
 impl ToolGroup {
@@ -49,6 +51,7 @@ impl ToolGroup {
         ToolGroup::Brush,
         ToolGroup::CloneStamp,
         ToolGroup::Eraser,
+        ToolGroup::Gradient,
     ];
 
     pub fn tools(self) -> &'static [Tool] {
@@ -62,6 +65,7 @@ impl ToolGroup {
             ToolGroup::Brush => &[Tool::Brush],
             ToolGroup::CloneStamp => &[Tool::CloneStamp],
             ToolGroup::Eraser => &[Tool::Eraser],
+            ToolGroup::Gradient => &[Tool::Gradient],
         }
     }
 
@@ -76,6 +80,7 @@ impl ToolGroup {
             ToolGroup::Brush => Key::B,
             ToolGroup::CloneStamp => Key::S,
             ToolGroup::Eraser => Key::E,
+            ToolGroup::Gradient => Key::G,
         };
         Some(k)
     }
@@ -99,6 +104,7 @@ pub enum Tool {
     MagicWand,
     ObjectSelection,
     Eyedropper,
+    Gradient,
 }
 
 impl Tool {
@@ -116,6 +122,7 @@ impl Tool {
             Tool::MagicWand => "Magic Wand",
             Tool::ObjectSelection => "Object Selection",
             Tool::Eyedropper => "Eyedropper",
+            Tool::Gradient => "Gradient",
         }
     }
 
@@ -133,6 +140,7 @@ impl Tool {
             Tool::MagicWand => WAND_ICON,
             Tool::ObjectSelection => OBJECT_ICON,
             Tool::Eyedropper => EYEDROPPER_ICON,
+            Tool::Gradient => GRADIENT_ICON,
         }
     }
 
@@ -151,6 +159,7 @@ impl Tool {
             Tool::Brush => ToolGroup::Brush,
             Tool::CloneStamp => ToolGroup::CloneStamp,
             Tool::Eraser => ToolGroup::Eraser,
+            Tool::Gradient => ToolGroup::Gradient,
         }
     }
 
@@ -164,7 +173,7 @@ impl Tool {
 
     /// Tools that paint with a brush, and so show its outline.
     pub fn paints(self) -> bool {
-        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper)
+        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient)
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -258,6 +267,27 @@ pub fn cursor_badge(tool: Tool, modifiers: Modifiers) -> Option<CursorBadge> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GradientColors {
+    #[default]
+    ForegroundToBackground,
+    ForegroundToTransparent,
+}
+
+impl GradientColors {
+    pub const ALL: [GradientColors; 2] = [
+        GradientColors::ForegroundToBackground,
+        GradientColors::ForegroundToTransparent,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GradientColors::ForegroundToBackground => "Foreground to Background",
+            GradientColors::ForegroundToTransparent => "Foreground to Transparent",
+        }
+    }
+}
+
 pub struct Tools {
     pub tool: Tool,
     last_marquee: Tool,
@@ -281,6 +311,11 @@ pub struct Tools {
     pub wand_tolerance: u8,
     pub wand_contiguous: bool,
     pub wand_anti_alias: bool,
+    /// Gradient tool settings matching Photoshop.
+    pub gradient_type: omapix_engine::ops::GradientType,
+    pub gradient_colors: GradientColors,
+    pub gradient_reverse: bool,
+    pub gradient_opacity: f32,
     /// Foreground and background colours, in sRGB as shown in the pickers.
     pub foreground: [u8; 3],
     pub background: [u8; 3],
@@ -320,6 +355,10 @@ impl Default for Tools {
             wand_tolerance: 32,
             wand_contiguous: true,
             wand_anti_alias: true,
+            gradient_type: omapix_engine::ops::GradientType::default(),
+            gradient_colors: GradientColors::default(),
+            gradient_reverse: false,
+            gradient_opacity: 1.0,
             foreground: [0, 0, 0],
             background: [255, 255, 255],
         }
@@ -336,7 +375,8 @@ impl Tools {
             | Tool::Lasso
             | Tool::MagicWand
             | Tool::ObjectSelection
-            | Tool::Eyedropper => self.brush,
+            | Tool::Eyedropper
+            | Tool::Gradient => self.brush,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
             Tool::SpotHealing => self.spot,
@@ -349,7 +389,11 @@ impl Tools {
     }
 
     pub fn set_opacity(&mut self, opacity: f32) {
-        self.settings_mut().opacity = opacity.clamp(0.0, 1.0);
+        if self.tool == Tool::Gradient {
+            self.gradient_opacity = opacity.clamp(0.0, 1.0);
+        } else {
+            self.settings_mut().opacity = opacity.clamp(0.0, 1.0);
+        }
     }
 
     fn settings_mut(&mut self) -> &mut BrushSettings {
@@ -361,7 +405,8 @@ impl Tools {
             | Tool::Lasso
             | Tool::MagicWand
             | Tool::ObjectSelection
-            | Tool::Eyedropper => &mut self.brush,
+            | Tool::Eyedropper
+            | Tool::Gradient => &mut self.brush,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
             Tool::SpotHealing => &mut self.spot,
@@ -486,6 +531,7 @@ impl Tools {
             ToolGroup::Brush => Tool::Brush,
             ToolGroup::CloneStamp => Tool::CloneStamp,
             ToolGroup::Eraser => Tool::Eraser,
+            ToolGroup::Gradient => Tool::Gradient,
         }
     }
 
@@ -566,6 +612,7 @@ impl Tools {
                     let opacity = if n == 0 { 1.0 } else { n as f32 / 10.0 };
                     match self.tool {
                         Tool::Move => layer_opacity = Some(opacity),
+                        Tool::Gradient => self.gradient_opacity = opacity,
                         _ => self.settings_mut().opacity = opacity,
                     }
                 }
@@ -610,6 +657,54 @@ impl Tools {
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.tool.name()).strong());
             ui.separator();
+            if self.tool == Tool::Gradient {
+                ui.label("Type");
+                ui.selectable_value(
+                    &mut self.gradient_type,
+                    omapix_engine::ops::GradientType::Linear,
+                    "Linear",
+                );
+                ui.selectable_value(
+                    &mut self.gradient_type,
+                    omapix_engine::ops::GradientType::Radial,
+                    "Radial",
+                );
+                ui.separator();
+                ui.label("Colours");
+                ComboBox::from_id_salt("gradient-colors")
+                    .selected_text(self.gradient_colors.label())
+                    .show_ui(ui, |ui| {
+                        for colors in GradientColors::ALL {
+                            ui.selectable_value(&mut self.gradient_colors, colors, colors.label());
+                        }
+                    });
+                ui.separator();
+                ui.checkbox(&mut self.gradient_reverse, "Reverse");
+                ui.separator();
+                let percent = |ui: &mut Ui, label: &str, value: &mut f32| {
+                    ui.label(label);
+                    let mut p = *value * 100.0;
+                    if ui
+                        .add(
+                            Slider::new(&mut p, 0.0..=100.0)
+                                .suffix("%")
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        *value = p / 100.0;
+                    }
+                };
+                percent(ui, "Opacity", &mut self.gradient_opacity);
+                ui.separator();
+                let (text, colour) = match target {
+                    Target::QuickMask => ("Gradient in Quick Mask", theme.accent),
+                    Target::Mask => ("Gradient on layer mask", theme.accent),
+                    Target::Pixels => ("Gradient on layer", theme.dark_foreground),
+                };
+                ui.label(RichText::new(text).color(colour));
+                return;
+            }
             if self.tool == Tool::Eyedropper {
                 ui.label("Sample Size");
                 ComboBox::from_id_salt("eyedropper-sample-size")
@@ -1077,6 +1172,24 @@ mod tests {
         press(&ctx, &[(Key::W, Modifiers::NONE)]);
         tools.keys(&ctx);
         assert_eq!(tools.tool, Tool::MagicWand);
+    }
+
+    #[test]
+    fn g_selects_gradient_and_number_keys_set_opacity() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+        press(&ctx, &[(Key::G, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Gradient);
+
+        // Number keys set gradient opacity
+        press(&ctx, &[(Key::Num5, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.gradient_opacity, 0.5);
+
+        press(&ctx, &[(Key::Num0, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.gradient_opacity, 1.0);
     }
 
     #[test]

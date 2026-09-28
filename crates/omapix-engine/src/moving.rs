@@ -154,7 +154,7 @@ impl Lifted<u16> {
 }
 
 /// `top` over `bottom`, straight alpha.
-fn over(top: Pixel, bottom: Pixel) -> Pixel {
+pub(crate) fn over(top: Pixel, bottom: Pixel) -> Pixel {
     if top[3] == u16::MAX || bottom[3] == 0 {
         return top;
     }

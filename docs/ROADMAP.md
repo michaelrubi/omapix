@@ -162,6 +162,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Filter settings kept between runs: apply a few filters, quit, reopen and check their dialogs
 - [ ] Object Selection: W then Shift+W, click a face, a dress and a prop, drag boxes, Shift and Alt, the first use (model loading) and after editing (analysed again), and how the edges look at 100 %
 - [ ] Navigator and Histogram panels: Window menu toggles strip, Navigator thumbnail drag pans canvas, zoom slider and field, and Histogram Colors and Luminosity views with statistics
+- [ ] Gradient tool: `G` shortcut, dragging linear and radial gradients on pixels and masks, Shift constraint to 45°, Foreground to Background and Foreground to Transparent, Reverse, Opacity with number keys, within a selection, and one undo step
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -193,6 +194,7 @@ The UI has been tested through the same code paths with scripts
   - Later: non-destructive density, as in Photoshop's Properties panel.
 - ~~**Live preview for Gaussian Blur**~~ (done): updates the canvas live as the radius changes, with a Preview checkbox in the dialog, respecting layer masks, blend modes, adjustments and selections.
 - ~~**Brush size and hardness by dragging**~~ (done): Alt+right-drag over the canvas with a painting tool, as in Photoshop: left and right change the size, up and down the hardness (down is harder), with the brush outline staying where the drag began. Hyprland's mouse bindings all use Super, so Alt+right-drag is free.
+- ~~**Gradient tool**~~ (done): `G` selects the Gradient tool (its own slot in the left toolbar after the Eraser). Dragging on the canvas fills the active layer's pixels, or its mask when targeted (graduated masks from black to white for retouching), with a line showing the drag. Shift constrains the angle to 45° steps. Options bar: Type (Linear, Radial), Colours (Foreground to Background, Foreground to Transparent), Reverse, and Opacity (number keys 1–9 and 0 set opacity, as with painting tools). Fills respect selections and Lock Transparent Pixels, with one undo step.
 - **Tablet support:** pen pressure for size and opacity (and later tilt). Blocked: winit (the windowing library) has no tablet support on Linux yet. Watch winit, or read tablet input directly through the Wayland tablet protocol (`tablet-v2`) on the same Wayland connection. Tablet buttons (ExpressKeys, stylus buttons) are best mapped to keystrokes outside Omapix (Hyprland binds or OpenTabletDriver), so they work through custom hotkeys rather than needing pad support in Omapix.
 - **Liquify:** forward warp, push, bloat and pucker, with a mesh that can be edited again later. Shares its warp engine with the slider-driven Symmetry and Reshape in section 7 ([AI.md](AI.md)), and is how their results get touched up by hand.
 

@@ -37,7 +37,7 @@ pub use filters::{
 };
 pub use histogram::{Histogram, HistogramStats};
 pub use layer::{Layer, Locks, Mask};
-pub use ops::{add_noise_layer, grain_layer};
+pub use ops::{GradientParams, GradientType, add_noise_layer, grain_layer};
 pub use raster::{Pixel, Raster};
 pub use selection::{Channel, Combine, Selection};
 
