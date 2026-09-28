@@ -17,6 +17,7 @@ const HEAL_ICON: &str = "\u{f0fa}";
 const SPOT_ICON: &str = "\u{f462}";
 const WAND_ICON: &str = "\u{f0d0}";
 const OBJECT_ICON: &str = "\u{f05b}";
+const QUICK_ICON: &str = "\u{f1fc}";
 const EYEDROPPER_ICON: &str = "\u{f1fb}";
 const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
@@ -59,7 +60,7 @@ impl ToolGroup {
             ToolGroup::Move => &[Tool::Move],
             ToolGroup::Marquee => &[Tool::Marquee, Tool::EllipticalMarquee],
             ToolGroup::Lasso => &[Tool::Lasso],
-            ToolGroup::Wand => &[Tool::ObjectSelection, Tool::MagicWand],
+            ToolGroup::Wand => &[Tool::ObjectSelection, Tool::QuickSelection, Tool::MagicWand],
             ToolGroup::Eyedropper => &[Tool::Eyedropper],
             ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
             ToolGroup::Brush => &[Tool::Brush],
@@ -103,6 +104,7 @@ pub enum Tool {
     Lasso,
     MagicWand,
     ObjectSelection,
+    QuickSelection,
     Eyedropper,
     Gradient,
 }
@@ -121,6 +123,7 @@ impl Tool {
             Tool::Lasso => "Lasso",
             Tool::MagicWand => "Magic Wand",
             Tool::ObjectSelection => "Object Selection",
+            Tool::QuickSelection => "Quick Selection",
             Tool::Eyedropper => "Eyedropper",
             Tool::Gradient => "Gradient",
         }
@@ -139,6 +142,7 @@ impl Tool {
             Tool::Lasso => LASSO_ICON,
             Tool::MagicWand => WAND_ICON,
             Tool::ObjectSelection => OBJECT_ICON,
+            Tool::QuickSelection => QUICK_ICON,
             Tool::Eyedropper => EYEDROPPER_ICON,
             Tool::Gradient => GRADIENT_ICON,
         }
@@ -153,7 +157,7 @@ impl Tool {
             Tool::Move => ToolGroup::Move,
             Tool::Marquee | Tool::EllipticalMarquee => ToolGroup::Marquee,
             Tool::Lasso => ToolGroup::Lasso,
-            Tool::MagicWand | Tool::ObjectSelection => ToolGroup::Wand,
+            Tool::MagicWand | Tool::ObjectSelection | Tool::QuickSelection => ToolGroup::Wand,
             Tool::Eyedropper => ToolGroup::Eyedropper,
             Tool::SpotHealing | Tool::Healing => ToolGroup::Healing,
             Tool::Brush => ToolGroup::Brush,
@@ -167,8 +171,19 @@ impl Tool {
     pub fn selects(self) -> bool {
         matches!(
             self,
-            Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso | Tool::MagicWand | Tool::ObjectSelection
+            Tool::Marquee
+                | Tool::EllipticalMarquee
+                | Tool::Lasso
+                | Tool::MagicWand
+                | Tool::ObjectSelection
+                | Tool::QuickSelection
         )
+    }
+
+    /// Tools with a brush, and so its outline: those that paint, and Quick
+    /// Selection.
+    pub fn has_brush(self) -> bool {
+        self.paints() || self == Tool::QuickSelection
     }
 
     /// Tools that paint with a brush, and so show its outline.
@@ -298,6 +313,12 @@ pub struct Tools {
     clone: BrushSettings,
     spot: BrushSettings,
     heal: BrushSettings,
+    quick: BrushSettings,
+    /// Object and Quick Selection: where the model's confidence is cut off
+    /// (0 is the model's own; lower selects more, higher less).
+    pub ai_threshold: f32,
+    /// The threshold slider moved this frame (`true`: let go).
+    pub threshold_moved: Option<bool>,
     /// Where the clone/heal source was set with Alt+click, in image pixels.
     source: Option<Pos2>,
     /// Source minus destination, fixed by the first stroke after setting a
@@ -348,6 +369,12 @@ impl Default for Tools {
                 hardness: 0.7,
                 ..BrushSettings::default()
             },
+            quick: BrushSettings {
+                size: 60.0,
+                ..BrushSettings::default()
+            },
+            ai_threshold: 0.0,
+            threshold_moved: None,
             source: None,
             offset: None,
             sample: Sample::All,
@@ -377,6 +404,7 @@ impl Tools {
             | Tool::ObjectSelection
             | Tool::Eyedropper
             | Tool::Gradient => self.brush,
+            Tool::QuickSelection => self.quick,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
             Tool::SpotHealing => self.spot,
@@ -407,6 +435,7 @@ impl Tools {
             | Tool::ObjectSelection
             | Tool::Eyedropper
             | Tool::Gradient => &mut self.brush,
+            Tool::QuickSelection => &mut self.quick,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
             Tool::SpotHealing => &mut self.spot,
@@ -511,7 +540,7 @@ impl Tools {
         match self.tool {
             Tool::Marquee | Tool::EllipticalMarquee => self.last_marquee = self.tool,
             Tool::SpotHealing | Tool::Healing => self.last_healing = self.tool,
-            Tool::MagicWand | Tool::ObjectSelection => self.last_wand = self.tool,
+            Tool::MagicWand | Tool::ObjectSelection | Tool::QuickSelection => self.last_wand = self.tool,
             _ => {}
         }
     }
@@ -721,8 +750,32 @@ impl Tools {
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
                 return;
             }
-            if self.tool == Tool::ObjectSelection {
-                let hint = "Click an object, or drag a box round it · Shift adds · Alt subtracts";
+            if matches!(self.tool, Tool::ObjectSelection | Tool::QuickSelection) {
+                if self.tool == Tool::QuickSelection {
+                    ui.label("Size");
+                    ui.add(
+                        egui::DragValue::new(&mut self.quick.size)
+                            .range(MIN_SIZE..=MAX_SIZE)
+                            .speed(1.0)
+                            .suffix(" px"),
+                    );
+                    ui.separator();
+                }
+                ui.label("Threshold");
+                let slider = ui
+                    .add(Slider::new(&mut self.ai_threshold, -8.0..=8.0).fixed_decimals(1))
+                    .on_hover_text("Lower selects more of what the model's unsure about, higher less");
+                if slider.changed() {
+                    self.threshold_moved = Some(!slider.dragged());
+                } else if slider.drag_stopped() {
+                    self.threshold_moved = Some(true);
+                }
+                ui.separator();
+                let hint = if self.tool == Tool::QuickSelection {
+                    "Paint over an object · paint again to add to it, Alt to take away · Shift adds another"
+                } else {
+                    "Click an object, or drag a box round it · Shift adds · Alt subtracts"
+                };
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
                 return;
             }

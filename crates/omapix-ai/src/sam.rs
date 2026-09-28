@@ -34,12 +34,15 @@ pub struct Encoded {
 }
 
 /// What to select, in image pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Prompt {
     /// The object under this point.
     Point(f32, f32),
     /// The object in this box, from one corner to the other.
     Box(f32, f32, f32, f32),
+    /// The object under these points (`true`) and not under these
+    /// (`false`), as painted with Quick Selection.
+    Points(Vec<(f32, f32, bool)>),
 }
 
 fn error(e: impl std::fmt::Display) -> String {
@@ -96,16 +99,22 @@ impl Sam {
 
     /// The object `prompt` points to, as [`MASK_SIZE`]² logits stretched
     /// over the whole image, positive inside it: the best of the masks the
-    /// model offers.
-    pub fn select(&mut self, image: &Encoded, prompt: Prompt) -> Result<Vec<f32>> {
+    /// model offers. `previous`, the last answer about the same object,
+    /// helps it refine rather than start again.
+    pub fn select(&mut self, image: &Encoded, prompt: &Prompt, previous: Option<&[f32]>) -> Result<Vec<f32>> {
         // Prompts are given in the encoder's SIZE × SIZE square. Box
-        // corners are labelled 2 and 3, points in the object 1.
+        // corners are labelled 2 and 3, points in the object 1 and points
         let (sx, sy) = (SIZE as f32 / image.width as f32, SIZE as f32 / image.height as f32);
-        let (coords, labels) = match prompt {
+        // not in it 0.
+        let (coords, labels) = match *prompt {
             Prompt::Point(x, y) => (vec![x * sx, y * sy], vec![1.0]),
             Prompt::Box(x0, y0, x1, y1) => (
                 vec![x0.min(x1) * sx, y0.min(y1) * sy, x0.max(x1) * sx, y0.max(y1) * sy],
                 vec![2.0, 3.0],
+            ),
+            Prompt::Points(ref points) => (
+                points.iter().flat_map(|&(x, y, _)| [x * sx, y * sy]).collect(),
+                points.iter().map(|&(_, _, inside)| if inside { 1.0 } else { 0.0 }).collect(),
             ),
         };
         let points = labels.len() as i64;
@@ -113,8 +122,11 @@ impl Sam {
         let mut inputs = ort::inputs![
             "point_coords" => tensor(vec![1, points, 2], coords)?,
             "point_labels" => tensor(vec![1, points], labels)?,
-            "mask_input" => tensor(vec![1, 1, MASK_SIZE as i64, MASK_SIZE as i64], vec![0.0; MASK_SIZE * MASK_SIZE])?,
-            "has_mask_input" => tensor(vec![1], vec![0.0])?,
+            "mask_input" => tensor(
+                vec![1, 1, MASK_SIZE as i64, MASK_SIZE as i64],
+                previous.map_or_else(|| vec![0.0; MASK_SIZE * MASK_SIZE], <[f32]>::to_vec),
+            )?,
+            "has_mask_input" => tensor(vec![1], vec![if previous.is_some() { 1.0 } else { 0.0 }])?,
         ];
         for (name, shape, data) in &image.features {
             inputs.push(((*name).into(), tensor(shape.clone(), data.clone())?.into()));
@@ -151,8 +163,11 @@ mod tests {
         let at = |mask: &[f32], x: f32, y: f32| {
             mask[(y / 400.0 * MASK_SIZE as f32) as usize * MASK_SIZE + (x / 600.0 * MASK_SIZE as f32) as usize]
         };
-        for prompt in [Prompt::Point(200.0, 200.0), Prompt::Box(90.0, 90.0, 310.0, 310.0)] {
-            let mask = sam.select(&image, prompt).unwrap();
+        let painted = Prompt::Points(vec![(180.0, 200.0, true), (220.0, 200.0, true), (500.0, 200.0, false)]);
+        for prompt in [Prompt::Point(200.0, 200.0), Prompt::Box(90.0, 90.0, 310.0, 310.0), painted] {
+            let mask = sam.select(&image, &prompt, None).unwrap();
+            let again = sam.select(&image, &prompt, Some(&mask)).unwrap();
+            assert!(at(&again, 200.0, 200.0) > 0.0 && at(&again, 500.0, 200.0) < 0.0, "{prompt:?}: refined");
             assert!(at(&mask, 200.0, 200.0) > 0.0, "{prompt:?}: centre");
             assert!(at(&mask, 150.0, 250.0) > 0.0, "{prompt:?}: inside");
             assert!(at(&mask, 500.0, 200.0) < 0.0, "{prompt:?}: outside");
