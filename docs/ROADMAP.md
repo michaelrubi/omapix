@@ -88,7 +88,7 @@ Alt+] and Alt+[ select the layer above or below following the rows in the Layers
 
 ### ~~Hide All masks and loading masks from their menu~~ (done)
 
-Alt+click on the mask button adds a black mask that hides the whole layer (Photoshop's Hide All), or with a selection, one that hides just the selection; it's also Layer › Add Layer Mask (Hide All). Right-clicking a mask thumbnail offers Add Mask to Selection, Subtract Mask from Selection and Intersect Mask with Selection, the same as Ctrl+click, Ctrl+Alt+click and Ctrl+Shift+Alt+click on it.
+Alt+click on the mask button adds a black mask that hides the whole layer (Photoshop's Hide All), or with a selection, one that hides just the selection; it's also Layer › Add Layer Mask (Hide All). Right-clicking a mask thumbnail offers Add Mask to Selection, Subtract Mask from Selection and Intersect Mask with Selection, the same as Ctrl+click, Ctrl+Alt+click and Ctrl+Shift+Alt+click on it. The other way round, it also offers Replace Mask with Selection, Add Selection to Mask, Subtract Selection from Mask and Intersect Selection with Mask, each one undo step, keeping the selection.
 
 ### ~~Tool cursor modifier badges (`+` and `-`)~~ (done)
 
@@ -178,6 +178,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Image rotation (180°, 90° CW, 90° CCW) and canvas flips (horizontal, vertical): layers, masks, selections, alpha channels, canvas fit, and undo/redo
 - [ ] EXIF metadata preservation: open a camera JPEG/TIFF with capture date, camera and lens, save to .ora, reopen, export JPEG/TIFF, and verify with exiftool that DateTimeOriginal, camera and lens survive
 - [ ] Curves: grabbing points quickly and from a little off, typing Input and Output for a selected point, switching channel or layer clears it
+- [ ] Mask menu: Replace Mask with Selection, and Add, Subtract and Intersect Selection with the mask, on a feathered selection
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
