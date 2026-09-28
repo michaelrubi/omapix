@@ -30,6 +30,10 @@ pub struct FilterSettings {
     /// Filter › High Pass and Retouch › High Pass Sharpening.
     pub high_pass_radius: f32,
     pub feather_radius: f32,
+    pub expand_radius: f32,
+    pub contract_radius: f32,
+    pub smooth_radius: f32,
+    pub border_width: f32,
     pub mask_density: f32,
     /// Frequency Separation's radius; unset, it's worked out from the
     /// image's size.
@@ -51,6 +55,10 @@ impl Default for FilterSettings {
             blur_radius: 2.0,
             high_pass_radius: 2.0,
             feather_radius: 10.0,
+            expand_radius: 5.0,
+            contract_radius: 5.0,
+            smooth_radius: 5.0,
+            border_width: 10.0,
             mask_density: 100.0,
             separation_radius: None,
             // A moderate sharpening for a 24 MP portrait.
@@ -247,6 +255,10 @@ mod tests {
         assert_eq!(settings, FilterSettings { path: Some(path.clone()), ..FilterSettings::default() });
         settings.blur_radius = 7.5;
         settings.separation_radius = Some(12.0);
+        settings.expand_radius = 8.0;
+        settings.contract_radius = 4.0;
+        settings.smooth_radius = 6.0;
+        settings.border_width = 15.0;
         settings.remember(&LayerFilter::SmartBlur(SmartBlurOptions {
             radius: 12.0,
             threshold: 40.0,
@@ -281,18 +293,26 @@ mod tests {
         let template = std::fs::read_to_string(&path).unwrap();
         assert!(template.lines().all(|l| l.is_empty() || l.starts_with('#')), "{template}");
         assert!(template.contains("# blur_radius = 2.0") && template.contains("# [smart_blur]"));
+        assert!(template.contains("# expand_radius = 5.0") && template.contains("# border_width = 10.0"));
 
         // Uncommented lines change the defaults, and the settings last used
         // fall back to them.
-        let edited = template.replace("# blur_radius = 2.0", "blur_radius = 4.0").replace(
-            "# separation_radius = 8.6  (unset: from the image's size)",
-            "separation_radius = 9.5",
-        );
+        let edited = template
+            .replace("# blur_radius = 2.0", "blur_radius = 4.0")
+            .replace("# expand_radius = 5.0", "expand_radius = 12.0")
+            .replace(
+                "# separation_radius = 8.6  (unset: from the image's size)",
+                "separation_radius = 9.5",
+            );
         std::fs::write(&path, edited).unwrap();
         let defaults = FilterSettings::load_defaults(&path);
-        assert_eq!((defaults.blur_radius, defaults.separation_radius), (4.0, Some(9.5)));
+        assert_eq!(
+            (defaults.blur_radius, defaults.expand_radius, defaults.separation_radius),
+            (4.0, 12.0, Some(9.5))
+        );
         let last = FilterSettings::load_from(&dir.join("filters.toml"), &defaults);
         assert_eq!(last.blur_radius, 4.0);
+        assert_eq!(last.expand_radius, 12.0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
