@@ -1923,11 +1923,15 @@ dependencies = [
  "omapix-ai",
  "omapix-engine",
  "pollster 1.0.1",
+ "raw-window-handle",
  "rayon",
  "rfd",
  "serde",
  "smithay-clipboard",
  "toml",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

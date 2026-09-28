@@ -704,12 +704,13 @@ impl Editor {
         true
     }
 
-    /// Continue the stroke to an image position.
-    pub fn stroke_to(&mut self, x: f32, y: f32) {
+    /// Continue the stroke to an image position, with a pen's `pressure`
+    /// there (1 for a mouse).
+    pub fn stroke_to(&mut self, x: f32, y: f32, pressure: f32) {
         let Some((stroke, _)) = &mut self.stroke else {
             return;
         };
-        let tiles = stroke.add_point(x, y);
+        let tiles = stroke.add_point(x, y, pressure);
         self.paint_tiles(&tiles, false);
     }
 
@@ -2034,8 +2035,7 @@ mod tests {
         BrushSettings {
             size,
             hardness: 1.0,
-            opacity: 1.0,
-            flow: 1.0,
+            ..Default::default()
         }
     }
 
@@ -2050,8 +2050,8 @@ mod tests {
         });
         e.target = Target::Mask;
         assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current));
-        e.stroke_to(100.0, 100.0);
-        e.stroke_to(300.0, 100.0);
+        e.stroke_to(100.0, 100.0, 1.0);
+        e.stroke_to(300.0, 100.0, 1.0);
         e.end_stroke();
         let layer = e.doc.layer(e.active).unwrap();
         assert_eq!(layer.mask.as_ref().unwrap().pixels.get(200, 100), 0);
@@ -2077,10 +2077,10 @@ mod tests {
     fn undo_mid_stroke_finishes_the_stroke_first() {
         let mut e = editor();
         assert!(e.begin_stroke(hard(40.0), Paint::Color([0, 0, 0, 65535]), Sample::Current));
-        e.stroke_to(100.0, 100.0);
+        e.stroke_to(100.0, 100.0, 1.0);
         e.undo();
         // Later moves of the abandoned stroke change nothing.
-        e.stroke_to(300.0, 100.0);
+        e.stroke_to(300.0, 100.0, 1.0);
         assert_eq!(
             e.doc.layers[0].pixels.get(300, 100),
             [30000, 30000, 30000, 65535]
@@ -2205,8 +2205,8 @@ mod tests {
         e.canvas.set_render(Arc::new(render));
         e.rendered = (e.revision, e.view_generation);
         assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current));
-        e.stroke_to(300.0, 300.0);
-        e.stroke_to(500.0, 300.0);
+        e.stroke_to(300.0, 300.0, 1.0);
+        e.stroke_to(500.0, 300.0, 1.0);
         e.end_stroke();
         assert_eq!(e.rendered, (e.revision, e.view_generation));
         let (full, _) = render_view(&e.doc, e.view, e.overlay_colour, None);
@@ -2231,7 +2231,7 @@ mod tests {
         e.canvas.set_render(Arc::new(render));
         e.rendered = (e.revision, e.view_generation);
         assert!(e.begin_stroke(hard(40.0), Paint::Color([65535, 0, 0, 65535]), Sample::Current));
-        e.stroke_to(300.0, 200.0);
+        e.stroke_to(300.0, 200.0, 1.0);
         e.end_stroke();
         assert_eq!(e.canvas.sample(300, 200), Some([65535, 65535, 65535, 65535]));
         assert_eq!(e.canvas.sample(10, 10), Some([10000, 10000, 10000, 65535]));
@@ -2294,13 +2294,13 @@ mod tests {
 
         // White stroke outside adds to the selection (clearing red overlay).
         assert!(e.begin_stroke(hard(40.0), Paint::Mask(u16::MAX), Sample::Current));
-        e.stroke_to(100.0, 100.0);
+        e.stroke_to(100.0, 100.0, 1.0);
         e.end_stroke();
         assert_eq!(e.doc.selection.as_ref().unwrap().coverage.get(100, 100), u16::MAX);
 
         // Black stroke inside removes from the selection (adding red overlay).
         assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current));
-        e.stroke_to(300.0, 300.0);
+        e.stroke_to(300.0, 300.0, 1.0);
         e.end_stroke();
         assert_eq!(e.doc.selection.as_ref().unwrap().coverage.get(300, 300), 0);
 
@@ -2310,7 +2310,7 @@ mod tests {
 
         // Re-paint black stroke inside to test leaving with combined selection.
         assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current));
-        e.stroke_to(300.0, 300.0);
+        e.stroke_to(300.0, 300.0, 1.0);
         e.end_stroke();
         assert_eq!(e.doc.selection.as_ref().unwrap().coverage.get(300, 300), 0);
 
@@ -2644,8 +2644,8 @@ mod tests {
         e.canvas.set_render(Arc::clone(&render));
         e.rendered = (e.revision, e.view_generation);
         assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535]), Sample::Current));
-        e.stroke_to(250.0, 250.0);
-        e.stroke_to(290.0, 270.0);
+        e.stroke_to(250.0, 250.0, 1.0);
+        e.stroke_to(290.0, 270.0, 1.0);
         e.end_stroke();
         assert_eq!(
             e.rendered,

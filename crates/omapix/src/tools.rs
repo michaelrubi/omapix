@@ -838,7 +838,11 @@ impl Tools {
             };
             percent(ui, "Hardness", &mut s.hardness);
             percent(ui, "Opacity", &mut s.opacity);
+            ui.toggle_value(&mut s.opacity_pressure, "✒")
+                .on_hover_text("A pen's pressure sets the opacity");
             percent(ui, "Flow", &mut s.flow);
+            ui.toggle_value(&mut s.size_pressure, "⊙")
+                .on_hover_text("A pen's pressure sets the size");
             ui.separator();
             if self.tool == Tool::SpotHealing {
                 self.sample_options(ui);

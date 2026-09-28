@@ -20,3 +20,7 @@ rfd = "0.17.2"
 smithay-clipboard = "0.7.3"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
+raw-window-handle = "0.6.2"
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }

@@ -73,13 +73,13 @@ pub fn mask_coverage(logits: &[f32], lw: usize, lh: usize, threshold: f32, image
 }
 
 /// Where the centre of pixel `i` of `n` falls on a grid `m` pixels across.
-fn centre(i: usize, n: usize, m: usize) -> f32 {
+pub(crate) fn centre(i: usize, n: usize, m: usize) -> f32 {
     (i as f32 + 0.5) * m as f32 / n as f32
 }
 
 /// `values` (`w` × `h`) at `(x, y)` in its own pixels, interpolated
 /// between the four nearest pixel centres (edges extend outwards).
-fn sample(values: &[f32], w: usize, h: usize, x: f32, y: f32) -> f32 {
+pub(crate) fn sample(values: &[f32], w: usize, h: usize, x: f32, y: f32) -> f32 {
     let (sx, sy) = (x - 0.5, y - 0.5);
     let (x0, y0) = (sx.floor(), sy.floor());
     let (fx, fy) = (sx - x0, sy - y0);

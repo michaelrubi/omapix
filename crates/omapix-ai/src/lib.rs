@@ -2,6 +2,7 @@
 //! No UI: the app runs these on background threads.
 
 mod runtime;
+pub mod lama;
 pub mod sam;
 
 pub use runtime::find_model;
