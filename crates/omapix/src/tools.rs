@@ -349,8 +349,14 @@ pub struct Tools {
     /// source and kept for later strokes (Photoshop's "Aligned").
     #[serde(skip)]
     offset: Option<Vec2>,
-    /// Where to sample pixels from (Current Layer, Current & Below, All Layers).
-    pub sample: Sample,
+    /// Where each tool samples pixels from (Current Layer, Current & Below,
+    /// All Layers): each keeps its own, as in Photoshop. Other tools'
+    /// Alt+click uses the Eyedropper's.
+    pub eyedropper_sample: Sample,
+    pub clone_sample: Sample,
+    pub heal_sample: Sample,
+    pub spot_sample: Sample,
+    pub wand_sample: Sample,
     /// Eyedropper sample size (Point, 3×3, 5×5, 11×11 average).
     pub sample_size: SampleSize,
     /// Magic Wand settings matching Photoshop.
@@ -409,7 +415,11 @@ impl Default for Tools {
             threshold_moved: None,
             source: None,
             offset: None,
-            sample: Sample::All,
+            eyedropper_sample: Sample::All,
+            clone_sample: Sample::All,
+            heal_sample: Sample::All,
+            spot_sample: Sample::All,
+            wand_sample: Sample::All,
             sample_size: SampleSize::default(),
             wand_tolerance: 32,
             wand_contiguous: true,
@@ -725,10 +735,32 @@ impl Tools {
         })
     }
 
+    /// Where the current tool samples pixels from.
+    pub fn sample_from(&self) -> Sample {
+        match self.tool {
+            Tool::CloneStamp => self.clone_sample,
+            Tool::Healing => self.heal_sample,
+            Tool::SpotHealing => self.spot_sample,
+            Tool::MagicWand => self.wand_sample,
+            _ => self.eyedropper_sample,
+        }
+    }
+
+    fn sample_from_mut(&mut self) -> &mut Sample {
+        match self.tool {
+            Tool::CloneStamp => &mut self.clone_sample,
+            Tool::Healing => &mut self.heal_sample,
+            Tool::SpotHealing => &mut self.spot_sample,
+            Tool::MagicWand => &mut self.wand_sample,
+            _ => &mut self.eyedropper_sample,
+        }
+    }
+
     fn sample_options(&mut self, ui: &mut Ui) {
         ui.label("Sample");
+        let current = self.sample_from_mut();
         for sample in Sample::ALL {
-            ui.selectable_value(&mut self.sample, sample, sample.label());
+            ui.selectable_value(current, sample, sample.label());
         }
     }
 
@@ -839,9 +871,9 @@ impl Tools {
                 );
                 ui.checkbox(&mut self.wand_anti_alias, "Anti-alias");
                 ui.checkbox(&mut self.wand_contiguous, "Contiguous");
-                let mut sample_all = self.sample == Sample::All;
+                let mut sample_all = self.wand_sample == Sample::All;
                 if ui.checkbox(&mut sample_all, "Sample All Layers").changed() {
-                    self.sample = if sample_all {
+                    self.wand_sample = if sample_all {
                         Sample::All
                     } else {
                         Sample::Current
@@ -1090,6 +1122,22 @@ fn step_size(size: f32, bigger: bool) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_tool_keeps_its_own_sample() {
+        let mut tools = Tools::default();
+        tools.select(Tool::SpotHealing);
+        *tools.sample_from_mut() = Sample::Current;
+        tools.select(Tool::Eyedropper);
+        *tools.sample_from_mut() = Sample::CurrentAndBelow;
+        tools.select(Tool::SpotHealing);
+        assert_eq!(tools.sample_from(), Sample::Current);
+        // The Brush's Alt+click samples as the Eyedropper does.
+        tools.select(Tool::Brush);
+        assert_eq!(tools.sample_from(), Sample::CurrentAndBelow);
+        tools.select(Tool::CloneStamp);
+        assert_eq!(tools.sample_from(), Sample::All);
+    }
 
     #[test]
     fn clone_offset_is_fixed_by_the_first_stroke_and_kept() {
