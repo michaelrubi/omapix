@@ -1420,6 +1420,22 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::ContentAwareFill, None);
             });
             ui.menu_button("Image", |ui| {
+                ui.menu_button("Adjustments", |ui| {
+                    self.menu_item(ui, Command::NewCurves, None);
+                    self.menu_item(ui, Command::NewLevels, None);
+                    self.menu_item(ui, Command::NewHueSaturation, None);
+                    self.menu_item(ui, Command::NewColorBalance, None);
+                    self.menu_item(ui, Command::NewSelectiveColor, None);
+                    self.menu_item(ui, Command::NewChannelMixer, None);
+                    self.menu_item(ui, Command::NewColorLookup, None);
+                    ui.separator();
+                    self.presets_menu(ui);
+                    self.menu_item(ui, Command::SaveAdjustmentPreset, None);
+                    self.menu_item(ui, Command::ExportAdjustmentLut, None);
+                    ui.separator();
+                    self.menu_item(ui, Command::Invert, None);
+                });
+                ui.separator();
                 ui.menu_button("Image Rotation", |ui| {
                     self.menu_item(ui, Command::Rotate180, None);
                     self.menu_item(ui, Command::Rotate90Cw, None);
@@ -1507,23 +1523,6 @@ self.filters.remember(&filter);
                     Command::QuickMask,
                     Some(format!("{tick} {}", Command::QuickMask.label())),
                 );
-            });
-            ui.menu_button("Image", |ui| {
-                ui.menu_button("Adjustments", |ui| {
-                    self.menu_item(ui, Command::NewCurves, None);
-                    self.menu_item(ui, Command::NewLevels, None);
-                    self.menu_item(ui, Command::NewHueSaturation, None);
-                    self.menu_item(ui, Command::NewColorBalance, None);
-                    self.menu_item(ui, Command::NewSelectiveColor, None);
-                    self.menu_item(ui, Command::NewChannelMixer, None);
-                    self.menu_item(ui, Command::NewColorLookup, None);
-                    ui.separator();
-                    self.presets_menu(ui);
-                    self.menu_item(ui, Command::SaveAdjustmentPreset, None);
-                    self.menu_item(ui, Command::ExportAdjustmentLut, None);
-                    ui.separator();
-                    self.menu_item(ui, Command::Invert, None);
-                });
             });
             ui.menu_button("Filter", |ui| {
                 ui.menu_button("Noise", |ui| {
