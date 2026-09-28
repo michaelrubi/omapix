@@ -35,7 +35,7 @@ pub use filters::{
     generate_grain, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
     SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions,
 };
-pub use histogram::Histogram;
+pub use histogram::{Histogram, HistogramStats};
 pub use layer::{Layer, Locks, Mask};
 pub use ops::{add_noise_layer, grain_layer};
 pub use raster::{Pixel, Raster};

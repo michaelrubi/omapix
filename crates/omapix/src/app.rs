@@ -22,8 +22,10 @@ use crate::settings::FilterSettings;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
+use crate::histogram_panel::HistogramPanel;
 use crate::history_panel::HistoryPanel;
 use crate::layers_panel::LayersPanel;
+use crate::navigator_panel::NavigatorPanel;
 use crate::properties_panel::PropertiesPanel;
 use crate::recent::RecentStore;
 use crate::theme::{self, Theme};
@@ -56,6 +58,24 @@ struct PendingClip {
     clip: Clip,
     name: Option<String>,
     kind: PasteKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TopTab {
+    Navigator,
+    Histogram,
+}
+
+impl TopTab {
+    /// Show `tab` above the layers, or hide it if it's showing.
+    fn toggle(shown: &mut Option<TopTab>, tab: TopTab) {
+        *shown = (*shown != Some(tab)).then_some(tab);
+    }
+
+    const ALL: [(TopTab, Command); 2] = [
+        (TopTab::Navigator, Command::ShowNavigator),
+        (TopTab::Histogram, Command::ShowHistogram),
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -223,6 +243,9 @@ pub struct App {
     properties: PropertiesPanel,
     history: HistoryPanel,
     recent: RecentStore,
+    top_tab: Option<TopTab>,
+    histogram: HistogramPanel,
+    navigator: NavigatorPanel,
     right_tab: RightTab,
     tools: Tools,
     /// A file being opened in the background.
@@ -281,6 +304,9 @@ impl App {
             properties: PropertiesPanel::default(),
             history: HistoryPanel,
             recent: RecentStore::load(),
+            top_tab: None,
+            histogram: HistogramPanel::default(),
+            navigator: NavigatorPanel::default(),
             right_tab: RightTab::default(),
             drawing: None,
             move_from: None,
@@ -685,7 +711,11 @@ impl App {
         let no_pixels = layer.is_some_and(|l| !l.has_pixels());
         match cmd {
             Command::ReopenLast => self.recent.last().is_some(),
-            Command::ShowLayers | Command::ShowChannels | Command::ShowHistory => true,
+            Command::ShowLayers
+            | Command::ShowChannels
+            | Command::ShowHistory
+            | Command::ShowNavigator
+            | Command::ShowHistogram => true,
             Command::SaveSelection => editor.doc.selection.is_some(),
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
@@ -788,6 +818,8 @@ impl App {
             Command::ShowLayers => self.right_tab = RightTab::Layers,
             Command::ShowChannels => self.right_tab = RightTab::Channels,
             Command::ShowHistory => self.right_tab = RightTab::History,
+            Command::ShowNavigator => TopTab::toggle(&mut self.top_tab, TopTab::Navigator),
+            Command::ShowHistogram => TopTab::toggle(&mut self.top_tab, TopTab::Histogram),
             Command::Quit => self.guard(Then::Quit, ctx),
             Command::Save => self.save(ctx),
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
@@ -1317,6 +1349,11 @@ impl App {
                 self.menu_item(ui, Command::MaskOverlay, None);
             });
             ui.menu_button("Window", |ui| {
+                for (tab, command) in TopTab::ALL {
+                    let tick = if self.top_tab == Some(tab) { "✓" } else { "  " };
+                    self.menu_item(ui, command, Some(format!("{tick} {}", command.label())));
+                }
+                ui.separator();
                 for (tab, command) in RightTab::ALL {
                     let tick = if self.right_tab == tab { "✓" } else { "  " };
                     self.menu_item(ui, command, Some(format!("{tick} {}", command.label())));
@@ -2930,6 +2967,35 @@ impl eframe::App for App {
                 .default_size(280.0)
                 .resizable(true)
                 .show(ui, |ui| {
+                    if let Some(top_tab) = self.top_tab {
+                        ui.horizontal(|ui| {
+                            for (tab, cmd) in TopTab::ALL {
+                                let is_active = self.top_tab == Some(tab);
+                                let text = if is_active {
+                                    RichText::new(cmd.label()).color(self.theme.foreground).strong()
+                                } else {
+                                    RichText::new(cmd.label()).color(self.theme.dark_foreground)
+                                };
+                                if ui.add(Button::new(text).frame(false)).clicked() {
+                                    TopTab::toggle(&mut self.top_tab, tab);
+                                }
+                                ui.add_space(8.0);
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("✕").on_hover_text("Close").clicked() {
+                                    self.top_tab = None;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        match top_tab {
+                            TopTab::Navigator => self.navigator.show(ui, editor, &self.theme),
+                            TopTab::Histogram => self.histogram.show(ui, editor, &self.theme),
+                        }
+                        ui.separator();
+                    }
+
                     ui.horizontal(|ui| {
                         for (tab, command) in RightTab::ALL {
                             let text = if self.right_tab == tab {
@@ -3452,6 +3518,9 @@ mod tests {
             properties: PropertiesPanel::default(),
             history: HistoryPanel,
             recent: RecentStore::default(),
+            top_tab: None,
+            histogram: HistogramPanel::default(),
+            navigator: NavigatorPanel::default(),
             right_tab: RightTab::default(),
             tools: Tools::default(),
             opening: None,
@@ -4390,6 +4459,37 @@ mod tests {
 
         app.run(Command::ShowLayers, &ctx);
         assert_eq!(app.right_tab, RightTab::Layers);
+    }
+
+    #[test]
+    fn window_menu_toggles_top_strip() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        assert_eq!(app.top_tab, None);
+
+        // Window -> Navigator opens Navigator
+        app.run(Command::ShowNavigator, &ctx);
+        assert_eq!(app.top_tab, Some(TopTab::Navigator));
+
+        // Window -> Navigator toggles Navigator off
+        app.run(Command::ShowNavigator, &ctx);
+        assert_eq!(app.top_tab, None);
+
+        // Window -> Histogram opens Histogram
+        app.run(Command::ShowHistogram, &ctx);
+        assert_eq!(app.top_tab, Some(TopTab::Histogram));
+
+        // Window -> Navigator switches active tab in strip
+        app.run(Command::ShowNavigator, &ctx);
+        assert_eq!(app.top_tab, Some(TopTab::Navigator));
+
+        // Window -> Histogram switches to Histogram
+        app.run(Command::ShowHistogram, &ctx);
+        assert_eq!(app.top_tab, Some(TopTab::Histogram));
+
+        // Window -> Histogram toggles Histogram off
+        app.run(Command::ShowHistogram, &ctx);
+        assert_eq!(app.top_tab, None);
     }
 
     #[test]

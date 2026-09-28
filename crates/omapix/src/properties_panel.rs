@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use egui::{
-    Color32, ComboBox, Pos2, Rect, RichText, Sense, Shape, Slider, Stroke, Ui, pos2, vec2,
+    Color32, ComboBox, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, pos2, vec2,
 };
 use omapix_engine::adjust::{
     Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation,
@@ -13,6 +13,7 @@ use omapix_engine::adjust::{
 };
 
 use crate::editor::Editor;
+use crate::histogram_panel::draw_histogram;
 use crate::theme::Theme;
 
 /// How close (in points) the pointer must be to grab a curve point.
@@ -507,84 +508,6 @@ fn move_point(curve: &mut Curve, i: usize, (x, y): (f32, f32)) {
         curve.points[i + 1].0 - GAP
     };
     curve.points[i] = (x.clamp(lo, hi.max(lo)), y);
-}
-
-fn draw_histogram(
-    painter: &egui::Painter,
-    rect: Rect,
-    bins: &[u32; 256],
-    channel: usize,
-    theme: &Theme,
-) {
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return;
-    }
-    let max = *bins.iter().max().unwrap_or(&0);
-    if max == 0 {
-        return;
-    }
-    let interior_max = *bins[1..255].iter().max().unwrap_or(&0);
-    let scale_max = if interior_max > 0 {
-        max.min(interior_max * 3).max(interior_max)
-    } else {
-        max
-    } as f32;
-
-    if scale_max <= 0.0 {
-        return;
-    }
-
-    let (fill, stroke) = match channel {
-        1 => (
-            Color32::from_rgba_unmultiplied(230, 80, 80, 50),
-            Color32::from_rgba_unmultiplied(230, 80, 80, 140),
-        ),
-        2 => (
-            Color32::from_rgba_unmultiplied(80, 200, 100, 50),
-            Color32::from_rgba_unmultiplied(80, 200, 100, 140),
-        ),
-        3 => (
-            Color32::from_rgba_unmultiplied(90, 140, 240, 50),
-            Color32::from_rgba_unmultiplied(90, 140, 240, 140),
-        ),
-        _ => {
-            let fg = theme.foreground;
-            (
-                Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 40),
-                Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 110),
-            )
-        }
-    };
-
-    let mut mesh = egui::Mesh::default();
-    let bottom = rect.bottom();
-    let height = rect.height();
-    let width = rect.width();
-    let left = rect.left();
-
-    let mut outline = Vec::with_capacity(258);
-    outline.push(pos2(left, bottom));
-
-    for (i, &count) in bins.iter().enumerate() {
-        let x0 = left + (i as f32 / 256.0) * width;
-        let x1 = left + ((i + 1) as f32 / 256.0) * width;
-        let h = (count as f32 / scale_max).clamp(0.0, 1.0) * height;
-        let y = bottom - h;
-        let xm = (x0 + x1) * 0.5;
-        outline.push(pos2(xm, y));
-
-        let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(pos2(x0, bottom), fill);
-        mesh.colored_vertex(pos2(x0, y), fill);
-        mesh.colored_vertex(pos2(x1, y), fill);
-        mesh.colored_vertex(pos2(x1, bottom), fill);
-        mesh.add_triangle(base, base + 1, base + 2);
-        mesh.add_triangle(base, base + 2, base + 3);
-    }
-    outline.push(pos2(rect.right(), bottom));
-
-    painter.add(Shape::mesh(mesh));
-    painter.add(Shape::line(outline, Stroke::new(1.0, stroke)));
 }
 
 fn hue_saturation(ui: &mut Ui, h: &mut HueSaturation) {
