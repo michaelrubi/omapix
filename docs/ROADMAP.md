@@ -181,6 +181,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Mask menu: Replace Mask with Selection, and Add, Subtract and Intersect Selection with the mask, on a feathered selection
 - [ ] Sample per tool: set Spot Healing to Current Layer and the Eyedropper to Current & Below, switch between them, restart, and check each kept its own
 - [ ] Adjustment presets: save a grade group (Curves, Hue/Saturation, a clipped layer, a Soft Light group) as a preset, open another image, add it from Presets, check it looks the same and stays editable, then undo; save over it (the warning and Replace) and delete it
+- [ ] Export Adjustments as LUT: export a grade, load the .cube in a Color Lookup layer on another image and in darktable's LUT 3D, and compare with the adjustment layers
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -230,6 +231,7 @@ The UI has been tested through the same code paths with scripts
 - ~~**Selective Color** and **Channel Mixer** adjustment layers~~ (done).
 - ~~**LUT adjustment layer:** load `.cube` files~~ (done).
 - ~~**Adjustment presets**~~ (done): Image › Adjustments › Save Adjustment Preset… keeps the selected adjustment layers, and groups with the adjustment layers in them, with their settings, names, blend modes, opacity, clipping and Blend If (not their masks, and not pixel layers), in `~/.config/omapix/presets/<name>.toml`. Image › Adjustments › Presets adds one's layers above the active layer, as a new layer would go, still editable, with white masks, as one undo step. For a session: grade the first image, save the grade, add it to the next image and tweak it there. To change a preset, add it, adjust it and save it under the same name: the dialog warns that it replaces the old one. Image › Adjustments › Delete Preset deletes one, after asking. Renaming is done in the folder for now.
+- ~~**Export adjustments as a LUT**~~ (done): Image › Adjustments › Export Adjustments as LUT… bakes the selected adjustment layers (the same ones a preset keeps) into a 33-point `.cube`, for a Color Lookup layer or darktable's LUT 3D module. It's made by adding the layers to an image with one pixel of each colour and compositing it, so blend modes, opacity, Blend If, groups and clipping bake in exactly; masks don't. It works in the document's colour space, so darktable's module needs the same one.
 - ~~**Curves points: easier to grab, and typed Input and Output**~~ (done): a point is picked where the button went down (egui only starts a drag once the pointer has moved, and a quick drag used to add a new point instead), from 12 points away rather than 8, and it keeps its distance from the pointer. Clicking or dragging a point selects it, filled in, and its Input and Output (0–255) can be typed or dragged under the graph, as in Photoshop.
 - **Monitor colour management:** read the display's ICC profile instead of assuming sRGB.
 - **Soft proofing** for print and web.
