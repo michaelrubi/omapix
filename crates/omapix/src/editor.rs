@@ -1104,23 +1104,19 @@ impl Editor {
         self.changed();
     }
 
-    /// Magic Wand: click to select similar colours, combining with the
-    /// current selection using `how`.
-    pub fn magic_wand(
-        &mut self,
+    /// Find the region of similar colours under `start`, matching Magic Wand and Paint Bucket.
+    /// Returns `None` if `start` is outside the document bounds.
+    pub fn wand_region(
+        &self,
         start: (u32, u32),
         tolerance: u16,
         contiguous: bool,
         anti_alias: bool,
         sample: Sample,
-        how: Combine,
-    ) -> bool {
+    ) -> Option<Selection> {
         let (w, h) = (self.doc.width, self.doc.height);
         if start.0 >= w || start.1 >= h {
-            if how == Combine::Replace && self.doc.selection.is_some() {
-                return self.edit("Deselect", |doc, _| doc.selection = None);
-            }
-            return false;
+            return None;
         }
 
         let selection = if sample != Sample::All && self.target == Target::Mask {
@@ -1156,6 +1152,26 @@ impl Editor {
         } else {
             let source = self.sample_source(sample);
             Selection::magic_wand_tiled(&source, start, tolerance, contiguous, anti_alias)
+        };
+        Some(selection)
+    }
+
+    /// Magic Wand: click to select similar colours, combining with the
+    /// current selection using `how`.
+    pub fn magic_wand(
+        &mut self,
+        start: (u32, u32),
+        tolerance: u16,
+        contiguous: bool,
+        anti_alias: bool,
+        sample: Sample,
+        how: Combine,
+    ) -> bool {
+        let Some(selection) = self.wand_region(start, tolerance, contiguous, anti_alias, sample) else {
+            if how == Combine::Replace && self.doc.selection.is_some() {
+                return self.edit("Deselect", |doc, _| doc.selection = None);
+            }
+            return false;
         };
 
         self.edit("Magic Wand", |doc, _| {

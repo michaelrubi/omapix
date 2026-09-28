@@ -25,6 +25,7 @@ const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
 const LASSO_ICON: &str = "\u{f0c4}";
 const GRADIENT_ICON: &str = "\u{f069b}";
+const BUCKET_ICON: &str = "\u{f0266}";
 
 const MIN_SIZE: f32 = 1.0;
 const MAX_SIZE: f32 = 5000.0;
@@ -68,7 +69,7 @@ impl ToolGroup {
             ToolGroup::Brush => &[Tool::Brush],
             ToolGroup::CloneStamp => &[Tool::CloneStamp],
             ToolGroup::Eraser => &[Tool::Eraser],
-            ToolGroup::Gradient => &[Tool::Gradient],
+            ToolGroup::Gradient => &[Tool::Gradient, Tool::PaintBucket],
         }
     }
 
@@ -109,6 +110,7 @@ pub enum Tool {
     QuickSelection,
     Eyedropper,
     Gradient,
+    PaintBucket,
 }
 
 impl Tool {
@@ -128,6 +130,7 @@ impl Tool {
             Tool::QuickSelection => "Quick Selection",
             Tool::Eyedropper => "Eyedropper",
             Tool::Gradient => "Gradient",
+            Tool::PaintBucket => "Paint Bucket",
         }
     }
 
@@ -147,6 +150,7 @@ impl Tool {
             Tool::QuickSelection => QUICK_ICON,
             Tool::Eyedropper => EYEDROPPER_ICON,
             Tool::Gradient => GRADIENT_ICON,
+            Tool::PaintBucket => BUCKET_ICON,
         }
     }
 
@@ -165,7 +169,7 @@ impl Tool {
             Tool::Brush => ToolGroup::Brush,
             Tool::CloneStamp => ToolGroup::CloneStamp,
             Tool::Eraser => ToolGroup::Eraser,
-            Tool::Gradient => ToolGroup::Gradient,
+            Tool::Gradient | Tool::PaintBucket => ToolGroup::Gradient,
         }
     }
 
@@ -190,7 +194,7 @@ impl Tool {
 
     /// Tools that paint with a brush, and so show its outline.
     pub fn paints(self) -> bool {
-        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient)
+        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient | Tool::PaintBucket)
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -314,6 +318,18 @@ impl GradientColors {
     }
 }
 
+/// A 0–1 setting as a percent slider in the options bar.
+fn percent(ui: &mut Ui, label: &str, value: &mut f32) {
+    ui.label(label);
+    let mut p = *value * 100.0;
+    if ui
+        .add(Slider::new(&mut p, 0.0..=100.0).suffix("%").fixed_decimals(0))
+        .changed()
+    {
+        *value = p / 100.0;
+    }
+}
+
 /// The tools and their options. The options (not the tool, the colours
 /// or the clone source) are kept between runs in `~/.config/omapix/tools.toml`.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -327,6 +343,8 @@ pub struct Tools {
     last_healing: Tool,
     #[serde(skip)]
     last_wand: Tool,
+    #[serde(skip)]
+    last_gradient: Tool,
     /// The tool key being held, the tool before it, and when it went down.
     #[serde(skip)]
     held: Option<(Key, Tool, f64)>,
@@ -368,6 +386,12 @@ pub struct Tools {
     pub gradient_colors: GradientColors,
     pub gradient_reverse: bool,
     pub gradient_opacity: f32,
+    /// Paint Bucket tool settings matching Photoshop.
+    pub bucket_opacity: f32,
+    pub bucket_tolerance: u8,
+    pub bucket_anti_alias: bool,
+    pub bucket_contiguous: bool,
+    pub bucket_all_layers: bool,
     /// Foreground and background colours, in sRGB as shown in the pickers.
     #[serde(skip)]
     pub foreground: [u8; 3],
@@ -385,6 +409,7 @@ impl Default for Tools {
             last_marquee: Tool::Marquee,
             last_healing: Tool::SpotHealing,
             last_wand: Tool::MagicWand,
+            last_gradient: Tool::Gradient,
             held: None,
             kept_colours: None,
             brush: BrushSettings::default(),
@@ -428,6 +453,11 @@ impl Default for Tools {
             gradient_colors: GradientColors::default(),
             gradient_reverse: false,
             gradient_opacity: 1.0,
+            bucket_opacity: 1.0,
+            bucket_tolerance: 32,
+            bucket_anti_alias: true,
+            bucket_contiguous: true,
+            bucket_all_layers: false,
             foreground: [0, 0, 0],
             background: [255, 255, 255],
         }
@@ -445,7 +475,8 @@ impl Tools {
             | Tool::MagicWand
             | Tool::ObjectSelection
             | Tool::Eyedropper
-            | Tool::Gradient => self.brush,
+            | Tool::Gradient
+            | Tool::PaintBucket => self.brush,
             Tool::QuickSelection => self.quick,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
@@ -461,6 +492,8 @@ impl Tools {
     pub fn set_opacity(&mut self, opacity: f32) {
         if self.tool == Tool::Gradient {
             self.gradient_opacity = opacity.clamp(0.0, 1.0);
+        } else if self.tool == Tool::PaintBucket {
+            self.bucket_opacity = opacity.clamp(0.0, 1.0);
         } else {
             self.settings_mut().opacity = opacity.clamp(0.0, 1.0);
         }
@@ -476,7 +509,8 @@ impl Tools {
             | Tool::MagicWand
             | Tool::ObjectSelection
             | Tool::Eyedropper
-            | Tool::Gradient => &mut self.brush,
+            | Tool::Gradient
+            | Tool::PaintBucket => &mut self.brush,
             Tool::QuickSelection => &mut self.quick,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
@@ -583,6 +617,7 @@ impl Tools {
             Tool::Marquee | Tool::EllipticalMarquee => self.last_marquee = self.tool,
             Tool::SpotHealing | Tool::Healing => self.last_healing = self.tool,
             Tool::MagicWand | Tool::ObjectSelection | Tool::QuickSelection => self.last_wand = self.tool,
+            Tool::Gradient | Tool::PaintBucket => self.last_gradient = self.tool,
             _ => {}
         }
     }
@@ -596,13 +631,13 @@ impl Tools {
             ToolGroup::Marquee => self.last_marquee,
             ToolGroup::Healing => self.last_healing,
             ToolGroup::Wand => self.last_wand,
+            ToolGroup::Gradient => self.last_gradient,
             ToolGroup::Move => Tool::Move,
             ToolGroup::Lasso => Tool::Lasso,
             ToolGroup::Eyedropper => Tool::Eyedropper,
             ToolGroup::Brush => Tool::Brush,
             ToolGroup::CloneStamp => Tool::CloneStamp,
             ToolGroup::Eraser => Tool::Eraser,
-            ToolGroup::Gradient => Tool::Gradient,
         }
     }
 
@@ -703,6 +738,7 @@ impl Tools {
                     match self.tool {
                         Tool::Move => layer_opacity = Some(opacity),
                         Tool::Gradient => self.gradient_opacity = opacity,
+                        Tool::PaintBucket => self.bucket_opacity = opacity,
                         _ => self.settings_mut().opacity = opacity,
                     }
                 }
@@ -817,6 +853,23 @@ impl Tools {
                 ui.label(RichText::new(text).color(colour));
                 return;
             }
+            if self.tool == Tool::PaintBucket {
+                percent(ui, "Opacity", &mut self.bucket_opacity);
+                ui.separator();
+                ui.label("Tolerance");
+                ui.add(
+                    egui::DragValue::new(&mut self.bucket_tolerance)
+                        .range(0..=255)
+                        .speed(1.0),
+                );
+                ui.checkbox(&mut self.bucket_anti_alias, "Anti-alias");
+                ui.checkbox(&mut self.bucket_contiguous, "Contiguous");
+                ui.checkbox(&mut self.bucket_all_layers, "All Layers");
+                ui.separator();
+                let hint = "Click to fill similar colours with the foreground colour, within the selection";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
             if self.tool == Tool::Eyedropper {
                 ui.label("Sample Size");
                 ComboBox::from_id_salt("eyedropper-sample-size")
@@ -905,20 +958,6 @@ impl Tools {
                     .suffix(" px")
                     .fixed_decimals(0),
             );
-            let percent = |ui: &mut Ui, label: &str, value: &mut f32| {
-                ui.label(label);
-                let mut p = *value * 100.0;
-                if ui
-                    .add(
-                        Slider::new(&mut p, 0.0..=100.0)
-                            .suffix("%")
-                            .fixed_decimals(0),
-                    )
-                    .changed()
-                {
-                    *value = p / 100.0;
-                }
-            };
             percent(ui, "Hardness", &mut s.hardness);
             percent(ui, "Opacity", &mut s.opacity);
             ui.toggle_value(&mut s.opacity_pressure, "✒")
@@ -1426,6 +1465,47 @@ mod tests {
         press(&ctx, &[(Key::Num0, Modifiers::NONE)]);
         tools.keys(&ctx);
         assert_eq!(tools.gradient_opacity, 1.0);
+    }
+
+    #[test]
+    fn g_and_shift_g_cycle_gradient_and_paint_bucket_and_number_keys_set_opacity() {
+        let mut tools = Tools::default();
+        let ctx = egui::Context::default();
+        press(&ctx, &[(Key::G, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Gradient);
+
+        // Shift+G cycles to Paint Bucket
+        press(&ctx, &[(Key::G, Modifiers::SHIFT)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::PaintBucket);
+
+        // Number keys set bucket opacity
+        press(&ctx, &[(Key::Num4, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.bucket_opacity, 0.4);
+
+        press(&ctx, &[(Key::Num0, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.bucket_opacity, 1.0);
+
+        // Shift+G cycles back to Gradient
+        press(&ctx, &[(Key::G, Modifiers::SHIFT)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Gradient);
+
+        // Switching away and back with G remembers the last used tool in the group
+        press(&ctx, &[(Key::G, Modifiers::SHIFT)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::PaintBucket);
+
+        press(&ctx, &[(Key::B, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::Brush);
+
+        press(&ctx, &[(Key::G, Modifiers::NONE)]);
+        tools.keys(&ctx);
+        assert_eq!(tools.tool, Tool::PaintBucket);
     }
 
     #[test]
