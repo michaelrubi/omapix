@@ -177,6 +177,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Gradient tool: `G` shortcut, dragging linear and radial gradients on pixels and masks, Shift constraint to 45°, Foreground to Background and Foreground to Transparent, Reverse, Opacity with number keys, within a selection, and one undo step
 - [ ] Image rotation (180°, 90° CW, 90° CCW) and canvas flips (horizontal, vertical): layers, masks, selections, alpha channels, canvas fit, and undo/redo
 - [ ] EXIF metadata preservation: open a camera JPEG/TIFF with capture date, camera and lens, save to .ora, reopen, export JPEG/TIFF, and verify with exiftool that DateTimeOriginal, camera and lens survive
+- [ ] Curves: grabbing points quickly and from a little off, typing Input and Output for a selected point, switching channel or layer clears it
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -225,6 +226,7 @@ The UI has been tested through the same code paths with scripts
 - ~~**Eyedroppers in Curves and Levels**~~ (done): set black, grey and white points by clicking the image (Curves adjusts red, green and blue curves to neutralise casts while preserving lightness; single-channel Levels sets master black/white and midtone gamma to map luminance to mid grey, with the limitation that Levels lacks per-channel data to neutralize colour casts).
 - ~~**Selective Color** and **Channel Mixer** adjustment layers~~ (done).
 - ~~**LUT adjustment layer:** load `.cube` files~~ (done).
+- ~~**Curves points: easier to grab, and typed Input and Output**~~ (done): a point is picked where the button went down (egui only starts a drag once the pointer has moved, and a quick drag used to add a new point instead), from 12 points away rather than 8, and it keeps its distance from the pointer. Clicking or dragging a point selects it, filled in, and its Input and Output (0–255) can be typed or dragged under the graph, as in Photoshop.
 - **Monitor colour management:** read the display's ICC profile instead of assuming sRGB.
 - **Soft proofing** for print and web.
 

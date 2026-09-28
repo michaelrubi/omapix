@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use egui::{
-    Color32, ComboBox, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, pos2, vec2,
+    Color32, ComboBox, Id, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, Vec2, pos2, vec2,
 };
 use omapix_engine::adjust::{
     Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation,
@@ -17,7 +17,7 @@ use crate::histogram_panel::draw_histogram;
 use crate::theme::Theme;
 
 /// How close (in points) the pointer must be to grab a curve point.
-const GRAB: f32 = 8.0;
+const GRAB: f32 = 12.0;
 /// Dragging a point this far outside the graph removes it.
 const REMOVE: f32 = 24.0;
 
@@ -25,8 +25,10 @@ const REMOVE: f32 = 24.0;
 pub struct PropertiesPanel {
     /// Curves channel being edited: 0 = RGB, 1–3 = red, green, blue.
     channel: usize,
-    /// Curve point being dragged.
-    dragging: Option<usize>,
+    /// Curve point being dragged, and where it is from the pointer.
+    dragging: Option<(usize, Vec2)>,
+    /// Curve point whose Input and Output are shown, as Photoshop's.
+    selected: Option<usize>,
     /// Armed eyedropper (Black, Gray, or White point).
     pub eyedropper: Option<Eyedropper>,
     /// Color Balance tonal range: 0 = shadows, 1 = midtones, 2 = highlights.
@@ -60,6 +62,9 @@ impl PropertiesPanel {
         }
         let original = adjustment.clone();
         let needs_histogram = matches!(adjustment, Adjustment::Curves(_) | Adjustment::Levels(_));
+        if self.cached_layer_id != id {
+            self.selected = None;
+        }
         if needs_histogram
             && (self.cached_layer_id != id
                 || self.cached_revision != editor.revision()
@@ -142,6 +147,7 @@ impl PropertiesPanel {
         self.eyedropper_buttons(ui);
         ui.add_space(4.0);
         let names = ["RGB", "Red", "Green", "Blue"];
+        let channel = self.channel;
         ComboBox::from_id_salt("curves-channel")
             .selected_text(names[self.channel])
             .show_ui(ui, |ui| {
@@ -149,6 +155,9 @@ impl PropertiesPanel {
                     ui.selectable_value(&mut self.channel, i, *name);
                 }
             });
+        if self.channel != channel {
+            self.selected = None;
+        }
         let colour = [
             theme.foreground,
             Color32::from_rgb(230, 80, 80),
@@ -163,7 +172,8 @@ impl PropertiesPanel {
         };
 
         let side = ui.available_width().min(300.0);
-        let (rect, response) = ui.allocate_exact_size(vec2(side, side), Sense::click_and_drag());
+        let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+        let response = ui.interact(rect, curves_id(), Sense::click_and_drag());
         let to_screen = |(x, y): (f32, f32)| {
             pos2(
                 rect.left() + x * rect.width(),
@@ -177,22 +187,26 @@ impl PropertiesPanel {
             )
         };
 
-        // Grab, add, move and remove points.
+        // Grab, add, move and remove points. Look for a point where the
+        // button went down: egui only starts a drag once the pointer has
+        // moved a few points, by which time it may be off the point.
         if let Some(pointer) = response.interact_pointer_pos() {
             if response.drag_started() || response.clicked() {
+                let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer);
                 let nearest = curve
                     .points
                     .iter()
                     .enumerate()
-                    .map(|(i, &p)| (i, to_screen(p).distance(pointer)))
+                    .map(|(i, &p)| (i, to_screen(p).distance(origin)))
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 self.dragging = match nearest {
-                    Some((i, d)) if d <= GRAB => Some(i),
-                    _ if rect.contains(pointer) => Some(insert_point(curve, to_curve(pointer))),
+                    Some((i, d)) if d <= GRAB => Some((i, to_screen(curve.points[i]) - origin)),
+                    _ if rect.contains(origin) => Some((insert_point(curve, to_curve(origin)), Vec2::ZERO)),
                     _ => None,
                 };
+                self.selected = self.dragging.map(|(i, _)| i);
             }
-            if let Some(i) = self.dragging
+            if let Some((i, offset)) = self.dragging
                 && response.dragged()
             {
                 let outside = !rect.expand(REMOVE).contains(pointer);
@@ -200,14 +214,16 @@ impl PropertiesPanel {
                 if outside && !endpoint {
                     curve.points.remove(i);
                     self.dragging = None;
+                    self.selected = None;
                 } else {
-                    move_point(curve, i, to_curve(pointer));
+                    move_point(curve, i, to_curve(pointer + offset));
                 }
             }
         }
         if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
             self.dragging = None;
         }
+        self.selected = self.selected.filter(|&i| i < curve.points.len());
 
         let painter = ui.painter_at(rect.expand(4.0));
         painter.rect_filled(rect, 0.0, theme.darker_background);
@@ -235,20 +251,34 @@ impl PropertiesPanel {
         for (i, &p) in curve.points.iter().enumerate() {
             let at = to_screen(p);
             let r = Rect::from_center_size(at, vec2(7.0, 7.0));
-            if self.dragging == Some(i) {
+            if self.selected == Some(i) {
                 painter.rect_filled(r, 0.0, colour);
             } else {
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, colour), egui::StrokeKind::Middle);
             }
         }
-        let readout = match self.dragging {
-            Some(i) => {
-                let (x, y) = curve.points[i];
-                format!("Input {:.0}   Output {:.0}", x * 255.0, y * 255.0)
-            }
-            None => "Click the curve to add a point; drag one off to remove it".into(),
-        };
-        ui.label(RichText::new(readout).small().color(theme.dark_foreground));
+        ui.add_enabled_ui(self.selected.is_some(), |ui| {
+            ui.horizontal(|ui| {
+                let (mut x, mut y) = self.selected.map_or((0.0, 0.0), |i| curve.points[i]);
+                let mut changed = false;
+                for (label, value) in [("Input", &mut x), ("Output", &mut y)] {
+                    ui.label(label);
+                    let mut level = *value * 255.0;
+                    let field = egui::DragValue::new(&mut level).range(0.0..=255.0).fixed_decimals(0);
+                    if ui.add(field).changed() {
+                        *value = level / 255.0;
+                        changed = true;
+                    }
+                }
+                if let Some(i) = self.selected
+                    && changed
+                {
+                    move_point(curve, i, (x, y));
+                }
+            });
+        });
+        let hint = "Click the curve to add a point; drag one off to remove it";
+        ui.label(RichText::new(hint).small().color(theme.dark_foreground));
     }
 
     fn color_balance(&mut self, ui: &mut Ui, b: &mut ColorBalance) {
@@ -483,6 +513,11 @@ impl PropertiesPanel {
     }
 }
 
+/// The Curves graph, one at a time.
+fn curves_id() -> Id {
+    Id::new("curves-graph")
+}
+
 /// Add a point at `p` between its neighbours; returns its index.
 fn insert_point(curve: &mut Curve, (x, y): (f32, f32)) -> usize {
     let i = curve
@@ -655,5 +690,57 @@ mod tests {
         assert!(shown, "panel should show for levels adjustment");
         assert!(panel.histogram.is_some(), "histogram computed for levels");
     }
-}
 
+    /// A pointer event over the panel, in a frame of its own.
+    fn frame(ctx: &egui::Context, panel: &mut PropertiesPanel, editor: &mut Editor, events: Vec<egui::Event>) {
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            panel.show(ui, editor, &Theme::default());
+        });
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn curve_points_are_grabbed_where_the_button_went_down() {
+        let image = omapix_engine::Raster::new(8, 8, vec![[30000, 30000, 30000, 65535]; 64]);
+        let mut doc = omapix_engine::Document::from_image(
+            "t.tif".into(),
+            &image,
+            omapix_engine::ColorProfile::srgb(),
+            16,
+        );
+        let mut curves = Curves::default();
+        insert_point(&mut curves.master, (0.5, 0.5));
+        doc.layers
+            .push(omapix_engine::Layer::adjustment(101, Adjustment::Curves(curves), 8, 8));
+        let mut editor = Editor::new(doc).unwrap();
+        editor.active = 101;
+        let (ctx, mut panel) = (egui::Context::default(), PropertiesPanel::default());
+        frame(&ctx, &mut panel, &mut editor, vec![]);
+        let rect = ctx.read_response(curves_id()).unwrap().rect;
+        let point = |t: f32| pos2(rect.left() + t * rect.width(), rect.bottom() - t * rect.height());
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+
+        // Press a little off the middle point, then move quickly: egui sees
+        // the drag start well away from the point.
+        let press = point(0.5) + vec2(5.0, 5.0);
+        frame(&ctx, &mut panel, &mut editor, vec![egui::Event::PointerMoved(press), button(press, true)]);
+        let to = press + vec2(0.0, -30.0);
+        frame(&ctx, &mut panel, &mut editor, vec![egui::Event::PointerMoved(to)]);
+        frame(&ctx, &mut panel, &mut editor, vec![button(to, false)]);
+
+        let Some(Adjustment::Curves(c)) = editor.doc.layer(101).unwrap().adjustment.clone() else {
+            panic!("a Curves layer");
+        };
+        assert_eq!(c.master.points.len(), 3, "the point moved, none added");
+        let (x, y) = c.master.points[1];
+        assert!((x - 0.5).abs() < 0.01, "kept where it was grabbed: {x}");
+        assert!((y - (0.5 + 30.0 / rect.height())).abs() < 0.01, "{y}");
+        assert_eq!(panel.selected, Some(1), "its Input and Output are shown");
+    }
+}
