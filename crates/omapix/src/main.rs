@@ -16,6 +16,7 @@ mod layers_panel;
 mod live;
 mod navigator_panel;
 mod object_selection;
+mod presets;
 mod properties_panel;
 mod recent;
 mod select_and_mask;

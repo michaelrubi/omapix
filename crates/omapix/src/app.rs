@@ -27,6 +27,7 @@ use crate::editor::{Editor, Target, View};
 use crate::histogram_panel::HistogramPanel;
 use crate::history_panel::HistoryPanel;
 use crate::layers_panel::LayersPanel;
+use crate::presets::Preset;
 use crate::navigator_panel::NavigatorPanel;
 use crate::properties_panel::PropertiesPanel;
 use crate::recent::RecentStore;
@@ -121,6 +122,14 @@ enum Dialog {
     },
     BlendingOptions(crate::blending_options::BlendingOptions),
     SelectAndMask(crate::select_and_mask::SelectAndMask),
+    /// Name the selected adjustment layers to keep as a preset.
+    SavePreset {
+        name: String,
+    },
+    /// Ask before deleting a preset.
+    DeletePreset {
+        name: String,
+    },
 }
 
 /// Result of a background save or export: the document revision written,
@@ -735,6 +744,7 @@ impl App {
             | Command::ShowNavigator
             | Command::ShowHistogram => true,
             Command::SaveSelection => editor.doc.selection.is_some(),
+            Command::SaveAdjustmentPreset => Preset::from_layers(doc, &editor.selected()).is_some(),
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
             Command::FreeTransform => layer.is_some() && editor.transform().is_none(),
@@ -937,6 +947,13 @@ impl App {
                     .as_ref()
                     .and_then(|editor| crate::select_and_mask::SelectAndMask::open(ctx, editor, options, output))
                     .map(Dialog::SelectAndMask);
+            }
+            Command::SaveAdjustmentPreset => {
+                if let Some(editor) = &self.editor {
+                    let top = editor.selected().last().copied().unwrap_or(editor.active);
+                    let name = editor.doc.layer(top).map(|l| l.name.clone()).unwrap_or_default();
+                    self.dialog = Some(Dialog::SavePreset { name });
+                }
             }
             Command::ContentAwareFill => {
                 if let Some(editor) = &self.editor
@@ -1235,6 +1252,69 @@ self.filters.remember(&filter);
         self.menu_item(ui, Command::FreeTransform, None);
     }
 
+    /// Image › Adjustments › Presets: add a saved preset's layers.
+    fn presets_menu(&mut self, ui: &mut Ui) {
+        let names = crate::presets::dir().as_deref().map(crate::presets::names).unwrap_or_default();
+        let enabled = self.editor.as_ref().is_some_and(|e| e.busy().is_none());
+        ui.add_enabled_ui(enabled && !names.is_empty(), |ui| {
+            ui.menu_button("Presets", |ui| {
+                for name in &names {
+                    if ui.button(name).clicked() {
+                        match crate::presets::path(name).as_deref().map(Preset::load) {
+                            Some(Ok(preset)) => self.apply_preset(name, &preset),
+                            Some(Err(e)) => self.message(format!("Could not read the preset “{name}”: {e}"), true),
+                            None => {}
+                        }
+                        ui.close();
+                    }
+                }
+            });
+        });
+        ui.add_enabled_ui(!names.is_empty(), |ui| {
+            ui.menu_button("Delete Preset", |ui| {
+                for name in &names {
+                    if ui.button(name).clicked() {
+                        self.dialog = Some(Dialog::DeletePreset { name: name.clone() });
+                        ui.close();
+                    }
+                }
+            });
+        });
+    }
+
+    fn save_preset(&mut self, name: &str) {
+        let Some(editor) = &self.editor else { return };
+        let (Some(preset), Some(path)) = (Preset::from_layers(&editor.doc, &editor.selected()), crate::presets::path(name))
+        else {
+            return;
+        };
+        match preset.save(&path) {
+            Ok(()) => self.message(format!("Saved the preset “{name}”"), false),
+            Err(e) => self.message(format!("Could not save the preset: {e}"), true),
+        }
+    }
+
+    fn delete_preset(&mut self, name: &str) {
+        let Some(path) = crate::presets::path(name) else { return };
+        match std::fs::remove_file(path) {
+            Ok(()) => self.message(format!("Deleted the preset “{name}”"), false),
+            Err(e) => self.message(format!("Could not delete the preset “{name}”: {e}"), true),
+        }
+    }
+
+    fn apply_preset(&mut self, name: &str, preset: &Preset) {
+        let Some(editor) = &mut self.editor else { return };
+        let index = editor.active_index().unwrap_or(0);
+        editor.edit(&format!("Preset {name}"), |doc, active| {
+            if let Some(top) = preset.apply(doc, index) {
+                *active = top;
+            }
+        });
+        // Painting on an adjustment layer paints its mask.
+        let adjusts = editor.doc.layer(editor.active).is_some_and(|l| l.adjustment.is_some());
+        editor.target = if adjusts { Target::Mask } else { Target::Pixels };
+    }
+
     fn menu_bar(&mut self, ui: &mut Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -1405,6 +1485,9 @@ self.filters.remember(&filter);
                     self.menu_item(ui, Command::NewSelectiveColor, None);
                     self.menu_item(ui, Command::NewChannelMixer, None);
                     self.menu_item(ui, Command::NewColorLookup, None);
+                    ui.separator();
+                    self.presets_menu(ui);
+                    self.menu_item(ui, Command::SaveAdjustmentPreset, None);
                     ui.separator();
                     self.menu_item(ui, Command::Invert, None);
                 });
@@ -1586,6 +1669,7 @@ self.filters.remember(&filter);
         let mut close = false;
         let mut action: Option<DialogAction> = None;
         let hint = self.theme.dark_foreground;
+        let warning = self.theme.red;
         let name = self
             .editor
             .as_ref()
@@ -1790,6 +1874,58 @@ self.filters.remember(&filter);
                                 }
                                 app.proceed(then, ctx);
                             }));
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::SavePreset { name } => {
+                    ui.heading("Save Adjustment Preset");
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Keeps the selected adjustment layers and groups, without\n\
+                             their masks, to add to other images from Image › Adjustments.",
+                        )
+                        .color(hint),
+                    );
+                    ui.add_space(8.0);
+                    let field = ui.text_edit_singleline(name);
+                    if ui.memory(|m| m.focused().is_none()) {
+                        field.request_focus();
+                    }
+                    let name = name.replace('/', "-").trim().to_owned();
+                    let exists = !name.is_empty() && crate::presets::path(&name).is_some_and(|p| p.exists());
+                    if exists {
+                        ui.add_space(4.0);
+                        let text = format!("There's already a preset called “{name}”: saving replaces it.");
+                        ui.label(RichText::new(text).color(warning));
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let label = if exists { "Replace" } else { "OK" };
+                        let ok = ui.add_enabled(!name.is_empty(), Button::new(label)).clicked()
+                            || (!name.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            action = Some(Box::new(move |app, _| app.save_preset(&name)));
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::DeletePreset { name } => {
+                    ui.heading("Delete Preset");
+                    ui.add_space(8.0);
+                    ui.label(format!("Delete the preset “{name}”? This can't be undone."));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            let name = name.clone();
+                            action = Some(Box::new(move |app, _| app.delete_preset(&name)));
                             close = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -3878,6 +4014,30 @@ mod tests {
             Some(omapix_engine::adjust::Adjustment::ColorLookup(_))
         ));
         assert_eq!(editor.target, Target::Mask);
+    }
+
+    #[test]
+    fn adjustment_presets_are_saved_from_the_selected_layers_and_added_on_top() {
+        let mut app = test_app();
+        let ctx = egui::Context::default();
+        assert!(!app.enabled(Command::SaveAdjustmentPreset), "a pixel layer");
+        app.run(Command::NewCurves, &ctx);
+        assert!(app.enabled(Command::SaveAdjustmentPreset));
+        app.run(Command::SaveAdjustmentPreset, &ctx);
+        assert!(matches!(&app.dialog, Some(Dialog::SavePreset { name }) if name == "Curves"));
+
+        let editor = app.editor.as_mut().unwrap();
+        let preset = Preset::from_layers(&editor.doc, &editor.selected()).unwrap();
+        let background = editor.doc.layers[0].id;
+        editor.active = background;
+        editor.target = Target::Pixels;
+        let count = editor.doc.layers.len();
+        app.apply_preset("Warm", &preset);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.doc.layers.len(), count + 1);
+        assert_eq!(editor.doc.index_of(editor.active), Some(1), "just above the background");
+        assert_eq!(editor.target, Target::Mask);
+        assert_eq!(editor.undo_label(), Some("Preset Warm"));
     }
 
     fn test_app() -> App {
