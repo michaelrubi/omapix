@@ -40,6 +40,11 @@ pub fn dir() -> Option<PathBuf> {
     crate::recent::config_dir().map(|d| d.join("presets"))
 }
 
+/// Where the preset called `name` is kept.
+pub fn path(name: &str) -> Option<PathBuf> {
+    dir().map(|d| d.join(format!("{name}.toml")))
+}
+
 /// The presets in `dir`, by name.
 pub fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)

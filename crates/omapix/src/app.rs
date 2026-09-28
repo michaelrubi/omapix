@@ -126,6 +126,10 @@ enum Dialog {
     SavePreset {
         name: String,
     },
+    /// Ask before deleting a preset.
+    DeletePreset {
+        name: String,
+    },
 }
 
 /// Result of a background save or export: the document revision written,
@@ -1250,19 +1254,27 @@ self.filters.remember(&filter);
 
     /// Image › Adjustments › Presets: add a saved preset's layers.
     fn presets_menu(&mut self, ui: &mut Ui) {
-        let dir = crate::presets::dir();
-        let names = dir.as_deref().map(crate::presets::names).unwrap_or_default();
+        let names = crate::presets::dir().as_deref().map(crate::presets::names).unwrap_or_default();
         let enabled = self.editor.as_ref().is_some_and(|e| e.busy().is_none());
         ui.add_enabled_ui(enabled && !names.is_empty(), |ui| {
             ui.menu_button("Presets", |ui| {
-                for name in names {
-                    if ui.button(&name).clicked() {
-                        let path = dir.as_deref().map(|d| d.join(format!("{name}.toml")));
-                        match path.as_deref().map(Preset::load) {
-                            Some(Ok(preset)) => self.apply_preset(&name, &preset),
+                for name in &names {
+                    if ui.button(name).clicked() {
+                        match crate::presets::path(name).as_deref().map(Preset::load) {
+                            Some(Ok(preset)) => self.apply_preset(name, &preset),
                             Some(Err(e)) => self.message(format!("Could not read the preset “{name}”: {e}"), true),
                             None => {}
                         }
+                        ui.close();
+                    }
+                }
+            });
+        });
+        ui.add_enabled_ui(!names.is_empty(), |ui| {
+            ui.menu_button("Delete Preset", |ui| {
+                for name in &names {
+                    if ui.button(name).clicked() {
+                        self.dialog = Some(Dialog::DeletePreset { name: name.clone() });
                         ui.close();
                     }
                 }
@@ -1272,13 +1284,21 @@ self.filters.remember(&filter);
 
     fn save_preset(&mut self, name: &str) {
         let Some(editor) = &self.editor else { return };
-        let (Some(preset), Some(dir)) = (Preset::from_layers(&editor.doc, &editor.selected()), crate::presets::dir())
+        let (Some(preset), Some(path)) = (Preset::from_layers(&editor.doc, &editor.selected()), crate::presets::path(name))
         else {
             return;
         };
-        match preset.save(&dir.join(format!("{name}.toml"))) {
+        match preset.save(&path) {
             Ok(()) => self.message(format!("Saved the preset “{name}”"), false),
             Err(e) => self.message(format!("Could not save the preset: {e}"), true),
+        }
+    }
+
+    fn delete_preset(&mut self, name: &str) {
+        let Some(path) = crate::presets::path(name) else { return };
+        match std::fs::remove_file(path) {
+            Ok(()) => self.message(format!("Deleted the preset “{name}”"), false),
+            Err(e) => self.message(format!("Could not delete the preset “{name}”: {e}"), true),
         }
     }
 
@@ -1649,6 +1669,7 @@ self.filters.remember(&filter);
         let mut close = false;
         let mut action: Option<DialogAction> = None;
         let hint = self.theme.dark_foreground;
+        let warning = self.theme.red;
         let name = self
             .editor
             .as_ref()
@@ -1876,15 +1897,38 @@ self.filters.remember(&filter);
                         field.request_focus();
                     }
                     let name = name.replace('/', "-").trim().to_owned();
+                    let exists = !name.is_empty() && crate::presets::path(&name).is_some_and(|p| p.exists());
+                    if exists {
+                        ui.add_space(4.0);
+                        let text = format!("There's already a preset called “{name}”: saving replaces it.");
+                        ui.label(RichText::new(text).color(warning));
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.add_enabled(!name.is_empty(), Button::new("OK")).clicked()
+                        let label = if exists { "Replace" } else { "OK" };
+                        let ok = ui.add_enabled(!name.is_empty(), Button::new(label)).clicked()
                             || (!name.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
                         if ok {
                             action = Some(Box::new(move |app, _| app.save_preset(&name)));
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::DeletePreset { name } => {
+                    ui.heading("Delete Preset");
+                    ui.add_space(8.0);
+                    ui.label(format!("Delete the preset “{name}”? This can't be undone."));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            let name = name.clone();
+                            action = Some(Box::new(move |app, _| app.delete_preset(&name)));
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
                             close = true;
                         }
                     });
