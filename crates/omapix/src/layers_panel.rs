@@ -1027,6 +1027,20 @@ fn mask_menu_items(
     for (label, how, enabled) in loads {
         menu_item(ui, label, None, enabled, || load_mask(editor, id, how));
     }
+
+    ui.separator();
+    let unlocked = editor.doc.layer(id).is_some_and(|l| !l.locks.all);
+    let saves = [
+        ("Replace Mask with Selection", Combine::Replace),
+        ("Add Selection to Mask", Combine::Add),
+        ("Subtract Selection from Mask", Combine::Subtract),
+        ("Intersect Selection with Mask", Combine::Intersect),
+    ];
+    for (label, how) in saves {
+        menu_item(ui, label, None, has_selection && unlocked, || {
+            selection_to_mask(editor, id, label, how)
+        });
+    }
 }
 
 /// Load layer `id`'s mask as a selection, combined with the current one
@@ -1036,6 +1050,19 @@ fn load_mask(editor: &mut Editor, id: u64, how: Combine) {
         let sel = Selection::from_mask(&mask.pixels);
         editor.set_selection("Load Selection", sel, how);
     }
+}
+
+/// Combine the selection into layer `id`'s mask (the other way round from
+/// `load_mask`), as one undo step labelled `label`.
+fn selection_to_mask(editor: &mut Editor, id: u64, label: &str, how: Combine) {
+    editor.edit(label, |doc, _| {
+        let Some(selection) = doc.selection.clone() else {
+            return;
+        };
+        if let Some(mask) = doc.layer_mut(id).and_then(|l| l.mask.as_mut()) {
+            mask.pixels = Selection::from_mask(&mask.pixels).combine(&selection, how).coverage;
+        }
+    });
 }
 
 fn mask_context_menu(
@@ -1480,6 +1507,33 @@ mod tests {
         assert_eq!(selected(&h, 10, 10), Some(u16::MAX));
         assert_eq!(selected(&h, 50, 10), Some(0));
         assert_eq!(selected(&h, 10, 30), Some(0));
+    }
+
+    #[test]
+    fn mask_menu_combines_the_selection_into_the_mask() {
+        let mut h = Harness::new();
+        let (w, hh) = (60, 40);
+        let left = Selection::rectangle(w, hh, (0.0, 0.0), (30.0, 40.0));
+        h.editor.doc.selection = Some(Selection::rectangle(w, hh, (0.0, 0.0), (60.0, 20.0)));
+        let masked = |h: &Harness, x, y| h.editor.doc.layer(CURVES).unwrap().mask.as_ref().unwrap().pixels.get(x, y);
+        let cases = [
+            (Combine::Replace, [u16::MAX, u16::MAX, 0, 0]),
+            (Combine::Add, [u16::MAX, u16::MAX, u16::MAX, 0]),
+            (Combine::Subtract, [0, 0, u16::MAX, 0]),
+            (Combine::Intersect, [u16::MAX, 0, 0, 0]),
+        ];
+        for (how, [top_left, top_right, bottom_left, bottom_right]) in cases {
+            // The Curves mask reveals the left half; the top half is selected.
+            h.editor.doc.layer_mut(CURVES).unwrap().mask.as_mut().unwrap().pixels = left.coverage.clone();
+            selection_to_mask(&mut h.editor, CURVES, "Mask", how);
+            assert_eq!(
+                [masked(&h, 10, 10), masked(&h, 50, 10), masked(&h, 10, 30), masked(&h, 50, 30)],
+                [top_left, top_right, bottom_left, bottom_right],
+                "{how:?}"
+            );
+            assert_eq!(h.editor.undo_label(), Some("Mask"));
+            assert!(h.editor.doc.selection.is_some(), "the selection stays");
+        }
     }
 
     #[test]
