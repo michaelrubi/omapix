@@ -21,7 +21,8 @@ use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 
 const MAX: f32 = u16::MAX as f32;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct BrushSettings {
     /// Diameter in image pixels.
     pub size: f32,

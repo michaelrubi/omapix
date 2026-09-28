@@ -132,7 +132,7 @@ pub fn fill_mask(
 }
 
 /// The shape of a gradient: Linear (along a line) or Radial (circle outward from centre).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum GradientType {
     #[default]
     Linear,
