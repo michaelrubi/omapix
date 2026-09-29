@@ -295,8 +295,8 @@ The smoothed image is `low + high + (1 − amount) × mid`.
   or removes smoothing by hand, exactly as with a manual frequency
   separation.
 - `r_fine` sits just above pore size (about 0.02 IOD) and `r_coarse` at
-  about 0.25 IOD. Both get tuned on real portraits and are exposed as
-  Detail and Smoothness sliders.
+  about 0.05 IOD, tuned on real portraits (see "Smooth Skin" below). They
+  are the Detail and Smoothness sliders.
 - Edges of features are protected twice: by the mask, and by blurring
   within the skin mask only (a normalised, masked blur), so eyebrows and
   lips don't bleed into the skin.
@@ -561,7 +561,7 @@ the spike:
 | (measured) | 15–60 ms; 0.85 s at 24 MP with the face analysis and skin mask it needs | |
 | Healing the spots found (CPU) | 0.1–0.3 s for 10–20 spots | same |
 | Denoise (NIND) at 24 MP | (measured: 7 s, 54 squares at 0.12 s each) | minutes |
-| Smooth Skin (blurs at 24 MP) | < 1 s (CPU) | same |
+| Smooth Skin (blurs at 24 MP) | < 1 s (CPU) (measured: 0.4 s) | same |
 | Auto Retouch end to end, per face | < 3 s | < 10 s |
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
 | Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) | same |
@@ -645,6 +645,9 @@ Reordered on 2026-09-29 (see Decisions).
      selected one. See "Denoise" below.
 5. **Smooth Skin**, with the dialog and preview, and the 3-band Frequency
    Separation setup.
+   - Done (2026-09-29): Retouch › Smooth Skin…, onto a new Smooth Skin
+     layer masked to the skin, with Amount (its opacity), Smoothness and
+     Detail and a 100 % preview box. See "Smooth Skin" below.
 6. **Even Tone**, the automatic Dodge & Burn.
 7. **Auto Retouch**, with the face strip, per-face groups, presets and
    scripting.
@@ -800,6 +803,43 @@ cargo run --release -p omapix-ai --example denoise -- out ~/Pictures/denoise-tes
   should.
 - **Left:** JPEG block artifacts in heavily compressed files stay; a
   faster fp16 run or TensorRT, if 7 s at 24 MP gets in the way.
+
+### Smooth Skin
+
+As built (`omapix_engine::skin`, `crates/omapix/src/smooth_skin.rs`),
+looked at on Michael's portraits and the acne photos in
+`~/Pictures/blemish-tests` through the ignored test
+`smooth_skin_in_photos`:
+
+```
+OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
+  cargo test --release -p omapix smooth_skin_in_photos -- --ignored
+```
+
+- **Where.** Face and body skin from the segmentation, less the eyes,
+  brows and lips, as Select › Skin makes it. The source is Current &
+  Below of the selected layer, so it goes on after Heal Blemishes.
+- **Bands.** Gaussian blurs weighted by the skin mask and divided by the
+  blurred mask (the image's alpha does the same in `gaussian_blur`), so
+  only skin is averaged. The layer is `image − blur(fine) + blur(coarse)`:
+  at full opacity the mid band is gone, and opacity scales it back, so
+  Amount is simply the layer's opacity.
+- **Radii.** The design's `r_coarse` of 0.25 IOD took the face's shape
+  away with the blotches: the nose's sides, the cheekbones' highlights and
+  the smile lines went flat, and faces looked like masks. At 0.04–0.06 IOD
+  acne redness and blotches even out and the shading stays. Smoothness
+  runs from 0.025 to 0.1 IOD (0.05 at 50), and Detail from 0.01 to 0.04
+  (0.02 at 50); the coarse blur is never finer than the fine one. Amount
+  starts at 70 %.
+- **Scale.** The distance between the eyes of the largest face, as for
+  blemishes. Smaller faces in the same photo are smoothed coarser than
+  they'd need.
+- **Speed.** Only the skin's bounding box is blurred: 0.03–0.5 s on the
+  test photos, up to 24 MP. The preview box is blurred on its own, with
+  three coarse radii of the image round it, on a thread.
+- **Left:** each face at its own scale; stronger smoothing that keeps the
+  shading needs an edge-aware coarse blur (a guided filter), rather than
+  a larger Gaussian.
 
 ## Decisions
 

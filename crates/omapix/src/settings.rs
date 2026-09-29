@@ -64,6 +64,8 @@ pub struct FilterSettings {
     pub separation_radius: Option<f32>,
     /// Heal Blemishes' Sensitivity, 0–100.
     pub blemish_sensitivity: f32,
+    /// Smooth Skin's Amount, Smoothness and Detail.
+    pub smooth_skin: omapix_engine::skin::Smoothing,
     /// Denoise's Luminance and Color, 0–100.
     pub denoise_luminance: f32,
     pub denoise_color: f32,
@@ -94,6 +96,7 @@ impl Default for FilterSettings {
             select_and_mask_output: Default::default(),
             separation_radius: None,
             blemish_sensitivity: 50.0,
+            smooth_skin: Default::default(),
             // Leaves a little fine grain at high ISO, which looks natural.
             denoise_luminance: 80.0,
             denoise_color: 100.0,

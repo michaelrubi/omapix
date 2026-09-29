@@ -26,6 +26,7 @@ pub mod raster;
 pub mod refine;
 pub mod reduced;
 pub mod selection;
+pub mod skin;
 pub mod tiled;
 pub mod tiles;
 pub mod transform;

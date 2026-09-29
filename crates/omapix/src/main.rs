@@ -11,6 +11,8 @@ mod drop;
 mod editor;
 mod face_selection;
 mod heal_blemishes;
+mod preview_box;
+mod smooth_skin;
 mod free_transform;
 mod gpu;
 mod histogram_panel;

@@ -234,6 +234,22 @@ pub fn blemish_skin(analysis: &Analysis, image: &Raster) -> Selection {
         .combine(&draw(&faces, &ROUND_EYES, w, h), Combine::Subtract)
 }
 
+/// The distance between the eyes of the largest face the landmarker saw
+/// (the others aren't looked at), as it would be facing the camera: a
+/// turned face's eyes look closer together, so it's at least a third of
+/// the face's height, as it is on faces facing the camera.
+pub fn scale(analysis: &Analysis) -> Option<f32> {
+    analysis
+        .faces
+        .iter()
+        .filter(|(_, points)| points.is_some())
+        .map(|(face, _)| {
+            let [l, r] = [face.points[0], face.points[1]];
+            (r[0] - l[0]).hypot(r[1] - l[1]).max((face.bounds[3] - face.bounds[1]) / 3.0)
+        })
+        .reduce(f32::max)
+}
+
 /// The points of each face the landmarker saw.
 fn points(analysis: &Analysis) -> Vec<&[[f32; 3]]> {
     analysis.faces.iter().filter_map(|(_, p)| p.as_deref()).collect()
