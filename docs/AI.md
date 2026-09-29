@@ -558,8 +558,8 @@ the spike:
 | SAM 2.1 encoder, once per image | < 0.5 s (measured: 0.14 s, 0.47 s the first time) | several s (measured: 1.1 s) |
 | SAM 2.1 per click | < 30 ms (measured: 8 ms) | < 200 ms (measured: 40 ms) |
 | Blemish detection | < 0.3 s (CPU) | same |
-| (measured) | 20 ms at 24 MP; 0.85 s with the face analysis and skin mask it needs | |
-| Healing the spots found (CPU) | 0.1–0.2 s for 3–26 spots | same |
+| (measured) | 15–60 ms; 0.85 s at 24 MP with the face analysis and skin mask it needs | |
+| Healing the spots found (CPU) | 0.1–0.3 s for 10–20 spots | same |
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) | same |
 | Auto Retouch end to end, per face | < 3 s | < 10 s |
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
@@ -631,10 +631,10 @@ Reordered on 2026-09-29 (see Decisions).
    saver in everyday retouching.
    - Done (2026-09-29): `omapix_engine::blemish` finds the spots and heals
      them onto a new Blemishes layer; Retouch › Heal Blemishes… circles
-     them on the canvas under a Sensitivity slider. Face skin only for
-     now (see "Blemish detection" below).
-   - Left: tuning Sensitivity on portraits with real blemishes; necks and
-     bodies once skin is split between people.
+     them on the canvas under a Sensitivity slider. Redone the same day on
+     real acne photos (see "Blemish detection" below). Faces only.
+   - Left: long marks, profiles, necks and bodies once skin is split
+     between people.
 4. **AI Denoise** with NIND (roadmap section 4), onto a Denoise layer. The
    model is already on disk from darktable (GPL-3.0, like Omapix) and the
    runtime works, so it's quick, and it's the first step of the finishing
@@ -699,30 +699,65 @@ full-length portrait (4024×6048), and two people, one in profile
 
 ### Blemish detection
 
-2026-09-29, as built (`omapix_engine::blemish`), tried on five portraits
-and on one with six spots painted in:
+As built (`omapix_engine::blemish`). The first version (a single light
+and heavy blur, blobs by flood fill) was tuned on spots painted onto clean
+portraits, and on real acne it circled pores and stubble while missing the
+pimples. It was redone on twelve freely licensed photos of acne, marks and
+scars (Pexels and Wikimedia Commons, kept in `~/Pictures/blemish-tests`,
+not in the repository) and four clean portraits of Michael's, looking at
+each through the ignored test `find_blemishes_in_photos`:
 
-- **Scale.** The box round the face skin is shrunk so the eyes are about
-  150 px apart (never enlarged), by the largest face's YuNet eye points.
-- **Signal.** Lab L\* and a\*, each blurred lightly (0.006 IOD) and
-  heavily (0.12 IOD) with the skin mask weighting the blur, so brows, lips
-  and hair don't darken the skin round them. A spot's score is how much
-  darker and redder the light blur is than the heavy one, in multiples of
-  the face's median absolute difference, combined as a distance.
-- **Spots.** Blobs scoring over 3, kept if their peak is over 4, their
-  radius 0.008–0.06 IOD, their longest axis at most three times their
-  shortest (stray hairs and wrinkles are longer), and there's skin all
-  round them (not at a feature or the face's edge).
-- **Scores.** Painted spots scored 11–64. On clean faces, texture and
-  stubble score 4–8, and a crease under the nose about 5. Sensitivity
-  50 % heals from 10 up, 100 % from 4.
-- **Skin.** Face skin only: the segmenter took a pink dress and a pumpkin
-  for body skin, and knuckles are full of spot-like creases.
-- **Healing.** One Spot Healing dab per spot, 3 × its radius + 4 px
-  across. The brush's choice of source had to change: it compared the
-  surroundings' absolute colour, so it copied the nasolabial crease into
-  a cheek. It now counts a difference in shade at a quarter (healing
-  corrects shade), and how much the copied patch varies.
+```
+OMAPIX_FACE_PHOTO=~/Pictures/blemish-tests OMAPIX_FACE_OUT=out \
+  cargo test --release -p omapix find_blemishes_in_photos -- --ignored
+```
+
+- **Where.** Face skin within each face's landmark outline (not the ears),
+  less the eyes, brows and lips, the bottom of the nose (MediaPipe's nose
+  outline, grown 0.06 IOD: nostrils and the creases beside them) and a
+  margin of 0.1 IOD round each eye (lashes, eyeliner, the lid's crease).
+  Faces the landmarker can't see (full profiles) are left out: YuNet's
+  points there are guesses, one mouth "corner" landed mid-cheek, and
+  without outlines nostrils and lips were healed into smears.
+- **Scale.** Eyes about 150 px apart. The distance between the eyes is
+  taken as at least a third of the face box's height, since a turned
+  face's eyes look closer together (face height ÷ eye distance is 2.8–3
+  facing the camera, up to 5.6 turned).
+- **Signal.** Blob detection at nine sizes half an octave apart (Gaussian
+  σ 0.0057–0.09 IOD): each point blurred by σ against the ring round it
+  blurred by 2.5σ, in Lab, with skin weighting every blur. Darker counts;
+  lighter counts only if also redder (a raised pimple on dark skin), so
+  oily highlights and light pores don't. Each size is measured against how
+  much the skin varies at that size (median absolute difference), so the
+  pores and stubble that are everywhere score low.
+- **Spots.** Peaks higher than their neighbours at their size and the
+  sizes either side, found at σ 0.008–0.045 only: a peak at the smallest
+  size is a pore, and one that still stands out at the two largest is a
+  flush or shading. Ridges (creases, hairs) are rejected by SIFT's
+  curvature test (ratio up to 6). A spot's extent is the largest size at
+  which it stands out a third as much as at its peak (its red halo), its
+  middle the peak at that size (not a highlight to one side), and it needs
+  skin at its middle and all round out to 2.5 × its radius + 0.02 IOD.
+  Duplicates across sizes are merged; small spots inside a big one are
+  kept, since one big heal leaves them.
+- **Scores.** Clear pimples score 20 and up, marks 10–20, dark marks on
+  dark skin and a few shadows 7–10, texture 4–7. Sensitivity runs from 20
+  (0 %) through about 9 (50 %) to 4 (100 %), on a log scale. Ice-pick
+  scars score 4–12. Rolling scars and texture (MJR00685) aren't spots:
+  Smooth Skin is for them.
+- **Healing.** A dab 2.6 × the radius + 4 px across, hardness 0.8, so it
+  covers the whole spot. The Spot Healing Brush's source choice was
+  rewritten along the way, as it produced flat, pale patches on real skin:
+  it compared pixels one by one, so on pored skin it chose the smoothest
+  patch it could reach, and it corrected tone by adding a difference. It
+  now compares blocks: the surroundings' shape (shade counts a quarter),
+  the patch's texture measured a few pixels apart against the skin round
+  the spot, lumps in the patch, and the patch against its own
+  surroundings; candidates start one spot-width away. Tone is corrected by
+  ratio, as light does, over a quarter of the dab's size.
+- **Left:** long marks (scratches, some scars) need a stroke, not a dab;
+  profiles need a better idea of where the nostrils and lips are; dark
+  marks on dark skin often need 70–75 %.
 
 ## Decisions
 

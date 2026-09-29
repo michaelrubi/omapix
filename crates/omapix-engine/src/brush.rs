@@ -366,7 +366,7 @@ impl Stroke {
             return tiles;
         }
         let (w, h) = (orig.width(), orig.height());
-        let sigma = (self.settings.size * 0.5).max(3.0);
+        let sigma = (self.settings.size * 0.25).max(3.0);
         let margin = (sigma * 3.0).ceil() as u32;
         let x0 = (tiles.iter().map(|t| t.0).min().unwrap() * TILE).saturating_sub(margin);
         let y0 = (tiles.iter().map(|t| t.1).min().unwrap() * TILE).saturating_sub(margin);
@@ -427,8 +427,10 @@ impl Stroke {
                 let mut healed = copied;
                 if d[3] > 1e-4 && c[3] > 1e-4 {
                     for ch in 0..3 {
-                        let shift = d[ch] / d[3] - c[ch] / c[3];
-                        let v = f32::from(copied[ch]) / MAX + shift;
+                        // As light does: a copy from shadow brightened keeps
+                        // its texture in proportion.
+                        let gain = (d[ch] / d[3]) / (c[ch] / c[3]).max(1e-3);
+                        let v = f32::from(copied[ch]) / MAX * gain.clamp(0.25, 4.0);
                         healed[ch] = (v.clamp(0.0, 1.0) * MAX).round() as u16;
                     }
                 }
@@ -440,10 +442,12 @@ impl Stroke {
 }
 
 impl Stroke {
-    /// Choose where a spot-heal stroke copies from: the nearby offset whose
-    /// surroundings best match the painted area's surroundings, preferring
-    /// even source patches so edges (hair, lips) and creases aren't pulled
-    /// in.
+    /// Choose where a spot-heal stroke copies from: the nearby patch whose
+    /// surroundings are shaped most like the painted area's, whose texture
+    /// is as fine or coarse as the skin round it, which is even (no spot,
+    /// crease, hair or lip edge in it), and which is like its own
+    /// surroundings, since healing takes the difference in shade between
+    /// the two surroundings and applies it to the patch.
     fn find_source(&self) -> Option<(i32, i32)> {
         let src = self.source.as_ref()?;
         let (w, h) = (src.width() as i64, src.height() as i64);
@@ -470,84 +474,103 @@ impl Stroke {
         let (rx0, ry0) = ((x0 - margin).max(0), (y0 - margin).max(0));
         let (rx1, ry1) = ((x1 + margin).min(w), (y1 + margin).min(h));
         let extent = (x1 - x0).max(y1 - y0) as f32;
-        let step = (((rx1 - rx0).max(ry1 - ry0) / 64).max(1)) as usize;
 
-        let rgb = |p: Pixel| {
-            [
-                f32::from(p[0]) / MAX,
-                f32::from(p[1]) / MAX,
-                f32::from(p[2]) / MAX,
-            ]
-        };
         let cov_at = |x: i64, y: i64| -> f32 {
             let (x, y) = (x as u32, y as u32);
             self.coverage
                 .get(&(x / TILE, y / TILE))
                 .map_or(0.0, |c| c[((y % TILE) * TILE + x % TILE) as usize])
         };
+        // The area cut into blocks, each summed up from a few pixels by its
+        // average colour and its texture (how much nearby pixels differ),
+        // and whether it's painted.
+        let block = ((rx1 - rx0).max(ry1 - ry0) / 12).max(2);
+        let taps = block.min(4);
+        // Texture is measured between pixels this far apart: pore-sized
+        // rather than noise.
+        let apart = (block / taps).max(1);
+        // Whole blocks only, with room for the texture's second pixel.
+        let blocks: Vec<(i64, i64)> = (ry0..ry1 - block - apart)
+            .step_by(block as usize)
+            .flat_map(|y| (rx0..rx1 - block - apart).step_by(block as usize).map(move |x| (x, y)))
+            .collect();
+        let sample = |bx: i64, by: i64, ox: i64, oy: i64| -> Option<([f32; 3], f32, bool)> {
+            let (mut mean, mut texture, mut painted, mut n) = ([0.0f32; 3], 0.0f32, false, 0.0f32);
+            for ty in 0..taps {
+                for tx in 0..taps {
+                    let (x, y) = (bx + tx * block / taps, by + ty * block / taps);
+                    painted |= cov_at(x, y) > 0.01;
+                    let at = |x: i64, y: i64| src.get((x + ox) as u32, (y + oy) as u32);
+                    let p = at(x, y);
+                    if p[3] == 0 {
+                        return None;
+                    }
+                    let (p, right, down) = (rgb(p), rgb(at(x + apart, y)), rgb(at(x, y + apart)));
+                    for c in 0..3 {
+                        mean[c] += p[c];
+                        texture += (p[c] - right[c]).powi(2) + (p[c] - down[c]).powi(2);
+                    }
+                    n += 1.0;
+                }
+            }
+            Some((mean.map(|v| v / n), texture / n, painted))
+        };
+        let here = blocks.iter().map(|&(x, y)| sample(x, y, 0, 0)).collect::<Option<Vec<_>>>()?;
+        // The texture of the skin round the painted area.
+        let ring_texture = {
+            let ring: Vec<f32> = here.iter().filter(|b| !b.2).map(|b| b.1).collect();
+            ring.iter().sum::<f32>() / ring.len().max(1) as f32
+        };
 
         let mut best: Option<(f32, (i32, i32))> = None;
-        for ring in [1.1f32, 1.5, 2.0, 2.8] {
-            let dist = ring * extent + margin as f32;
-            for k in 0..16 {
-                let angle = k as f32 / 16.0 * std::f32::consts::TAU;
+        for ring in [1.0f32, 1.25, 1.6, 2.0, 2.6] {
+            let dist = ring * extent;
+            for k in 0..24 {
+                let angle = k as f32 / 24.0 * std::f32::consts::TAU;
                 let (ox, oy) = (
                     (angle.cos() * dist).round() as i64,
                     (angle.sin() * dist).round() as i64,
                 );
-                if rx0 + ox < 0 || ry0 + oy < 0 || rx1 + ox + 1 > w || ry1 + oy + 1 > h {
+                if rx0 + ox < 0 || ry0 + oy < 0 || rx1 + ox > w || ry1 + oy > h {
                     continue;
                 }
-                let (mut ring_err, mut ring_n, mut edges, mut inner_n) =
-                    (0.0f32, 0usize, 0.0f32, 0usize);
-                // How the surroundings differ on average. Healing corrects
-                // that, so it counts for less than a difference in shape,
-                // but it still counts: skin shouldn't come from hair.
-                let mut ring_shift = [0.0f32; 3];
-                // The copied patch's sum and sum of squares, for its variance.
-                let (mut sum, mut squares) = ([0.0f32; 3], 0.0f32);
-                let mut usable = true;
-                for y in (ry0..ry1).step_by(step) {
-                    for x in (rx0..rx1).step_by(step) {
-                        let s = src.get((x + ox) as u32, (y + oy) as u32);
-                        if cov_at(x, y) < 0.01 {
-                            let d = rgb(src.get(x as u32, y as u32));
-                            let s = rgb(s);
-                            for c in 0..3 {
-                                ring_err += (d[c] - s[c]).powi(2);
-                                ring_shift[c] += d[c] - s[c];
-                            }
-                            ring_n += 1;
-                        } else {
-                            if s[3] == 0 {
-                                usable = false;
-                            }
-                            let (s, right, down) = (
-                                rgb(s),
-                                rgb(src.get((x + ox + 1) as u32, (y + oy) as u32)),
-                                rgb(src.get((x + ox) as u32, (y + oy + 1) as u32)),
-                            );
-                            edges += (0..3)
-                                .map(|c| (s[c] - right[c]).abs() + (s[c] - down[c]).abs())
-                                .sum::<f32>();
-                            for c in 0..3 {
-                                sum[c] += s[c];
-                                squares += s[c] * s[c];
-                            }
-                            inner_n += 1;
+                let there: Option<Vec<_>> = blocks.iter().map(|&(x, y)| sample(x, y, ox, oy)).collect();
+                let Some(there) = there else { continue };
+                // Surroundings: their difference, on average and in shape.
+                let (mut shift, mut shift_sq, mut ring_n) = ([0.0f32; 3], 0.0f32, 0.0f32);
+                let (mut source_ring, mut patch, mut patch_sq, mut texture, mut patch_n) =
+                    ([0.0f32; 3], [0.0f32; 3], 0.0f32, 0.0f32, 0.0f32);
+                for (d, s) in here.iter().zip(&there) {
+                    if d.2 {
+                        for (p, v) in patch.iter_mut().zip(s.0) {
+                            *p += v;
+                            patch_sq += v * v;
                         }
+                        texture += s.1;
+                        patch_n += 1.0;
+                    } else {
+                        for c in 0..3 {
+                            shift[c] += d.0[c] - s.0[c];
+                            shift_sq += (d.0[c] - s.0[c]).powi(2);
+                            source_ring[c] += s.0[c];
+                        }
+                        ring_n += 1.0;
                     }
                 }
-                if !usable || ring_n == 0 {
+                if ring_n == 0.0 || patch_n == 0.0 {
                     continue;
                 }
-                // A patch that varies (a crease, another spot) would be
-                // copied in; one with sharp edges (hair, lips) too.
-                let n = inner_n.max(1) as f32;
-                let variance = squares / n - sum.iter().map(|s| (s / n).powi(2)).sum::<f32>();
-                let ring = ring_err / ring_n as f32
-                    - 0.75 * ring_shift.iter().map(|s| (s / ring_n as f32).powi(2)).sum::<f32>();
-                let score = ring + variance + 0.5 * (edges / n).powi(2);
+                let shift_mean: f32 = shift.iter().map(|s| (s / ring_n).powi(2)).sum();
+                // Shaped alike; a difference in shade counts for a quarter,
+                // since healing corrects it, but skin shouldn't come from hair.
+                let shape = shift_sq / ring_n - 0.75 * shift_mean;
+                // As fine or coarse as the skin round the painted area.
+                let grain = ((texture / patch_n).sqrt() - ring_texture.sqrt()).powi(2);
+                // Even: no spot or crease in it.
+                let lumps = patch_sq / patch_n - patch.iter().map(|p| (p / patch_n).powi(2)).sum::<f32>();
+                // Like its own surroundings.
+                let unlike: f32 = (0..3).map(|c| (patch[c] / patch_n - source_ring[c] / ring_n).powi(2)).sum();
+                let score = shape + grain + lumps + unlike;
                 if best.is_none_or(|(b, _)| score < b) {
                     best = Some((score, (ox as i32, oy as i32)));
                 }
@@ -555,6 +578,15 @@ impl Stroke {
         }
         best.map(|(_, offset)| offset)
     }
+}
+
+/// A pixel's colour, 0–1.
+fn rgb(p: Pixel) -> [f32; 3] {
+    [
+        f32::from(p[0]) / MAX,
+        f32::from(p[1]) / MAX,
+        f32::from(p[2]) / MAX,
+    ]
 }
 
 /// Dab shape at distance `d` (fraction of the radius) from the centre:
@@ -936,6 +968,51 @@ mod tests {
         for x in 140..160 {
             assert!(out.get(x, 100)[0] > 20000, "dark pixel at {x}");
         }
+    }
+
+    #[test]
+    fn spot_healing_copies_texture_like_the_skin_round_it() {
+        // Pored skin (a dot every 6 px) with a spot, and a smooth patch just
+        // to its right that a choice by likeness pixel by pixel would take.
+        let (w, h) = (600, 300);
+        let img: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let (dx, dy) = (x as i32 - 200, y as i32 - 150);
+                let v = if dx * dx + dy * dy < 100 {
+                    20000
+                } else if (250..330).contains(&x) {
+                    40000
+                } else if x % 6 < 2 && y % 6 < 2 {
+                    30000
+                } else {
+                    42000
+                };
+                [v, v - 6000, v - 10000, 65535]
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &img);
+        let surface = Surface::Pixels(img.clone());
+        let settings = BrushSettings {
+            size: 40.0,
+            hardness: 0.8,
+            ..Default::default()
+        };
+        let mut s = Stroke::new(settings, Paint::SpotHeal, surface.clone()).sampling(img);
+        let mut out = surface;
+        let tiles = s.add_point(200.0, 150.0, 1.0);
+        s.apply(&mut out, &tiles);
+        s.finish(&mut out);
+        let Surface::Pixels(out) = out else {
+            unreachable!()
+        };
+        // Pores in the healed patch, not the smooth patch's evenness.
+        let (lo, hi) = (140..160)
+            .flat_map(|y| (190..210).map(move |x| (x, y)))
+            .map(|(x, y)| out.get(x, y)[0])
+            .fold((u16::MAX, 0), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        assert!(hi - lo > 6000, "{lo}..{hi}");
+        assert!(lo > 25000, "the spot's still there: {lo}");
     }
 
     #[test]

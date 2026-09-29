@@ -79,6 +79,27 @@ const FEATURES: Shapes = Shapes {
     grow: 0.03,
     feather: 0.015,
 };
+/// What else blemishes aren't looked for on: the bottom of the nose, grown
+/// to take in the creases beside it, whose nostrils and shadows look like
+/// spots.
+const NOSE: Shapes = Shapes {
+    outlines: &[(&outline::NOSE, Combine::Add)],
+    grow: 0.06,
+    feather: 0.02,
+};
+/// Nor round the eyes, where lashes, eyeliner and the crease of the lid
+/// look like spots.
+const ROUND_EYES: Shapes = Shapes {
+    outlines: &[(&outline::LEFT_EYE, Combine::Add), (&outline::RIGHT_EYE, Combine::Add)],
+    grow: 0.1,
+    feather: 0.02,
+};
+/// Round each face, grown to take in the jaw's edge.
+const OUTLINE: Shapes = Shapes {
+    outlines: &[(&outline::FACE, Combine::Add)],
+    grow: 0.08,
+    feather: 0.0,
+};
 const EYES: Shapes = Shapes {
     outlines: &[(&outline::LEFT_EYE, Combine::Add), (&outline::RIGHT_EYE, Combine::Add)],
     grow: 0.0,
@@ -198,6 +219,19 @@ pub fn analyse(image: &Raster, profile: &ColorProfile) -> Result<(Vec<[u8; 4]>, 
         height,
     })?;
     Ok((srgb, analysis))
+}
+
+/// The face skin to look for blemishes on: [`skin`] within each face's
+/// outline (leaving out the ears), less the bottom of its nose and round
+/// its eyes. Faces the landmarker didn't see (in profile) are left out:
+/// without their points, nostrils and lips would be taken for spots.
+pub fn blemish_skin(analysis: &Analysis, image: &Raster) -> Selection {
+    let (w, h) = (image.width(), image.height());
+    let faces = points(analysis);
+    skin(analysis, image, &[FACE_SKIN])
+        .combine(&draw(&faces, &OUTLINE, w, h), Combine::Intersect)
+        .combine(&draw(&faces, &NOSE, w, h), Combine::Subtract)
+        .combine(&draw(&faces, &ROUND_EYES, w, h), Combine::Subtract)
 }
 
 /// The points of each face the landmarker saw.

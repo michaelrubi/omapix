@@ -1,12 +1,15 @@
 //! Finding blemishes on skin and healing them (docs/AI.md, feature 4).
 //!
-//! The finder is classical, not a model: spots are small patches darker or
-//! redder than the skin round them. It works at a scale where the eyes are
-//! about [`WORKING_IOD`] pixels apart, in CIE Lab, comparing a lightly
-//! blurred image with a heavily blurred one. Both blurs only see skin, so
-//! brows, lips and hair don't count as spots. The differences are measured
-//! against how much the skin varies as a rule, so smooth, oily and textured
-//! skin all use the same threshold. Round blobs of spot size are the spots.
+//! The finder is classical, not a model: it looks for blobs, patches darker
+//! or redder than the ring of skin round them, at several sizes, as blob
+//! detectors (SIFT's, for one) do. It works at a scale where the eyes are
+//! about [`WORKING_IOD`] pixels apart, in CIE Lab, and every blur only sees
+//! skin, so brows, lips and hair don't count. At each size, differences are
+//! measured against how much the skin varies at that size, so pores and
+//! stubble, which are everywhere, score low, while a pimple among them
+//! stands out. Lighter alone doesn't count (oily highlights), but a raised
+//! pimple lighter than dark skin counts by its redness. Creases and stray
+//! hairs are long rather than round, and are left.
 
 use rayon::prelude::*;
 
@@ -23,35 +26,41 @@ pub struct Spot {
     pub x: f32,
     pub y: f32,
     pub radius: f32,
-    /// How much it stands out: its peak difference from the skin round it,
-    /// in multiples of the skin's usual variation.
+    /// How much it stands out from the skin round it, in multiples of how
+    /// much the skin varies at its size.
     pub score: f32,
 }
 
 impl Spot {
-    /// The diameter of the Spot Healing dab that covers it: its found
-    /// outline is where it stands out most, and redness spreads further.
+    /// The diameter of the Spot Healing dab that covers it: with
+    /// [`HEAL_HARDNESS`], fully over the spot, fading out a little beyond.
     pub fn heal_size(&self) -> f32 {
-        self.radius * 3.0 + 4.0
+        self.radius * 2.6 + 4.0
     }
 }
 
+/// The healing dab's hardness: its middle 80 % covers fully.
+const HEAL_HARDNESS: f32 = 0.8;
+
 /// The distance between the eyes, in pixels, that spots are looked for at.
 const WORKING_IOD: f32 = 150.0;
-/// The lighter blur, taking out noise and pores, and the heavier one, the
-/// skin round a spot. Fractions of the distance between the eyes.
-const FINE: f32 = 0.006;
-const SURROUNDINGS: f32 = 0.12;
-/// Where a spot's outline is drawn.
-const OUTLINE: f32 = 3.0;
-/// The least score a spot can have. Below it, on real faces, is mostly
-/// pores and texture.
+/// The blob sizes looked at, half an octave apart, as the standard
+/// deviation of the blur that finds each, in fractions of the distance
+/// between the eyes. Spots are found at all but the first and the last
+/// two, which are only there to compare with: a blob that stands out most
+/// at the smallest size is a pore, and at the largest, shading or a
+/// flush.
+const SIZES: [f32; 9] = [0.0057, 0.008, 0.0113, 0.016, 0.0226, 0.032, 0.045, 0.064, 0.09];
+/// A spot's radius, in multiples of the blur that finds it best (measured
+/// on discs).
+const RADIUS: f32 = 1.9;
+/// How much wider the ring of skin a blob is compared with is.
+const SURROUND: f32 = 2.5;
+/// The least score a spot can have.
 pub const LEAST_SCORE: f32 = 4.0;
-/// Spot radii, as fractions of the distance between the eyes.
-const RADII: std::ops::RangeInclusive<f32> = 0.008..=0.06;
-/// How far from round a spot can be: the ratio of its longest axis to its
-/// shortest. Stray hairs and wrinkles are longer.
-const LONGEST: f32 = 3.0;
+/// How far from round a spot can be: the ratio of its curvatures across
+/// and along (SIFT uses 10; creases are longer).
+const LONGEST: f32 = 6.0;
 
 /// The spots on `skin` in `srgb` (8-bit sRGB, the same size), for faces
 /// with eyes `iod` pixels apart. Most prominent first.
@@ -92,123 +101,159 @@ pub fn find(srgb: &[[u8; 4]], skin: &Selection, iod: f32) -> Vec<Spot> {
             [l * m, a * m, m, 0.0]
         })
         .collect();
-    let normalised = |blurred: Vec<[f32; 4]>| -> Vec<[f32; 2]> {
-        blurred
+    let skin: Vec<f32> = weighted.iter().map(|p| p[2]).collect();
+    let scores: Vec<Vec<f32>> = SIZES
+        .par_iter()
+        .map(|size| blob_scores(&weighted, &skin, gw, gh, size * iod))
+        .collect();
+
+    let mut found = Vec::new();
+    for level in 1..SIZES.len() - 2 {
+        let [below, here, above] = [&scores[level - 1], &scores[level], &scores[level + 1]];
+        let sigma = SIZES[level] * iod;
+        for y in 1..gh - 1 {
+            for x in 1..gw - 1 {
+                let i = y * gw + x;
+                let v = here[i];
+                if v < LEAST_SCORE {
+                    continue;
+                }
+                // Highest of its neighbours, at its size and either side.
+                let peak = [-1isize, 0, 1].iter().all(|&dy| {
+                    [-1isize, 0, 1].iter().all(|&dx| {
+                        let j = (i as isize + dy * gw as isize + dx) as usize;
+                        below[j] <= v && above[j] <= v && (j == i || here[j] <= v)
+                    })
+                });
+                if peak && round(here, gw, gh, x, y, sigma) {
+                    // Its whole extent, redness round it and all: the
+                    // biggest size at which it still stands out a third as
+                    // much.
+                    let widest = (level..SIZES.len()).take_while(|&l| scores[l][i] >= v / 3.0).last().unwrap_or(level);
+                    // Still standing out at the biggest sizes: a flush or
+                    // shading, not a spot.
+                    if widest >= SIZES.len() - 2 {
+                        continue;
+                    }
+                    // Its middle: the peak at that size, which a highlight
+                    // on one side doesn't pull over.
+                    let (x, y) = climb(&scores[widest], gw, gh, x, y, SIZES[widest] * iod * RADIUS);
+                    found.push(Spot {
+                        x: x as f32,
+                        y: y as f32,
+                        radius: SIZES[widest] * iod * RADIUS,
+                        score: v,
+                    });
+                }
+            }
+        }
+    }
+
+    // Strongest first; one spot where the same one's found twice, but small
+    // spots in a big one are kept, since one big heal leaves them.
+    found.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut spots: Vec<Spot> = Vec::new();
+    for spot in found {
+        let overlaps = spots.iter().any(|s| (s.x - spot.x).hypot(s.y - spot.y) < s.radius.min(spot.radius));
+        if !overlaps && skin_round(&skin, gw, gh, &spot, iod) {
+            spots.push(spot);
+        }
+    }
+    let k = k as f32;
+    spots
+        .into_iter()
+        .map(|s| Spot {
+            x: bx as f32 + (s.x + 0.5) * k,
+            y: by as f32 + (s.y + 0.5) * k,
+            radius: s.radius * k,
+            score: s.score,
+        })
+        .collect()
+}
+
+/// How much each point stands out as a blob of Gaussian `sigma`: how much
+/// darker and redder it is, blurred by `sigma`, than blurred by
+/// [`SURROUND`] times as much, each against how much that varies over the
+/// skin.
+fn blob_scores(weighted: &[[f32; 4]], skin: &[f32], gw: usize, gh: usize, sigma: f32) -> Vec<f32> {
+    let lab = |sigma: f32| -> Vec<[f32; 2]> {
+        blur_buffer(weighted.to_vec(), gw, gh, sigma)
             .into_iter()
             .map(|[l, a, m, _]| if m > 1e-3 { [l / m, a / m] } else { [0.0; 2] })
             .collect()
     };
-    let fine = normalised(blur_buffer(weighted.clone(), gw, gh, (FINE * iod).max(0.7)));
-    let round = normalised(blur_buffer(weighted.clone(), gw, gh, SURROUNDINGS * iod));
-    let skin: Vec<f32> = weighted.iter().map(|p| p[2]).collect();
-
-    // Darker and redder than the surroundings.
-    let diff: Vec<[f32; 2]> = fine.iter().zip(&round).map(|(f, r)| [r[0] - f[0], f[1] - r[1]]).collect();
-    // The skin's usual variation, from the median absolute difference.
+    let (centre, round) = (lab(sigma.max(0.5)), lab(sigma * SURROUND));
+    // Darker, redder.
+    let diff: Vec<[f32; 2]> = centre.iter().zip(&round).map(|(c, r)| [r[0] - c[0], c[1] - r[1]]).collect();
+    // Darker counts, and so does lighter if it's also redder (a raised
+    // pimple on dark skin), but not lighter alone (a highlight).
+    let stands_out = |dark: f32, red: f32| if red > 0.0 { dark.abs().hypot(red) } else { dark.max(0.0) };
+    // How much it varies, from the median absolute difference.
     let spread = |c: usize| {
-        let mut all: Vec<f32> = diff.iter().zip(&skin).filter(|(_, m)| **m > 0.9).map(|(d, _)| d[c].abs()).collect();
+        let mut all: Vec<f32> = diff.iter().zip(skin).filter(|(_, m)| **m > 0.9).map(|(d, _)| d[c].abs()).collect();
         if all.is_empty() {
             return 1.0;
         }
         let mid = all.len() / 2;
-        (*all.select_nth_unstable_by(mid, f32::total_cmp).1).max(0.2)
+        (*all.select_nth_unstable_by(mid, f32::total_cmp).1).max(0.05)
     };
     let (dark, red) = (spread(0), spread(1));
-    let score: Vec<f32> = diff
-        .iter()
-        .zip(&skin)
-        .map(|(d, m)| {
-            if *m < 0.5 {
-                return 0.0;
-            }
-            (d[0].max(0.0) / dark).hypot(d[1].max(0.0) / red)
-        })
-        .collect();
-
-    let mut spots = Vec::new();
-    let mut seen = vec![false; gw * gh];
-    for start in 0..gw * gh {
-        if seen[start] || score[start] < OUTLINE {
-            continue;
-        }
-        let blob = flood(&score, &mut seen, gw, gh, start);
-        let Some(spot) = measure(&blob, &score, &skin, gw, gh, iod) else {
-            continue;
-        };
-        let k = k as f32;
-        spots.push(Spot {
-            x: bx as f32 + (spot.x + 0.5) * k,
-            y: by as f32 + (spot.y + 0.5) * k,
-            radius: spot.radius * k,
-            score: spot.score,
-        });
-    }
-    spots.sort_by(|a, b| b.score.total_cmp(&a.score));
-    spots
+    diff.iter()
+        .zip(skin)
+        .map(|(d, m)| if *m < 0.5 { 0.0 } else { stands_out(d[0] / dark, d[1] / red) })
+        .collect()
 }
 
-/// The pixels joined to `start` (8-connected) that score at least
-/// [`OUTLINE`], marking them seen.
-fn flood(score: &[f32], seen: &mut [bool], gw: usize, gh: usize, start: usize) -> Vec<usize> {
-    let mut blob = Vec::new();
-    let mut stack = vec![start];
-    seen[start] = true;
-    while let Some(i) = stack.pop() {
-        blob.push(i);
-        let (x, y) = ((i % gw) as isize, (i / gw) as isize);
+/// Where going uphill on `score` from (x, y) leads, going at most `reach`.
+fn climb(score: &[f32], gw: usize, gh: usize, mut x: usize, mut y: usize, reach: f32) -> (usize, usize) {
+    let (x0, y0) = (x as f32, y as f32);
+    loop {
+        let mut best = (x, y);
         for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
-            let (nx, ny) = (x + dx, y + dy);
-            if nx < 0 || ny < 0 || nx >= gw as isize || ny >= gh as isize {
+            let (nx, ny) = (x as isize + dx, y as isize + dy);
+            if nx < 0 || ny < 0 || nx as usize >= gw || ny as usize >= gh {
                 continue;
             }
-            let j = ny as usize * gw + nx as usize;
-            if !seen[j] && score[j] >= OUTLINE {
-                seen[j] = true;
-                stack.push(j);
+            let (nx, ny) = (nx as usize, ny as usize);
+            if score[ny * gw + nx] > score[best.1 * gw + best.0] && (nx as f32 - x0).hypot(ny as f32 - y0) <= reach {
+                best = (nx, ny);
             }
         }
+        if best == (x, y) {
+            return best;
+        }
+        (x, y) = best;
     }
-    blob
 }
 
-/// `blob` as a spot, in working pixels, if it's spot-sized, round enough,
-/// and has skin all round it.
-fn measure(blob: &[usize], score: &[f32], skin: &[f32], gw: usize, gh: usize, iod: f32) -> Option<Spot> {
-    let radius = (blob.len() as f32 / std::f32::consts::PI).sqrt();
-    let peak = blob.iter().map(|&i| score[i]).fold(0.0, f32::max);
-    if !RADII.contains(&(radius / iod)) || peak < LEAST_SCORE {
-        return None;
+/// Whether the peak of `score` at (x, y) is round rather than a ridge, from
+/// its curvatures (SIFT's edge test), measured 1.5 `sigma` either side.
+fn round(score: &[f32], gw: usize, gh: usize, x: usize, y: usize, sigma: f32) -> bool {
+    let h = ((sigma * 1.5).round() as usize).max(1);
+    if x < h || y < h || x + h >= gw || y + h >= gh {
+        return false;
     }
-    let n = blob.len() as f32;
-    let at = |i: usize| ((i % gw) as f32, (i / gw) as f32);
-    let (cx, cy) = blob.iter().map(|&i| at(i)).fold((0.0, 0.0), |(sx, sy), (x, y)| (sx + x / n, sy + y / n));
-    // Second moments: the spread along its longest and shortest axes.
-    let (mut xx, mut yy, mut xy) = (0.0, 0.0, 0.0);
-    for &i in blob {
-        let (x, y) = at(i);
-        xx += (x - cx).powi(2) / n;
-        yy += (y - cy).powi(2) / n;
-        xy += (x - cx) * (y - cy) / n;
-    }
-    let (mid, half) = ((xx + yy) / 2.0, (((xx - yy) / 2.0).powi(2) + xy * xy).sqrt());
-    if mid + half > LONGEST.powi(2) * (mid - half).max(0.25) {
-        return None;
-    }
-    // Skin all round: not at the edge of the face, a feature or the hair.
-    let ring = radius * 2.0 + 0.02 * iod;
-    for step in 0..12 {
-        let angle = step as f32 / 12.0 * std::f32::consts::TAU;
-        let (x, y) = (cx + angle.cos() * ring, cy + angle.sin() * ring);
-        if x < 0.0 || y < 0.0 || x >= gw as f32 || y >= gh as f32 || skin[y as usize * gw + x as usize] < 0.5 {
-            return None;
-        }
-    }
-    Some(Spot {
-        x: cx,
-        y: cy,
-        radius,
-        score: peak,
-    })
+    let at = |dx: isize, dy: isize| score[(y as isize + dy * h as isize) as usize * gw + (x as isize + dx * h as isize) as usize];
+    let v = at(0, 0);
+    let dxx = at(1, 0) + at(-1, 0) - 2.0 * v;
+    let dyy = at(0, 1) + at(0, -1) - 2.0 * v;
+    let dxy = (at(1, 1) + at(-1, -1) - at(1, -1) - at(-1, 1)) / 4.0;
+    let (trace, det) = (dxx + dyy, dxx * dyy - dxy * dxy);
+    trace < 0.0 && det > 0.0 && trace * trace / det < (LONGEST + 1.0).powi(2) / LONGEST
+}
+
+/// Whether `spot` (working pixels) is on skin, with skin all round it as
+/// far as healing matches its tone to: not at the edge of the face, a
+/// feature or the hair.
+fn skin_round(skin: &[f32], gw: usize, gh: usize, spot: &Spot, iod: f32) -> bool {
+    let on_skin = |x: f32, y: f32| x >= 0.0 && y >= 0.0 && x < gw as f32 && y < gh as f32 && skin[y as usize * gw + x as usize] >= 0.5;
+    on_skin(spot.x, spot.y)
+        && [spot.radius * 0.7, spot.radius * 2.5 + 0.02 * iod].iter().all(|ring| {
+            (0..12).all(|step| {
+                let angle = step as f32 / 12.0 * std::f32::consts::TAU;
+                on_skin(spot.x + angle.cos() * ring, spot.y + angle.sin() * ring)
+            })
+        })
 }
 
 fn to_linear(v: f32) -> f32 {
@@ -244,7 +289,7 @@ pub fn heal(doc: &mut Document, above: usize, spots: &[Spot]) -> u64 {
     for spot in spots {
         let settings = BrushSettings {
             size: spot.heal_size(),
-            hardness: 0.5,
+            hardness: HEAL_HARDNESS,
             ..Default::default()
         };
         let mut stroke = Stroke::new(settings, Paint::SpotHeal, surface.clone()).sampling(source.clone());
@@ -315,7 +360,7 @@ mod tests {
         assert!(near(400.0, 250.0), "{spots:?}");
         assert_eq!(spots.len(), 2, "{spots:?}");
         for s in &spots {
-            assert!((1.5..6.0).contains(&s.radius), "{s:?}");
+            assert!((2.0..10.0).contains(&s.radius), "{s:?}");
         }
     }
 
@@ -333,6 +378,23 @@ mod tests {
         let spots = find(&photo(), &skin, 150.0);
         assert_eq!(spots.len(), 1, "{spots:?}");
         assert!((spots[0].x - 400.0).hypot(spots[0].y - 250.0) < 3.0, "{spots:?}");
+    }
+
+    #[test]
+    fn spots_close_together_are_each_found() {
+        let photo: Vec<[u8; 4]> = (0..W * H)
+            .map(|i| {
+                let (x, y) = (i % W, i / W);
+                let mut rgb = skin_at(x, y);
+                disc(&mut rgb, (x, y), (300.0, 200.0, 3.0), [215.0, 110.0, 110.0]);
+                disc(&mut rgb, (x, y), (312.0, 200.0, 3.0), [215.0, 110.0, 110.0]);
+                [rgb[0] as u8, rgb[1] as u8, rgb[2] as u8, 255]
+            })
+            .collect();
+        let spots = find(&photo, &all_skin(), 150.0);
+        for x in [300.0, 312.0] {
+            assert!(spots.iter().any(|s| (s.x - x).hypot(s.y - 200.0) < 3.0), "{x}: {spots:?}");
+        }
     }
 
     #[test]
@@ -394,3 +456,4 @@ mod tests {
         }
     }
 }
+

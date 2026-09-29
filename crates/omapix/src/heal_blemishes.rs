@@ -7,13 +7,13 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
 
 use egui::{Color32, RichText, Slider, vec2};
-use omapix_ai::face::FACE_SKIN;
+use omapix_ai::face::Analysis;
 use omapix_engine::blemish::{self, LEAST_SCORE, Spot};
 use omapix_engine::ColorProfile;
 
 use crate::canvas::Render;
 use crate::editor::{Editor, Target};
-use crate::face_selection::{analyse, skin};
+use crate::face_selection::{analyse, blemish_skin};
 use crate::theme::Theme;
 
 pub struct HealBlemishes {
@@ -25,9 +25,10 @@ pub struct HealBlemishes {
 }
 
 /// The least score a spot needs at `sensitivity`: at 100 %, every spot
-/// found.
+/// found; at 50 %, about 9 (clear pimples and marks, few shadows or
+/// pores, on the test portraits); at 0 %, 20 (only obvious pimples).
 fn least_score(sensitivity: f32) -> f32 {
-    LEAST_SCORE + (100.0 - sensitivity) * 0.12
+    LEAST_SCORE * 5f32.powf((100.0 - sensitivity) / 100.0)
 }
 
 impl HealBlemishes {
@@ -125,23 +126,32 @@ fn find(image: &Render, profile: &ColorProfile) -> Result<Vec<Spot>, String> {
     image
         .with_image(|image| {
             let (srgb, analysis) = analyse(image, profile)?;
-            let iod = analysis
-                .faces
-                .iter()
-                .map(|(face, _)| {
-                    let [l, r] = [face.points[0], face.points[1]];
-                    (r[0] - l[0]).hypot(r[1] - l[1])
-                })
-                .fold(0.0, f32::max);
-            if iod == 0.0 {
+            if analysis.faces.is_empty() {
                 return Err("Found no faces".into());
             }
+            let iod = scale(&analysis).ok_or("The faces are turned too far to look for blemishes")?;
             // Face skin only, for now: the segmenter takes some clothes
             // and props for body skin.
-            let skin = skin(&analysis, image, &[FACE_SKIN]);
+            let skin = blemish_skin(&analysis, image);
             Ok(blemish::find(&srgb, &skin, iod))
         })
         .ok_or("The image isn't ready yet")?
+}
+
+/// The distance between the eyes of the largest face the landmarker saw
+/// (the others aren't looked at), as it would be facing the camera: a
+/// turned face's eyes look closer together, so it's at least a third of
+/// the face's height, as it is on faces facing the camera.
+fn scale(analysis: &Analysis) -> Option<f32> {
+    analysis
+        .faces
+        .iter()
+        .filter(|(_, points)| points.is_some())
+        .map(|(face, _)| {
+            let [l, r] = [face.points[0], face.points[1]];
+            (r[0] - l[0]).hypot(r[1] - l[1]).max((face.bounds[3] - face.bounds[1]) / 3.0)
+        })
+        .reduce(f32::max)
 }
 
 #[cfg(test)]
@@ -159,7 +169,7 @@ mod tests {
         let mut dialog = HealBlemishes {
             sensitivity: 100.0,
             finding: None,
-            found: vec![spot(20.0), spot(12.0), spot(6.0), spot(LEAST_SCORE)],
+            found: vec![spot(25.0), spot(12.0), spot(6.0), spot(LEAST_SCORE)],
         };
         assert_eq!(dialog.spots().len(), 4);
         dialog.sensitivity = 50.0;
@@ -213,61 +223,84 @@ mod tests {
         assert_eq!(editor.doc.layers.len(), 1);
     }
 
-    /// A look at a real photo: the spots found in `OMAPIX_FACE_PHOTO`
-    /// circled (green if healed at 50 %), beside the photo with every spot
-    /// healed, cropped round them, as `<photo>.ppm` in `OMAPIX_FACE_OUT`.
-    /// Needs the models (scripts/fetch-models.sh).
+    /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a
+    /// folder of them), the face skin with the spots found circled by
+    /// score (red 20 and up, green 10, cyan 7, yellow less), and beside it
+    /// those healed at 50 % (or `BLEMISH_SENSITIVITY`), as
+    /// `<photo>.png` in `OMAPIX_FACE_OUT`. Needs the models
+    /// (scripts/fetch-models.sh) and ImageMagick.
     #[test]
     #[ignore]
-    fn find_blemishes_in_a_photo() {
-        let (Ok(photo), Ok(out)) = (std::env::var("OMAPIX_FACE_PHOTO"), std::env::var("OMAPIX_FACE_OUT")) else {
+    fn find_blemishes_in_photos() {
+        let (Ok(photos), Ok(out)) = (std::env::var("OMAPIX_FACE_PHOTO"), std::env::var("OMAPIX_FACE_OUT")) else {
             return;
         };
-        let mut doc = omapix_engine::io::load(std::path::Path::new(&photo)).unwrap();
-        let before = doc.composite();
-        let render = Render::new(before.clone());
-        // Once to load the models, then timed.
-        find(&render, &doc.profile).unwrap();
-        let started = std::time::Instant::now();
-        let spots = find(&render, &doc.profile).unwrap();
-        eprintln!("{} spots in {:?}", spots.len(), started.elapsed());
-        for s in &spots {
-            eprintln!("  ({:.0}, {:.0}) r {:.1} score {:.1}", s.x, s.y, s.radius, s.score);
-        }
-        let started = std::time::Instant::now();
-        let top = doc.layers.len() - 1;
-        blemish::heal(&mut doc, top, &spots);
-        eprintln!("healed in {:?}", started.elapsed());
-        let after = doc.composite();
+        let photos = std::path::Path::new(&photos);
+        let mut paths: Vec<_> = match std::fs::read_dir(photos) {
+            Ok(dir) => dir.map(|e| e.unwrap().path()).collect(),
+            Err(_) => vec![photos.to_owned()],
+        };
+        paths.sort();
+        for path in paths {
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let mut doc = omapix_engine::io::load(&path).unwrap();
+            let before = doc.composite();
+            let (srgb, analysis) = analyse(&before, &doc.profile).unwrap();
+            let Some(iod) = scale(&analysis) else {
+                eprintln!("{name}: no faces seen well enough");
+                continue;
+            };
+            let boxes: Vec<_> = analysis.faces.iter().map(|(f, p)| (f.bounds[3] - f.bounds[1], p.is_some())).collect();
+            let skin = blemish_skin(&analysis, &before);
+            let started = std::time::Instant::now();
+            let spots = blemish::find(&srgb, &skin, iod);
+            let took = started.elapsed();
+            let sensitivity = std::env::var("BLEMISH_SENSITIVITY").map_or(50.0, |v| v.parse().unwrap());
+            let healed_spots: Vec<_> = spots.iter().copied().filter(|s| s.score >= least_score(sensitivity)).collect();
+            eprintln!(
+                "{name}: iod {iod:.0}, faces (height, seen) {boxes:?}, {} spots ({} healed) in {took:?}",
+                spots.len(),
+                healed_spots.len()
+            );
+            let top = doc.layers.len() - 1;
+            blemish::heal(&mut doc, top, &healed_spots);
+            let after = doc.composite();
 
-        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
-        for s in &spots {
-            x0 = x0.min(s.x as u32);
-            y0 = y0.min(s.y as u32);
-            x1 = x1.max(s.x as u32);
-            y1 = y1.max(s.y as u32);
-        }
-        let pad = 100;
-        let (x0, y0) = (x0.saturating_sub(pad), y0.saturating_sub(pad));
-        let (x1, y1) = ((x1 + pad).min(doc.width), (y1 + pad).min(doc.height));
-        let mut ppm = format!("P6 {} {} 255\n", (x1 - x0) * 2, y1 - y0).into_bytes();
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let p = before.get(x, y);
-                let mut rgb = [0, 1, 2].map(|c| (p[c] >> 8) as u8);
-                for s in &spots {
-                    let d = (x as f32 - s.x).hypot(y as f32 - s.y);
-                    if (d - s.heal_size() / 2.0).abs() < 0.7 {
-                        rgb = if s.score >= least_score(50.0) { [0, 255, 0] } else { [255, 255, 0] };
+            let Some([x0, y0, w, h]) = skin.bounds() else { continue };
+            // At most 1200 px across each half.
+            let step = (w.max(h) as f32 / 1200.0).max(1.0);
+            let (ow, oh) = ((w as f32 / step) as u32, (h as f32 / step) as u32);
+            let mut ppm = format!("P6 {} {} 255\n", ow * 2, oh).into_bytes();
+            for y in 0..oh {
+                for half in [&before, &after] {
+                    for x in 0..ow {
+                        let (ix, iy) = (x0 + (x as f32 * step) as u32, y0 + (y as f32 * step) as u32);
+                        let mut rgb = [0, 1, 2].map(|c| (half.get(ix, iy)[c] >> 8) as u8);
+                        if std::ptr::eq(half, &before) {
+                            let inside = |dx: f32| skin.at((ix as f32 + dx).min(before.width() as f32 - 1.0) as u32, iy) >= 0.5;
+                            if inside(0.0) != inside(step) {
+                                rgb = [0, 120, 255];
+                            }
+                            for s in &spots {
+                                let d = (ix as f32 - s.x).hypot(iy as f32 - s.y);
+                                if (d - s.heal_size() / 2.0).abs() < step * 0.8 {
+                                    rgb = match s.score {
+                                        v if v >= 20.0 => [255, 0, 0],
+                                        v if v >= 10.0 => [0, 255, 0],
+                                        v if v >= 7.0 => [0, 255, 255],
+                                        _ => [255, 255, 0],
+                                    };
+                                }
+                            }
+                        }
+                        ppm.extend(rgb);
                     }
                 }
-                ppm.extend(rgb);
             }
-            for x in x0..x1 {
-                ppm.extend([0, 1, 2].map(|c| (after.get(x, y)[c] >> 8) as u8));
-            }
+            let ppm_path = format!("{out}/{name}.ppm");
+            std::fs::write(&ppm_path, ppm).unwrap();
+            std::process::Command::new("magick").args([&ppm_path, &format!("{out}/{name}.png")]).status().unwrap();
+            std::fs::remove_file(ppm_path).unwrap();
         }
-        let name = std::path::Path::new(&photo).file_stem().unwrap().to_string_lossy().into_owned();
-        std::fs::write(format!("{out}/{name}.ppm"), ppm).unwrap();
     }
 }
