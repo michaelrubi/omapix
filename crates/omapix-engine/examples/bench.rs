@@ -50,6 +50,13 @@ fn main() {
     rot.apply_orientation(omapix_engine::tiled::Orientation::Rotate90Cw);
     println!("rotate 90cw     {:>8.0?}", t.elapsed());
 
+    let t = Instant::now();
+    doc.clone().resize_image(doc.width / 2, doc.height / 2);
+    println!("image size 50%  {:>8.0?}", t.elapsed());
+    let t = Instant::now();
+    doc.clone().resize_image(doc.width * 3 / 2, doc.height * 3 / 2);
+    println!("image size 150% {:>8.0?}", t.elapsed());
+
     let dir = std::env::temp_dir().join(format!("omapix-bench-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let t = Instant::now();

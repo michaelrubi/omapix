@@ -25,6 +25,7 @@ const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
 const LASSO_ICON: &str = "\u{f0c4}";
 const GRADIENT_ICON: &str = "\u{f069b}";
+const CROP_ICON: &str = "\u{f125}";
 const BUCKET_ICON: &str = "\u{f0266}";
 
 const MIN_SIZE: f32 = 1.0;
@@ -36,6 +37,7 @@ pub enum ToolGroup {
     Marquee,
     Lasso,
     Wand,
+    Crop,
     Eyedropper,
     Healing,
     Brush,
@@ -50,6 +52,7 @@ impl ToolGroup {
         ToolGroup::Marquee,
         ToolGroup::Lasso,
         ToolGroup::Wand,
+        ToolGroup::Crop,
         ToolGroup::Eyedropper,
         ToolGroup::Healing,
         ToolGroup::Brush,
@@ -64,6 +67,7 @@ impl ToolGroup {
             ToolGroup::Marquee => &[Tool::Marquee, Tool::EllipticalMarquee],
             ToolGroup::Lasso => &[Tool::Lasso],
             ToolGroup::Wand => &[Tool::ObjectSelection, Tool::QuickSelection, Tool::MagicWand],
+            ToolGroup::Crop => &[Tool::Crop],
             ToolGroup::Eyedropper => &[Tool::Eyedropper],
             ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
             ToolGroup::Brush => &[Tool::Brush],
@@ -79,6 +83,7 @@ impl ToolGroup {
             ToolGroup::Marquee => Key::M,
             ToolGroup::Lasso => Key::L,
             ToolGroup::Wand => Key::W,
+            ToolGroup::Crop => Key::C,
             ToolGroup::Eyedropper => Key::I,
             ToolGroup::Healing => Key::J,
             ToolGroup::Brush => Key::B,
@@ -111,6 +116,7 @@ pub enum Tool {
     Eyedropper,
     Gradient,
     PaintBucket,
+    Crop,
 }
 
 impl Tool {
@@ -131,6 +137,7 @@ impl Tool {
             Tool::Eyedropper => "Eyedropper",
             Tool::Gradient => "Gradient",
             Tool::PaintBucket => "Paint Bucket",
+            Tool::Crop => "Crop",
         }
     }
 
@@ -151,6 +158,7 @@ impl Tool {
             Tool::Eyedropper => EYEDROPPER_ICON,
             Tool::Gradient => GRADIENT_ICON,
             Tool::PaintBucket => BUCKET_ICON,
+            Tool::Crop => CROP_ICON,
         }
     }
 
@@ -170,6 +178,7 @@ impl Tool {
             Tool::CloneStamp => ToolGroup::CloneStamp,
             Tool::Eraser => ToolGroup::Eraser,
             Tool::Gradient | Tool::PaintBucket => ToolGroup::Gradient,
+            Tool::Crop => ToolGroup::Crop,
         }
     }
 
@@ -194,7 +203,8 @@ impl Tool {
 
     /// Tools that paint with a brush, and so show its outline.
     pub fn paints(self) -> bool {
-        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient | Tool::PaintBucket)
+        !self.selects()
+            && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient | Tool::PaintBucket | Tool::Crop)
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -476,7 +486,8 @@ impl Tools {
             | Tool::ObjectSelection
             | Tool::Eyedropper
             | Tool::Gradient
-            | Tool::PaintBucket => self.brush,
+            | Tool::PaintBucket
+            | Tool::Crop => self.brush,
             Tool::QuickSelection => self.quick,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
@@ -510,7 +521,8 @@ impl Tools {
             | Tool::ObjectSelection
             | Tool::Eyedropper
             | Tool::Gradient
-            | Tool::PaintBucket => &mut self.brush,
+            | Tool::PaintBucket
+            | Tool::Crop => &mut self.brush,
             Tool::QuickSelection => &mut self.quick,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
@@ -634,6 +646,7 @@ impl Tools {
             ToolGroup::Gradient => self.last_gradient,
             ToolGroup::Move => Tool::Move,
             ToolGroup::Lasso => Tool::Lasso,
+            ToolGroup::Crop => Tool::Crop,
             ToolGroup::Eyedropper => Tool::Eyedropper,
             ToolGroup::Brush => Tool::Brush,
             ToolGroup::CloneStamp => Tool::CloneStamp,
@@ -946,6 +959,13 @@ impl Tools {
             if self.tool == Tool::Move {
                 let hint = "Drag to move the layer, or the selected pixels · Alt+drag moves a \
                             copy · Shift constrains to 45° · arrow keys nudge (Shift: 10 px)";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
+            if self.tool == Tool::Crop {
+                let hint = "Drag the handles to resize the box (Shift keeps the proportions, Alt \
+                            from the centre) · drag inside to move it · drag outside for a new \
+                            one · Enter crops · Esc resets";
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
                 return;
             }

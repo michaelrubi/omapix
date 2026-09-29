@@ -213,6 +213,50 @@ impl Document {
             ch.pixels = ch.pixels.oriented(orientation);
         }
     }
+
+    /// Change the canvas to `width` × `height`, with the old top left corner
+    /// at (`dx`, `dy`): Image › Canvas Size, and Crop with the offsets
+    /// negative. Whatever falls outside is deleted. New areas are transparent
+    /// (unselected in the selection and alpha channels, and as masks read
+    /// by default), except on the bottom layer when `extension` gives them
+    /// a colour, as Photoshop's Background layer.
+    pub fn resize_canvas(&mut self, width: u32, height: u32, dx: i32, dy: i32, extension: Option<Pixel>) {
+        (self.width, self.height) = (width, height);
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let colour = extension.filter(|_| i == 0 && layer.has_pixels() && layer.parent.is_none());
+            let uncovered = colour.unwrap_or(layer.pixels.fill());
+            layer.pixels = layer.pixels.reframed(width, height, dx, dy, uncovered);
+            if let Some(mask) = &mut layer.mask {
+                mask.pixels = mask.pixels.reframed(width, height, dx, dy, mask.pixels.fill());
+            }
+        }
+        if let Some(sel) = &self.selection {
+            let coverage = sel.coverage.reframed(width, height, dx, dy, 0);
+            self.selection = Some(Selection::from_coverage(coverage));
+        }
+        for ch in &mut self.channels {
+            ch.pixels = ch.pixels.reframed(width, height, dx, dy, 0);
+        }
+    }
+
+    /// Resample the whole document to `width` × `height` (Image › Image
+    /// Size): every layer, mask, the selection and alpha channels.
+    pub fn resize_image(&mut self, width: u32, height: u32) {
+        use crate::transform::{Resampling::Bicubic, resized};
+        (self.width, self.height) = (width, height);
+        for layer in &mut self.layers {
+            layer.pixels = resized(&layer.pixels, width, height, Bicubic);
+            if let Some(mask) = &mut layer.mask {
+                mask.pixels = resized(&mask.pixels, width, height, Bicubic);
+            }
+        }
+        if let Some(sel) = &self.selection {
+            self.selection = Some(Selection::from_coverage(resized(&sel.coverage, width, height, Bicubic)));
+        }
+        for ch in &mut self.channels {
+            ch.pixels = resized(&ch.pixels, width, height, Bicubic);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -392,6 +436,49 @@ mod tests {
             d.channels[0].pixels.to_vec(),
             doc.channels[0].pixels.to_vec()
         );
+    }
+
+    #[test]
+    fn canvas_size_extends_and_crops_everything_together() {
+        let grey = [9000, 9000, 9000, 65535];
+        let mut doc = Document::from_image("t.tif".into(), &Raster::new(300, 200, vec![grey; 60000]), ColorProfile::srgb(), 16);
+        let mut top = Layer::empty(doc.next_layer_id(), "top", 300, 200);
+        top.pixels.tile_mut(0, 0)[0] = [1, 2, 3, 65535];
+        top.mask = Some(crate::layer::Mask::white(300, 200));
+        doc.layers.push(top);
+        doc.selection = Some(Selection::rectangle(300, 200, (0.0, 0.0), (10.0, 10.0)));
+        doc.channels.push(AlphaChannel { id: 99, name: "Alpha 1".into(), pixels: Tiled::new(300, 200, 65535) });
+
+        // 100 px more on the left and 50 on top, filled white on the bottom layer only.
+        let mut big = doc.clone();
+        big.resize_canvas(400, 250, 100, 50, Some([65535; 4]));
+        assert_eq!((big.width, big.height), (400, 250));
+        assert_eq!((big.layers[0].pixels.get(0, 0), big.layers[0].pixels.get(100, 50)), ([65535; 4], grey));
+        assert_eq!((big.layers[1].pixels.get(0, 0)[3], big.layers[1].pixels.get(100, 50)), (0, [1, 2, 3, 65535]));
+        assert_eq!(big.layers[1].mask.as_ref().unwrap().pixels.get(0, 0), 65535);
+        let sel = &big.selection.as_ref().unwrap().coverage;
+        assert_eq!((sel.get(105, 55), sel.get(5, 5)), (65535, 0));
+        assert_eq!((big.channels[0].pixels.get(0, 0), big.channels[0].pixels.get(399, 249)), (0, 65535));
+
+        // Cropping is the same with the offsets negative.
+        let mut crop = doc.clone();
+        crop.resize_canvas(50, 40, -1, -1, None);
+        assert_eq!((crop.width, crop.height, crop.layers[1].pixels.get(0, 0)[3]), (50, 40, 0));
+        assert_eq!(crop.layers[0].pixels.width(), 50);
+    }
+
+    #[test]
+    fn image_size_resamples_everything_together() {
+        let grey = [9000, 9000, 9000, 65535];
+        let mut doc = Document::from_image("t.tif".into(), &Raster::new(300, 200, vec![grey; 60000]), ColorProfile::srgb(), 16);
+        doc.layers[0].mask = Some(crate::layer::Mask::white(300, 200));
+        doc.selection = Some(Selection::rectangle(300, 200, (0.0, 0.0), (150.0, 200.0)));
+        doc.resize_image(150, 100);
+        assert_eq!((doc.width, doc.height), (150, 100));
+        assert_eq!(doc.layers[0].pixels.get(149, 99), grey);
+        assert_eq!(doc.layers[0].mask.as_ref().unwrap().pixels.width(), 150);
+        let sel = &doc.selection.as_ref().unwrap().coverage;
+        assert_eq!((sel.get(10, 50), sel.get(140, 50)), (65535, 0));
     }
 
     #[test]

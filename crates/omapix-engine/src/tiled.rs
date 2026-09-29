@@ -160,8 +160,15 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
     /// A copy moved by (`dx`, `dy`) pixels. Areas the move uncovers read as
     /// `uncovered`; whatever moves past the edges is lost.
     pub fn translated(&self, dx: i32, dy: i32, uncovered: T) -> Self {
+        self.reframed(self.width, self.height, dx, dy, uncovered)
+    }
+
+    /// A `width` × `height` copy with this image's top left corner at
+    /// (`dx`, `dy`): Image › Canvas Size and Crop. Areas it doesn't cover
+    /// read as `uncovered`; whatever falls outside is lost.
+    pub fn reframed(&self, width: u32, height: u32, dx: i32, dy: i32, uncovered: T) -> Self {
         let fill = self.fill;
-        if dx == 0 && dy == 0 {
+        if dx == 0 && dy == 0 && (width, height) == (self.width, self.height) {
             return self.clone();
         }
         let (w, h, t) = (
@@ -170,9 +177,9 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
             i64::from(TILE),
         );
         let (dx, dy) = (i64::from(dx), i64::from(dy));
-        Self::from_tiles(self.width, self.height, fill, |col, row| {
+        Self::from_tiles(width, height, fill, |col, row| {
             let (x0, y0) = (i64::from(col) * t, i64::from(row) * t);
-            let (x1, y1) = ((x0 + t).min(w), (y0 + t).min(h));
+            let (x1, y1) = ((x0 + t).min(i64::from(width)), (y0 + t).min(i64::from(height)));
             // The source area, clipped to the image. If it covers the whole
             // tile and only unwritten tiles, this tile stays unwritten too.
             let (sx0, sy0) = ((x0 - dx).max(0), (y0 - dy).max(0));

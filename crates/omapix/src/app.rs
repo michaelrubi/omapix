@@ -133,6 +133,39 @@ enum Dialog {
     DeletePreset {
         name: String,
     },
+    /// Image › Image Size, in pixels; `constrain` keeps the proportions.
+    ImageSize {
+        width: u32,
+        height: u32,
+        constrain: bool,
+    },
+    /// Image › Canvas Size: the image goes at `anchor` (0–2 across, 0–2
+    /// down), and new areas of the bottom layer are `extension`.
+    CanvasSize {
+        width: u32,
+        height: u32,
+        anchor: (u8, u8),
+        extension: Extension,
+    },
+}
+
+/// A drag on the Crop tool's box: on a handle or inside (with the box as
+/// it was), or outside, drawing a new box from there.
+#[derive(Clone, Copy)]
+enum CropDrag {
+    Box(crate::free_transform::Drag, [f64; 4]),
+    New(Pos2),
+}
+
+/// What Canvas Size fills new areas of the bottom layer with (Photoshop's
+/// "Canvas extension color").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Extension {
+    Background,
+    Foreground,
+    White,
+    Black,
+    Transparent,
 }
 
 /// Result of a background save or export: the document revision written,
@@ -154,7 +187,7 @@ struct FileJob {
 ///   default radius);
 /// - `Stroke x0 y0 x1 y1`: a brush stroke with the current tool, in image
 ///   pixels, through the same path as mouse strokes;
-/// - `Tool Move|Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso`, `Size n`, `Opacity percent`,
+/// - `Tool Move|Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso|Crop`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
 ///   `Look x y` (centre the view on an image point at 100 %),
 ///   `View image|mask|overlay|texture r|tone r|blur r` (what the canvas shows).
@@ -242,6 +275,7 @@ impl ScriptStep {
                 "Eyedropper" => ScriptStep::Tool(crate::tools::Tool::Eyedropper),
                 "Gradient" => ScriptStep::Tool(crate::tools::Tool::Gradient),
                 "PaintBucket" | "Bucket" => ScriptStep::Tool(crate::tools::Tool::PaintBucket),
+                "Crop" => ScriptStep::Tool(crate::tools::Tool::Crop),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -290,6 +324,10 @@ pub struct App {
     move_from: Option<Pos2>,
     /// A drag on Free Transform's box.
     transform_drag: Option<crate::free_transform::Drag>,
+    /// The Crop tool's box, (x0, y0, x1, y1) in image pixels; `None` is
+    /// round the whole image.
+    crop: Option<[f64; 4]>,
+    crop_drag: Option<CropDrag>,
     /// The Object Selection tool's model, running on its own thread.
     objects: crate::object_selection::ObjectSelection,
     /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
@@ -341,6 +379,8 @@ impl App {
             drawing: None,
             move_from: None,
             transform_drag: None,
+            crop: None,
+            crop_drag: None,
             objects: Default::default(),
             tools,
             tools_path,
@@ -572,6 +612,7 @@ impl App {
         self.drawing = None;
         self.move_from = None;
         self.transform_drag = None;
+        self.crop = None;
         self.pasting = None;
         self.dialog = None;
         self.pending_drops.clear();
@@ -795,6 +836,7 @@ impl App {
                 editor.doc.selection.is_some()
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
+            Command::Crop => editor.doc.selection.is_some(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
             Command::FillForeground
             | Command::FillBackground
@@ -853,9 +895,12 @@ impl App {
             Command::Rotate90Ccw,
             Command::FlipCanvasHorizontal,
             Command::FlipCanvasVertical,
+            Command::ImageSize,
+            Command::CanvasSize,
+            Command::Crop,
         ];
         if finishing.contains(&cmd) {
-            self.transform_drag = None;
+            (self.transform_drag, self.crop) = (None, None);
             if let Some(editor) = &mut self.editor {
                 editor.commit_transform();
             }
@@ -891,6 +936,17 @@ impl App {
                 self.dialog = Some(Dialog::AddNoise {
                     options: self.filters.noise,
                     preview: true,
+                });
+            }
+            Command::ImageSize | Command::CanvasSize => {
+                let Some(doc) = self.editor.as_ref().map(|e| &e.doc) else {
+                    return;
+                };
+                let (width, height) = (doc.width, doc.height);
+                self.dialog = Some(if cmd == Command::ImageSize {
+                    Dialog::ImageSize { width, height, constrain: true }
+                } else {
+                    Dialog::CanvasSize { width, height, anchor: (1, 1), extension: Extension::Background }
                 });
             }
             Command::MaskDensity => {
@@ -1100,6 +1156,38 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Image › Image Size: resample everything to `width` × `height`.
+    fn resize_image(&mut self, width: u32, height: u32) {
+        if let Some(editor) = &mut self.editor
+            && (width, height) != (editor.doc.width, editor.doc.height)
+        {
+            editor.edit("Image Size", |doc, _| doc.resize_image(width, height));
+        }
+    }
+
+    /// Image › Canvas Size: a `width` × `height` canvas with the image at
+    /// `anchor` (0–2 across and down).
+    fn resize_canvas(&mut self, width: u32, height: u32, (col, row): (u8, u8), extension: Extension) {
+        let colour = match extension {
+            Extension::Background => Some(self.tools.background),
+            Extension::Foreground => Some(self.tools.foreground),
+            Extension::White => Some([255; 3]),
+            Extension::Black => Some([0; 3]),
+            Extension::Transparent => None,
+        };
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let doc = &editor.doc;
+        if (width, height) == (doc.width, doc.height) {
+            return;
+        }
+        let offset = |new: u32, old: u32, at: u8| ((i64::from(new) - i64::from(old)) * i64::from(at) / 2) as i32;
+        let (dx, dy) = (offset(width, doc.width, col), offset(height, doc.height, row));
+        let pixel = colour.map(|rgb| doc.profile.from_srgb8(rgb).unwrap_or([0, 0, 0, u16::MAX]));
+        editor.edit("Canvas Size", |doc, _| doc.resize_canvas(width, height, dx, dy, pixel));
     }
 
     fn apply_add_noise(&mut self, options: NoiseOptions, ctx: &egui::Context) {
@@ -1437,6 +1525,8 @@ self.filters.remember(&filter);
                     self.menu_item(ui, Command::Invert, None);
                 });
                 ui.separator();
+                self.menu_item(ui, Command::ImageSize, None);
+                self.menu_item(ui, Command::CanvasSize, None);
                 ui.menu_button("Image Rotation", |ui| {
                     self.menu_item(ui, Command::Rotate180, None);
                     self.menu_item(ui, Command::Rotate90Cw, None);
@@ -1445,6 +1535,7 @@ self.filters.remember(&filter);
                     self.menu_item(ui, Command::FlipCanvasHorizontal, None);
                     self.menu_item(ui, Command::FlipCanvasVertical, None);
                 });
+                self.menu_item(ui, Command::Crop, None);
             });
             ui.menu_button("Layer", |ui| {
                 let several = self.editor.as_ref().is_some_and(|e| e.several_selected());
@@ -1610,6 +1701,12 @@ self.filters.remember(&filter);
                 if let Some((_, t)) = editor.transform() {
                     ui.label(RichText::new(crate::free_transform::readout(&t)).color(self.theme.accent));
                     ui.separator();
+                } else if self.tools.tool == crate::tools::Tool::Crop {
+                    let [x0, y0, x1, y1] = self.crop_box();
+                    let (w, h) = ((x1 - x0).round(), (y1 - y0).round());
+                    let text = format!("Crop: {w} × {h} px — Enter to crop, Esc to reset");
+                    ui.label(RichText::new(text).color(self.theme.accent));
+                    ui.separator();
                 }
                 if editor.hide_selection_edges && doc.selection.is_some() {
                     ui.label(
@@ -1708,6 +1805,7 @@ self.filters.remember(&filter);
             .as_ref()
             .map(|e| e.doc.file_name())
             .unwrap_or_default();
+        let (now_w, now_h) = self.editor.as_ref().map_or((1, 1), |e| (e.doc.width, e.doc.height));
         let mut modal = egui::Modal::new(egui::Id::new("dialog"));
         if matches!(dialog, Dialog::Radius { .. }) {
             // Keep the image visible while choosing a radius.
@@ -1946,6 +2044,88 @@ self.filters.remember(&filter);
                         }
                         if ok {
                             action = Some(Box::new(move |app, _| app.save_preset(&name)));
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::ImageSize { width, height, constrain } => {
+                    ui.heading("Image Size");
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(format!("Now {now_w} × {now_h} px")).color(hint));
+                    ui.add_space(4.0);
+                    let before = (*width, *height);
+                    size_field(ui, "Width", width, now_w);
+                    size_field(ui, "Height", height, now_h);
+                    let scaled = |v: u32, to: u32, from: u32| {
+                        ((f64::from(v) * f64::from(to) / f64::from(from)).round() as u32).clamp(1, MAX_SIDE)
+                    };
+                    if *constrain && *width != before.0 {
+                        *height = scaled(*width, now_h, now_w);
+                    } else if *constrain && *height != before.1 {
+                        *width = scaled(*height, now_w, now_h);
+                    }
+                    ui.checkbox(constrain, "Constrain Proportions");
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let (w, h) = (*width, *height);
+                            action = Some(Box::new(move |app, _| app.resize_image(w, h)));
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::CanvasSize { width, height, anchor, extension } => {
+                    ui.heading("Canvas Size");
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(format!("Now {now_w} × {now_h} px")).color(hint));
+                    ui.add_space(4.0);
+                    size_field(ui, "Width", width, now_w);
+                    size_field(ui, "Height", height, now_h);
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Anchor");
+                        egui::Grid::new("anchor").spacing([2.0, 2.0]).show(ui, |ui| {
+                            for row in 0..3 {
+                                for col in 0..3 {
+                                    let on = *anchor == (col, row);
+                                    let button = Button::new("").min_size(egui::vec2(20.0, 20.0)).selected(on);
+                                    if ui.add(button).clicked() {
+                                        *anchor = (col, row);
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    egui::ComboBox::from_label("Canvas extension color")
+                        .selected_text(format!("{extension:?}"))
+                        .show_ui(ui, |ui| {
+                            for e in [
+                                Extension::Background,
+                                Extension::Foreground,
+                                Extension::White,
+                                Extension::Black,
+                                Extension::Transparent,
+                            ] {
+                                ui.selectable_value(extension, e, format!("{e:?}"));
+                            }
+                        });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let (w, h, anchor, extension) = (*width, *height, *anchor, *extension);
+                            action = Some(Box::new(move |app, _| app.resize_canvas(w, h, anchor, extension)));
                             close = true;
                         }
                     });
@@ -2201,6 +2381,75 @@ self.filters.remember(&filter);
         }
     }
 
+    /// The Crop tool's box, round the whole image until it's changed.
+    fn crop_box(&self) -> [f64; 4] {
+        let whole = self.editor.as_ref().map_or([0.0; 4], |e| [0.0, 0.0, e.doc.width.into(), e.doc.height.into()]);
+        self.crop.unwrap_or(whole)
+    }
+
+    /// Enter crops to the Crop tool's box, and Esc puts it back round the
+    /// whole image.
+    fn check_crop_keys(&mut self, ctx: &egui::Context) {
+        if self.tools.tool != crate::tools::Tool::Crop || self.dialog.is_some() || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let key = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if key(egui::Key::Enter) {
+            let [x0, y0, x1, y1] = self.crop_box().map(|v| v.round() as i32);
+            if let Some(editor) = &mut self.editor {
+                crop(editor, x0, y0, (x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32);
+            }
+        } else if !key(egui::Key::Escape) {
+            return;
+        }
+        (self.crop, self.crop_drag) = (None, None);
+    }
+
+    /// Dragging the Crop tool's box: its handles resize it (Shift keeps
+    /// the proportions), inside moves it, and outside draws a new one.
+    fn crop_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        use crate::free_transform::{Drag, Handle, corners, hit};
+        use omapix_engine::transform::Affine;
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let rect = self.crop_box();
+        let bounding = |a: Pos2, b: Pos2| [a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)].map(f64::from);
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                self.crop_drag = Some(match hit(rect, &Affine::IDENTITY, p, reach) {
+                    Handle::Rotate => CropDrag::New(p),
+                    handle => CropDrag::Box(Drag::new(handle, p, Affine::IDENTITY), rect),
+                });
+            }
+            ToolInput::StrokeMove(p) => match self.crop_drag {
+                Some(CropDrag::Box(drag, start)) => {
+                    // Free Transform keeps the proportions unless Shift is
+                    // held; cropping, only while it is.
+                    let shift = modifiers.shift != matches!(drag.handle(), Handle::Scale { .. });
+                    let c = corners(start, &drag.to(start, p, shift, modifiers.alt));
+                    self.crop = Some(bounding(c[0], c[2]));
+                }
+                Some(CropDrag::New(from)) => {
+                    let to = if modifiers.shift { constrain_square(from, p) } else { p };
+                    self.crop = Some(bounding(from, to));
+                }
+                None => {}
+            },
+            ToolInput::StrokeEnd => {
+                self.crop_drag = None;
+                // A click outside leaves no box, so it goes back round the image.
+                if let Some([x0, y0, x1, y1]) = self.crop
+                    && (x1 - x0 < 1.0 || y1 - y0 < 1.0)
+                {
+                    self.crop = None;
+                }
+            }
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
+        }
+    }
+
     fn tool_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
         if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) {
             self.transform_input(input, modifiers);
@@ -2232,6 +2481,10 @@ self.filters.remember(&filter);
         }
         if self.tools.tool == crate::tools::Tool::Gradient {
             self.gradient_input(input, modifiers);
+            return;
+        }
+        if self.tools.tool == crate::tools::Tool::Crop {
+            self.crop_input(input, modifiers);
             return;
         }
         if self.tools.tool == crate::tools::Tool::PaintBucket {
@@ -2930,6 +3183,30 @@ fn radius_field(ui: &mut Ui, radius: &mut f32, label: &str, range: std::ops::Ran
     });
 }
 
+/// Crop the document to `w` × `h` from (`x`, `y`), which can be outside it
+/// (extending the canvas, transparent), deselecting.
+fn crop(editor: &mut Editor, x: i32, y: i32, w: u32, h: u32) {
+    if (x, y, w, h) != (0, 0, editor.doc.width, editor.doc.height) {
+        editor.edit("Crop", |doc, _| {
+            doc.resize_canvas(w, h, -x, -y, None);
+            doc.selection = None;
+        });
+    }
+}
+
+/// The largest width or height Image Size and Canvas Size allow.
+const MAX_SIDE: u32 = 30_000;
+
+/// A width or height in pixels, with the percentage of `now` it is.
+fn size_field(ui: &mut Ui, label: &str, value: &mut u32, now: u32) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value).range(1..=MAX_SIDE).suffix(" px"));
+        let percent = f64::from(*value) / f64::from(now) * 100.0;
+        ui.weak(format!("{percent:.0} %"));
+    });
+}
+
 /// The Lock commands, in Photoshop's order.
 const LOCKS: [Command; 4] = [
     Command::LockTransparent,
@@ -3437,6 +3714,12 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 doc.apply_orientation(orientation);
             });
         }
+        // Image › Crop: to the selection's bounds, deselecting.
+        Command::Crop => {
+            if let Some([x, y, w, h]) = editor.doc.selection.as_ref().and_then(|s| s.bounds()) {
+                crop(editor, x as i32, y as i32, w, h);
+            }
+        }
         Command::ZoomIn => editor.canvas.step_zoom(true),
         Command::ZoomOut => editor.canvas.step_zoom(false),
         Command::FitOnScreen => editor.canvas.fit(),
@@ -3500,6 +3783,7 @@ impl eframe::App for App {
         }
         self.check_escape(ctx);
         self.check_transform_keys(ctx);
+        self.check_crop_keys(ctx);
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
                 editor.end_live();
@@ -3652,6 +3936,11 @@ impl eframe::App for App {
             }
             _ => points.clone(),
         });
+        let crop_box = (tool == crate::tools::Tool::Crop).then(|| self.crop_box());
+        let crop_handle = self.crop_drag.map(|d| match d {
+            CropDrag::Box(drag, _) => drag.handle(),
+            CropDrag::New(_) => crate::free_transform::Handle::Rotate,
+        });
         let mut input = None;
         let mut menu_on = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -3698,7 +3987,20 @@ impl eframe::App for App {
                             crate::free_transform::cursor(bounds, &t, h)
                         });
                         (crate::free_transform::corners(bounds, &t), cursor)
+                    }).or_else(|| {
+                        // The Crop tool's box: outside it, a crosshair to draw a new one.
+                        let rect = crop_box.filter(|_| !tools_off)?;
+                        let t = omapix_engine::transform::Affine::IDENTITY;
+                        let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                        let handle = crop_handle.or_else(|| {
+                            Some(crate::free_transform::hit(rect, &t, editor.canvas.pointer?, reach))
+                        });
+                        let cursor = handle.map_or(egui::CursorIcon::Crosshair, |h| {
+                            crate::free_transform::cursor(rect, &t, h)
+                        });
+                        Some((crate::free_transform::corners(rect, &t), cursor))
                     }),
+                    crop: crop_box.is_some() && !tools_off,
                 };
                 let (tool_input, response) = editor.canvas.show(ui, pasteboard, overlay);
                 input = tool_input;
@@ -4172,6 +4474,8 @@ mod tests {
             drawing: None,
             move_from: None,
             transform_drag: None,
+            crop: None,
+            crop_drag: None,
             objects: Default::default(),
             script: VecDeque::new(),
             clipboard: Clipboard::new(false),
@@ -4726,18 +5030,7 @@ mod tests {
         let mut output = ctx.run_ui(input, |ui| {
             ui.allocate_ui(egui::vec2(800.0, 600.0), |ui| {
                 let editor = app.editor.as_mut().unwrap();
-                let overlay = crate::canvas::Overlay {
-                    tool: false,
-                    alt_samples: false,
-                    samples: false,
-                    brush: None,
-                    moves: false,
-                    source: None,
-                    selection: &[],
-                    drawing: None,
-                    badge: None,
-                    transform: None,
-                };
+                let overlay = crate::canvas::Overlay::default();
                 editor.canvas.show(ui, egui::Color32::BLACK, overlay);
             });
         });
@@ -5191,18 +5484,7 @@ mod tests {
         let mut output = ctx.run_ui(input, |ui| {
             ui.allocate_ui(egui::vec2(800.0, 600.0), |ui| {
                 let editor = app.editor.as_mut().unwrap();
-                let overlay = crate::canvas::Overlay {
-                    tool: false,
-                    alt_samples: false,
-                    samples: false,
-                    brush: None,
-                    moves: false,
-                    source: None,
-                    selection: &[],
-                    drawing: None,
-                    badge: None,
-                    transform: None,
-                };
+                let overlay = crate::canvas::Overlay::default();
                 editor.canvas.show(ui, egui::Color32::BLACK, overlay);
             });
         });
@@ -5410,6 +5692,56 @@ mod tests {
             app.editor.as_ref().unwrap().undo_label(),
             Some("Set Gray Point")
         );
+    }
+
+    #[test]
+    fn crop_tool_box_drags_and_crops_on_enter() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let editor = app.editor.as_mut().unwrap();
+        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)), 1.0);
+        let key = |app: &mut App, key| {
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut out = ctx.run_ui(input, |ui| app.check_crop_keys(ui.ctx()));
+            out.textures_delta.clear();
+        };
+        let drag = |app: &mut App, from: (f32, f32), to: (f32, f32), modifiers| {
+            app.tool_input(ToolInput::StrokeBegin(egui::pos2(from.0, from.1)), modifiers);
+            app.tool_input(ToolInput::StrokeMove(egui::pos2(to.0, to.1)), modifiers);
+            app.tool_input(ToolInput::StrokeEnd, modifiers);
+        };
+        let none = egui::Modifiers::NONE;
+        app.tools.select(crate::tools::Tool::Crop);
+
+        // The box starts round the whole 600 × 400 image. Its bottom right
+        // corner goes freely to (500, 250), then Shift keeps 2:1 from the top left.
+        assert_eq!(app.crop_box(), [0.0, 0.0, 600.0, 400.0]);
+        drag(&mut app, (600.0, 400.0), (500.0, 250.0), none);
+        assert_eq!(app.crop_box(), [0.0, 0.0, 500.0, 250.0]);
+        drag(&mut app, (500.0, 250.0), (300.0, 150.0), egui::Modifiers::SHIFT);
+        assert_eq!(app.crop_box(), [0.0, 0.0, 300.0, 150.0]);
+        // Inside moves it; outside draws a new one; Esc puts it back.
+        drag(&mut app, (100.0, 100.0), (150.0, 120.0), none);
+        assert_eq!(app.crop_box(), [50.0, 20.0, 350.0, 170.0]);
+        drag(&mut app, (580.0, 380.0), (400.0, 300.0), none);
+        assert_eq!(app.crop_box(), [400.0, 300.0, 580.0, 380.0]);
+        key(&mut app, egui::Key::Escape);
+        assert_eq!(app.crop_box(), [0.0, 0.0, 600.0, 400.0]);
+
+        // Enter crops to it, and the box goes back round the cropped image.
+        drag(&mut app, (0.0, 0.0), (100.0, 50.0), none);
+        key(&mut app, egui::Key::Enter);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!((editor.doc.width, editor.doc.height, editor.undo_label()), (500, 350, Some("Crop")));
+        assert!(editor.doc.selection.is_none());
+        assert_eq!(app.crop_box(), [0.0, 0.0, 500.0, 350.0]);
     }
 
     #[test]
@@ -6889,6 +7221,49 @@ mod tests {
         app.run(Command::Rotate180, &ctx);
         assert!(app.editor.as_ref().unwrap().transform().is_none());
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Rotate 180°"));
+    }
+
+    #[test]
+    fn image_size_canvas_size_and_crop_run_and_undo() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let size = |app: &App| {
+            let doc = &app.editor.as_ref().unwrap().doc;
+            (doc.width, doc.height)
+        };
+
+        // The dialogs start at the current size; OK applies what's typed.
+        app.run(Command::ImageSize, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::ImageSize { width: 600, height: 400, constrain: true })));
+        app.dialog = None;
+        app.resize_image(300, 200);
+        assert_eq!((size(&app), app.editor.as_ref().unwrap().undo_label()), ((300, 200), Some("Image Size")));
+        app.run(Command::Undo, &ctx);
+
+        // Canvas Size anchored top left, extended in black.
+        app.run(Command::CanvasSize, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::CanvasSize { anchor: (1, 1), .. })));
+        app.dialog = None;
+        app.resize_canvas(700, 450, (0, 0), Extension::Black);
+        let doc = &app.editor.as_ref().unwrap().doc;
+        assert_eq!((doc.width, doc.height), (700, 450));
+        assert_eq!(doc.layers[0].pixels.get(0, 0), [30000, 30000, 30000, 65535]);
+        assert_eq!(doc.layers[0].pixels.get(650, 420), [0, 0, 0, 65535]);
+        // Centred, shrinking crops half the difference off each side.
+        app.run(Command::Undo, &ctx);
+        app.resize_canvas(500, 400, (1, 1), Extension::Transparent);
+        let sel = &app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap();
+        assert_eq!(sel.bounds(), Some([50, 100, 100, 100]));
+        app.run(Command::Undo, &ctx);
+
+        // Crop goes to the selection (100, 100, 100 × 100) and deselects.
+        assert!(app.enabled(Command::Crop));
+        app.run(Command::Crop, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!((size(&app), editor.undo_label()), ((100, 100), Some("Crop")));
+        assert!(editor.doc.selection.is_none() && !app.enabled(Command::Crop));
+        app.run(Command::Undo, &ctx);
+        assert_eq!(size(&app), (600, 400));
     }
 
     #[test]
