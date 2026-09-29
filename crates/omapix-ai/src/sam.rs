@@ -4,19 +4,16 @@
 
 use ort::session::Session;
 use ort::value::Tensor;
-use rayon::prelude::*;
 
 use crate::Result;
-use crate::runtime::{find_model, session};
+use crate::find_model;
+use crate::runtime::{imagenet_input, session};
 
 /// The model's id, as darktable names its folder.
 pub const MODEL: &str = "mask-object-sam21-small";
 
 /// The encoder sees the image stretched to this square.
 const SIZE: usize = 1024;
-/// ImageNet's mean and spread, which the encoder was trained with.
-const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const STD: [f32; 3] = [0.229, 0.224, 0.225];
 /// The decoder's masks are this many pixels across.
 pub const MASK_SIZE: usize = 256;
 
@@ -52,39 +49,18 @@ fn error(e: impl std::fmt::Display) -> String {
 impl Sam {
     /// Load the model from Omapix's or darktable's model folder.
     pub fn load() -> Result<Self> {
-        let dir = find_model(MODEL).ok_or_else(|| {
+        let files = find_model(MODEL).ok_or_else(|| {
             format!("Object Selection needs the {MODEL} model: install it from darktable's AI preferences")
         })?;
         Ok(Self {
-            encoder: session(&dir.join("encoder.onnx"))?,
-            decoder: session(&dir.join("decoder.onnx"))?,
+            encoder: session(&files["encoder.onnx"])?,
+            decoder: session(&files["decoder.onnx"])?,
         })
     }
 
     /// Encode an image given as 8-bit sRGB, `width` × `height`.
     pub fn encode(&mut self, srgb: &[[u8; 4]], width: u32, height: u32) -> Result<Encoded> {
-        let (w, h) = (width as usize, height as usize);
-        // Averaged down (or stretched) to SIZE × SIZE, normalised, channels
-        // first.
-        let pixels: Vec<[f32; 3]> = (0..SIZE * SIZE)
-            .into_par_iter()
-            .map(|i| {
-                let (x, y) = (i % SIZE, i / SIZE);
-                let (x0, y0) = (x * w / SIZE, y * h / SIZE);
-                let (x1, y1) = (((x + 1) * w / SIZE).max(x0 + 1), ((y + 1) * h / SIZE).max(y0 + 1));
-                let mut sum = [0u32; 3];
-                for row in srgb[y0 * w..y1 * w].chunks(w) {
-                    for p in &row[x0..x1] {
-                        for c in 0..3 {
-                            sum[c] += u32::from(p[c]);
-                        }
-                    }
-                }
-                let n = ((x1 - x0) * (y1 - y0)) as f32 * 255.0;
-                [0, 1, 2].map(|c| (sum[c] as f32 / n - MEAN[c]) / STD[c])
-            })
-            .collect();
-        let planar: Vec<f32> = (0..3).flat_map(|c| pixels.iter().map(move |p| p[c])).collect();
+        let planar = imagenet_input(srgb, width, height, SIZE);
         let image = Tensor::from_array((vec![1i64, 3, SIZE as i64, SIZE as i64], planar)).map_err(error)?;
         let outputs = self.encoder.run(ort::inputs!["image" => image]).map_err(error)?;
         let features = ["image_embed", "high_res_feats_0", "high_res_feats_1"]

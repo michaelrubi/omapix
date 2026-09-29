@@ -51,6 +51,7 @@ pub enum Command {
     SelectAll,
     Deselect,
     InvertSelection,
+    SelectSubject,
     SelectSkin,
     SelectHair,
     BorderSelection,
@@ -117,6 +118,7 @@ pub enum Command {
     Crop,
     Liquify,
     BatchExport,
+    AiModels,
     Finish,
 }
 
@@ -184,6 +186,7 @@ impl Command {
         Command::SelectAll,
         Command::Deselect,
         Command::InvertSelection,
+        Command::SelectSubject,
         Command::SelectSkin,
         Command::SelectHair,
         Command::BorderSelection,
@@ -250,6 +253,7 @@ impl Command {
         Command::Crop,
         Command::Liquify,
         Command::BatchExport,
+        Command::AiModels,
         Command::Finish,
     ];
 
@@ -379,6 +383,7 @@ impl Command {
             Command::SelectAll => "All",
             Command::Deselect => "Deselect",
             Command::InvertSelection => "Inverse",
+            Command::SelectSubject => "Subject",
             Command::SelectSkin => "Skin",
             Command::SelectHair => "Hair",
             Command::BorderSelection => "Border…",
@@ -444,6 +449,7 @@ impl Command {
             Command::Crop => "Crop",
             Command::Liquify => "Liquify…",
             Command::BatchExport => "Batch Export…",
+            Command::AiModels => "AI Models…",
             Command::Finish => "Finish",
         }
     }

@@ -8,7 +8,8 @@ use ort::value::Tensor;
 use rayon::prelude::*;
 
 use crate::Result;
-use crate::runtime::{find_model, session};
+use crate::find_model;
+use crate::runtime::session;
 
 pub const DETECTOR: &str = "face-detect-yunet";
 pub const LANDMARKER: &str = "face-landmarks-mediapipe";
@@ -165,9 +166,9 @@ fn error(e: impl std::fmt::Display) -> String {
 }
 
 fn load(id: &str, file: &str) -> Result<Session> {
-    let dir =
+    let files =
         find_model(id).ok_or_else(|| format!("Face analysis needs the {id} model: run scripts/fetch-models.sh"))?;
-    session(&dir.join(file))
+    session(&files[file])
 }
 
 pub struct Faces {

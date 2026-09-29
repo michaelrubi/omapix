@@ -6,7 +6,8 @@ use ort::session::Session;
 use ort::value::Tensor;
 
 use crate::Result;
-use crate::runtime::{find_model, session};
+use crate::find_model;
+use crate::runtime::session;
 
 /// The model's id: its folder in Omapix's models (scripts/fetch-models.sh).
 pub const MODEL: &str = "inpaint-lama";
@@ -19,10 +20,10 @@ pub struct Lama {
 
 impl Lama {
     pub fn load() -> Result<Self> {
-        let dir = find_model(MODEL)
+        let files = find_model(MODEL)
             .ok_or_else(|| format!("Content-Aware Fill needs the {MODEL} model: run scripts/fetch-models.sh"))?;
         Ok(Self {
-            session: session(&dir.join("lama_fp32.onnx"))?,
+            session: session(&files["lama_fp32.onnx"])?,
         })
     }
 

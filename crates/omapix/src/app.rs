@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -21,6 +21,7 @@ use crate::canvas::ToolInput;
 use crate::settings::FilterSettings;
 use crate::tablet::Tablet;
 use crate::content_fill::ContentFill;
+use crate::select_subject::SelectSubject;
 use crate::face_selection::{FaceSelection, Part};
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
@@ -155,6 +156,43 @@ enum Dialog {
         settings: crate::settings::BatchExport,
         picking: Option<(bool, Receiver<Option<Vec<PathBuf>>>)>,
     },
+    /// Help › AI Models: where each of `omapix_ai::models::models()` was
+    /// found on disk, if it was, when the dialog opened.
+    AiModels(Vec<Option<HashMap<&'static str, PathBuf>>>),
+}
+
+/// The AI models `cmd` needs.
+fn models_for(cmd: Command) -> &'static [&'static str] {
+    use omapix_ai::face::{DETECTOR, LANDMARKER, SEGMENTER};
+    match cmd {
+        Command::SelectSubject => &[omapix_ai::subject::MODEL],
+        Command::ContentAwareFill => &[omapix_ai::lama::MODEL],
+        Command::SelectSkin | Command::SelectHair => &[DETECTOR, LANDMARKER, SEGMENTER],
+        _ => &[],
+    }
+}
+
+/// The names of the models `cmd` needs that aren't on disk, as last
+/// checked.
+fn missing_models(cmd: Command, on_disk: &HashMap<&'static str, bool>) -> Vec<&'static str> {
+    let models = omapix_ai::models::models();
+    models_for(cmd)
+        .iter()
+        .filter(|id| on_disk.get(*id) == Some(&false))
+        .filter_map(|id| models.iter().find(|m| m.id == *id).map(|m| m.name))
+        .collect()
+}
+
+/// Which AI models are on disk, found on a thread of its own.
+fn check_models(ctx: &egui::Context) -> Receiver<HashMap<&'static str, bool>> {
+    let (tx, rx) = channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let models = omapix_ai::models::models();
+        let _ = tx.send(models.iter().map(|m| (m.id, omapix_ai::find_model(m.id).is_some())).collect());
+        ctx.request_repaint();
+    });
+    rx
 }
 
 /// A drag on the Crop tool's box: on a handle or inside (with the box as
@@ -373,7 +411,13 @@ pub struct App {
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
     content_fill: ContentFill,
+    select_subject: SelectSubject,
     face_selection: FaceSelection,
+    /// Which AI models are on disk, by id, as last checked: on a thread at
+    /// startup (finding a shared model means reading it through), and
+    /// whenever Help › AI Models opens.
+    models: HashMap<&'static str, bool>,
+    models_check: Option<Receiver<HashMap<&'static str, bool>>>,
 }
 
 impl App {
@@ -446,7 +490,10 @@ impl App {
             v_down: false,
             tablet: Tablet::connect(cc),
             content_fill: ContentFill::default(),
+            select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            models: HashMap::new(),
+            models_check: Some(check_models(ctx)),
         };
         let warnings = crate::hotkeys::load();
         if !warnings.is_empty() {
@@ -655,6 +702,12 @@ impl App {
 
     /// Pick up results from background work.
     fn poll(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.models_check
+            && let Ok(models) = rx.try_recv()
+        {
+            self.models = models;
+            self.models_check = None;
+        }
         if let Some(theme) = self.theme_rx.try_iter().last() {
             ctx.set_visuals(theme.visuals());
             self.theme = theme;
@@ -667,6 +720,7 @@ impl App {
             let errors = [
                 self.objects.poll(ctx, editor),
                 self.content_fill.poll(editor),
+                self.select_subject.poll(editor),
                 self.face_selection.poll(editor),
             ];
             for e in errors.into_iter().flatten() {
@@ -825,7 +879,7 @@ impl App {
 
     fn enabled(&self, cmd: Command) -> bool {
         let Some(editor) = &self.editor else {
-            return matches!(cmd, Command::Open | Command::Quit | Command::BatchExport)
+            return matches!(cmd, Command::Open | Command::Quit | Command::BatchExport | Command::AiModels)
                 || (cmd == Command::ReopenLast && self.recent.last().is_some());
         };
         let view = matches!(
@@ -833,6 +887,9 @@ impl App {
             Command::ZoomIn | Command::ZoomOut | Command::FitOnScreen | Command::ActualPixels
         );
         if editor.busy().is_some() && !view && !matches!(cmd, Command::Quit) {
+            return false;
+        }
+        if !missing_models(cmd, &self.models).is_empty() {
             return false;
         }
         let doc = &editor.doc;
@@ -892,6 +949,7 @@ impl App {
                 editor.doc.selection.is_some()
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
+            Command::SelectSubject => !self.select_subject.busy(),
             Command::SelectSkin | Command::SelectHair => self.face_selection.busy().is_none(),
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
@@ -996,6 +1054,12 @@ impl App {
                     settings: self.filters.batch_export.clone(),
                     picking: None,
                 });
+            }
+            Command::AiModels => {
+                let models = omapix_ai::models::models();
+                let found: Vec<_> = models.iter().map(|m| omapix_ai::find_model(m.id)).collect();
+                self.models = models.iter().zip(&found).map(|(m, f)| (m.id, f.is_some())).collect();
+                self.dialog = Some(Dialog::AiModels(found));
             }
             Command::Finish => self.finish(),
             // On a mask, noise goes straight into it; on pixels, onto a
@@ -1105,6 +1169,13 @@ impl App {
             Command::ContentAwareFill => {
                 if let Some(editor) = &self.editor
                     && let Err(e) = self.content_fill.start(ctx, editor)
+                {
+                    self.message(e, true);
+                }
+            }
+            Command::SelectSubject => {
+                if let Some(editor) = &self.editor
+                    && let Err(e) = self.select_subject.start(ctx, editor)
                 {
                     self.message(e, true);
                 }
@@ -1454,7 +1525,14 @@ self.filters.remember(&filter);
         if let Some(shortcut) = cmd.shortcut() {
             button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
         }
-        if ui.add_enabled(self.enabled(cmd), button).clicked() {
+        let mut response = ui.add_enabled(self.enabled(cmd), button);
+        let missing = missing_models(cmd, &self.models);
+        if !missing.is_empty() {
+            let plural = if missing.len() > 1 { "s" } else { "" };
+            let text = format!("Needs the {} model{plural}: see Help › AI Models", missing.join(", "));
+            response = response.on_disabled_hover_text(text);
+        }
+        if response.clicked() {
             let ctx = ui.ctx().clone();
             self.run(cmd, &ctx);
         }
@@ -1720,6 +1798,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::Deselect, None);
                 self.menu_item(ui, Command::InvertSelection, None);
                 ui.separator();
+                self.menu_item(ui, Command::SelectSubject, None);
                 self.menu_item(ui, Command::SelectSkin, None);
                 self.menu_item(ui, Command::SelectHair, None);
                 ui.separator();
@@ -1805,6 +1884,9 @@ self.filters.remember(&filter);
                     self.menu_item(ui, command, Some(format!("{tick} {}", command.label())));
                 }
             });
+            ui.menu_button("Help", |ui| {
+                self.menu_item(ui, Command::AiModels, None);
+            });
         });
     }
 
@@ -1837,6 +1919,10 @@ self.filters.remember(&filter);
                 }
                 if self.content_fill.busy() {
                     ui.label(RichText::new("Filling the selection…").color(self.theme.accent));
+                    ui.separator();
+                }
+                if self.select_subject.busy() {
+                    ui.label(RichText::new("Finding the subject…").color(self.theme.accent));
                     ui.separator();
                 }
                 if let Some(part) = self.face_selection.busy() {
@@ -2289,6 +2375,38 @@ self.filters.remember(&filter);
                         }
                     });
                 }
+                Dialog::AiModels(found) => {
+                    ui.heading("AI Models");
+                    ui.add_space(8.0);
+                    for (model, files) in omapix_ai::models::models().iter().zip(found.iter()) {
+                        ui.label(RichText::new(model.name).strong());
+                        ui.label(format!("For {}", model.used_by));
+                        ui.label(RichText::new(model.licence).color(hint));
+                        match files.as_ref().and_then(|f| f.values().next()) {
+                            Some(path) => {
+                                let runs = match omapix_ai::on_gpu(path) {
+                                    Some(true) => " (GPU)",
+                                    Some(false) => " (CPU)",
+                                    None => "",
+                                };
+                                let folder = path.parent().unwrap_or(path);
+                                ui.label(RichText::new(format!("{}{runs}", folder.display())).color(hint));
+                            }
+                            None if model.files.iter().all(|f| f.url.is_none()) => {
+                                ui.label(RichText::new("Not installed: install it from darktable's AI preferences").color(warning));
+                            }
+                            None => {
+                                let size: u64 = model.files.iter().map(|f| f.bytes).sum();
+                                let text = format!("Not installed: run scripts/fetch-models.sh ({} MB)", size / 1_000_000);
+                                ui.label(RichText::new(text).color(warning));
+                            }
+                        }
+                        ui.add_space(8.0);
+                    }
+                    if ui.button("Close").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close = true;
+                    }
+                }
                 Dialog::DeletePreset { name } => {
                     ui.heading("Delete Preset");
                     ui.add_space(8.0);
@@ -2575,6 +2693,25 @@ self.filters.remember(&filter);
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if escape && self.properties.eyedropper.take().is_none() {
             editor.set_view(View::Image);
+        }
+    }
+
+    /// Esc deselects, once nothing else has taken it (Quick Mask is the
+    /// selection being painted, so it's left alone).
+    fn check_deselect(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if editor.doc.selection.is_none()
+            || editor.view() == View::QuickMask
+            || self.dialog.is_some()
+            || ctx.egui_wants_keyboard_input()
+            || egui::Popup::is_any_open(ctx)
+        {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.run(Command::Deselect, ctx);
         }
     }
 
@@ -4189,6 +4326,7 @@ impl eframe::App for App {
         self.check_escape(ctx);
         self.check_transform_keys(ctx);
         self.check_crop_keys(ctx);
+        self.check_deselect(ctx);
         self.liquify_held(ctx);
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
@@ -4906,7 +5044,10 @@ mod tests {
             v_down: false,
             tablet: None,
             content_fill: ContentFill::default(),
+            select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            models: HashMap::new(),
+            models_check: None,
         }
     }
 
@@ -6634,6 +6775,111 @@ mod tests {
         });
         out.textures_delta.clear();
         assert_eq!(app.properties.eyedropper, None);
+    }
+
+    #[test]
+    fn ai_models_says_where_each_model_is_or_how_to_get_it() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let models = omapix_ai::models::models();
+        let sam = models.iter().position(|m| m.id == omapix_ai::sam::MODEL).unwrap();
+        let mut found = vec![None; models.len()];
+        found[sam] = Some(HashMap::from([("encoder.onnx", PathBuf::from("/models/sam/encoder.onnx"))]));
+        app.dialog = Some(Dialog::AiModels(found));
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 1000.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(t) => texts.push(t.galley.text().to_owned()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, texts)),
+                    _ => {}
+                }
+            }
+            out.shapes.iter().for_each(|s| collect(&s.shape, &mut texts));
+            texts
+        };
+        // A modal's laid out on its first frame and drawn on the next.
+        frame(&mut app, vec![]);
+        let texts = frame(&mut app, vec![]);
+        for model in models {
+            assert!(texts.iter().any(|t| t == model.name), "{} in {texts:?}", model.name);
+        }
+        assert!(texts.iter().any(|t| t == "/models/sam"), "{texts:?}");
+        let missing = texts.iter().filter(|t| t.starts_with("Not installed: run scripts/fetch-models.sh")).count();
+        assert_eq!(missing, models.len() - 1, "{texts:?}");
+
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn ai_commands_are_greyed_out_without_their_model() {
+        let mut app = test_app();
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+        // Not checked yet: nothing's greyed out.
+        assert!(app.enabled(Command::SelectSubject) && app.enabled(Command::ContentAwareFill));
+        app.models = HashMap::from([(omapix_ai::subject::MODEL, false), (omapix_ai::lama::MODEL, true)]);
+        assert!(!app.enabled(Command::SelectSubject));
+        assert!(app.enabled(Command::ContentAwareFill));
+        app.models.insert(omapix_ai::lama::MODEL, false);
+        assert!(!app.enabled(Command::ContentAwareFill));
+        // Skin and Hair need all three face models.
+        assert!(app.enabled(Command::SelectSkin) && app.enabled(Command::SelectHair));
+        app.models.insert(omapix_ai::face::LANDMARKER, false);
+        assert!(!app.enabled(Command::SelectSkin) && !app.enabled(Command::SelectHair));
+        assert_eq!(missing_models(Command::SelectHair, &app.models), ["MediaPipe Face Landmarker"]);
+    }
+
+    #[test]
+    fn escape_deselects_but_not_in_quick_mask() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let escape = |app: &mut App| {
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut out = ctx.run_ui(input, |ui| {
+                app.check_escape(ui.ctx());
+                app.check_transform_keys(ui.ctx());
+                app.check_crop_keys(ui.ctx());
+                app.check_deselect(ui.ctx());
+            });
+            out.textures_delta.clear();
+        };
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+        escape(&mut app);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.doc.selection.is_none());
+        assert_eq!(editor.undo_label(), Some("Deselect"));
+
+        // Quick Mask is the selection being painted: Esc leaves it be.
+        app.run(Command::SelectAll, &ctx);
+        app.run(Command::QuickMask, &ctx);
+        escape(&mut app);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.view(), View::QuickMask);
+        assert!(editor.doc.selection.is_some());
     }
 
     #[test]
