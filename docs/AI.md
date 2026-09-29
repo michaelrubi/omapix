@@ -160,9 +160,17 @@ goes in the engine, where it can be tested without models.
     model, the checksum no longer matches, and Omapix asks for its own
     copy. If darktable changes its folder layout, only the search changes.
     Neither depends on how big Omapix gets, so sharing can stay.
+- `crates/omapix-ai/models.txt` lists each model's files, with their
+  sizes, SHA-256 and download URLs. Omapix and the script both read it,
+  so they can't disagree. A shared copy is found by its size first (just
+  a directory walk), then its checksum, which Omapix remembers while the
+  file's unchanged. Files in Omapix's own folder were checked when they
+  were downloaded, so only their size is checked. Extra folders go in
+  `~/.config/omapix/model_folders`, one a line.
 - `scripts/fetch-models.sh` downloads the default set with `curl`, checks
   the checksums, and prints each model's size and licence before
-  downloading. Omapix itself never touches the network.
+  downloading. Omapix itself never touches the network. SAM 2.1 has no
+  download URL yet: darktable installs it (as a zipped `.dtmodel`).
 - A Help › AI Models dialog lists what's installed, where from, the licence
   and GPU/CPU, and says how to run the script for what's missing.
 
@@ -213,6 +221,11 @@ full-length portrait, and on 12 MP and 60 MP files.
 - **Select › Subject.** Selects the person in one step, with a
   portrait-matting model (BiRefNet portrait, or MODNet as the lighter
   choice). Soft hair edges come out as partial selection, as in Photoshop.
+  - Done with BiRefNet portrait's fp16 export (490 MB): about 0.8 s at
+    1024 px on the GPU. The matte is refined like Object Selection's
+    mask, but kept soft (`refine::matte_coverage`).
+  - On the CPU, the fp16 export is unusably slow (over 10 minutes). A
+    CPU fallback needs the fp32 export (970 MB) or MODNet.
 - Both produce an ordinary `Selection`, so Feather, Invert, Add Mask and
   the marching ants all just work.
 
@@ -506,8 +519,8 @@ Default set, all usable for commercial work:
 
 | Use | Model | Size | Licence | Notes |
 |---|---|---|---|---|
-| Object Selection | SAM 2.1 Hiera Small | 180 MB | Apache-2.0 | Already installed via darktable. Tiny and Base Plus variants exist. |
-| Select Subject | BiRefNet portrait | ~200–900 MB (variant) | MIT | Best hair edges. MODNet (Apache-2.0, 25 MB) as the light option. |
+| Object Selection | SAM 2.1 Hiera Small | 180 MB | Apache-2.0 | Already installed via darktable. Tiny and Base Plus variants exist. Its training data includes SA-1B, under Meta's research-only licence (darktable's model card), so it doesn't strictly meet principle 4. |
+| Select Subject | BiRefNet portrait | 490 MB (fp16) | MIT | Trained on P3M-10k (MIT) and TR-humans (Apache-2.0). Best hair edges. MODNet (Apache-2.0, 25 MB) as the light option. |
 | Faces | YuNet | <1 MB | MIT | Fast, fine on CPU. |
 | Face points | MediaPipe Face Landmarker | 4.9 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. |
 | Skin, hair | MediaPipe multiclass selfie segmentation | 16 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. 256×256 input, so the guided filter matters. |
@@ -591,12 +604,11 @@ Reordered on 2026-09-29 (see Decisions).
    `omapix-ai` crate, on the CPU and with CUDA (once cuDNN is loaded
    first, see Runtime). One click on a portrait's face selects its skin.
    `crates/omapix-ai/examples/spike.rs` does it again.
-1. ~~**Groundwork and Object Selection.**~~ (done): Object Selection and
-   Quick Selection (click, box or brush, Shift and Alt; `omapix-ai`'s
-   runtime and SAM, and the engine's `refine::mask_coverage` with the
-   guided filter), and Content-Aware Fill with LaMa and `fetch-models.sh`.
-   Left for later: the model registry (shared folders, matched by
-   checksum) and Help › AI Models.
+1. ~~**Groundwork and Object Selection.**~~ (done, 2026-09-29): Object
+   Selection (click or box, Shift and Alt; `omapix-ai`'s runtime and SAM,
+   and the engine's `refine::mask_coverage` with the guided filter), the
+   model registry with checksums (`models.txt`), `fetch-models.sh`,
+   Select › Subject and Help › AI Models.
 2. **Face analysis and masks**, per face and per person. Select › Skin,
    Hair, Eyes, Lips, Teeth, and masks from them. Everything after this
    needs these masks, so it comes first.
@@ -629,8 +641,7 @@ Reordered on 2026-09-29 (see Decisions).
     photo, while Generative Fill is for the occasional big removal or
     extension. By then Arch's ONNX Runtime should have reached 1.30. Starts
     with a spike: memory, speed, and unloading.
-11. **Select › Subject** (MODNet or BiRefNet), and **AI upscaling** for
-    print enlargements in Image Size (darktable's RealPLKSR, MIT, already
+11. **AI upscaling** for print enlargements in Image Size (darktable's RealPLKSR, MIT, already
     on disk).
 12. **Body Reshape**, with the pose model and background protection.
 13. **Later:**
@@ -647,8 +658,9 @@ full-length portrait (4024×6048), and two people, one in profile
 - **Models.** YuNet is OpenCV Zoo's ONNX file. MediaPipe only publishes
   the other two as TFLite. `tf2onnx` converts both cleanly, and so do the
   ONNX copies on Hugging Face from `senty-au`: all four match TFLite to
-  within 5e-4 on random inputs. `fetch-models.sh` downloads those copies,
-  pinned by revision and checksum, so it needs no Python or TensorFlow.
+  within 5e-4 on random inputs. `models.txt` points `fetch-models.sh` at
+  those copies, pinned by revision and checksum, so it needs no Python or
+  TensorFlow.
 - **Inputs.** From the TFLite metadata: the segmenter wants RGB in −1 to
   1, and the landmarker RGB in 0 to 1. YuNet wants BGR in 0 to 255, in a
   640 × 640 square. The segmenter's classes are background, hair, body

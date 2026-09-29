@@ -19,6 +19,20 @@ const WORKING: usize = 2048;
 /// smoothly, snapped to the edges of the image's luminance with a guided
 /// filter, then scaled up to full size.
 pub fn mask_coverage(logits: &[f32], lw: usize, lh: usize, threshold: f32, image: &Raster) -> Tiled<u16> {
+    coverage(logits, lw, lh, image, |v| if v > threshold { 1.0 } else { 0.0 })
+}
+
+/// `matte` (`lw` × `lh`, 0–1, stretched over the whole image: a matting
+/// model's answer) as selection coverage the size of `image`, as
+/// [`mask_coverage`] makes it, but kept soft, so hair comes out partly
+/// selected.
+pub fn matte_coverage(matte: &[f32], lw: usize, lh: usize, image: &Raster) -> Tiled<u16> {
+    coverage(matte, lw, lh, image, |v| v)
+}
+
+/// `values`, interpolated and then made coverage by `inside`, snapped to
+/// the image's edges and scaled up to its size.
+fn coverage(values: &[f32], lw: usize, lh: usize, image: &Raster, inside: impl Fn(f32) -> f32 + Sync) -> Tiled<u16> {
     let (width, height) = (image.width() as usize, image.height() as usize);
     let k = (width.max(height) as f32 / WORKING as f32).max(1.0);
     let (gw, gh) = (((width as f32 / k).round() as usize).max(1), ((height as f32 / k).round() as usize).max(1));
@@ -42,14 +56,10 @@ pub fn mask_coverage(logits: &[f32], lw: usize, lh: usize, threshold: f32, image
         })
         .collect();
 
-    // Inside where the logits, interpolated, are positive: a smooth outline
-    // rather than the model's blocky pixels.
+    // Interpolated: a smooth outline rather than the model's blocky pixels.
     let inside: Vec<f32> = (0..gw * gh)
         .into_par_iter()
-        .map(|i| {
-            let v = sample(logits, lw, lh, centre(i % gw, gw, lw), centre(i / gw, gh, lh));
-            if v > threshold { 1.0 } else { 0.0 }
-        })
+        .map(|i| inside(sample(values, lw, lh, centre(i % gw, gw, lw), centre(i / gw, gh, lh))))
         .collect();
 
     // The model's pixels are this many working pixels across; the guided

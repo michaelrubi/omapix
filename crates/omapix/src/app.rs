@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -21,6 +21,7 @@ use crate::canvas::ToolInput;
 use crate::settings::FilterSettings;
 use crate::tablet::Tablet;
 use crate::content_fill::ContentFill;
+use crate::select_subject::SelectSubject;
 use crate::face_selection::{FaceSelection, Part};
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
@@ -155,6 +156,9 @@ enum Dialog {
         settings: crate::settings::BatchExport,
         picking: Option<(bool, Receiver<Option<Vec<PathBuf>>>)>,
     },
+    /// Help › AI Models: where each of `omapix_ai::models::models()` was
+    /// found on disk, if it was, when the dialog opened.
+    AiModels(Vec<Option<HashMap<&'static str, PathBuf>>>),
 }
 
 /// A drag on the Crop tool's box: on a handle or inside (with the box as
@@ -373,6 +377,7 @@ pub struct App {
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
     content_fill: ContentFill,
+    select_subject: SelectSubject,
     face_selection: FaceSelection,
 }
 
@@ -446,6 +451,7 @@ impl App {
             v_down: false,
             tablet: Tablet::connect(cc),
             content_fill: ContentFill::default(),
+            select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
         };
         let warnings = crate::hotkeys::load();
@@ -667,6 +673,7 @@ impl App {
             let errors = [
                 self.objects.poll(ctx, editor),
                 self.content_fill.poll(editor),
+                self.select_subject.poll(editor),
                 self.face_selection.poll(editor),
             ];
             for e in errors.into_iter().flatten() {
@@ -825,7 +832,7 @@ impl App {
 
     fn enabled(&self, cmd: Command) -> bool {
         let Some(editor) = &self.editor else {
-            return matches!(cmd, Command::Open | Command::Quit | Command::BatchExport)
+            return matches!(cmd, Command::Open | Command::Quit | Command::BatchExport | Command::AiModels)
                 || (cmd == Command::ReopenLast && self.recent.last().is_some());
         };
         let view = matches!(
@@ -892,6 +899,7 @@ impl App {
                 editor.doc.selection.is_some()
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
+            Command::SelectSubject => !self.select_subject.busy(),
             Command::SelectSkin | Command::SelectHair => self.face_selection.busy().is_none(),
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
@@ -996,6 +1004,10 @@ impl App {
                     settings: self.filters.batch_export.clone(),
                     picking: None,
                 });
+            }
+            Command::AiModels => {
+                let found = omapix_ai::models::models().iter().map(|m| omapix_ai::find_model(m.id)).collect();
+                self.dialog = Some(Dialog::AiModels(found));
             }
             Command::Finish => self.finish(),
             // On a mask, noise goes straight into it; on pixels, onto a
@@ -1105,6 +1117,13 @@ impl App {
             Command::ContentAwareFill => {
                 if let Some(editor) = &self.editor
                     && let Err(e) = self.content_fill.start(ctx, editor)
+                {
+                    self.message(e, true);
+                }
+            }
+            Command::SelectSubject => {
+                if let Some(editor) = &self.editor
+                    && let Err(e) = self.select_subject.start(ctx, editor)
                 {
                     self.message(e, true);
                 }
@@ -1720,6 +1739,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::Deselect, None);
                 self.menu_item(ui, Command::InvertSelection, None);
                 ui.separator();
+                self.menu_item(ui, Command::SelectSubject, None);
                 self.menu_item(ui, Command::SelectSkin, None);
                 self.menu_item(ui, Command::SelectHair, None);
                 ui.separator();
@@ -1805,6 +1825,9 @@ self.filters.remember(&filter);
                     self.menu_item(ui, command, Some(format!("{tick} {}", command.label())));
                 }
             });
+            ui.menu_button("Help", |ui| {
+                self.menu_item(ui, Command::AiModels, None);
+            });
         });
     }
 
@@ -1837,6 +1860,10 @@ self.filters.remember(&filter);
                 }
                 if self.content_fill.busy() {
                     ui.label(RichText::new("Filling the selection…").color(self.theme.accent));
+                    ui.separator();
+                }
+                if self.select_subject.busy() {
+                    ui.label(RichText::new("Finding the subject…").color(self.theme.accent));
                     ui.separator();
                 }
                 if let Some(part) = self.face_selection.busy() {
@@ -2288,6 +2315,38 @@ self.filters.remember(&filter);
                             close = true;
                         }
                     });
+                }
+                Dialog::AiModels(found) => {
+                    ui.heading("AI Models");
+                    ui.add_space(8.0);
+                    for (model, files) in omapix_ai::models::models().iter().zip(found.iter()) {
+                        ui.label(RichText::new(model.name).strong());
+                        ui.label(format!("For {}", model.used_by));
+                        ui.label(RichText::new(model.licence).color(hint));
+                        match files.as_ref().and_then(|f| f.values().next()) {
+                            Some(path) => {
+                                let runs = match omapix_ai::on_gpu(path) {
+                                    Some(true) => " (GPU)",
+                                    Some(false) => " (CPU)",
+                                    None => "",
+                                };
+                                let folder = path.parent().unwrap_or(path);
+                                ui.label(RichText::new(format!("{}{runs}", folder.display())).color(hint));
+                            }
+                            None if model.files.iter().all(|f| f.url.is_none()) => {
+                                ui.label(RichText::new("Not installed: install it from darktable's AI preferences").color(warning));
+                            }
+                            None => {
+                                let size: u64 = model.files.iter().map(|f| f.bytes).sum();
+                                let text = format!("Not installed: run scripts/fetch-models.sh ({} MB)", size / 1_000_000);
+                                ui.label(RichText::new(text).color(warning));
+                            }
+                        }
+                        ui.add_space(8.0);
+                    }
+                    if ui.button("Close").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close = true;
+                    }
                 }
                 Dialog::DeletePreset { name } => {
                     ui.heading("Delete Preset");
@@ -4926,6 +4985,7 @@ mod tests {
             v_down: false,
             tablet: None,
             content_fill: ContentFill::default(),
+            select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
         }
     }
@@ -6654,6 +6714,57 @@ mod tests {
         });
         out.textures_delta.clear();
         assert_eq!(app.properties.eyedropper, None);
+    }
+
+    #[test]
+    fn ai_models_says_where_each_model_is_or_how_to_get_it() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let models = omapix_ai::models::models();
+        let sam = models.iter().position(|m| m.id == omapix_ai::sam::MODEL).unwrap();
+        let mut found = vec![None; models.len()];
+        found[sam] = Some(HashMap::from([("encoder.onnx", PathBuf::from("/models/sam/encoder.onnx"))]));
+        app.dialog = Some(Dialog::AiModels(found));
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 1000.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(t) => texts.push(t.galley.text().to_owned()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, texts)),
+                    _ => {}
+                }
+            }
+            out.shapes.iter().for_each(|s| collect(&s.shape, &mut texts));
+            texts
+        };
+        // A modal's laid out on its first frame and drawn on the next.
+        frame(&mut app, vec![]);
+        let texts = frame(&mut app, vec![]);
+        for model in models {
+            assert!(texts.iter().any(|t| t == model.name), "{} in {texts:?}", model.name);
+        }
+        assert!(texts.iter().any(|t| t == "/models/sam"), "{texts:?}");
+        let missing = texts.iter().filter(|t| t.starts_with("Not installed: run scripts/fetch-models.sh")).count();
+        assert_eq!(missing, models.len() - 1, "{texts:?}");
+
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.dialog.is_none());
     }
 
     #[test]

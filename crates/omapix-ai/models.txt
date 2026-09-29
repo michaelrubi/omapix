@@ -1,0 +1,25 @@
+# The AI models Omapix uses (docs/AI.md, "Models on disk"), read by Omapix
+# (omapix-ai's models.rs) and by scripts/fetch-models.sh. Fields are split
+# by |, one model or file per line:
+#
+# model|id|name|used by|licence|author|source|task|arch
+# file|id|file name|bytes|SHA-256|URL (none: darktable installs it)
+
+model|mask-object-sam21-small|SAM 2.1 Hiera Small|Object Selection, Quick Selection|Apache-2.0 (trained on SA-V, CC BY 4.0, and SA-1B, Meta's research licence)|Meta|https://github.com/facebookresearch/sam2|mask|sam2
+file|mask-object-sam21-small|encoder.onnx|162683048|82ee8774d6c362de06b35481ff6e6e68bb33ed5973aee8c45c606dfae7300d06|
+file|mask-object-sam21-small|decoder.onnx|20603850|606d43f1f16e2c61dafb93d7781f7461c9604baf10aaf372ddf77e3bdddb1e8d|
+
+model|mask-subject-birefnet-portrait|BiRefNet portrait|Select Subject|MIT (trained on P3M-10k, MIT, and TR-humans, Apache-2.0)|Peng Zheng et al. (BiRefNet), onnx-community (ONNX export)|https://huggingface.co/onnx-community/BiRefNet-portrait-ONNX|mask|birefnet
+file|mask-subject-birefnet-portrait|model_fp16.onnx|489666272|4c05930c0b6f1418d02eb1de81c46fe37638ba54f5a93adeb5c674521db10110|https://huggingface.co/onnx-community/BiRefNet-portrait-ONNX/resolve/dd7167f6a8b54ff7efc29a4c988938d79866464f/onnx/model_fp16.onnx
+
+model|inpaint-lama|LaMa|Content-Aware Fill|Apache-2.0 (trained on Places2)|Samsung AI Center (LaMa), Carve (ONNX export)|https://huggingface.co/Carve/LaMa-ONNX|inpaint|lama
+file|inpaint-lama|lama_fp32.onnx|208044816|1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6|https://huggingface.co/Carve/LaMa-ONNX/resolve/c3c0c9e468934d62e79c329e35d82dd09ff8c444/lama_fp32.onnx
+
+model|face-detect-yunet|YuNet|Select Skin, Select Hair|MIT|Shiqi Yu et al. (YuNet), OpenCV Zoo|https://huggingface.co/opencv/face_detection_yunet|detect|yunet
+file|face-detect-yunet|face_detection_yunet_2023mar.onnx|232589|8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4|https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/face_detection_yunet_2023mar.onnx
+
+model|face-landmarks-mediapipe|MediaPipe Face Landmarker|Select Skin|Apache-2.0|Google (MediaPipe Face Landmarker), senty-au (ONNX export)|https://huggingface.co/senty-au/face_landmarks_detector-ONNX|landmarks|mediapipe-face-mesh-v2
+file|face-landmarks-mediapipe|face_landmarks_detector.onnx|4920995|7d6e82dee82a1dca5fbddb282b3cc74571833a530de317fc22ae325c3358beeb|https://huggingface.co/senty-au/face_landmarks_detector-ONNX/resolve/337d58218b5b1cc597ca3c67360880b920f6ce7b/onnx/model.onnx
+
+model|mask-selfie-multiclass|MediaPipe multiclass selfie segmentation|Select Skin, Select Hair|Apache-2.0|Google (MediaPipe multiclass selfie segmentation), senty-au (ONNX export)|https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX|mask|mediapipe-selfie-multiclass
+file|mask-selfie-multiclass|selfie_multiclass_256x256.onnx|16454560|35ec1ecd9ee7f85073c99c00020b7f6751b69506eeacf683bc8665f6117f85b0|https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX/resolve/6db8421a7150ac20558f2c24675078eb3a1a04d0/onnx/model.onnx
