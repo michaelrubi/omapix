@@ -219,10 +219,10 @@ impl LinearSrgbTransform {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn linear_prophoto() -> ColorProfile {
+    pub(crate) fn linear_prophoto() -> ColorProfile {
         let curve = ToneCurve::new(1.0);
         let primaries = CIExyYTRIPLE {
             Red: CIExyY {

@@ -128,6 +128,7 @@ enum Dialog {
     BlendingOptions(crate::blending_options::BlendingOptions),
     SelectAndMask(crate::select_and_mask::SelectAndMask),
     HealBlemishes(crate::heal_blemishes::HealBlemishes),
+    Denoise(crate::denoise::Denoise),
     /// Name the selected adjustment layers to keep as a preset.
     SavePreset {
         name: String,
@@ -168,6 +169,7 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
     match cmd {
         Command::SelectSubject => &[omapix_ai::subject::MODEL],
         Command::ContentAwareFill => &[omapix_ai::lama::MODEL],
+        Command::Denoise => &[omapix_ai::denoise::MODEL],
         Command::SelectSkin
         | Command::SelectHair
         | Command::SelectEyes
@@ -417,6 +419,7 @@ pub struct App {
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
     content_fill: ContentFill,
+    denoising: crate::denoise::Denoising,
     select_subject: SelectSubject,
     face_selection: FaceSelection,
     /// Which AI models are on disk, by id, as last checked: on a thread at
@@ -496,6 +499,7 @@ impl App {
             v_down: false,
             tablet: Tablet::connect(cc),
             content_fill: ContentFill::default(),
+            denoising: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             models: HashMap::new(),
@@ -726,6 +730,7 @@ impl App {
             let errors = [
                 self.objects.poll(ctx, editor),
                 self.content_fill.poll(editor),
+                self.denoising.poll(editor),
                 self.select_subject.poll(editor),
                 self.face_selection.poll(editor),
             ];
@@ -955,6 +960,7 @@ impl App {
                 editor.doc.selection.is_some()
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
+            Command::Denoise => self.denoising.busy().is_none(),
             Command::SelectSubject => !self.select_subject.busy(),
             Command::SelectSkin
             | Command::SelectHair
@@ -1288,6 +1294,14 @@ impl App {
                     radius: self.filters.high_pass_radius,
                     preview: None,
                 });
+            }
+            Command::Denoise => {
+                let Some(editor) = &self.editor else { return };
+                let (luminance, color) = (self.filters.denoise_luminance, self.filters.denoise_color);
+                match crate::denoise::Denoise::open(ctx, editor, luminance, color) {
+                    Ok(dialog) => self.dialog = Some(Dialog::Denoise(dialog)),
+                    Err(e) => self.message(e, true),
+                }
             }
             Command::HealBlemishes => {
                 let Some(editor) = &self.editor else { return };
@@ -1869,6 +1883,7 @@ self.filters.remember(&filter);
                 ui.menu_button("Noise", |ui| {
                     self.menu_item(ui, Command::AddNoise, None);
                     self.menu_item(ui, Command::ReduceNoise, None);
+                    self.menu_item(ui, Command::Denoise, None);
                 });
                 ui.menu_button("Blur", |ui| {
                     self.menu_item(ui, Command::GaussianBlur, None);
@@ -1950,6 +1965,10 @@ self.filters.remember(&filter);
                 }
                 if self.content_fill.busy() {
                     ui.label(RichText::new("Filling the selection…").color(self.theme.accent));
+                    ui.separator();
+                }
+                if let Some((done, total)) = self.denoising.busy() {
+                    ui.label(RichText::new(format!("Denoising… {done} of {total}")).color(self.theme.accent));
                     ui.separator();
                 }
                 if self.select_subject.busy() {
@@ -2054,6 +2073,21 @@ self.filters.remember(&filter);
                 }
                 Some(false) => dialog.cancel(editor),
                 None => return,
+            }
+            self.dialog = None;
+            return;
+        }
+        if let (Some(Dialog::Denoise(dialog)), Some(editor)) = (&mut self.dialog, &self.editor) {
+            match dialog.show(ctx, editor, &self.theme) {
+                Ok(Some(true)) => {
+                    dialog.apply(ctx, &mut self.denoising);
+                    self.filters.denoise_luminance = dialog.luminance;
+                    self.filters.denoise_color = dialog.color;
+                    self.filters.save();
+                }
+                Ok(Some(false)) => {}
+                Ok(None) => return,
+                Err(e) => self.message(e, true),
             }
             self.dialog = None;
             return;
@@ -2276,7 +2310,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) => {}
+                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) | Dialog::Denoise(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -5093,6 +5127,7 @@ mod tests {
             v_down: false,
             tablet: None,
             content_fill: ContentFill::default(),
+            denoising: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             models: HashMap::new(),
@@ -6861,8 +6896,11 @@ mod tests {
             assert!(texts.iter().any(|t| t == model.name), "{} in {texts:?}", model.name);
         }
         assert!(texts.iter().any(|t| t == "/models/sam"), "{texts:?}");
-        let missing = texts.iter().filter(|t| t.starts_with("Not installed: run scripts/fetch-models.sh")).count();
-        assert_eq!(missing, models.len() - 1, "{texts:?}");
+        // The rest aren't installed: from the script, or from darktable.
+        let count = |start: &str| texts.iter().filter(|t| t.starts_with(start)).count();
+        let darktables = models.iter().filter(|m| m.files.iter().all(|f| f.url.is_none())).count();
+        assert_eq!(count("Not installed: run scripts/fetch-models.sh"), models.len() - darktables, "{texts:?}");
+        assert_eq!(count("Not installed: install it from darktable"), darktables - 1, "{texts:?}");
 
         frame(
             &mut app,

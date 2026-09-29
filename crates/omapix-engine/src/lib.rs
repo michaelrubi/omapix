@@ -8,6 +8,7 @@ pub mod brush;
 pub mod clip;
 pub mod color;
 pub mod composite;
+pub mod denoise;
 pub mod document;
 pub mod export;
 pub mod filters;

@@ -275,14 +275,7 @@ fn lab([r, g, b]: [f32; 3]) -> [f32; 2] {
 /// the layer's opacity fades them, erasing brings one back, and hiding it
 /// shows the before. Returns the new layer's id.
 pub fn heal(doc: &mut Document, above: usize, spots: &[Spot]) -> u64 {
-    // What's below, as Sample Current & Below sees it: the groups the layer
-    // is in stay visible.
-    let mut below = doc.clone();
-    let layer = doc.layers[above].id;
-    for l in &mut below.layers[above + 1..] {
-        l.visible = doc.is_inside(layer, l.id) && l.visible;
-    }
-    let source = Tiled::from_raster(&below.composite());
+    let source = Tiled::from_raster(&doc.composite_current_and_below(above));
     let id = doc.next_layer_id();
     let at = doc.insert_above(above, Layer::empty(id, "Blemishes", doc.width, doc.height));
     let mut surface = Surface::Pixels(doc.layers[at].pixels.clone());

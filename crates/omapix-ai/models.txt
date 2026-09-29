@@ -23,3 +23,6 @@ file|face-landmarks-mediapipe|face_landmarks_detector.onnx|4920995|7d6e82dee82a1
 
 model|mask-selfie-multiclass|MediaPipe multiclass selfie segmentation|Select Skin, Select Hair|Apache-2.0|Google (MediaPipe multiclass selfie segmentation), senty-au (ONNX export)|https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX|mask|mediapipe-selfie-multiclass
 file|mask-selfie-multiclass|selfie_multiclass_256x256.onnx|16454560|35ec1ecd9ee7f85073c99c00020b7f6751b69506eeacf683bc8665f6117f85b0|https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX/resolve/6db8421a7150ac20558f2c24675078eb3a1a04d0/onnx/model.onnx
+
+model|denoise-nind|NIND denoiser|Denoise|GPL-3.0 (trained on NIND, CC BY 4.0 and CC0)|Benoit Brummer (UCLouvain)|https://github.com/trougnouf/nind-denoise|denoise|unet
+file|denoise-nind|model.onnx|59138823|5d615c5026a3c579455b9082f72b91e109adb54f4125b5b5cde45983bd6776b2|
