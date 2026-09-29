@@ -216,6 +216,8 @@ pub struct Overlay<'a> {
     /// Free Transform's box, its corners in image pixels clockwise from the
     /// top left, and the cursor for what's under the pointer.
     pub transform: Option<([Pos2; 4], CursorIcon)>,
+    /// The box is the Crop tool's: what it leaves out is darkened.
+    pub crop: bool,
 }
 
 /// Pointer input meant for the active tool, in image pixels.
@@ -569,6 +571,7 @@ impl Canvas {
             drawing,
             badge,
             transform,
+            crop,
         } = overlay;
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
@@ -600,7 +603,7 @@ impl Canvas {
         self.pointer = response.hover_pos().map(|p| self.to_image(p));
         self.draw_outlines(ui, selection, drawing);
         if let Some((corners, cursor)) = transform {
-            self.draw_transform_box(ui, corners);
+            self.draw_transform_box(ui, corners, crop);
             if response.hover_pos().is_some() && !navigating {
                 ui.ctx().set_cursor_icon(cursor);
             }
@@ -644,10 +647,24 @@ impl Canvas {
     }
 
     /// Free Transform's box: its outline, a handle at each corner and side,
-    /// and a mark at the centre.
-    fn draw_transform_box(&self, ui: &Ui, corners: [Pos2; 4]) {
+    /// and a mark at the centre. For `crop`, the box is upright, and
+    /// what's outside it is darkened.
+    fn draw_transform_box(&self, ui: &Ui, corners: [Pos2; 4], crop: bool) {
         let painter = ui.painter_at(self.rect);
         let c = corners.map(|p| self.to_screen((p.x, p.y)));
+        if crop {
+            let (inside, all, shade) = (Rect::from_two_pos(c[0], c[2]), self.rect, Color32::from_black_alpha(140));
+            for r in [
+                Rect::from_x_y_ranges(all.x_range(), all.min.y..=inside.min.y),
+                Rect::from_x_y_ranges(all.x_range(), inside.max.y..=all.max.y),
+                Rect::from_x_y_ranges(all.min.x..=inside.min.x, inside.y_range()),
+                Rect::from_x_y_ranges(inside.max.x..=all.max.x, inside.y_range()),
+            ] {
+                if r.is_positive() {
+                    painter.rect_filled(r, 0.0, shade);
+                }
+            }
+        }
         let mut outline = c.to_vec();
         outline.push(c[0]);
         painter.add(egui::Shape::line(outline.clone(), Stroke::new(3.0, Color32::from_black_alpha(160))));

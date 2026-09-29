@@ -234,6 +234,75 @@ pub fn transformed<T: Resample>(image: &Tiled<T>, t: &Affine, outside: T, resamp
     })
 }
 
+/// `image` resampled to `width` × `height`, for Image › Image Size: in two
+/// passes, across then down. Pixels past the edges repeat the edge, so an
+/// opaque layer stays opaque to the border.
+pub fn resized<T: Resample>(image: &Tiled<T>, width: u32, height: u32, resampling: Resampling) -> Tiled<T> {
+    let (w, h) = (image.width(), image.height());
+    if (width, height) == (w, h) {
+        return image.clone();
+    }
+    let fill = image.fill();
+    let written = (0..image.rows()).any(|r| (0..image.cols()).any(|c| image.tile(c, r).is_some()));
+    if !written {
+        return Tiled::new(width, height, fill);
+    }
+    let (across, down) = (taps(w, width, resampling), taps(h, height, resampling));
+    let source = image.to_vec();
+    let mut rows = vec![[0.0f32; 4]; width as usize * h as usize];
+    rows.par_chunks_mut(width as usize).enumerate().for_each(|(y, out)| {
+        let line = &source[y * w as usize..(y + 1) * w as usize];
+        for (o, taps) in out.iter_mut().zip(&across) {
+            *o = weighted(taps.iter().map(|&(x, k)| (line[x as usize].to_f(), k)));
+        }
+    });
+    Tiled::from_tiles(width, height, fill, |col, row| {
+        let (x0, y0) = (col * TILE, row * TILE);
+        let (tw, th) = (TILE.min(width - x0), TILE.min(height - y0));
+        let mut tile = vec![fill; (TILE * TILE) as usize];
+        for j in 0..th {
+            let taps = &down[(y0 + j) as usize];
+            for i in 0..tw {
+                let x = (x0 + i) as usize;
+                let v = weighted(taps.iter().map(|&(y, k)| (rows[y as usize * width as usize + x], k)));
+                tile[(j * TILE + i) as usize] = T::from_f(v);
+            }
+        }
+        tile.iter().any(|&p| p != fill).then_some(tile)
+    })
+}
+
+/// For each of `to` pixels along one axis, the `from` pixels it reads and
+/// their weights (summing to 1), with the edge pixels repeated.
+fn taps(from: u32, to: u32, resampling: Resampling) -> Vec<Vec<(u32, f32)>> {
+    let scale = f64::from(from) / f64::from(to);
+    // Shrinking, the kernel widens to cover the pixels that merge.
+    let stretch = scale.max(1.0);
+    let r = resampling.reach() * stretch;
+    (0..to)
+        .map(|i| {
+            let c = (f64::from(i) + 0.5) * scale - 0.5;
+            let near = (c - r).floor() as i64 + 1..=(c + r).floor() as i64;
+            let taps: Vec<_> = near
+                .map(|s| (s.clamp(0, i64::from(from) - 1) as u32, resampling.weight((s as f64 - c) / stretch)))
+                .filter(|&(_, k)| k != 0.0)
+                .collect();
+            let total: f64 = taps.iter().map(|&(_, k)| k).sum();
+            taps.into_iter().map(|(s, k)| (s, (k / total) as f32)).collect()
+        })
+        .collect()
+}
+
+fn weighted(samples: impl Iterator<Item = ([f32; 4], f32)>) -> [f32; 4] {
+    let mut sum = [0.0f32; 4];
+    for (s, k) in samples {
+        for (a, b) in sum.iter_mut().zip(s) {
+            *a += b * k;
+        }
+    }
+    sum
+}
+
 /// The smallest tile-aligned area outside of which `image` is `outside`,
 /// as (x0, y0, x1, y1), or `None` if it's all `outside`.
 fn content_bounds<T: Resample>(image: &Tiled<T>, outside: T) -> Option<(u32, u32, u32, u32)> {
@@ -275,6 +344,34 @@ mod tests {
             .then(&Affine::rotate_about(0.5, (0.0, 0.0)))
             .decompose();
         assert!((sx - 2.0).abs() < 1e-9 && (sy - 3.0).abs() < 1e-9 && (angle - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resizing_keeps_edges_opaque_and_flat_colour_exact() {
+        let grey = [30000, 40000, 50000, 65535];
+        let image = Tiled::from_slice(600, 400, [0; 4], &vec![grey; 600 * 400]);
+        for (w, h) in [(300, 200), (1000, 700), (599, 401)] {
+            let out = resized(&image, w, h, Resampling::Bicubic);
+            assert_eq!((out.width(), out.height()), (w, h));
+            for (x, y) in [(0, 0), (w - 1, h - 1), (w / 2, h / 2), (w - 1, 0)] {
+                assert_eq!(out.get(x, y), grey, "{w}×{h} at ({x}, {y})");
+            }
+        }
+        // Nothing written stays nothing written, at any size.
+        let empty = resized(&Tiled::new(600, 400, [0u16; 4]), 50, 70, Resampling::Bicubic);
+        assert!((empty.cols(), empty.rows()) == (1, 1) && empty.tile(0, 0).is_none());
+    }
+
+    #[test]
+    fn resizing_down_averages_and_keeps_the_square_in_place() {
+        let px: Vec<Pixel> =
+            (0..600 * 400).map(|i| if i % 2 == 0 { [65535; 4] } else { [0, 0, 0, 65535] }).collect();
+        let out = resized(&Tiled::from_slice(600, 400, [0; 4], &px), 150, 100, Resampling::Bicubic);
+        assert!((out.get(75, 50)[0] as i32 - 32768).abs() < 2000, "{:?}", out.get(75, 50));
+        // The square from 100 to 200 lands from 50 to 100 at half size.
+        let half = resized(&square(), 300, 200, Resampling::Bicubic);
+        assert_eq!((half.get(52, 52), half.get(97, 97)), (RED, RED));
+        assert_eq!((half.get(47, 75)[3], half.get(103, 75)[3]), (0, 0));
     }
 
     #[test]
