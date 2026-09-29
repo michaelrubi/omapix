@@ -603,7 +603,7 @@ impl Canvas {
         let input = if navigating || !tool {
             None
         } else {
-            self.tool_input(ui, &response, alt_samples, samples)
+            self.tool_input(ui, &response, alt_samples, samples, brush.is_some())
         };
 
         self.receive_tiles(ui.ctx());
@@ -778,11 +778,12 @@ impl Canvas {
         response: &egui::Response,
         alt_samples: bool,
         samples: bool,
+        brush: bool,
     ) -> Option<ToolInput> {
         let alt = ui.input(|i| i.modifiers.alt);
         // Alt+right-drag: left and right change the size, up and down the
         // hardness (down is harder), with the outline staying put.
-        if alt && alt_samples && response.dragged_by(PointerButton::Secondary) {
+        if alt && brush && response.dragged_by(PointerButton::Secondary) {
             let origin = ui.input(|i| i.pointer.press_origin());
             self.resizing = self.resizing.or(origin);
             let d = response.drag_delta();
@@ -1267,6 +1268,34 @@ mod tests {
             egui::Shape::LineSegment { points, .. } => *points,
             _ => panic!("expected LineSegment"),
         }
+    }
+
+    #[test]
+    fn alt_right_drag_resizes_any_brush_shown() {
+        let ctx = egui::Context::default();
+        let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
+        let mut canvas = Canvas::new(800, 600, transform);
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        canvas.lay_out_for_test(view, 1.0);
+        let alt = egui::Modifiers::ALT;
+        let mut time = 0.0;
+        // Liquify's brush: shown, but Alt doesn't sample with it.
+        let mut frame = |canvas: &mut Canvas, event| {
+            time += 0.1;
+            let input = egui::RawInput { time: Some(time), screen_rect: Some(view), events: vec![egui::Event::ModifiersChanged(alt), event], ..Default::default() };
+            let mut input_out = None;
+            let mut out = ctx.run_ui(input, |ui| {
+                let overlay = Overlay { tool: true, brush: Some(100.0), ..Default::default() };
+                input_out = canvas.show(ui, Color32::BLACK, overlay).0;
+            });
+            out.textures_delta.clear();
+            input_out
+        };
+        let button = |pressed| egui::Event::PointerButton { pos: pos2(400.0, 300.0), button: PointerButton::Secondary, pressed, modifiers: alt };
+        frame(&mut canvas, egui::Event::PointerMoved(pos2(400.0, 300.0)));
+        frame(&mut canvas, button(true));
+        let drag = frame(&mut canvas, egui::Event::PointerMoved(pos2(430.0, 300.0)));
+        assert!(matches!(drag, Some(ToolInput::BrushDrag { size, .. }) if size > 0.0), "{drag:?}");
     }
 
     #[test]

@@ -949,8 +949,9 @@ impl App {
             Command::CanvasSize,
             Command::Crop,
         ];
-        // Liquify is applied before anything but zooming.
-        let zoom = [Command::ZoomIn, Command::ZoomOut, Command::FitOnScreen, Command::ActualPixels];
+        // Liquify is applied before anything but zooming, and undoes its
+        // own strokes.
+        let zoom = [Command::ZoomIn, Command::ZoomOut, Command::FitOnScreen, Command::ActualPixels, Command::Undo, Command::Redo];
         if !zoom.contains(&cmd)
             && let Some(editor) = &mut self.editor
         {
@@ -2687,6 +2688,7 @@ self.filters.remember(&filter);
     /// Liquify's brush on the canvas. Forward Warp and Push Left follow the
     /// pointer; the others work while the button is held ([`Self::liquify_held`]).
     fn liquify_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let pressure = self.liquify_pressure();
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -2710,17 +2712,29 @@ self.filters.remember(&filter);
                     .map(|n| from + d * (n as f32 / steps))
                     .map(|at| ([at.x, at.y], [step.x, step.y]))
                     .collect();
-                editor.liquify(options.brush, &dabs, radius, options.pressure);
+                editor.liquify(options.brush, &dabs, radius, pressure);
             }
-            ToolInput::StrokeEnd => self.liquify_at = None,
-            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
+            ToolInput::StrokeEnd => {
+                self.liquify_at = None;
+                editor.end_liquify_stroke();
+            }
+            ToolInput::BrushDrag { size, .. } => self.tools.liquify.resize(size),
+            ToolInput::Sample(_) => {}
         }
+    }
+
+    /// Liquify's pressure, scaled by a pen's.
+    fn liquify_pressure(&self) -> f32 {
+        let options = self.tools.liquify;
+        let pen = self.tablet.as_ref().filter(|_| options.pen_pressure).map_or(1.0, Tablet::pressure);
+        options.pressure * pen
     }
 
     /// Reconstruct, Pucker and Bloat work a little every frame while the
     /// button is held, as in Photoshop. Alt swaps Pucker and Bloat.
     fn liquify_held(&mut self, ctx: &egui::Context) {
         use omapix_engine::warp::Brush;
+        let pressure = self.liquify_pressure();
         let (Some(editor), Some(at)) = (&mut self.editor, self.liquify_at) else {
             return;
         };
@@ -2734,7 +2748,7 @@ self.filters.remember(&filter);
             (brush, _) => brush,
         };
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
-        editor.liquify(brush, &[([at.x, at.y], [0.0; 2])], options.size / 2.0, options.pressure * dt);
+        editor.liquify(brush, &[([at.x, at.y], [0.0; 2])], options.size / 2.0, pressure * dt);
         ctx.request_repaint();
     }
 
@@ -4171,13 +4185,17 @@ impl eframe::App for App {
         egui::Panel::bottom("status")
             .frame(bar)
             .show(ui, |ui| self.status_bar(ui));
-        if let Some(editor) = &self.editor {
+        if let Some(editor) = &mut self.editor {
             let target = editor.target;
             egui::Panel::top("options")
                 .frame(bar)
                 .show(ui, |ui| {
                     if editor.liquifying() {
-                        self.tools.liquify.options_bar(ui, &self.theme);
+                        let mut restore = editor.liquify_restore();
+                        self.tools.liquify.options_bar(ui, &self.theme, &mut restore);
+                        if restore != editor.liquify_restore() {
+                            editor.set_liquify_restore(restore);
+                        }
                     } else {
                         self.tools.options_bar(ui, target, &self.theme);
                     }
@@ -6159,21 +6177,26 @@ mod tests {
         );
     }
 
+    /// A test app with nothing selected and a red 20 px square at (300, 200).
+    fn red_square_app() -> App {
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().edit("Deselect", |doc, _| {
+            doc.selection = None;
+            for y in 190..210 {
+                for x in 290..310 {
+                    doc.layers[0].pixels.tile_mut(x / 256, y / 256)[((y % 256) * 256 + x % 256) as usize] = [65535, 0, 0, 65535];
+                }
+            }
+        });
+        app
+    }
+
     #[test]
     fn liquify_warps_applies_carries_on_and_cancels() {
         use omapix_engine::warp::Brush;
         let ctx = egui::Context::default();
-        let mut app = test_app();
+        let mut app = red_square_app();
         let red = [65535, 0, 0, 65535];
-        let editor = app.editor.as_mut().unwrap();
-        editor.edit("Deselect", |doc, _| {
-            doc.selection = None;
-            for y in 190..210 {
-                for x in 290..310 {
-                    doc.layers[0].pixels.tile_mut(x / 256, y / 256)[((y % 256) * 256 + x % 256) as usize] = red;
-                }
-            }
-        });
         let key = |app: &mut App, key| {
             let mut input = egui::RawInput::default();
             input.events.push(egui::Event::Key {
@@ -6218,6 +6241,71 @@ mod tests {
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Liquify"));
         key(&mut app, egui::Key::W);
         assert_eq!(app.tools.liquify.brush, Brush::Reconstruct, "keys are Liquify's only while it's open");
+    }
+
+    #[test]
+    fn liquify_undoes_its_strokes_restores_live_and_applies_as_one_step() {
+        use omapix_engine::warp::Brush;
+        let ctx = egui::Context::default();
+        let mut app = red_square_app();
+        let none = egui::Modifiers::NONE;
+        let pixels = |app: &App| app.editor.as_ref().unwrap().doc.layers[0].pixels.to_vec();
+        let stroke = |app: &mut App, from: Pos2, to: Pos2| {
+            app.tool_input(ToolInput::StrokeBegin(from), none);
+            app.tool_input(ToolInput::StrokeMove(to), none);
+            app.tool_input(ToolInput::StrokeEnd, none);
+        };
+        let before_label = app.editor.as_ref().unwrap().undo_label().map(str::to_owned);
+        let original = pixels(&app);
+
+        // Two strokes, each undone and redone on its own while Liquify is open.
+        app.run(Command::Liquify, &ctx);
+        stroke(&mut app, egui::pos2(300.0, 200.0), egui::pos2(315.0, 200.0));
+        let one = pixels(&app);
+        stroke(&mut app, egui::pos2(300.0, 190.0), egui::pos2(300.0, 175.0));
+        let two = pixels(&app);
+        assert!(one != original && two != one);
+        assert!(app.enabled(Command::Undo) && !app.enabled(Command::Redo));
+        app.run(Command::Undo, &ctx);
+        assert_eq!(pixels(&app), one);
+        app.run(Command::Undo, &ctx);
+        assert_eq!(pixels(&app), original);
+        assert!(!app.enabled(Command::Undo) && app.enabled(Command::Redo));
+        app.run(Command::Redo, &ctx);
+        app.run(Command::Redo, &ctx);
+        assert_eq!(pixels(&app), two);
+        assert!(app.editor.as_ref().unwrap().liquifying());
+
+        // Restore All shows live, and is a step of its own once kept.
+        let editor = app.editor.as_mut().unwrap();
+        editor.set_liquify_restore(1.0);
+        assert_eq!(pixels(&app), original);
+        let editor = app.editor.as_mut().unwrap();
+        editor.set_liquify_restore(0.5);
+        let half = pixels(&app);
+        assert!(half != original && half != two);
+        app.run(Command::Undo, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().liquify_restore(), 0.0);
+        assert_eq!(pixels(&app), two);
+
+        // Alt+right-drag resizes the brush.
+        app.tool_input(ToolInput::BrushDrag { size: 20.0, hardness: 0.5 }, none);
+        assert_eq!(app.tools.liquify.size, 120.0);
+
+        // Applied, it's one step.
+        app.editor.as_mut().unwrap().commit_liquify();
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Liquify"));
+        app.run(Command::Undo, &ctx);
+        assert_eq!(pixels(&app), original);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), before_label.as_deref());
+
+        // With every stroke undone, applying leaves no step.
+        app.run(Command::Liquify, &ctx);
+        app.editor.as_mut().unwrap().liquify(Brush::Bloat, &[([300.0, 200.0], [0.0; 2])], 50.0, 1.0);
+        app.run(Command::Undo, &ctx);
+        app.editor.as_mut().unwrap().commit_liquify();
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), before_label.as_deref());
+        assert_eq!(pixels(&app), original);
     }
 
     #[test]

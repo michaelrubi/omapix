@@ -12,7 +12,7 @@ use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
 use omapix_engine::transform::{Affine, Resampling, transformed};
-use omapix_engine::warp::{self, Field};
+use omapix_engine::warp::{self, Field, Patch};
 use omapix_engine::reduced::Reduced;
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
@@ -171,12 +171,26 @@ struct Transforming {
     started: bool,
 }
 
+/// The area covering both `a` and `b`, (x0, y0, x1, y1).
+fn union(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
 /// Liquify (Ctrl+Shift+X) in progress on a layer.
 struct Liquifying {
     layer: u64,
     /// The layer's pixels before, which the warp is always made from.
     source: Tiled<Pixel>,
     field: Field,
+    /// How much of the warp Restore All is taking out (0–1): shown, but not
+    /// yet in `field`.
+    restore: f32,
+    /// The stroke in progress: the field before it, and the area it changed.
+    stroke: Option<(Field, [u32; 4])>,
+    /// Strokes to undo and redo while Liquify is open, each as the part of
+    /// the field it changed.
+    undo: Vec<Patch>,
+    redo: Vec<Patch>,
     /// The document has changed, as one undo step.
     started: bool,
 }
@@ -364,12 +378,19 @@ impl Editor {
         self.job.as_ref().map(|j| j.label.as_str())
     }
 
+    /// While Liquify is open, Undo and Redo step through its strokes.
     pub fn undo_label(&self) -> Option<&str> {
-        self.undo.last().map(|s| s.label.as_str())
+        match &self.liquifying {
+            Some(l) => (!l.undo.is_empty() || l.stroke.is_some() || l.restore > 0.0).then_some("Liquify"),
+            None => self.undo.last().map(|s| s.label.as_str()),
+        }
     }
 
     pub fn redo_label(&self) -> Option<&str> {
-        self.redo.last().map(|s| s.label.as_str())
+        match &self.liquifying {
+            Some(l) => (!l.redo.is_empty() && l.restore == 0.0).then_some("Liquify"),
+            None => self.redo.last().map(|s| s.label.as_str()),
+        }
     }
 
     fn snapshot(&self, label: &str) -> Snapshot {
@@ -540,6 +561,10 @@ impl Editor {
         if self.job.is_some() {
             return;
         }
+        if self.liquifying.is_some() {
+            self.step_liquify(true);
+            return;
+        }
         self.end_gesture();
         self.live = None;
         if let Some(prev) = self.undo.pop() {
@@ -555,6 +580,10 @@ impl Editor {
 
     pub fn redo(&mut self) {
         if self.job.is_some() {
+            return;
+        }
+        if self.liquifying.is_some() {
+            self.step_liquify(false);
             return;
         }
         self.end_gesture();
@@ -642,6 +671,7 @@ impl Editor {
     }
 
     pub fn clear_history(&mut self) {
+        self.end_gesture();
         self.undo.clear();
         self.redo.clear();
     }
@@ -1153,7 +1183,16 @@ impl Editor {
             Some((source, field, made)) if made.same_tiles(&layer.pixels) => (source.clone(), field.clone()),
             _ => (layer.pixels.clone(), Field::new(self.doc.width, self.doc.height)),
         };
-        self.liquifying = Some(Liquifying { layer: layer.id, source, field, started: false });
+        self.liquifying = Some(Liquifying {
+            layer: layer.id,
+            source,
+            field,
+            restore: 0.0,
+            stroke: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            started: false,
+        });
         Ok(())
     }
 
@@ -1162,13 +1201,90 @@ impl Editor {
     }
 
     /// Dabs of Liquify's `brush` (see [`Field::dab`]), each at a centre
-    /// and with how far the pointer moved there, shown at once.
+    /// and with how far the pointer moved there, shown at once. They make
+    /// one stroke, to undo while Liquify is open, until
+    /// [`Self::end_liquify_stroke`].
     pub fn liquify(&mut self, brush: warp::Brush, dabs: &[([f32; 2], [f32; 2])], radius: f32, amount: f32) {
+        self.keep_liquify_restore();
         let Some(liquifying) = &mut self.liquifying else {
             return;
         };
+        let (before, stroke) = match liquifying.stroke.take() {
+            Some((before, stroke)) => (before, Some(stroke)),
+            None => (liquifying.field.clone(), None),
+        };
         let areas = dabs.iter().filter_map(|&(centre, motion)| liquifying.field.dab(brush, centre, radius, amount, motion));
-        let Some(area) = areas.reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]) else {
+        let area = areas.reduce(union);
+        liquifying.stroke = stroke.into_iter().chain(area).reduce(union).map(|stroke| (before, stroke));
+        if let Some(area) = area {
+            self.show_liquify(area);
+        }
+    }
+
+    /// The stroke is over: it's undone as one step.
+    pub fn end_liquify_stroke(&mut self) {
+        let Some(liquifying) = &mut self.liquifying else {
+            return;
+        };
+        if let Some((before, area)) = liquifying.stroke.take() {
+            liquifying.undo.push(before.patch(area));
+            liquifying.redo.clear();
+        }
+    }
+
+    /// How much of the warp Restore All is taking out, 0–1.
+    pub fn liquify_restore(&self) -> f32 {
+        self.liquifying.as_ref().map_or(0.0, |l| l.restore)
+    }
+
+    /// Show the warp with `restore` (0–1) of it taken out. It's kept as a
+    /// step to undo once something else happens.
+    pub fn set_liquify_restore(&mut self, restore: f32) {
+        self.end_liquify_stroke();
+        let Some(liquifying) = &mut self.liquifying else {
+            return;
+        };
+        liquifying.restore = restore.clamp(0.0, 1.0);
+        if let Some(area) = liquifying.field.extent() {
+            self.show_liquify(area);
+        }
+    }
+
+    /// Make Restore All's change to the field a step to undo.
+    fn keep_liquify_restore(&mut self) {
+        let Some(liquifying) = &mut self.liquifying else {
+            return;
+        };
+        if liquifying.restore == 0.0 {
+            return;
+        }
+        if let Some(area) = liquifying.field.extent() {
+            liquifying.undo.push(liquifying.field.patch(area));
+            liquifying.redo.clear();
+            liquifying.field.scale(1.0 - liquifying.restore);
+        }
+        liquifying.restore = 0.0;
+    }
+
+    /// Undo (or redo) a Liquify stroke.
+    fn step_liquify(&mut self, undo: bool) {
+        self.end_liquify_stroke();
+        self.keep_liquify_restore();
+        let Some(liquifying) = &mut self.liquifying else {
+            return;
+        };
+        let (from, to) = if undo { (&mut liquifying.undo, &mut liquifying.redo) } else { (&mut liquifying.redo, &mut liquifying.undo) };
+        let Some(mut patch) = from.pop() else {
+            return;
+        };
+        let area = liquifying.field.swap(&mut patch);
+        to.push(patch);
+        self.show_liquify(area);
+    }
+
+    /// Warp the layer anew within `area`.
+    fn show_liquify(&mut self, area: [u32; 4]) {
+        let Some(liquifying) = &mut self.liquifying else {
             return;
         };
         if !liquifying.started {
@@ -1183,16 +1299,29 @@ impl Editor {
         let Some(layer) = self.doc.layer_mut(liquifying.layer) else {
             return;
         };
-        let tiles = warp::warp_area(&liquifying.source, &liquifying.field, &mut layer.pixels, area);
+        let restored = (liquifying.restore > 0.0).then(|| {
+            let mut field = liquifying.field.clone();
+            field.scale(1.0 - liquifying.restore);
+            field
+        });
+        let field = restored.as_ref().unwrap_or(&liquifying.field);
+        let tiles = warp::warp_area(&liquifying.source, field, &mut layer.pixels, area);
         self.redraw_tiles(&tiles);
     }
 
-    /// Keep the Liquify (Enter), remembering its mesh.
+    /// Keep the Liquify (Enter), remembering its mesh. With every stroke
+    /// undone, it's as if it never opened.
     pub fn commit_liquify(&mut self) {
+        self.end_liquify_stroke();
+        self.keep_liquify_restore();
         let Some(liquifying) = self.liquifying.take() else {
             return;
         };
-        if liquifying.started
+        if liquifying.started && liquifying.undo.is_empty() {
+            if let Some(before) = self.undo.pop() {
+                self.restore(before);
+            }
+        } else if liquifying.started
             && let Some(layer) = self.doc.layer(liquifying.layer)
         {
             let made = layer.pixels.clone();
