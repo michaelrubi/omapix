@@ -18,7 +18,7 @@ file|inpaint-lama|lama_fp32.onnx|208044816|1faef5301d78db7dda502fe59966957ec4b79
 model|face-detect-yunet|YuNet|Select Skin, Select Hair|MIT|Shiqi Yu et al. (YuNet), OpenCV Zoo|https://huggingface.co/opencv/face_detection_yunet|detect|yunet
 file|face-detect-yunet|face_detection_yunet_2023mar.onnx|232589|8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4|https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/face_detection_yunet_2023mar.onnx
 
-model|face-landmarks-mediapipe|MediaPipe Face Landmarker|Select Skin|Apache-2.0|Google (MediaPipe Face Landmarker), senty-au (ONNX export)|https://huggingface.co/senty-au/face_landmarks_detector-ONNX|landmarks|mediapipe-face-mesh-v2
+model|face-landmarks-mediapipe|MediaPipe Face Landmarker|Select Skin, Select Hair|Apache-2.0|Google (MediaPipe Face Landmarker), senty-au (ONNX export)|https://huggingface.co/senty-au/face_landmarks_detector-ONNX|landmarks|mediapipe-face-mesh-v2
 file|face-landmarks-mediapipe|face_landmarks_detector.onnx|4920995|7d6e82dee82a1dca5fbddb282b3cc74571833a530de317fc22ae325c3358beeb|https://huggingface.co/senty-au/face_landmarks_detector-ONNX/resolve/337d58218b5b1cc597ca3c67360880b920f6ce7b/onnx/model.onnx
 
 model|mask-selfie-multiclass|MediaPipe multiclass selfie segmentation|Select Skin, Select Hair|Apache-2.0|Google (MediaPipe multiclass selfie segmentation), senty-au (ONNX export)|https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX|mask|mediapipe-selfie-multiclass

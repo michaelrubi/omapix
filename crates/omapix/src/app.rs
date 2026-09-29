@@ -161,13 +161,26 @@ enum Dialog {
     AiModels(Vec<Option<HashMap<&'static str, PathBuf>>>),
 }
 
-/// The AI model `cmd` needs, if any.
-fn model_for(cmd: Command) -> Option<&'static str> {
+/// The AI models `cmd` needs.
+fn models_for(cmd: Command) -> &'static [&'static str] {
+    use omapix_ai::face::{DETECTOR, LANDMARKER, SEGMENTER};
     match cmd {
-        Command::SelectSubject => Some(omapix_ai::subject::MODEL),
-        Command::ContentAwareFill => Some(omapix_ai::lama::MODEL),
-        _ => None,
+        Command::SelectSubject => &[omapix_ai::subject::MODEL],
+        Command::ContentAwareFill => &[omapix_ai::lama::MODEL],
+        Command::SelectSkin | Command::SelectHair => &[DETECTOR, LANDMARKER, SEGMENTER],
+        _ => &[],
     }
+}
+
+/// The names of the models `cmd` needs that aren't on disk, as last
+/// checked.
+fn missing_models(cmd: Command, on_disk: &HashMap<&'static str, bool>) -> Vec<&'static str> {
+    let models = omapix_ai::models::models();
+    models_for(cmd)
+        .iter()
+        .filter(|id| on_disk.get(*id) == Some(&false))
+        .filter_map(|id| models.iter().find(|m| m.id == *id).map(|m| m.name))
+        .collect()
 }
 
 /// Which AI models are on disk, found on a thread of its own.
@@ -876,7 +889,7 @@ impl App {
         if editor.busy().is_some() && !view && !matches!(cmd, Command::Quit) {
             return false;
         }
-        if model_for(cmd).is_some_and(|id| self.models.get(id) == Some(&false)) {
+        if !missing_models(cmd, &self.models).is_empty() {
             return false;
         }
         let doc = &editor.doc;
@@ -1513,8 +1526,11 @@ self.filters.remember(&filter);
             button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
         }
         let mut response = ui.add_enabled(self.enabled(cmd), button);
-        if let Some(model) = model_for(cmd).and_then(|id| omapix_ai::models::models().iter().find(|m| m.id == id)) {
-            response = response.on_disabled_hover_text(format!("Needs the {} model: see Help › AI Models", model.name));
+        let missing = missing_models(cmd, &self.models);
+        if !missing.is_empty() {
+            let plural = if missing.len() > 1 { "s" } else { "" };
+            let text = format!("Needs the {} model{plural}: see Help › AI Models", missing.join(", "));
+            response = response.on_disabled_hover_text(text);
         }
         if response.clicked() {
             let ctx = ui.ctx().clone();
@@ -6823,6 +6839,11 @@ mod tests {
         assert!(app.enabled(Command::ContentAwareFill));
         app.models.insert(omapix_ai::lama::MODEL, false);
         assert!(!app.enabled(Command::ContentAwareFill));
+        // Skin and Hair need all three face models.
+        assert!(app.enabled(Command::SelectSkin) && app.enabled(Command::SelectHair));
+        app.models.insert(omapix_ai::face::LANDMARKER, false);
+        assert!(!app.enabled(Command::SelectSkin) && !app.enabled(Command::SelectHair));
+        assert_eq!(missing_models(Command::SelectHair, &app.models), ["MediaPipe Face Landmarker"]);
     }
 
     #[test]
