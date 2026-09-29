@@ -5,6 +5,7 @@ mod channels_panel;
 mod clipboard;
 mod commands;
 mod content_fill;
+mod denoise;
 mod select_subject;
 mod drop;
 mod editor;

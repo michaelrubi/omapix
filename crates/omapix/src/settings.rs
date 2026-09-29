@@ -64,6 +64,9 @@ pub struct FilterSettings {
     pub separation_radius: Option<f32>,
     /// Heal Blemishes' Sensitivity, 0–100.
     pub blemish_sensitivity: f32,
+    /// Denoise's Luminance and Color, 0–100.
+    pub denoise_luminance: f32,
+    pub denoise_color: f32,
     pub unsharp_mask: UnsharpMask,
     pub smart_sharpen: SmartSharpenOptions,
     pub reduce_noise: ReduceNoiseOptions,
@@ -91,6 +94,9 @@ impl Default for FilterSettings {
             select_and_mask_output: Default::default(),
             separation_radius: None,
             blemish_sensitivity: 50.0,
+            // Leaves a little fine grain at high ISO, which looks natural.
+            denoise_luminance: 80.0,
+            denoise_color: 100.0,
             // A moderate sharpening for a 24 MP portrait.
             unsharp_mask: UnsharpMask {
                 amount: 0.8,

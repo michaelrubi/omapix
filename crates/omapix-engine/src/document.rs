@@ -164,6 +164,18 @@ impl Document {
         crate::composite::composite(&self.layers, self.width, self.height)
     }
 
+    /// The image as the layer at `index` and those below it make it, as
+    /// Sample Current & Below sees it: the groups the layer is in stay
+    /// visible.
+    pub fn composite_current_and_below(&self, index: usize) -> Raster {
+        let mut below = self.clone();
+        let layer = self.layers[index].id;
+        for l in &mut below.layers[index + 1..] {
+            l.visible = self.is_inside(layer, l.id) && l.visible;
+        }
+        below.composite()
+    }
+
     /// The tonal histogram of the composite of all visible layers below `layer_id`.
     /// Used by adjustment layers (such as Curves and Levels) to show their input distribution.
     pub fn histogram_below(&self, layer_id: u64) -> crate::Histogram {

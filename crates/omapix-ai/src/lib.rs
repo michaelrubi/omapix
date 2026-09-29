@@ -2,6 +2,7 @@
 //! No UI: the app runs these on background threads.
 
 mod runtime;
+pub mod denoise;
 pub mod face;
 pub mod lama;
 pub mod models;

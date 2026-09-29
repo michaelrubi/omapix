@@ -560,6 +560,7 @@ the spike:
 | Blemish detection | < 0.3 s (CPU) | same |
 | (measured) | 15–60 ms; 0.85 s at 24 MP with the face analysis and skin mask it needs | |
 | Healing the spots found (CPU) | 0.1–0.3 s for 10–20 spots | same |
+| Denoise (NIND) at 24 MP | (measured: 7 s, 54 squares at 0.12 s each) | minutes |
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) | same |
 | Auto Retouch end to end, per face | < 3 s | < 10 s |
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
@@ -639,6 +640,9 @@ Reordered on 2026-09-29 (see Decisions).
    model is already on disk from darktable (GPL-3.0, like Omapix) and the
    runtime works, so it's quick, and it's the first step of the finishing
    workflow.
+   - Done (2026-09-29): Filter › Noise › Denoise…, with Luminance and
+     Color and a 100 % preview box, onto a new Denoise layer above the
+     selected one. See "Denoise" below.
 5. **Smooth Skin**, with the dialog and preview, and the 3-band Frequency
    Separation setup.
 6. **Even Tone**, the automatic Dodge & Burn.
@@ -758,6 +762,44 @@ OMAPIX_FACE_PHOTO=~/Pictures/blemish-tests OMAPIX_FACE_OUT=out \
 - **Left:** long marks (scratches, some scars) need a stroke, not a dab;
   profiles need a better idea of where the nostrils and lips are; dark
   marks on dark skin often need 70–75 %.
+
+### Denoise
+
+As built (`omapix_engine::denoise`, `omapix_ai::denoise`). NIND is a UNet
+darktable installs as `denoise-nind`: a fixed 768 × 768 input and output,
+sRGB from 0 to 1 as red, green and blue planes (darktable feeds it sRGB
+too). Looked at on seven high-ISO portraits and a black and white shot
+from Wikimedia Commons (ISO 6400–20000: straight from the camera, camera
+JPEGs, and Canon DPP and Lightroom exports), kept in
+`~/Pictures/denoise-tests` with their credits, not in the repository:
+
+```
+cargo run --release -p omapix-ai --example denoise -- out ~/Pictures/denoise-tests/*.jpg
+```
+
+- **Squares.** The image, in sRGB, is cut into 768 px squares. NIND's
+  outer 16 pixels come back wrong (very dark), so 32 are thrown away on
+  every side and the image is reflected beyond its own edges; the kept
+  704 px overlap by 32 and fade from one to the next. Without this, the
+  squares' edges showed as a faint grid.
+- **Only detail changes.** NIND darkens shadows a little and tints black
+  and white photos magenta (by up to 4 levels in 255), which noise
+  doesn't do. So only the fine part of its change is kept: the change
+  less a blur of it (σ 16 px). Means before and after now match to 0.1
+  levels.
+- **Luminance and colour** are split in gamma-encoded sRGB by Rec. 709
+  luma: Luminance scales the change in luma, Color the rest.
+- **Wide gamut.** The result goes on as a change to the original, in the
+  document's colours (the original plus the denoised sRGB, less the
+  original sRGB, both converted back), so ProPhoto colours sRGB can't hold
+  change as their clipped selves did rather than being clipped.
+- **Amounts.** At ISO 12800 on an old APS-C camera, 100 % cleans it but
+  starts to look smeared, and 70–80 % leaves a fine, natural grain; on
+  moderate noise they look alike. Hence 80 % Luminance, 100 % Color.
+  Files already noise-reduced by the camera or DPP change little, as they
+  should.
+- **Left:** JPEG block artifacts in heavily compressed files stay; a
+  faster fp16 run or TensorRT, if 7 s at 24 MP gets in the way.
 
 ## Decisions
 
