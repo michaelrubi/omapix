@@ -454,6 +454,25 @@ pub fn add_noise_layer(doc: &mut Document, above: usize, options: &NoiseOptions)
     id
 }
 
+/// Retouch › Finish, and Batch Export's last steps: the visible image
+/// sharpened with `sharpen` on a "Sharpen" layer at the top, then grain on
+/// a Grain layer above that (as [`add_noise_layer`]). Returns the top
+/// layer's id, if either was added.
+pub fn finish(doc: &mut Document, sharpen: Option<&crate::filters::LayerFilter>, grain: Option<&NoiseOptions>) -> Option<u64> {
+    let mut top = None;
+    if let Some(filter) = sharpen {
+        let id = stamp_visible(doc);
+        let layer = doc.layer_mut(id).expect("just added");
+        layer.name = "Sharpen".into();
+        layer.pixels = filter.apply(&layer.pixels);
+        top = Some(id);
+    }
+    if let Some(options) = grain {
+        top = Some(add_noise_layer(doc, doc.layers.len() - 1, options));
+    }
+    top
+}
+
 /// Create a Grain layer filled with 50 % grey in Overlay mode carrying grain.
 pub fn grain_layer(
     id: u64,

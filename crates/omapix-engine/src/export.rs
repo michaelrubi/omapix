@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use image::ImageEncoder;
 use image::codecs::jpeg::JpegEncoder;
@@ -223,6 +223,35 @@ pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
     Ok(())
 }
 
+/// File › Batch Export for one file: `source` opened, shrunk so its long
+/// edge is at most `long_edge`, finished ([`crate::ops::finish`]), and
+/// written to `dir` named after it, as a JPEG at `jpeg_quality` or else a
+/// 16-bit TIFF. Returns the path written.
+pub fn batch_file(
+    source: &Path,
+    dir: &Path,
+    long_edge: Option<u32>,
+    sharpen: Option<&crate::filters::LayerFilter>,
+    grain: Option<&crate::NoiseOptions>,
+    jpeg_quality: Option<u8>,
+) -> Result<PathBuf> {
+    let mut doc = crate::io::load(source)?;
+    let long = doc.width.max(doc.height);
+    if let Some(edge) = long_edge.filter(|&e| e < long) {
+        let side = |v: u32| ((f64::from(v) * f64::from(edge) / f64::from(long)).round() as u32).max(1);
+        doc.resize_image(side(doc.width), side(doc.height));
+    }
+    crate::ops::finish(&mut doc, sharpen, grain);
+    let name = source.file_stem().unwrap_or_default();
+    let path = dir.join(name).with_extension(if jpeg_quality.is_some() { "jpg" } else { "tif" });
+    std::fs::create_dir_all(dir).map_err(|source| Error::Read { path: dir.display().to_string(), source })?;
+    match jpeg_quality {
+        Some(quality) => jpeg(&doc, &path, quality)?,
+        None => tiff(&doc, &path)?,
+    }
+    Ok(path)
+}
+
 /// The most EXIF one JPEG APP1 segment holds: 65535, less the length field
 /// and the "Exif\0\0" header. The encoder silently wraps the segment length
 /// past this, corrupting the file.
@@ -330,5 +359,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert!(segments_ok(&bytes));
         assert!(parsed.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY).is_some());
+    }
+
+    #[test]
+    fn batch_export_shrinks_finishes_and_names_the_files() {
+        let dir = std::env::temp_dir().join(format!("omapix-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pixels: Vec<crate::Pixel> = (0..400 * 200).map(|i| [(i % 400 * 150) as u16, 30000, 20000, 65535]).collect();
+        let doc = Document::from_image("wide.tif".into(), &Raster::new(400, 200, pixels), ColorProfile::srgb(), 16);
+        let source = dir.join("wide.tif");
+        tiff(&doc, &source).unwrap();
+        let out = dir.join("export");
+
+        // Long edge 100: half, then a quarter, as a JPEG.
+        let path = batch_file(&source, &out, Some(100), None, None, Some(90)).unwrap();
+        assert_eq!(path, out.join("wide.jpg"));
+        let jpeg = crate::io::load(&path).unwrap();
+        assert_eq!((jpeg.width, jpeg.height), (100, 50));
+        // Never enlarged; with no steps, the pixels come back as they were.
+        let path = batch_file(&source, &out, Some(1000), None, None, None).unwrap();
+        assert_eq!(path, out.join("wide.tif"));
+        assert_eq!(crate::io::load(&path).unwrap().composite().pixels(), doc.composite().pixels());
+        // Sharpened and grained, as Finish does it.
+        let sharpen = crate::filters::LayerFilter::UnsharpMask { amount: 2.0, radius: 2.0, threshold: 0.0 };
+        let grain = crate::NoiseOptions { amount: 20.0, ..Default::default() };
+        let path = batch_file(&source, &out, None, Some(&sharpen), Some(&grain), None).unwrap();
+        let mut finished = doc.clone();
+        crate::ops::finish(&mut finished, Some(&sharpen), Some(&grain));
+        assert_eq!(crate::io::load(&path).unwrap().composite().pixels(), finished.composite().pixels());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

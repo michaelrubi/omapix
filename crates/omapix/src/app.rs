@@ -147,6 +147,13 @@ enum Dialog {
         anchor: (u8, u8),
         extension: Extension,
     },
+    /// File › Batch Export: the files chosen, the settings, and a file
+    /// dialog open in the background (for the output folder, if `true`).
+    BatchExport {
+        files: Vec<PathBuf>,
+        settings: crate::settings::BatchExport,
+        picking: Option<(bool, Receiver<Option<Vec<PathBuf>>>)>,
+    },
 }
 
 /// A drag on the Crop tool's box: on a handle or inside (with the box as
@@ -189,6 +196,15 @@ type Opened = Result<(Document, Option<String>), String>;
 struct FileJob {
     label: String,
     rx: Receiver<Written>,
+}
+
+/// A Batch Export running in the background: one result per file, and
+/// the files that failed so far, with why.
+struct BatchJob {
+    total: usize,
+    done: usize,
+    failed: Vec<String>,
+    rx: Receiver<Result<PathBuf, String>>,
 }
 
 /// One step of an `OMAPIX_SCRIPT` (comma-separated steps):
@@ -316,6 +332,7 @@ pub struct App {
     /// A file dialog open in the background.
     picking: Option<(Purpose, Receiver<Option<PathBuf>>)>,
     file_job: Option<FileJob>,
+    batch_export: Option<BatchJob>,
     dialog: Option<Dialog>,
     filter_preview: Option<FilterPreview>,
     /// A transient message for the status bar, and whether it's an error.
@@ -401,6 +418,7 @@ impl App {
             opening: None,
             picking: None,
             file_job: None,
+            batch_export: None,
             dialog: None,
             filter_preview: None,
             status: None,
@@ -711,6 +729,23 @@ impl App {
                 Err(err) => self.message(format!("{label} failed: {err}"), true),
             }
         }
+        if let Some(job) = &mut self.batch_export {
+            for result in job.rx.try_iter() {
+                job.done += 1;
+                job.failed.extend(result.err());
+            }
+            if job.done == job.total {
+                let written = job.total - job.failed.len();
+                let plural = if written == 1 { "" } else { "s" };
+                let text = match job.failed.as_slice() {
+                    [] => format!("Exported {written} file{plural}"),
+                    failed => format!("Exported {written} file{plural}; {} failed: {}", failed.len(), failed.join("; ")),
+                };
+                let failed = !job.failed.is_empty();
+                self.batch_export = None;
+                self.message(text, failed);
+            }
+        }
         if let Some(rx) = &self.pasting
             && self.editor.as_ref().is_some_and(|e| e.busy().is_none())
         {
@@ -783,7 +818,7 @@ impl App {
 
     fn enabled(&self, cmd: Command) -> bool {
         let Some(editor) = &self.editor else {
-            return matches!(cmd, Command::Open | Command::Quit)
+            return matches!(cmd, Command::Open | Command::Quit | Command::BatchExport)
                 || (cmd == Command::ReopenLast && self.recent.last().is_some());
         };
         let view = matches!(
@@ -946,6 +981,14 @@ impl App {
             Command::ExportTiff => self.pick(Purpose::ExportTiff, ctx),
             Command::ExportJpeg => self.pick(Purpose::ExportJpeg, ctx),
             Command::ExportAdjustmentLut => self.pick(Purpose::ExportLut, ctx),
+            Command::BatchExport => {
+                self.dialog = Some(Dialog::BatchExport {
+                    files: Vec::new(),
+                    settings: self.filters.batch_export.clone(),
+                    picking: None,
+                });
+            }
+            Command::Finish => self.finish(),
             // On a mask, noise goes straight into it; on pixels, onto a
             // Grain layer.
             Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target == Target::Mask) => {
@@ -1217,6 +1260,47 @@ impl App {
         let (dx, dy) = (offset(width, doc.width, col), offset(height, doc.height, row));
         let pixel = colour.map(|rgb| doc.profile.from_srgb8(rgb).unwrap_or([0, 0, 0, u16::MAX]));
         editor.edit("Canvas Size", |doc, _| doc.resize_canvas(width, height, dx, dy, pixel));
+    }
+
+    /// Retouch › Finish: the visible image sharpened with Unsharp Mask's
+    /// settings on a Sharpen layer, then grain with Add Noise's on a Grain
+    /// layer, as one step.
+    fn finish(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let (sharpen, grain): (LayerFilter, _) = (self.filters.unsharp_mask.into(), self.filters.noise);
+        editor.target = Target::Pixels;
+        editor.edit("Finish", |doc, active| {
+            *active = ops::finish(doc, Some(&sharpen), Some(&grain)).unwrap_or(*active);
+        });
+    }
+
+    /// Export `files` one after another in the background, as `settings` say.
+    fn batch_export(&mut self, files: Vec<PathBuf>, settings: crate::settings::BatchExport, ctx: &egui::Context) {
+        let Some(dir) = settings.folder.clone() else {
+            return;
+        };
+        let sharpen: Option<LayerFilter> = settings.sharpen.then(|| self.filters.unsharp_mask.into());
+        let grain = settings.grain.then_some(self.filters.noise);
+        let long_edge = settings.resize.then_some(settings.long_edge);
+        let quality = settings.jpeg.then_some(settings.quality);
+        let (tx, rx) = channel();
+        let total = files.len();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            for file in files {
+                let result = omapix_engine::export::batch_file(&file, &dir, long_edge, sharpen.as_ref(), grain.as_ref(), quality);
+                let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                if tx.send(result.map_err(|e| format!("{name}: {e}"))).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+        self.filters.batch_export = settings;
+        self.filters.save();
+        self.batch_export = Some(BatchJob { total, done: 0, failed: Vec::new(), rx });
     }
 
     fn apply_add_noise(&mut self, options: NoiseOptions, ctx: &egui::Context) {
@@ -1507,6 +1591,7 @@ self.filters.remember(&filter);
                 ui.separator();
                 self.menu_item(ui, Command::ExportTiff, None);
                 self.menu_item(ui, Command::ExportJpeg, None);
+                self.menu_item(ui, Command::BatchExport, None);
                 ui.separator();
                 self.menu_item(ui, Command::Quit, None);
             });
@@ -1668,6 +1753,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::DodgeAndBurnCurves, None);
                 ui.separator();
                 self.menu_item(ui, Command::HighPassSharpening, None);
+                self.menu_item(ui, Command::Finish, None);
             });
             ui.menu_button("View", |ui| {
                 self.menu_item(ui, Command::ZoomIn, None);
@@ -1764,6 +1850,7 @@ self.filters.remember(&filter);
                         let name = p.file_name().unwrap_or_default().to_string_lossy();
                         format!("Opening {name}…")
                     })
+                    .or_else(|| self.batch_export.as_ref().map(|b| format!("Exporting {} of {}…", b.done + 1, b.total)))
                     .or_else(|| self.file_job.as_ref().map(|j| format!("{}…", j.label)))
                     .or_else(|| {
                         let editor = self.editor.as_ref()?;
@@ -2186,6 +2273,87 @@ self.filters.remember(&filter);
                             close = true;
                         }
                         if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::BatchExport { files, settings, picking } => {
+                    if let Some((folder, rx)) = picking
+                        && let Ok(picked) = rx.try_recv()
+                    {
+                        match picked {
+                            Some(mut picked) if *folder => settings.folder = picked.pop(),
+                            Some(picked) => {
+                                // At first, an "export" folder beside them.
+                                if settings.folder.is_none() {
+                                    settings.folder = picked.first().and_then(|f| f.parent()).map(|d| d.join("export"));
+                                }
+                                *files = picked;
+                            }
+                            None => {}
+                        }
+                        *picking = None;
+                    }
+                    ui.heading("Batch Export");
+                    ui.add_space(8.0);
+                    let mut pick = |ui: &mut Ui, folder: bool, label: &str| {
+                        if ui.add_enabled(picking.is_none(), Button::new(label)).clicked() {
+                            let (tx, rx) = channel();
+                            let ctx = ui.ctx().clone();
+                            let start = settings.folder.clone();
+                            std::thread::spawn(move || {
+                                let mut dialog = rfd::FileDialog::new();
+                                if let Some(dir) = start {
+                                    dialog = dialog.set_directory(dir);
+                                }
+                                let picked = if folder {
+                                    dialog.pick_folder().map(|f| vec![f])
+                                } else {
+                                    dialog.add_filter("Images", &OPEN_EXTENSIONS).pick_files()
+                                };
+                                let _ = tx.send(picked);
+                                ctx.request_repaint();
+                            });
+                            *picking = Some((folder, rx));
+                        }
+                    };
+                    ui.horizontal(|ui| {
+                        pick(ui, false, "Choose Files…");
+                        let chosen = match files.as_slice() {
+                            [] => "No files chosen".to_owned(),
+                            [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                            many => format!("{} files", many.len()),
+                        };
+                        ui.label(RichText::new(chosen).color(hint));
+                    });
+                    ui.horizontal(|ui| {
+                        pick(ui, true, "Choose Folder…");
+                        let folder = settings.folder.as_ref().map_or("No folder chosen".into(), |f| f.display().to_string());
+                        ui.label(RichText::new(folder).color(hint));
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut settings.resize, "Resize the long edge to");
+                        ui.add_enabled(settings.resize, egui::DragValue::new(&mut settings.long_edge).range(1..=MAX_SIDE).suffix(" px"));
+                    });
+                    ui.checkbox(&mut settings.sharpen, "Sharpen (Unsharp Mask's settings)");
+                    ui.checkbox(&mut settings.grain, "Add grain (Add Noise's settings)");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut settings.jpeg, true, "JPEG");
+                        ui.add_enabled(settings.jpeg, egui::Slider::new(&mut settings.quality, 1..=100).text("quality"));
+                        ui.radio_value(&mut settings.jpeg, false, "16-bit TIFF");
+                    });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ready = !files.is_empty() && settings.folder.is_some();
+                        let ok = ui.add_enabled(ready, Button::new("Export")).clicked()
+                            || (ready && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let (files, settings) = (std::mem::take(files), settings.clone());
+                            action = Some(Box::new(move |app, ctx| app.batch_export(files, settings, ctx)));
                             close = true;
                         }
                     });
@@ -4664,6 +4832,7 @@ mod tests {
             opening: None,
             picking: None,
             file_job: None,
+            batch_export: None,
             dialog: None,
             filter_preview: None,
             status: None,
@@ -7643,6 +7812,70 @@ mod tests {
             );
             app.run(Command::Undo, &ctx);
         }
+    }
+
+    #[test]
+    fn finish_creates_sharpen_and_grain_layers_in_one_undo_step() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let initial_layer_count = app.editor.as_ref().unwrap().doc.layers.len();
+
+        app.run(Command::Finish, &ctx);
+
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.undo_label(), Some("Finish"));
+        assert_eq!(editor.doc.layers.len(), initial_layer_count + 2);
+
+        // Top layer is Grain in Overlay blend mode
+        let grain_layer = editor.doc.layers.last().unwrap();
+        assert_eq!(grain_layer.name, "Grain");
+        assert_eq!(grain_layer.blend, omapix_engine::BlendMode::Overlay);
+
+        // Below it is Sharpen layer
+        let sharpen_layer = &editor.doc.layers[editor.doc.layers.len() - 2];
+        assert_eq!(sharpen_layer.name, "Sharpen");
+
+        // Undoing undoes the whole Finish action in one step
+        app.run(Command::Undo, &ctx);
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers.len(), initial_layer_count);
+    }
+
+    #[test]
+    fn batch_export_runs_in_the_background_and_says_what_failed() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix-batch-app-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.tif");
+        omapix_engine::export::tiff(&app.editor.as_ref().unwrap().doc, &good).unwrap();
+        let bad = dir.join("bad.tif");
+        std::fs::write(&bad, b"not a tiff").unwrap();
+        let settings = crate::settings::BatchExport { folder: Some(dir.join("out")), ..Default::default() };
+        app.batch_export(vec![good, bad], settings, &ctx);
+        for _ in 0..1000 {
+            app.poll(&ctx);
+            if app.batch_export.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (text, error, _) = app.status.clone().expect("a message");
+        assert!(error && text.starts_with("Exported 1 file; 1 failed: bad.tif"), "{text}");
+        assert!(dir.join("out/good.jpg").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn batch_export_dialog_opens_with_saved_settings() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.filters.batch_export.long_edge = 1920;
+        app.filters.batch_export.jpeg = false;
+        app.run(Command::BatchExport, &ctx);
+        let Some(Dialog::BatchExport { settings, .. }) = &app.dialog else {
+            panic!("no dialog");
+        };
+        assert_eq!(settings, &app.filters.batch_export);
     }
 }
 

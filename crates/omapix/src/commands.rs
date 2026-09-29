@@ -114,6 +114,8 @@ pub enum Command {
     CanvasSize,
     Crop,
     Liquify,
+    BatchExport,
+    Finish,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -243,6 +245,8 @@ impl Command {
         Command::CanvasSize,
         Command::Crop,
         Command::Liquify,
+        Command::BatchExport,
+        Command::Finish,
     ];
 
     /// Look a command up by its name in code, e.g. "FrequencySeparation".
@@ -433,6 +437,8 @@ impl Command {
             Command::CanvasSize => "Canvas Size…",
             Command::Crop => "Crop",
             Command::Liquify => "Liquify…",
+            Command::BatchExport => "Batch Export…",
+            Command::Finish => "Finish",
         }
     }
 

@@ -22,6 +22,28 @@ impl From<UnsharpMask> for LayerFilter {
     }
 }
 
+/// File › Batch Export's steps and where it writes, as last used.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct BatchExport {
+    /// Shrink so the long edge is at most `long_edge` pixels.
+    pub resize: bool,
+    pub long_edge: u32,
+    /// Sharpen with Unsharp Mask's settings, and add grain with Add Noise's.
+    pub sharpen: bool,
+    pub grain: bool,
+    /// JPEG at `quality`, or else a 16-bit TIFF.
+    pub jpeg: bool,
+    pub quality: u8,
+    pub folder: Option<PathBuf>,
+}
+
+impl Default for BatchExport {
+    fn default() -> Self {
+        Self { resize: true, long_edge: 2048, sharpen: true, grain: true, jpeg: true, quality: 92, folder: None }
+    }
+}
+
 /// Each filter's and retouching setup's settings.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -45,6 +67,7 @@ pub struct FilterSettings {
     pub reduce_noise: ReduceNoiseOptions,
     pub smart_blur: SmartBlurOptions,
     pub noise: NoiseOptions,
+    pub batch_export: BatchExport,
     /// Where they're kept; `None` (the defaults, and in tests) isn't saved.
     #[serde(skip)]
     path: Option<PathBuf>,
@@ -92,6 +115,7 @@ impl Default for FilterSettings {
                 mode: SmartBlurMode::Normal,
             },
             noise: NoiseOptions::default(),
+            batch_export: BatchExport::default(),
             path: None,
         }
     }

@@ -186,6 +186,8 @@ The UI has been tested through the same code paths with scripts
 - [ ] Export Adjustments as LUT: export a grade, load the .cube in a Color Lookup layer on another image and in darktable's LUT 3D, and compare with the adjustment layers
 - [ ] Image Size, Canvas Size and Crop: Image Size on a layered 24 MP retouch (half size and 150 %) with masks and a selection, Constrain Proportions; Canvas Size with each anchor and extension colour; the Crop tool's handles with Shift and Alt, moving the box, drawing a new one, Enter and Esc; Image › Crop to a selection; and undo after each
 - [ ] Liquify on a 24 MP portrait: each brush and its key, Size with [ and ], Pressure, Alt with Pucker, Bloat and Push Left, holding still with Bloat, big brushes dragged fast, Enter, Esc, Ctrl+Z, and reopening Liquify to Reconstruct an earlier move
+- [ ] Retouch › Finish: stamps visible image onto "Sharpen" layer with saved Unsharp Mask settings, adds "Grain" layer in Overlay with saved Add Noise settings, and single undo step reverts both
+- [ ] File › Batch Export…: dialog with source file picker, output folder, checkboxes for resize long edge, sharpen and grain, format choice (JPEG with quality slider, 16-bit TIFF), status bar progress, summary message, and settings remembered between runs
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -262,7 +264,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - Later, output sharpening for the export size, once exports can resize (see Batch export).
 - ~~**Add Noise**~~ (done): Filter › Noise › Add Noise… opens a dialog with Photoshop's controls (Amount, Uniform or Gaussian, Monochromatic) plus film-like Grain Size and Roughness, and tonal falloff in shadows/highlights. By default the result goes on a new Grain layer in Overlay mode carrying the grain, with live preview while the dialog is open.
   - Later: grain added at output size once exports can resize.
-- Later, a **Finish** action that runs Sharpen then Add Noise with saved settings, which Batch export can reuse.
+- ~~**Finish** action~~ (done): Retouch › Finish stamps the visible image onto a "Sharpen" layer at the top sharpened with remembered Unsharp Mask settings, then adds a "Grain" layer in Overlay with remembered Add Noise settings, grouped into a single undo step that Batch export also shares.
 
 ## 5. Workflow and files
 
@@ -270,7 +272,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - Omapix is opened as `omapix --round-trip image.tif`, which other apps can use too.
   - Later: opening several exports in one Omapix window, and a darkroom shortcut.
 - ~~**Keep EXIF metadata on export and save**~~ (done): raw EXIF metadata (camera make and model, lens, exposure, and capture date / `DateTimeOriginal`) is read when loading TIFF and JPEG files and preserved through .ora saves (`metadata/exif.bin` in the zip, referenced via `omapix:exif` in `stack.xml`), flattened TIFF and JPEG exports, and the darktable round-trip TIFF. Image orientation in the EXIF block is normalized to 1 (normal) so viewers display upright pixels correctly.
-- **Batch export:** apply a saved action (for example "resize, sharpen, JPEG") to many files.
+- ~~**Batch export**~~ (done): File › Batch Export… exports the files chosen one after another in the background, each shrunk so its long edge is at most N px (never enlarged), then finished as Retouch › Finish does it (the same code, so an export matches Finish on the open image), and written as a JPEG at a quality or a 16-bit TIFF, named after the file, in the folder chosen (at first an `export` folder beside them). The status bar shows progress and then says how many were written and which failed and why. The steps and folder are remembered.
 - ~~**Recent files** and reopening the last document~~ (done).
 - ~~**Close document**~~ (done): Ctrl+W (File › Close) closes the open image and returns to the empty start state, asking to save unsaved changes first.
 - ~~**Dropping files onto the window**~~ (done): dropping an image onto an open document places it centred as a new layer named after the file; Shift+drop or dropping with nothing open opens it instead.
