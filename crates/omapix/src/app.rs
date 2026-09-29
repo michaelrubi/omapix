@@ -2578,6 +2578,25 @@ self.filters.remember(&filter);
         }
     }
 
+    /// Esc deselects, once nothing else has taken it (Quick Mask is the
+    /// selection being painted, so it's left alone).
+    fn check_deselect(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if editor.doc.selection.is_none()
+            || editor.view() == View::QuickMask
+            || self.dialog.is_some()
+            || ctx.egui_wants_keyboard_input()
+            || egui::Popup::is_any_open(ctx)
+        {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.run(Command::Deselect, ctx);
+        }
+    }
+
     /// Enter applies Free Transform and Esc cancels it.
     fn check_transform_keys(&mut self, ctx: &egui::Context) {
         let Some(editor) = &mut self.editor else {
@@ -4189,6 +4208,7 @@ impl eframe::App for App {
         self.check_escape(ctx);
         self.check_transform_keys(ctx);
         self.check_crop_keys(ctx);
+        self.check_deselect(ctx);
         self.liquify_held(ctx);
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
@@ -6634,6 +6654,42 @@ mod tests {
         });
         out.textures_delta.clear();
         assert_eq!(app.properties.eyedropper, None);
+    }
+
+    #[test]
+    fn escape_deselects_but_not_in_quick_mask() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let escape = |app: &mut App| {
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut out = ctx.run_ui(input, |ui| {
+                app.check_escape(ui.ctx());
+                app.check_transform_keys(ui.ctx());
+                app.check_crop_keys(ui.ctx());
+                app.check_deselect(ui.ctx());
+            });
+            out.textures_delta.clear();
+        };
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+        escape(&mut app);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.doc.selection.is_none());
+        assert_eq!(editor.undo_label(), Some("Deselect"));
+
+        // Quick Mask is the selection being painted: Esc leaves it be.
+        app.run(Command::SelectAll, &ctx);
+        app.run(Command::QuickMask, &ctx);
+        escape(&mut app);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.view(), View::QuickMask);
+        assert!(editor.doc.selection.is_some());
     }
 
     #[test]
