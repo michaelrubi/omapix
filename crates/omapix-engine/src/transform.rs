@@ -104,7 +104,7 @@ impl Resampling {
         }
     }
 
-    fn weight(self, t: f64) -> f64 {
+    pub(crate) fn weight(self, t: f64) -> f64 {
         let t = t.abs();
         match self {
             Self::Bilinear => (1.0 - t).max(0.0),

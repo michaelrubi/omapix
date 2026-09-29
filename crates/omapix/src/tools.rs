@@ -4,6 +4,7 @@
 use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
 use omapix_engine::selection::Combine;
+use omapix_engine::warp::Brush as LiquifyBrush;
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
 
 use crate::editor::Target;
@@ -340,6 +341,71 @@ fn percent(ui: &mut Ui, label: &str, value: &mut f32) {
     }
 }
 
+/// Liquify's brush and its settings.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Liquify {
+    pub brush: LiquifyBrush,
+    /// Diameter in image pixels.
+    pub size: f32,
+    /// How strongly it works, 0–1.
+    pub pressure: f32,
+}
+
+impl Default for Liquify {
+    fn default() -> Self {
+        Self { brush: LiquifyBrush::ForwardWarp, size: 100.0, pressure: 1.0 }
+    }
+}
+
+impl Liquify {
+    /// Photoshop's key for each brush.
+    fn key(brush: LiquifyBrush) -> Key {
+        match brush {
+            LiquifyBrush::ForwardWarp => Key::W,
+            LiquifyBrush::Reconstruct => Key::R,
+            LiquifyBrush::Pucker => Key::S,
+            LiquifyBrush::Bloat => Key::B,
+            LiquifyBrush::PushLeft => Key::O,
+        }
+    }
+
+    /// While Liquify is open, its keys pick a brush, and [ and ] change the size.
+    pub fn keys(&mut self, ctx: &egui::Context) {
+        ctx.input_mut(|i| {
+            for brush in LiquifyBrush::ALL {
+                if i.consume_key(Modifiers::NONE, Self::key(brush)) {
+                    self.brush = brush;
+                }
+            }
+            for (key, bigger) in [(Key::OpenBracket, false), (Key::CloseBracket, true)] {
+                if i.consume_key(Modifiers::NONE, key) {
+                    self.size = step_size(self.size, bigger).clamp(MIN_SIZE, MAX_SIZE);
+                }
+            }
+        });
+    }
+
+    pub fn options_bar(&mut self, ui: &mut Ui, theme: &Theme) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Liquify").strong());
+            ui.separator();
+            for brush in LiquifyBrush::ALL {
+                let name = format!("{} ({})", brush.name(), Self::key(brush).name());
+                ui.selectable_value(&mut self.brush, brush, name);
+            }
+            ui.separator();
+            ui.label("Size");
+            let size = egui::DragValue::new(&mut self.size).range(MIN_SIZE..=MAX_SIZE).suffix(" px").fixed_decimals(0);
+            ui.add(size);
+            percent(ui, "Pressure", &mut self.pressure);
+            ui.separator();
+            let hint = "Alt swaps Pucker and Bloat, and pushes right · Enter applies · Esc cancels";
+            ui.label(RichText::new(hint).color(theme.dark_foreground));
+        });
+    }
+}
+
 /// The tools and their options. The options (not the tool, the colours
 /// or the clone source) are kept between runs in `~/.config/omapix/tools.toml`.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -402,6 +468,7 @@ pub struct Tools {
     pub bucket_anti_alias: bool,
     pub bucket_contiguous: bool,
     pub bucket_all_layers: bool,
+    pub liquify: Liquify,
     /// Foreground and background colours, in sRGB as shown in the pickers.
     #[serde(skip)]
     pub foreground: [u8; 3],
@@ -468,6 +535,7 @@ impl Default for Tools {
             bucket_anti_alias: true,
             bucket_contiguous: true,
             bucket_all_layers: false,
+            liquify: Liquify::default(),
             foreground: [0, 0, 0],
             background: [255, 255, 255],
         }

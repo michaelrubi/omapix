@@ -113,6 +113,7 @@ pub enum Command {
     ImageSize,
     CanvasSize,
     Crop,
+    Liquify,
 }
 
 const CMD: Modifiers = Modifiers::COMMAND;
@@ -241,6 +242,7 @@ impl Command {
         Command::ImageSize,
         Command::CanvasSize,
         Command::Crop,
+        Command::Liquify,
     ];
 
     /// Look a command up by its name in code, e.g. "FrequencySeparation".
@@ -265,6 +267,7 @@ impl Command {
         Command::ClippingMask,
         Command::ImageSize,
         Command::CanvasSize,
+        Command::Liquify,
         Command::SaveAs,
         Command::Redo,
         Command::CopyMerged,
@@ -429,6 +432,7 @@ impl Command {
             Command::ImageSize => "Image Size…",
             Command::CanvasSize => "Canvas Size…",
             Command::Crop => "Crop",
+            Command::Liquify => "Liquify…",
         }
     }
 
@@ -474,6 +478,7 @@ impl Command {
             Command::SelectAndMask => s(CMD_ALT, Key::R),
             Command::ImageSize => s(CMD_ALT, Key::I),
             Command::CanvasSize => s(CMD_ALT, Key::C),
+            Command::Liquify => s(CMD_SHIFT, Key::X),
             Command::FillForeground => s(Modifiers::ALT, Key::Backspace),
             Command::FillBackground => s(CMD, Key::Backspace),
             Command::Clear => s(Modifiers::NONE, Key::Delete),
@@ -542,18 +547,18 @@ impl Command {
             // instead of key presses. Ctrl+V becomes a Paste event only when
             // the clipboard holds text, not an image, but its V is still
             // released: a V released without being pressed was Ctrl+V.
+            // Whether `command`'s shortcut is `key` with the Shift and Alt held now.
+            let held = |command: Command, key: Key| {
+                hotkeys.command(command).is_some_and(|s| {
+                    s.logical_key == key && s.modifiers.alt == i.modifiers.alt && s.modifiers.shift == i.modifiers.shift
+                })
+            };
             for event in &i.events {
                 match event {
-                    // Ctrl+Alt+C (Canvas Size) comes as a Copy too.
-                    egui::Event::Copy
-                        if hotkeys.command(Command::CanvasSize).is_some_and(|s| {
-                            s.logical_key == Key::C
-                                && s.modifiers.alt == i.modifiers.alt
-                                && s.modifiers.shift == i.modifiers.shift
-                        }) =>
-                    {
-                        pressed.push(Command::CanvasSize)
-                    }
+                    // Ctrl+Alt+C (Canvas Size) comes as a Copy too, and
+                    // Ctrl+Shift+X (Liquify) as a Cut.
+                    egui::Event::Copy if held(Command::CanvasSize, Key::C) => pressed.push(Command::CanvasSize),
+                    egui::Event::Cut if held(Command::Liquify, Key::X) => pressed.push(Command::Liquify),
                     egui::Event::Copy if i.modifiers.shift => pressed.push(Command::CopyMerged),
                     egui::Event::Copy => pressed.push(Command::Copy),
                     egui::Event::Cut => pressed.push(Command::Cut),
@@ -658,7 +663,8 @@ mod tests {
         let copy = vec![egui::Event::Copy];
         assert_eq!(press(&ctx, &mut v_down, CMD_ALT, copy), [Command::CanvasSize]);
         let cut = vec![egui::Event::Cut];
-        assert_eq!(press(&ctx, &mut v_down, CMD, cut), [Command::Cut]);
+        assert_eq!(press(&ctx, &mut v_down, CMD, cut.clone()), [Command::Cut]);
+        assert_eq!(press(&ctx, &mut v_down, CMD_SHIFT, cut), [Command::Liquify]);
 
         // Ctrl+V with an image on the clipboard: only the release arrives,
         // even if Ctrl was let go first.

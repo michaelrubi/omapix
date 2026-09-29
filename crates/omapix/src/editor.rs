@@ -1,6 +1,7 @@
 //! One open document: its layers, undo history, selection, and the
 //! background work that keeps the canvas up to date.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
@@ -11,6 +12,7 @@ use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
 use omapix_engine::transform::{Affine, Resampling, transformed};
+use omapix_engine::warp::{self, Field};
 use omapix_engine::reduced::Reduced;
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
@@ -169,6 +171,16 @@ struct Transforming {
     started: bool,
 }
 
+/// Liquify (Ctrl+Shift+X) in progress on a layer.
+struct Liquifying {
+    layer: u64,
+    /// The layer's pixels before, which the warp is always made from.
+    source: Tiled<Pixel>,
+    field: Field,
+    /// The document has changed, as one undo step.
+    started: bool,
+}
+
 /// A Move drag, or a slider drag on one layer's settings, shown live on the
 /// GPU (see live.rs), and once it ends, until the CPU render of it is on
 /// screen.
@@ -238,6 +250,10 @@ pub struct Editor {
     /// The Move tool drag in progress.
     moving: Option<Moving>,
     transforming: Option<Transforming>,
+    liquifying: Option<Liquifying>,
+    /// Each layer's last Liquify: its pixels before, the warp, and the
+    /// pixels it made, to carry on from while the layer still has them.
+    meshes: HashMap<u64, (Tiled<Pixel>, Field, Tiled<Pixel>)>,
     live_view: Option<LiveView>,
     /// The largest GPU texture side for live moves, or `None` to move on
     /// the CPU (see gpu.rs).
@@ -298,6 +314,8 @@ impl Editor {
             stroke: None,
             moving: None,
             transforming: None,
+            liquifying: None,
+            meshes: HashMap::new(),
             live_view: None,
             live_limit: crate::gpu::max_side(),
             painted: 0,
@@ -383,6 +401,8 @@ impl Editor {
             self.live_view = None;
             self.moving = None;
             self.transforming = None;
+            self.liquifying = None;
+            self.meshes.clear();
             if let Some(rendering) = self.rendering.take() {
                 rendering.cancel.store(true, Ordering::Release);
             }
@@ -813,6 +833,12 @@ impl Editor {
             }
             _ => {}
         }
+        self.redraw_tiles(&changed);
+    }
+
+    /// Show a change to `changed` tiles at once, drawing them straight into
+    /// the canvas.
+    fn redraw_tiles(&mut self, changed: &[(u32, u32)]) {
         if changed.is_empty() {
             return;
         }
@@ -832,12 +858,12 @@ impl Editor {
             &self.doc.layers,
             self.view,
             self.overlay_colour,
-            &changed,
+            changed,
             Some(&self.groups),
             self.doc.selection.as_ref(),
         );
-        render.write_tiles(0, &changed, &data, None);
-        self.canvas.invalidate_tiles(0, &changed);
+        render.write_tiles(0, changed, &data, None);
+        self.canvas.invalidate_tiles(0, changed);
         self.painted = self.revision;
         // If the canvas was current before this dab, it still is. If not, a
         // full render will catch up with the rest.
@@ -851,6 +877,7 @@ impl Editor {
         self.end_stroke();
         self.end_move();
         self.commit_transform();
+        self.commit_liquify();
     }
 
     /// Start moving the active layer with the Move tool: the whole layer
@@ -1102,6 +1129,88 @@ impl Editor {
             self.doc.selection = Some(sel.transformed(&t)).filter(|s| !s.is_empty());
         }
         self.changed();
+    }
+
+    /// Start Liquify on the active layer, carrying on from its last one if
+    /// the layer hasn't changed since. Nothing changes until the first dab.
+    /// Returns why it can't start, if it can't.
+    pub fn begin_liquify(&mut self) -> Result<(), &'static str> {
+        if self.job.is_some() {
+            return Err("Omapix is busy");
+        }
+        if self.target != Target::Pixels {
+            return Err("Liquify works on a layer's pixels: target the layer, not its mask");
+        }
+        self.end_gesture();
+        let layer = self.doc.layer(self.active).ok_or("There's no layer to liquify")?;
+        if !layer.has_pixels() {
+            return Err("Could not liquify because the layer has no pixels");
+        }
+        if !layer.can_paint_pixels() {
+            return Err("Could not liquify because the layer is locked");
+        }
+        let (source, field) = match self.meshes.get(&layer.id) {
+            Some((source, field, made)) if made.same_tiles(&layer.pixels) => (source.clone(), field.clone()),
+            _ => (layer.pixels.clone(), Field::new(self.doc.width, self.doc.height)),
+        };
+        self.liquifying = Some(Liquifying { layer: layer.id, source, field, started: false });
+        Ok(())
+    }
+
+    pub fn liquifying(&self) -> bool {
+        self.liquifying.is_some()
+    }
+
+    /// Dabs of Liquify's `brush` (see [`Field::dab`]), each at a centre
+    /// and with how far the pointer moved there, shown at once.
+    pub fn liquify(&mut self, brush: warp::Brush, dabs: &[([f32; 2], [f32; 2])], radius: f32, amount: f32) {
+        let Some(liquifying) = &mut self.liquifying else {
+            return;
+        };
+        let areas = dabs.iter().filter_map(|&(centre, motion)| liquifying.field.dab(brush, centre, radius, amount, motion));
+        let Some(area) = areas.reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]) else {
+            return;
+        };
+        if !liquifying.started {
+            liquifying.started = true;
+            self.live = None;
+            let before = self.snapshot("Liquify");
+            self.push_undo(before);
+        }
+        let Some(liquifying) = &self.liquifying else {
+            return;
+        };
+        let Some(layer) = self.doc.layer_mut(liquifying.layer) else {
+            return;
+        };
+        let tiles = warp::warp_area(&liquifying.source, &liquifying.field, &mut layer.pixels, area);
+        self.redraw_tiles(&tiles);
+    }
+
+    /// Keep the Liquify (Enter), remembering its mesh.
+    pub fn commit_liquify(&mut self) {
+        let Some(liquifying) = self.liquifying.take() else {
+            return;
+        };
+        if liquifying.started
+            && let Some(layer) = self.doc.layer(liquifying.layer)
+        {
+            let made = layer.pixels.clone();
+            self.meshes.insert(liquifying.layer, (liquifying.source, liquifying.field, made));
+        }
+    }
+
+    /// Put the layer back as it was (Esc).
+    pub fn cancel_liquify(&mut self) {
+        let Some(liquifying) = self.liquifying.take() else {
+            return;
+        };
+        // Undo the step the first dab made, without offering to redo it.
+        if liquifying.started
+            && let Some(before) = self.undo.pop()
+        {
+            self.restore(before);
+        }
     }
 
     /// Find the region of similar colours under `start`, matching Magic Wand and Paint Bucket.

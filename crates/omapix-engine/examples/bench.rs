@@ -57,6 +57,16 @@ fn main() {
     doc.clone().resize_image(doc.width * 3 / 2, doc.height * 3 / 2);
     println!("image size 150% {:>8.0?}", t.elapsed());
 
+    for radius in [50.0, 250.0] {
+        let mut field = omapix_engine::warp::Field::new(doc.width, doc.height);
+        let mut layer = doc.layers[0].pixels.clone();
+        let t = Instant::now();
+        let c = [doc.width as f32 / 2.0, doc.height as f32 / 2.0];
+        let area = field.dab(omapix_engine::warp::Brush::ForwardWarp, c, radius, 1.0, [10.0, 0.0]).unwrap();
+        omapix_engine::warp::warp_area(&doc.layers[0].pixels, &field, &mut layer, area);
+        println!("liquify dab r{radius:<4} {:>8.1?}", t.elapsed());
+    }
+
     let dir = std::env::temp_dir().join(format!("omapix-bench-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let t = Instant::now();
