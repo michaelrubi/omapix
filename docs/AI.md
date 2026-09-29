@@ -2,7 +2,7 @@
 
 Design for section 7 of the [roadmap](ROADMAP.md): Evoto-style one-click
 portrait cleanup, running locally on the GPU, with no subscription and no
-cloud. Status: proposal, not started. [DESIGN.md](DESIGN.md) covers the
+cloud. Status: under way, see Milestones. [DESIGN.md](DESIGN.md) covers the
 rest of Omapix.
 
 ## Goals
@@ -21,13 +21,15 @@ rest of Omapix.
 - **Subtle reshaping by slider.** Face symmetry, and "easy Liquify" for
   face and body shape, driven by face and body landmarks rather than
   brushes.
+- **Generative Fill with a prompt.** Remove or replace something big, or
+  extend the canvas, where Content-Aware Fill and healing run out.
 - **Everything stays editable.** Each result is an ordinary layer, mask or
   selection that can be painted on, faded, hidden or deleted, as if it had
   been done by hand. No black boxes baked into the pixels.
 
 ### Not goals
 
-- Generative fill, face swaps, anything that invents content.
+- Face swaps.
 - Changes a slider can't take back: reshaping is always a separate layer
   with its settings kept, so it can be reopened, softened or deleted.
 - Cloud processing, accounts, telemetry, or downloads Omapix starts on its
@@ -70,6 +72,9 @@ to go:
    face points and spot positions. The changes to pixels are the engine's
    own filters and brushes, which are exact, 16-bit, colour-managed and
    tested. So a weak model gives a worse mask, never damaged pixels.
+   The fills (Content-Aware Fill, Generative Fill) are the exception: their
+   job is to make new pixels, so they always land on their own layer,
+   masked to the selection, over the untouched image.
 2. **Results are layers.** Auto Retouch builds a layer group you could
    have built by hand. Undo is one step. Hiding the group shows the before.
 3. **Opt-in and offline.** Omapix never goes online. Models are installed
@@ -417,7 +422,12 @@ Also from the same masks, later:
 
 ### 8. Reshape (easy Liquify)
 
-*Evoto's face and body shaping. Liquify with sliders instead of brushes.*
+*Evoto's face and body shaping. Liquify with sliders instead of brushes.
+Photoshop: Face-Aware Liquify, in the Liquify dialog.*
+
+- The face sliders go in the Liquify dialog, as Photoshop's Face-Aware
+  Liquify does, so the brushes can touch up what the sliders did in the
+  same session. Symmetry sits there too.
 
 - **Face.** Sliders per face:
   - face width, jaw and chin
@@ -461,6 +471,35 @@ engine in `omapix-engine` (plain CPU maths, headless tests):
 - **Live preview:** the warp applied to the shrunk pyramid level on screen
   while a slider moves, then at full size.
 
+### 9. Generative Fill
+
+*Photoshop: Edit › Generative Fill.*
+
+- Make a selection, then Edit › **Generative Fill…**: a prompt ("remove the
+  person", "a bare wall", "more of the backdrop") and Generate. An empty
+  prompt fills from the surroundings, as in Photoshop.
+- Three results to choose from, with arrows in the dialog, previewed on the
+  canvas. Generate again for three more.
+- The result goes on a new **Generative Fill** layer above the selected
+  one, masked to the selection, like Content-Aware Fill's. The prompt and
+  seed are kept on the layer, so it can be generated again later.
+- Same input path as Content-Aware Fill: a square round the selection (with
+  context around it), scaled to the model's size, and only the selected
+  part replaced, keeping the rest fixed while it generates, as ComfyUI's
+  masked fills do. Selecting past the canvas with the Crop tool, then
+  filling the transparent edge, extends the image.
+- Model: FLUX.2 klein 4B (Apache-2.0). An int4 ONNX export exists (7.8 GB
+  on disk). It needs ONNX Runtime 1.30, which Arch doesn't have yet.
+  - GPU only: on the CPU a result would take minutes, so without CUDA the
+    command is greyed out with a status-bar hint.
+  - To check in a spike: whether it fits beside everything else in 8 GB of
+    GPU memory, how long a result takes at 1024 px, and whether it has to
+    be unloaded after use (see Runtime: unloading CUDA sessions crashes
+    today).
+- Big fills come out at the model's resolution. On a 24 MP file a large
+  fill is softer than the photo round it, so Add Noise or the Finish grain
+  helps it match.
+
 ## Models
 
 Default set, all usable for commercial work:
@@ -473,8 +512,11 @@ Default set, all usable for commercial work:
 | Face points | MediaPipe Face Landmarker | ~3 MB | Apache-2.0 | Community ONNX conversions exist. We'd convert and check it ourselves. |
 | Skin, hair | MediaPipe multiclass selfie segmentation | ~16 MB | Apache-2.0 | 256×256 input, so the guided filter matters. |
 | Body points (Reshape) | MediaPipe Pose Landmarker | ~6–30 MB | Apache-2.0 | 33 points. Lite/Full/Heavy variants. |
+| Content-Aware Fill | LaMa | 208 MB | Apache-2.0 | Installed by `fetch-models.sh`. |
+| Generative Fill | FLUX.2 klein 4B (int4 ONNX) | 7.8 GB | Apache-2.0 | Optional download, GPU only. Needs ONNX Runtime 1.30. The 9B model is non-commercial, so it's left out. |
 
-About 400 MB total without BiRefNet's large variant, on disk only. Loaded
+About 600 MB total without BiRefNet's large variant and FLUX.2, on disk
+only. FLUX.2 is a separate, optional download because of its size. Loaded
 on first use.
 
 Considered and left out for now, because their weights or training data
@@ -542,37 +584,47 @@ the spike:
 ## Milestones
 
 Each is useful on its own and ends with `make install` and hand testing.
+Reordered on 2026-09-29 (see Decisions).
 
 0. ~~**Spike**~~ (done, 2026-09-25): `ort` 2.0.0-rc.13 with
    `load-dynamic` runs darktable's SAM 2.1 (small) from Omapix's new
    `omapix-ai` crate, on the CPU and with CUDA (once cuDNN is loaded
    first, see Runtime). One click on a portrait's face selects its skin.
    `crates/omapix-ai/examples/spike.rs` does it again.
-1. **Groundwork and Object Selection.** Object Selection is done
-   (click or box, Shift and Alt; `omapix-ai`'s runtime and SAM, and the
-   engine's `refine::mask_coverage` with the guided filter). Still to do:
-   the model registry with checksums, `fetch-models.sh`, Select › Subject
-   and Help › AI Models.
-   - `omapix-ai`, the model registry (shared folders, matched by checksum),
-     `fetch-models.sh`, and the model input/output path with the guided
-     filter.
-   - Object Selection tool, Select › Subject, Help › AI Models.
+1. **Groundwork and Object Selection.** Done: Object Selection and Quick
+   Selection (click, box or brush, Shift and Alt; `omapix-ai`'s runtime and
+   SAM, and the engine's `refine::mask_coverage` with the guided filter),
+   and Content-Aware Fill with LaMa and `fetch-models.sh`. Still to do:
+   the model registry (shared folders, matched by checksum) and
+   Help › AI Models.
 2. **Face analysis and masks**, per face and per person. Select › Skin,
-   Hair, Eyes, Lips, Teeth, and masks from them.
-3. **Smooth Skin**, with the dialog and preview, and the 3-band Frequency
+   Hair, Eyes, Lips, Teeth, and masks from them. Everything after this
+   needs these masks, so it comes first.
+3. **Blemishes.** The classical detector and Heal Blemishes, onto an empty
+   layer (Sample Current & Below already heals onto one). The biggest time
+   saver in everyday retouching.
+4. **AI Denoise** with NIND (roadmap section 4), onto a Denoise layer. The
+   model is already on disk from darktable (GPL-3.0, like Omapix) and the
+   runtime works, so it's quick, and it's the first step of the finishing
+   workflow.
+5. **Smooth Skin**, with the dialog and preview, and the 3-band Frequency
    Separation setup.
-4. **Blemishes.** Spot healing onto an empty layer, the detector, Heal
-   Blemishes.
-5. **Even Tone**, the automatic Dodge & Burn.
-6. **Auto Retouch**, with the face strip, per-face groups, presets and
+6. **Even Tone**, the automatic Dodge & Burn.
+7. **Auto Retouch**, with the face strip, per-face groups, presets and
    scripting.
-7. **Warps and Liquify.**
-   - The warp engine.
-   - Brush Liquify from section 3, as the first user of the engine and the
-     way to touch up what the sliders do.
-8. **Face Symmetry and face Reshape.**
-9. **Body Reshape**, with the pose model and background protection.
-10. **Later:**
+8. ~~**Warps and Liquify**~~ (done): the warp engine, and brush Liquify
+   (roadmap section 3), the way to touch up what the sliders do.
+9. **Face-Aware Liquify and Face Symmetry**, in the Liquify dialog. Cheap
+   once face points (2) and the warp engine (8) exist.
+10. **Generative Fill.** After the portrait work, which is used on every
+    photo, while Generative Fill is for the occasional big removal or
+    extension. By then Arch's ONNX Runtime should have reached 1.30. Starts
+    with a spike: memory, speed, and unloading.
+11. **Select › Subject** (MODNet or BiRefNet), and **AI upscaling** for
+    print enlargements in Image Size (darktable's RealPLKSR, MIT, already
+    on disk).
+12. **Body Reshape**, with the pose model and background protection.
+13. **Later:**
     - the optional learned blemish detector
     - eye and teeth whitening, shine, under-eye
     - checking whether an opt-in face parser beats the landmark polygons
@@ -594,6 +646,14 @@ From Michael, 24 September 2026:
 4. **No review step.** Automated edits land on their own layers and
    groups, and opacity, erasing and hiding are the review.
 5. **Training on your own retouches is optional**, opt-in and local only.
+
+From Michael, 29 September 2026:
+
+6. **Generative Fill is a goal** (feature 9), no longer a non-goal. It
+   comes after the portrait work (milestone 10).
+7. **Milestone order:** face masks, then blemishes, AI denoise, smooth
+   skin, even tone and Auto Retouch; then Face-Aware Liquify, Generative
+   Fill, Select Subject and upscaling, and body reshaping last.
 
 ## Decisions
 
@@ -619,4 +679,5 @@ From Michael, 24 September 2026:
 - [YuNet in OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT)
 - [MediaPipe Pose Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) (Apache-2.0)
 - [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker), [multiclass selfie segmentation ONNX](https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX) (Apache-2.0)
+- FLUX.2 klein from Black Forest Labs (4B: Apache-2.0; 9B: non-commercial), to be rechecked when packaged
 - Excluded: [face-parsing](https://github.com/yakhyo/face-parsing) (MIT code, CelebAMask-HQ weights), [Sapiens](https://huggingface.co/facebook/sapiens), [Sapiens2](https://huggingface.co/facebook/sapiens2)
