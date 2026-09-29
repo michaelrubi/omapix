@@ -62,6 +62,10 @@ pub struct FilterSettings {
     /// Frequency Separation's radius; unset, it's worked out from the
     /// image's size.
     pub separation_radius: Option<f32>,
+    /// Frequency Separation (3 Bands)' radii; unset, they're worked out
+    /// from the image's size.
+    pub separation3_fine: Option<f32>,
+    pub separation3_coarse: Option<f32>,
     /// Heal Blemishes' Sensitivity, 0–100.
     pub blemish_sensitivity: f32,
     /// Smooth Skin's Amount, Smoothness and Detail.
@@ -95,6 +99,8 @@ impl Default for FilterSettings {
             select_and_mask: Default::default(),
             select_and_mask_output: Default::default(),
             separation_radius: None,
+            separation3_fine: None,
+            separation3_coarse: None,
             blemish_sensitivity: 50.0,
             smooth_skin: Default::default(),
             // Leaves a little fine grain at high ISO, which looks natural.
@@ -181,6 +187,8 @@ impl FilterSettings {
         let text = toml::to_string(&Self::default()).unwrap_or_default();
         let mut out = TEMPLATE_HEADER.to_owned();
         out.push_str("# separation_radius = 8.6  (unset: from the image's size)\n");
+        out.push_str("# separation3_fine = 4.3  (unset: from the image's size)\n");
+        out.push_str("# separation3_coarse = 25.8  (unset: from the image's size)\n");
         for line in text.lines() {
             out.push_str(if line.is_empty() { "" } else { "# " });
             out.push_str(line);

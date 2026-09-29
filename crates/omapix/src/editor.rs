@@ -17,7 +17,7 @@ use omapix_engine::reduced::Reduced;
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
 use omapix_engine::{
-    BlendMode, DisplayTransform, Document, NoiseOptions, Pixel, Raster, composite, filters, ops,
+    DisplayTransform, Document, NoiseOptions, Pixel, Raster, composite, filters, ops,
 };
 
 use crate::canvas::{Canvas, Render};
@@ -32,6 +32,14 @@ const HISTORY_LIMIT: usize = 50;
 /// in Photoshop), out of `u16::MAX`.
 const OVERLAY_OPACITY: u32 = 32768;
 
+/// Which band of a frequency separation to preview on the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeparationBand {
+    Texture,
+    Mid,
+    Tone,
+}
+
 /// What the canvas shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum View {
@@ -45,9 +53,13 @@ pub enum View {
     /// Photoshop's Quick Mask mode (`Q`), painting the selection directly
     /// with the red overlay.
     QuickMask,
-    /// What frequency separation at `radius` would produce: the texture
-    /// layer, or the colour/tone layer.
-    Separation { radius: f32, texture: bool },
+    /// One layer of what frequency separation would make: at `fine` alone
+    /// (two bands), or at `fine` and `coarse` (three).
+    Separation {
+        fine: f32,
+        coarse: Option<f32>,
+        band: SeparationBand,
+    },
     /// What a Filter menu filter would do to `layer`, or with `mask` to
     /// its mask.
     Filter {
@@ -2038,20 +2050,15 @@ pub(crate) fn render_view(
             }
             (Render::new(image), None)
         }
-        View::Separation { radius, texture } => {
+        View::Separation { fine, coarse, band } => {
             let base = base.unwrap_or_else(|| Arc::new(Tiled::from_raster(&doc.composite())));
-            let low = filters::gaussian_blur(&base, radius);
-            let image = if texture {
-                // The texture layer on its own: image grain-extract blurred.
-                let mut extract = Layer::from_pixels(0, "", low);
-                extract.blend = BlendMode::GrainExtract;
-                composite::composite(
-                    &[Layer::from_pixels(0, "", (*base).clone()), extract],
-                    doc.width,
-                    doc.height,
-                )
-            } else {
-                low.to_raster()
+            let blurred = |radius| filters::gaussian_blur(&base, radius);
+            let coarse = coarse.unwrap_or(fine);
+            // Each layer on its own.
+            let image = match band {
+                SeparationBand::Texture => ops::grain_extract(&base, &blurred(fine)),
+                SeparationBand::Mid => ops::grain_extract(&blurred(fine), &blurred(coarse)),
+                SeparationBand::Tone => blurred(coarse).to_raster(),
             };
             (Render::new(image), Some(base))
         }
@@ -2325,7 +2332,7 @@ fn tile_order(
 mod tests {
     use super::*;
     use omapix_engine::layer::Mask;
-    use omapix_engine::{ColorProfile, Raster, ops};
+    use omapix_engine::{BlendMode, ColorProfile, Raster, ops};
 
     const RED: Pixel = [65535, 0, 0, 65535];
 
@@ -2415,23 +2422,36 @@ mod tests {
         let (texture, base) = render_view(
             &e.doc,
             View::Separation {
-                radius: 5.0,
-                texture: true,
+                fine: 5.0,
+                coarse: None,
+                band: SeparationBand::Texture,
             },
             RED,
             None,
         );
         assert!(texture.sample_for_test(300, 200)[0].abs_diff(32768) <= 2);
-        let (tone, _) = render_view(
+        let (tone, base) = render_view(
             &e.doc,
             View::Separation {
-                radius: 5.0,
-                texture: false,
+                fine: 5.0,
+                coarse: None,
+                band: SeparationBand::Tone,
             },
             RED,
             base,
         );
         assert!(tone.sample_for_test(300, 200)[0].abs_diff(30000) <= 2);
+        let (mid, _) = render_view(
+            &e.doc,
+            View::Separation {
+                fine: 2.0,
+                coarse: Some(6.0),
+                band: SeparationBand::Mid,
+            },
+            RED,
+            base,
+        );
+        assert!(mid.sample_for_test(300, 200)[0].abs_diff(32768) <= 2);
 
         // Gaussian blur preview blurs the layer pixels.
         e.edit("Dot", |doc, active| {
@@ -3338,7 +3358,7 @@ mod tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
-    use omapix_engine::{ColorProfile, Raster};
+    use omapix_engine::{BlendMode, ColorProfile, Raster};
 
     /// A 600 × 400 grey image and a red patch layer above it, laid out on
     /// screen as if a GPU could show moves live.

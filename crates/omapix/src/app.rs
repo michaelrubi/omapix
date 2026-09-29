@@ -26,7 +26,7 @@ use crate::face_selection::{FaceSelection, Part};
 use crate::preview_box::PreviewBox;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
-use crate::editor::{Editor, Target, View};
+use crate::editor::{Editor, SeparationBand, Target, View};
 use crate::histogram_panel::HistogramPanel;
 use crate::history_panel::HistoryPanel;
 use crate::layers_panel::LayersPanel;
@@ -105,14 +105,13 @@ impl RightTab {
 
 enum Dialog {
     /// Ask for a radius, then run a filter. For frequency separation,
-    /// `preview` shows the texture layer (`Some(true)`), the colour/tone
-    /// layer (`Some(false)`) or the image (`None`) while adjusting.
-    /// For Gaussian blur, `preview` shows the blurred layer (`Some(true)`)
-    /// or the unblurred image (`Some(false)`).
+    /// `preview` shows the texture layer, mid layer, colour/tone layer
+    /// or the image (`None`) while adjusting.
     Radius {
         command: Command,
         radius: f32,
-        preview: Option<bool>,
+        coarse: Option<f32>,
+        preview: Option<SeparationBand>,
     },
     AddNoise {
         options: NoiseOptions,
@@ -309,12 +308,19 @@ impl ScriptStep {
                 ("overlay", _) => ScriptStep::View(View::MaskOverlay(0)),
                 ("quickmask", _) => ScriptStep::View(View::QuickMask),
                 ("texture", &[radius]) => ScriptStep::View(View::Separation {
-                    radius,
-                    texture: true,
+                    fine: radius,
+                    coarse: None,
+                    band: SeparationBand::Texture,
+                }),
+                ("mid", &[fine, coarse]) => ScriptStep::View(View::Separation {
+                    fine,
+                    coarse: Some(coarse),
+                    band: SeparationBand::Mid,
                 }),
                 ("tone", &[radius]) => ScriptStep::View(View::Separation {
-                    radius,
-                    texture: false,
+                    fine: radius,
+                    coarse: None,
+                    band: SeparationBand::Tone,
                 }),
                 ("blur", &[radius]) => ScriptStep::View(View::Filter {
                     layer: 0,
@@ -1161,6 +1167,7 @@ impl App {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius,
+                    coarse: None,
                     preview: None,
                 });
             }
@@ -1295,6 +1302,7 @@ impl App {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius: self.filters.high_pass_radius,
+                    coarse: None,
                     preview: None,
                 });
             }
@@ -1326,7 +1334,20 @@ impl App {
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
                     radius,
-                    preview: Some(true),
+                    coarse: None,
+                    preview: Some(SeparationBand::Texture),
+                });
+            }
+            Command::FrequencySeparation3 => {
+                let Some(editor) = &self.editor else { return };
+                let (fine, coarse) = three_band_radii(separation_radius(editor));
+                let fine = self.filters.separation3_fine.unwrap_or(fine);
+                let coarse = self.filters.separation3_coarse.unwrap_or(coarse);
+                self.dialog = Some(Dialog::Radius {
+                    command: cmd,
+                    radius: fine,
+                    coarse: Some(coarse),
+                    preview: Some(SeparationBand::Texture),
                 });
             }
             Command::SelectLayerAbove => {
@@ -1492,7 +1513,7 @@ self.filters.remember(&filter);
         );
     }
 
-    fn apply_radius(&mut self, command: Command, radius: f32, ctx: &egui::Context) {
+    fn apply_radius(&mut self, command: Command, radius: f32, coarse: Option<f32>, ctx: &egui::Context) {
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -1548,6 +1569,21 @@ self.filters.remember(&filter);
                     move |doc, active| {
                         let (_, high) = ops::frequency_separation(doc, index, radius);
                         *active = high;
+                    },
+                    ctx,
+                );
+            }
+            Command::FrequencySeparation3 => {
+                let coarse = coarse.unwrap_or(radius);
+                self.filters.separation3_fine = Some(radius);
+                self.filters.separation3_coarse = Some(coarse);
+                self.filters.save();
+                editor.target = Target::Pixels;
+                editor.edit_in_background(
+                    "Frequency Separation (3 Bands)",
+                    move |doc, active| {
+                        let (_, mid, _) = ops::frequency_separation_3(doc, index, radius, coarse);
+                        *active = mid;
                     },
                     ctx,
                 );
@@ -1909,6 +1945,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::HealBlemishes, None);
                 self.menu_item(ui, Command::SmoothSkin, None);
                 self.menu_item(ui, Command::FrequencySeparation, None);
+                self.menu_item(ui, Command::FrequencySeparation3, None);
                 self.menu_item(ui, Command::DodgeAndBurn, None);
                 self.menu_item(ui, Command::DodgeAndBurnCurves, None);
                 ui.separator();
@@ -2165,6 +2202,7 @@ self.filters.remember(&filter);
                 Dialog::Radius {
                     command,
                     radius,
+                    coarse,
                     preview,
                 } => {
                     ui.heading(command.label().trim_end_matches('…'));
@@ -2179,31 +2217,43 @@ self.filters.remember(&filter);
                         );
                         ui.add_space(8.0);
                     }
-                    if *command == Command::FrequencySeparation {
-                        ui.label(
-                            RichText::new(
-                                "Raise the radius until skin blotches vanish from the\n\
-                                 color/tone layer and only pores remain in texture.",
-                            )
-                            .color(hint),
-                        );
+                    if matches!(command, Command::FrequencySeparation | Command::FrequencySeparation3) {
+                        let text = if coarse.is_some() {
+                            "Fine: just above the pores, so only they are in texture.\n\
+                             Coarse: until blotches vanish from color/tone."
+                        } else {
+                            "Raise the radius until skin blotches vanish from the\n\
+                             color/tone layer and only pores remain in texture."
+                        };
+                        ui.label(RichText::new(text).color(hint));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             ui.label("Preview");
-                            ui.selectable_value(preview, Some(true), "Texture");
-                            ui.selectable_value(preview, Some(false), "Color/Tone");
+                            ui.selectable_value(preview, Some(SeparationBand::Texture), "Texture");
+                            if *command == Command::FrequencySeparation3 {
+                                ui.selectable_value(preview, Some(SeparationBand::Mid), "Mid");
+                            }
+                            ui.selectable_value(preview, Some(SeparationBand::Tone), "Color/Tone");
                             ui.selectable_value(preview, None, "Image");
                         });
                         ui.add_space(4.0);
                     }
-                    let (label, range) = match command {
-                        Command::BorderSelection => ("Width", 1.0..=200.0),
-                        Command::SmoothSelection
-                        | Command::ExpandSelection
-                        | Command::ContractSelection => ("Radius", 1.0..=100.0),
-                        _ => ("Radius", 0.1..=250.0),
-                    };
-                    radius_field(ui, radius, label, range);
+                    if let Some(coarse) = coarse {
+                        radius_field(ui, radius, "Fine", 0.1..=(*coarse).max(0.1));
+                        radius_field(ui, coarse, "Coarse", (*radius).min(250.0)..=250.0);
+                        if *coarse < *radius {
+                            *coarse = *radius;
+                        }
+                    } else {
+                        let (label, range) = match command {
+                            Command::BorderSelection => ("Width", 1.0..=200.0),
+                            Command::SmoothSelection
+                            | Command::ExpandSelection
+                            | Command::ContractSelection => ("Radius", 1.0..=100.0),
+                            _ => ("Radius", 0.1..=250.0),
+                        };
+                        radius_field(ui, radius, label, range);
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let ok = ui.button("OK").clicked()
@@ -2221,13 +2271,20 @@ self.filters.remember(&filter);
                                 Command::FrequencySeparation => {
                                     defaults.separation_radius.or(auto_separation).unwrap_or(*radius)
                                 }
+                                Command::FrequencySeparation3 => {
+                                    let auto = auto_separation.map(three_band_radii);
+                                    if let Some(c) = coarse {
+                                        *c = defaults.separation3_coarse.or(auto.map(|a| a.1)).unwrap_or(*c);
+                                    }
+                                    defaults.separation3_fine.or(auto.map(|a| a.0)).unwrap_or(*radius)
+                                }
                                 _ => defaults.high_pass_radius,
                             };
                         }
                         if ok {
-                            let (command, radius) = (*command, *radius);
+                            let (command, radius, coarse) = (*command, *radius, *coarse);
                             action = Some(Box::new(move |app, ctx| {
-                                app.apply_radius(command, radius, ctx)
+                                app.apply_radius(command, radius, coarse, ctx)
                             }));
                             close = true;
                         }
@@ -2618,14 +2675,16 @@ self.filters.remember(&filter);
         if let Some(editor) = &mut self.editor {
             match &self.dialog {
                 Some(Dialog::Radius {
-                    command: Command::FrequencySeparation,
+                    command: Command::FrequencySeparation | Command::FrequencySeparation3,
                     radius,
+                    coarse,
                     preview,
                 }) => {
                     let view = match preview {
-                        Some(texture) => View::Separation {
-                            radius: *radius,
-                            texture: *texture,
+                        Some(band) => View::Separation {
+                            fine: *radius,
+                            coarse: *coarse,
+                            band: *band,
                         },
                         None => View::Image,
                     };
@@ -3469,10 +3528,13 @@ self.filters.remember(&filter);
                 self.run(cmd, ctx);
                 // Radius commands open a dialog; accept its default.
                 if let Some(Dialog::Radius {
-                    command, radius, ..
+                    command,
+                    radius,
+                    coarse,
+                    ..
                 }) = self.dialog.take()
                 {
-                    self.apply_radius(command, radius, ctx);
+                    self.apply_radius(command, radius, coarse, ctx);
                 }
                 match self.dialog.take() {
                     Some(Dialog::AddNoise { options, .. }) => self.apply_add_noise(options, ctx),
@@ -3775,6 +3837,13 @@ fn smart_blur_controls(ui: &mut Ui, options: &mut SmartBlurOptions, hint: egui::
 fn separation_radius(editor: &Editor) -> f32 {
     let longest = editor.doc.width.max(editor.doc.height) as f32;
     (longest / 700.0 * 10.0).round() / 10.0
+}
+
+/// Frequency Separation (3 Bands)' fine and coarse radii until they're
+/// chosen, from the 2-band one's `radius`.
+fn three_band_radii(radius: f32) -> (f32, f32) {
+    let round = |r: f32| (r * 10.0).round() / 10.0;
+    (round(radius / 2.0), round(radius * 3.0))
 }
 
 /// Select › Modify's remembered radius (Border's width) for `command`.
@@ -5726,8 +5795,9 @@ mod tests {
         let active = app.editor.as_ref().unwrap().active;
         for view in [
             View::Separation {
-                radius: 5.0,
-                texture: true,
+                fine: 5.0,
+                coarse: None,
+                band: SeparationBand::Texture,
             },
             View::Filter {
                 layer: active,
@@ -5867,7 +5937,7 @@ mod tests {
         else {
             panic!("no radius dialog");
         };
-        app.apply_radius(command, radius, &ctx);
+        app.apply_radius(command, radius, None, &ctx);
         let editor = app.editor.as_mut().unwrap();
         while editor.busy().is_some() {
             std::thread::sleep(Duration::from_millis(1));
@@ -6749,7 +6819,7 @@ mod tests {
         app.run(Command::FrequencySeparation, &ctx);
         assert!(matches!(app.dialog, Some(Dialog::Radius { radius, .. }) if radius == 0.9));
         app.dialog = None;
-        app.apply_radius(Command::FrequencySeparation, 3.5, &ctx);
+        app.apply_radius(Command::FrequencySeparation, 3.5, None, &ctx);
         let editor = app.editor.as_mut().unwrap();
         while editor.busy().is_some() {
             std::thread::sleep(Duration::from_millis(1));
@@ -6768,6 +6838,80 @@ mod tests {
         frame(&mut app, Some(button));
         frame(&mut app, Some(button));
         assert!(matches!(app.dialog, Some(Dialog::Radius { radius, .. }) if radius == 25.0));
+    }
+
+    #[test]
+    fn frequency_separation_3_dialog_preview_and_remembers() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+
+        // 1. Run the command: opens dialog with defaults computed from image size (fine=0.5, coarse=2.7).
+        app.run(Command::FrequencySeparation3, &ctx);
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Radius {
+                command: Command::FrequencySeparation3,
+                radius,
+                coarse: Some(coarse),
+                preview: Some(SeparationBand::Texture),
+            }) if radius == 0.5 && coarse == 2.7
+        ));
+
+        // 2. Check that the preview view is set when dialog runs.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.dialogs(ui.ctx()));
+        out.textures_delta.clear();
+        assert_eq!(
+            app.editor.as_ref().unwrap().view(),
+            View::Separation {
+                fine: 0.5,
+                coarse: Some(2.7),
+                band: SeparationBand::Texture,
+            }
+        );
+
+        // 3. Apply with custom radii.
+        app.dialog = None;
+        app.apply_radius(Command::FrequencySeparation3, 1.5, Some(6.0), &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+
+        // 4. Check layers made and that Mid layer is selected.
+        let doc = &editor.doc;
+        assert_eq!(doc.layers.len(), 5);
+        let group = doc.layers.last().unwrap();
+        assert!(group.is_group && group.blend == omapix_engine::blend::BlendMode::PassThrough);
+        assert_eq!(group.name, "Frequency Separation (3 Bands)");
+
+        let low = &doc.layers[1];
+        let mid = &doc.layers[2];
+        let high = &doc.layers[3];
+        assert_eq!(low.name, "Low - color/tone");
+        assert_eq!(low.blend, omapix_engine::blend::BlendMode::Normal);
+        assert_eq!(mid.name, "Mid - blotches");
+        assert_eq!(mid.blend, omapix_engine::blend::BlendMode::GrainMerge);
+        assert_eq!(high.name, "High - texture");
+        assert_eq!(high.blend, omapix_engine::blend::BlendMode::GrainMerge);
+
+        assert_eq!(editor.active, mid.id);
+
+        // 5. Check radii remembered.
+        assert_eq!(app.filters.separation3_fine, Some(1.5));
+        assert_eq!(app.filters.separation3_coarse, Some(6.0));
+
+        // Running the command again uses remembered radii.
+        app.run(Command::FrequencySeparation3, &ctx);
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Radius {
+                command: Command::FrequencySeparation3,
+                radius,
+                coarse: Some(coarse),
+                ..
+            }) if radius == 1.5 && coarse == 6.0
+        ));
     }
 
     #[test]

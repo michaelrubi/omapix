@@ -345,20 +345,23 @@ pub fn stamp_visible(doc: &mut Document) -> u64 {
     id
 }
 
+/// `image` less `blurred`, round 50 % grey (Grain Extract): a frequency
+/// separation's band between them.
+pub fn grain_extract(image: &Tiled<crate::Pixel>, blurred: &Tiled<crate::Pixel>) -> Raster {
+    let mut extract = Layer::from_pixels(0, "", blurred.clone());
+    extract.blend = BlendMode::GrainExtract;
+    composite(&[Layer::from_pixels(0, "", image.clone()), extract], image.width(), image.height())
+}
+
 /// Split the visible image into a blurred colour/tone layer and a texture
 /// layer that recombine exactly to the original (Grain Extract / Grain
 /// Merge), in a "Frequency Separation" group placed above layer index
 /// `above`, so hiding the group shows the image before. Returns (low id,
 /// high id).
 pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u64, u64) {
-    let visible = doc.composite();
-    let (w, h) = (doc.width, doc.height);
-    let visible_layer = Layer::from_raster(0, "", &visible);
-    let low_pixels = gaussian_blur(&visible_layer.pixels, radius);
-
-    let mut extract = Layer::from_pixels(0, "", low_pixels.clone());
-    extract.blend = BlendMode::GrainExtract;
-    let high_raster: Raster = composite(&[visible_layer, extract], w, h);
+    let visible = Tiled::from_raster(&doc.composite());
+    let low_pixels = gaussian_blur(&visible, radius);
+    let high_raster = grain_extract(&visible, &low_pixels);
 
     let low_id = doc.next_layer_id();
     let high_id = doc.next_layer_id();
@@ -369,6 +372,39 @@ pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u
     let at = doc.insert_above(group, low);
     doc.insert_above(at, high);
     (low_id, high_id)
+}
+
+/// Split the visible image into low (colour/tone), mid (blotches), and high
+/// (texture) bands that recombine exactly to the original, in a "Frequency
+/// Separation (3 Bands)" group placed above layer index `above`. Returns
+/// (low id, mid id, high id).
+pub fn frequency_separation_3(
+    doc: &mut Document,
+    above: usize,
+    fine: f32,
+    coarse: f32,
+) -> (u64, u64, u64) {
+    let visible = Tiled::from_raster(&doc.composite());
+    let fine_pixels = gaussian_blur(&visible, fine);
+    let coarse_pixels = gaussian_blur(&visible, coarse);
+    let mid_raster = grain_extract(&fine_pixels, &coarse_pixels);
+    let high_raster = grain_extract(&visible, &fine_pixels);
+
+    let low_id = doc.next_layer_id();
+    let mid_id = doc.next_layer_id();
+    let high_id = doc.next_layer_id();
+
+    let low = Layer::from_pixels(low_id, "Low - color/tone", coarse_pixels);
+    let mut mid = Layer::from_raster(mid_id, "Mid - blotches", &mid_raster);
+    mid.blend = BlendMode::GrainMerge;
+    let mut high = Layer::from_raster(high_id, "High - texture", &high_raster);
+    high.blend = BlendMode::GrainMerge;
+
+    let group = new_setup_group(doc, above, "Frequency Separation (3 Bands)");
+    let at = doc.insert_above(group, low);
+    let at = doc.insert_above(at, mid);
+    doc.insert_above(at, high);
+    (low_id, mid_id, high_id)
 }
 
 /// Layer `id`'s pixels after `filter`, within the selection if there is
@@ -654,6 +690,58 @@ mod tests {
             .unwrap();
         // Only rounding differences, except where local contrast exceeds
         // half the range and the texture layer clips (same as Photoshop).
+        assert!(worst <= 3, "worst channel difference {worst}");
+    }
+
+    #[test]
+    fn frequency_separation_3_leaves_the_image_unchanged() {
+        let (w, h) = (300, 280);
+        let px = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let grain = ((x * 7 + y * 3) % 11) * 300;
+                [
+                    (15000 + x * 60 + grain) as u16,
+                    (20000 + y * 50 + grain) as u16,
+                    (30000 + grain) as u16,
+                    65535,
+                ]
+            })
+            .collect();
+        let mut doc = doc_with(px, w, h);
+        let before = doc.composite();
+        let (low, mid, high) = frequency_separation_3(&mut doc, 0, 3.0, 9.0);
+        assert_eq!(doc.layers.len(), 5);
+
+        let low_layer = doc.layer(low).unwrap();
+        let mid_layer = doc.layer(mid).unwrap();
+        let high_layer = doc.layer(high).unwrap();
+
+        assert_eq!(low_layer.name, "Low - color/tone");
+        assert_eq!(low_layer.blend, BlendMode::Normal);
+        assert_eq!(mid_layer.name, "Mid - blotches");
+        assert_eq!(mid_layer.blend, BlendMode::GrainMerge);
+        assert_eq!(high_layer.name, "High - texture");
+        assert_eq!(high_layer.blend, BlendMode::GrainMerge);
+
+        assert!(doc.index_of(low).unwrap() < doc.index_of(mid).unwrap());
+        assert!(doc.index_of(mid).unwrap() < doc.index_of(high).unwrap());
+
+        let group = doc.layers.last().unwrap();
+        assert!(group.is_group && group.blend == BlendMode::PassThrough);
+        assert_eq!(group.name, "Frequency Separation (3 Bands)");
+        assert_eq!(low_layer.parent, Some(group.id));
+        assert_eq!(mid_layer.parent, Some(group.id));
+        assert_eq!(high_layer.parent, Some(group.id));
+
+        let after = doc.composite();
+        let worst = before
+            .pixels()
+            .iter()
+            .zip(after.pixels())
+            .flat_map(|(a, b)| (0..3).map(move |c| a[c].abs_diff(b[c])))
+            .max()
+            .unwrap();
         assert!(worst <= 3, "worst channel difference {worst}");
     }
 
