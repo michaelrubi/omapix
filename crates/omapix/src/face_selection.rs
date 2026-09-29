@@ -6,10 +6,10 @@
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
-use omapix_ai::face::{BODY_SKIN, FACE_SKIN, Faces, HAIR, Image, outline};
+use omapix_ai::face::{Analysis, BODY_SKIN, FACE_SKIN, Faces, HAIR, Image, outline};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, Tiled};
-use omapix_engine::{ColorProfile, DisplayTransform, refine};
+use omapix_engine::{ColorProfile, DisplayTransform, Raster, refine};
 use rayon::prelude::*;
 
 use crate::canvas::Render;
@@ -151,39 +151,16 @@ impl FaceSelection {
 }
 
 fn find(image: &Render, profile: &ColorProfile, part: Part) -> Result<Selection, String> {
-    let transform = DisplayTransform::to_srgb(profile).map_err(|e| e.to_string())?;
     image
         .with_image(|image| {
-            let mut srgb = vec![[0u8; 4]; image.pixels().len()];
-            // In parallel: a 24 MP image takes half a second on one thread.
-            srgb.par_chunks_mut(1 << 16)
-                .zip(image.pixels().par_chunks(1 << 16))
-                .for_each(|(out, pixels)| transform.convert(pixels, out));
-            let analysis = {
-                let mut models = MODELS.lock().map_err(|e| e.to_string())?;
-                let faces = match &mut *models {
-                    Some(faces) => faces,
-                    None => models.insert(Faces::load()?),
-                };
-                let (width, height) = (image.width() as usize, image.height() as usize);
-                faces.analyse(&Image {
-                    pixels: &srgb,
-                    width,
-                    height,
-                })?
-            };
+            let (_, analysis) = analyse(image, profile)?;
             let (width, height) = (image.width(), image.height());
-            let faces: Vec<&[[f32; 3]]> = analysis.faces.iter().filter_map(|(_, p)| p.as_deref()).collect();
+            let faces = points(&analysis);
             let found = match part {
-                Part::Skin | Part::Hair => {
-                    let classes: &[usize] = if part == Part::Skin { &[BODY_SKIN, FACE_SKIN] } else { &[HAIR] };
-                    let (logits, lw, lh) = analysis.logits(classes);
-                    let found = Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image));
-                    if part == Part::Skin {
-                        found.combine(&draw(&faces, &FEATURES, width, height), Combine::Subtract)
-                    } else {
-                        found
-                    }
+                Part::Skin => skin(&analysis, image, &[BODY_SKIN, FACE_SKIN]),
+                Part::Hair => {
+                    let (logits, lw, lh) = analysis.logits(&[HAIR]);
+                    Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image))
                 }
                 Part::Eyes => draw(&faces, &EYES, width, height),
                 Part::Lips => draw(&faces, &LIPS, width, height),
@@ -199,6 +176,43 @@ fn find(image: &Render, profile: &ColorProfile, part: Part) -> Result<Selection,
             }
         })
         .ok_or("The image isn't ready yet")?
+}
+
+/// `image` in 8-bit sRGB, as the models see it, and what they find in it.
+pub fn analyse(image: &Raster, profile: &ColorProfile) -> Result<(Vec<[u8; 4]>, Analysis), String> {
+    let transform = DisplayTransform::to_srgb(profile).map_err(|e| e.to_string())?;
+    let mut srgb = vec![[0u8; 4]; image.pixels().len()];
+    // In parallel: a 24 MP image takes half a second on one thread.
+    srgb.par_chunks_mut(1 << 16)
+        .zip(image.pixels().par_chunks(1 << 16))
+        .for_each(|(out, pixels)| transform.convert(pixels, out));
+    let mut models = MODELS.lock().map_err(|e| e.to_string())?;
+    let faces = match &mut *models {
+        Some(faces) => faces,
+        None => models.insert(Faces::load()?),
+    };
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    let analysis = faces.analyse(&Image {
+        pixels: &srgb,
+        width,
+        height,
+    })?;
+    Ok((srgb, analysis))
+}
+
+/// The points of each face the landmarker saw.
+fn points(analysis: &Analysis) -> Vec<&[[f32; 3]]> {
+    analysis.faces.iter().filter_map(|(_, p)| p.as_deref()).collect()
+}
+
+/// The skin in `image` of `classes` (face skin, body skin or both), from its
+/// segmentation, less each face's eyes, brows and lips.
+pub fn skin(analysis: &Analysis, image: &Raster, classes: &[usize]) -> Selection {
+    let (logits, lw, lh) = analysis.logits(classes);
+    Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image)).combine(
+        &draw(&points(analysis), &FEATURES, image.width(), image.height()),
+        Combine::Subtract,
+    )
 }
 
 /// The distance between a face's irises' centres, which its features are

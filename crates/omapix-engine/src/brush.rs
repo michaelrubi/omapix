@@ -442,7 +442,8 @@ impl Stroke {
 impl Stroke {
     /// Choose where a spot-heal stroke copies from: the nearby offset whose
     /// surroundings best match the painted area's surroundings, preferring
-    /// smooth source texture so edges (hair, lips) aren't pulled in.
+    /// even source patches so edges (hair, lips) and creases aren't pulled
+    /// in.
     fn find_source(&self) -> Option<(i32, i32)> {
         let src = self.source.as_ref()?;
         let (w, h) = (src.width() as i64, src.height() as i64);
@@ -499,6 +500,12 @@ impl Stroke {
                 }
                 let (mut ring_err, mut ring_n, mut edges, mut inner_n) =
                     (0.0f32, 0usize, 0.0f32, 0usize);
+                // How the surroundings differ on average. Healing corrects
+                // that, so it counts for less than a difference in shape,
+                // but it still counts: skin shouldn't come from hair.
+                let mut ring_shift = [0.0f32; 3];
+                // The copied patch's sum and sum of squares, for its variance.
+                let (mut sum, mut squares) = ([0.0f32; 3], 0.0f32);
                 let mut usable = true;
                 for y in (ry0..ry1).step_by(step) {
                     for x in (rx0..rx1).step_by(step) {
@@ -506,7 +513,10 @@ impl Stroke {
                         if cov_at(x, y) < 0.01 {
                             let d = rgb(src.get(x as u32, y as u32));
                             let s = rgb(s);
-                            ring_err += (0..3).map(|c| (d[c] - s[c]).powi(2)).sum::<f32>();
+                            for c in 0..3 {
+                                ring_err += (d[c] - s[c]).powi(2);
+                                ring_shift[c] += d[c] - s[c];
+                            }
                             ring_n += 1;
                         } else {
                             if s[3] == 0 {
@@ -520,6 +530,10 @@ impl Stroke {
                             edges += (0..3)
                                 .map(|c| (s[c] - right[c]).abs() + (s[c] - down[c]).abs())
                                 .sum::<f32>();
+                            for c in 0..3 {
+                                sum[c] += s[c];
+                                squares += s[c] * s[c];
+                            }
                             inner_n += 1;
                         }
                     }
@@ -527,8 +541,13 @@ impl Stroke {
                 if !usable || ring_n == 0 {
                     continue;
                 }
-                let score =
-                    ring_err / ring_n as f32 + 0.5 * (edges / inner_n.max(1) as f32).powi(2);
+                // A patch that varies (a crease, another spot) would be
+                // copied in; one with sharp edges (hair, lips) too.
+                let n = inner_n.max(1) as f32;
+                let variance = squares / n - sum.iter().map(|s| (s / n).powi(2)).sum::<f32>();
+                let ring = ring_err / ring_n as f32
+                    - 0.75 * ring_shift.iter().map(|s| (s / ring_n as f32).powi(2)).sum::<f32>();
+                let score = ring + variance + 0.5 * (edges / n).powi(2);
                 if best.is_none_or(|(b, _)| score < b) {
                     best = Some((score, (ox as i32, oy as i32)));
                 }

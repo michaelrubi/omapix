@@ -558,6 +558,8 @@ the spike:
 | SAM 2.1 encoder, once per image | < 0.5 s (measured: 0.14 s, 0.47 s the first time) | several s (measured: 1.1 s) |
 | SAM 2.1 per click | < 30 ms (measured: 8 ms) | < 200 ms (measured: 40 ms) |
 | Blemish detection | < 0.3 s (CPU) | same |
+| (measured) | 20 ms at 24 MP; 0.85 s with the face analysis and skin mask it needs | |
+| Healing the spots found (CPU) | 0.1–0.2 s for 3–26 spots | same |
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) | same |
 | Auto Retouch end to end, per face | < 3 s | < 10 s |
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
@@ -627,6 +629,12 @@ Reordered on 2026-09-29 (see Decisions).
 3. **Blemishes.** The classical detector and Heal Blemishes, onto an empty
    layer (Sample Current & Below already heals onto one). The biggest time
    saver in everyday retouching.
+   - Done (2026-09-29): `omapix_engine::blemish` finds the spots and heals
+     them onto a new Blemishes layer; Retouch › Heal Blemishes… circles
+     them on the canvas under a Sensitivity slider. Face skin only for
+     now (see "Blemish detection" below).
+   - Left: tuning Sensitivity on portraits with real blemishes; necks and
+     bodies once skin is split between people.
 4. **AI Denoise** with NIND (roadmap section 4), onto a Denoise layer. The
    model is already on disk from darktable (GPL-3.0, like Omapix) and the
    runtime works, so it's quick, and it's the first step of the finishing
@@ -688,6 +696,33 @@ full-length portrait (4024×6048), and two people, one in profile
     around each person helps there.
   - An orange pumpkin (a costume) comes out partly as skin. Splitting skin
     between people with SAM, prompted by their faces, should drop it.
+
+### Blemish detection
+
+2026-09-29, as built (`omapix_engine::blemish`), tried on five portraits
+and on one with six spots painted in:
+
+- **Scale.** The box round the face skin is shrunk so the eyes are about
+  150 px apart (never enlarged), by the largest face's YuNet eye points.
+- **Signal.** Lab L\* and a\*, each blurred lightly (0.006 IOD) and
+  heavily (0.12 IOD) with the skin mask weighting the blur, so brows, lips
+  and hair don't darken the skin round them. A spot's score is how much
+  darker and redder the light blur is than the heavy one, in multiples of
+  the face's median absolute difference, combined as a distance.
+- **Spots.** Blobs scoring over 3, kept if their peak is over 4, their
+  radius 0.008–0.06 IOD, their longest axis at most three times their
+  shortest (stray hairs and wrinkles are longer), and there's skin all
+  round them (not at a feature or the face's edge).
+- **Scores.** Painted spots scored 11–64. On clean faces, texture and
+  stubble score 4–8, and a crease under the nose about 5. Sensitivity
+  50 % heals from 10 up, 100 % from 4.
+- **Skin.** Face skin only: the segmenter took a pink dress and a pumpkin
+  for body skin, and knuckles are full of spot-like creases.
+- **Healing.** One Spot Healing dab per spot, 3 × its radius + 4 px
+  across. The brush's choice of source had to change: it compared the
+  surroundings' absolute colour, so it copied the nasolabial crease into
+  a cheek. It now counts a difference in shade at a quarter (healing
+  corrects shade), and how much the copied patch varies.
 
 ## Decisions
 

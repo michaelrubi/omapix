@@ -9,6 +9,7 @@ mod select_subject;
 mod drop;
 mod editor;
 mod face_selection;
+mod heal_blemishes;
 mod free_transform;
 mod gpu;
 mod histogram_panel;

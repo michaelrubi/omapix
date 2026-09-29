@@ -127,6 +127,7 @@ enum Dialog {
     },
     BlendingOptions(crate::blending_options::BlendingOptions),
     SelectAndMask(crate::select_and_mask::SelectAndMask),
+    HealBlemishes(crate::heal_blemishes::HealBlemishes),
     /// Name the selected adjustment layers to keep as a preset.
     SavePreset {
         name: String,
@@ -171,7 +172,8 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::SelectHair
         | Command::SelectEyes
         | Command::SelectLips
-        | Command::SelectTeeth => &[DETECTOR, LANDMARKER, SEGMENTER],
+        | Command::SelectTeeth
+        | Command::HealBlemishes => &[DETECTOR, LANDMARKER, SEGMENTER],
         _ => &[],
     }
 }
@@ -1287,6 +1289,13 @@ impl App {
                     preview: None,
                 });
             }
+            Command::HealBlemishes => {
+                let Some(editor) = &self.editor else { return };
+                match crate::heal_blemishes::HealBlemishes::open(ctx, editor, self.filters.blemish_sensitivity) {
+                    Ok(dialog) => self.dialog = Some(Dialog::HealBlemishes(dialog)),
+                    Err(e) => self.message(e, true),
+                }
+            }
             Command::FrequencySeparation => {
                 let Some(editor) = &self.editor else { return };
                 let radius = self.filters.separation_radius.unwrap_or_else(|| separation_radius(editor));
@@ -1872,6 +1881,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::HighPass, None);
             });
             ui.menu_button("Retouch", |ui| {
+                self.menu_item(ui, Command::HealBlemishes, None);
                 self.menu_item(ui, Command::FrequencySeparation, None);
                 self.menu_item(ui, Command::DodgeAndBurn, None);
                 self.menu_item(ui, Command::DodgeAndBurnCurves, None);
@@ -2044,6 +2054,20 @@ self.filters.remember(&filter);
                 }
                 Some(false) => dialog.cancel(editor),
                 None => return,
+            }
+            self.dialog = None;
+            return;
+        }
+        if let (Some(Dialog::HealBlemishes(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
+            match dialog.show(ctx, &self.theme) {
+                Ok(Some(true)) => {
+                    dialog.apply(ctx, editor);
+                    self.filters.blemish_sensitivity = dialog.sensitivity;
+                    self.filters.save();
+                }
+                Ok(Some(false)) => {}
+                Ok(None) => return,
+                Err(e) => self.message(e, true),
             }
             self.dialog = None;
             return;
@@ -2252,7 +2276,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) => {}
+                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -4579,6 +4603,10 @@ impl eframe::App for App {
                         Some((crate::free_transform::corners(rect, &t), cursor))
                     }),
                     crop: crop_box.is_some() && !tools_off,
+                    spots: match &self.dialog {
+                        Some(Dialog::HealBlemishes(dialog)) => dialog.spots(),
+                        _ => &[],
+                    },
                 };
                 let (tool_input, response) = editor.canvas.show(ui, pasteboard, overlay);
                 input = tool_input;
