@@ -21,6 +21,7 @@ use crate::canvas::ToolInput;
 use crate::settings::FilterSettings;
 use crate::tablet::Tablet;
 use crate::content_fill::ContentFill;
+use crate::face_selection::{FaceSelection, Part};
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
@@ -372,6 +373,7 @@ pub struct App {
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
     content_fill: ContentFill,
+    face_selection: FaceSelection,
 }
 
 impl App {
@@ -444,6 +446,7 @@ impl App {
             v_down: false,
             tablet: Tablet::connect(cc),
             content_fill: ContentFill::default(),
+            face_selection: FaceSelection::default(),
         };
         let warnings = crate::hotkeys::load();
         if !warnings.is_empty() {
@@ -661,7 +664,11 @@ impl App {
             if let Some(commit) = self.tools.threshold_moved.take() {
                 self.objects.threshold(editor, self.tools.ai_threshold, commit);
             }
-            let errors = [self.objects.poll(ctx, editor), self.content_fill.poll(editor)];
+            let errors = [
+                self.objects.poll(ctx, editor),
+                self.content_fill.poll(editor),
+                self.face_selection.poll(editor),
+            ];
             for e in errors.into_iter().flatten() {
                 self.message(e, true);
             }
@@ -885,6 +892,7 @@ impl App {
                 editor.doc.selection.is_some()
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
+            Command::SelectSkin | Command::SelectHair => self.face_selection.busy().is_none(),
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
@@ -1097,6 +1105,18 @@ impl App {
             Command::ContentAwareFill => {
                 if let Some(editor) = &self.editor
                     && let Err(e) = self.content_fill.start(ctx, editor)
+                {
+                    self.message(e, true);
+                }
+            }
+            Command::SelectSkin | Command::SelectHair => {
+                let part = if cmd == Command::SelectSkin { Part::Skin } else { Part::Hair };
+                // Shift adds to the selection, Alt takes away, as with the
+                // marquees.
+                let modifiers = ctx.input(|i| i.modifiers);
+                let how = Combine::from_modifiers(modifiers.shift, modifiers.alt);
+                if let Some(editor) = &self.editor
+                    && let Err(e) = self.face_selection.start(ctx, editor, part, how)
                 {
                     self.message(e, true);
                 }
@@ -1700,6 +1720,9 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::Deselect, None);
                 self.menu_item(ui, Command::InvertSelection, None);
                 ui.separator();
+                self.menu_item(ui, Command::SelectSkin, None);
+                self.menu_item(ui, Command::SelectHair, None);
+                ui.separator();
                 self.menu_item(ui, Command::SelectAndMask, None);
                 ui.menu_button("Modify", |ui| {
                     self.menu_item(ui, Command::BorderSelection, None);
@@ -1814,6 +1837,10 @@ self.filters.remember(&filter);
                 }
                 if self.content_fill.busy() {
                     ui.label(RichText::new("Filling the selection…").color(self.theme.accent));
+                    ui.separator();
+                }
+                if let Some(part) = self.face_selection.busy() {
+                    ui.label(RichText::new(part.finding()).color(self.theme.accent));
                     ui.separator();
                 }
                 if let Some((_, t)) = editor.transform() {
@@ -3184,6 +3211,7 @@ self.filters.remember(&filter);
         let idle = self.opening.is_none()
             && self.file_job.is_none()
             && self.dialog.is_none()
+            && self.face_selection.busy().is_none()
             && self
                 .editor
                 .as_ref()
@@ -4878,6 +4906,7 @@ mod tests {
             v_down: false,
             tablet: None,
             content_fill: ContentFill::default(),
+            face_selection: FaceSelection::default(),
         }
     }
 

@@ -509,8 +509,8 @@ Default set, all usable for commercial work:
 | Object Selection | SAM 2.1 Hiera Small | 180 MB | Apache-2.0 | Already installed via darktable. Tiny and Base Plus variants exist. |
 | Select Subject | BiRefNet portrait | ~200–900 MB (variant) | MIT | Best hair edges. MODNet (Apache-2.0, 25 MB) as the light option. |
 | Faces | YuNet | <1 MB | MIT | Fast, fine on CPU. |
-| Face points | MediaPipe Face Landmarker | ~3 MB | Apache-2.0 | Community ONNX conversions exist. We'd convert and check it ourselves. |
-| Skin, hair | MediaPipe multiclass selfie segmentation | ~16 MB | Apache-2.0 | 256×256 input, so the guided filter matters. |
+| Face points | MediaPipe Face Landmarker | 4.9 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. |
+| Skin, hair | MediaPipe multiclass selfie segmentation | 16 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. 256×256 input, so the guided filter matters. |
 | Body points (Reshape) | MediaPipe Pose Landmarker | ~6–30 MB | Apache-2.0 | 33 points. Lite/Full/Heavy variants. |
 | Content-Aware Fill | LaMa | 208 MB | Apache-2.0 | Installed by `fetch-models.sh`. |
 | Generative Fill | FLUX.2 klein 4B (int4 ONNX) | 7.8 GB | Apache-2.0 | Optional download, GPU only. Needs ONNX Runtime 1.30. The 9B model is non-commercial, so it's left out. |
@@ -540,7 +540,7 @@ the spike:
 
 | Step | GPU target | CPU fallback |
 |---|---|---|
-| Face analysis (detect, points, skin/hair) | < 0.3 s | < 2 s |
+| Face analysis (detect, points, skin/hair) | < 0.3 s (measured: 0.23 s at 24 MP, two faces) | < 2 s (measured: 0.87 s) |
 | Guided filter refine, per mask at 24 MP | < 0.3 s (CPU, parallel) | same |
 | SAM 2.1 encoder, once per image | < 0.5 s (measured: 0.14 s, 0.47 s the first time) | several s (measured: 1.1 s) |
 | SAM 2.1 per click | < 30 ms (measured: 8 ms) | < 200 ms (measured: 40 ms) |
@@ -591,15 +591,24 @@ Reordered on 2026-09-29 (see Decisions).
    `omapix-ai` crate, on the CPU and with CUDA (once cuDNN is loaded
    first, see Runtime). One click on a portrait's face selects its skin.
    `crates/omapix-ai/examples/spike.rs` does it again.
-1. **Groundwork and Object Selection.** Done: Object Selection and Quick
-   Selection (click, box or brush, Shift and Alt; `omapix-ai`'s runtime and
-   SAM, and the engine's `refine::mask_coverage` with the guided filter),
-   and Content-Aware Fill with LaMa and `fetch-models.sh`. Still to do:
-   the model registry (shared folders, matched by checksum) and
-   Help › AI Models.
+1. ~~**Groundwork and Object Selection.**~~ (done): Object Selection and
+   Quick Selection (click, box or brush, Shift and Alt; `omapix-ai`'s
+   runtime and SAM, and the engine's `refine::mask_coverage` with the
+   guided filter), and Content-Aware Fill with LaMa and `fetch-models.sh`.
+   Left for later: the model registry (shared folders, matched by
+   checksum) and Help › AI Models.
 2. **Face analysis and masks**, per face and per person. Select › Skin,
    Hair, Eyes, Lips, Teeth, and masks from them. Everything after this
    needs these masks, so it comes first.
+   - Spike done (2026-09-29): `omapix-ai::face` runs all three models,
+     and `crates/omapix-ai/examples/faces.rs` draws what they find. See
+     "Face analysis spike" below.
+   - Done: Select › Skin and Hair, from the whole image's segmentation,
+     with each face's eyes, brows and lips taken out of Skin (grown 0.03
+     IOD, feathered 0.015 IOD). 0.45 s at 24 MP once loaded.
+   - Next: Select › Eyes, Lips and Teeth; masks from each; a second
+     segmentation pass round each person; skin split between people with
+     SAM.
 3. **Blemishes.** The classical detector and Heal Blemishes, onto an empty
    layer (Sample Current & Below already heals onto one). The biggest time
    saver in everyday retouching.
@@ -628,6 +637,42 @@ Reordered on 2026-09-29 (see Decisions).
     - the optional learned blemish detector
     - eye and teeth whitening, shine, under-eye
     - checking whether an opt-in face parser beats the landmark polygons
+
+### Face analysis spike
+
+2026-09-29, on a headshot, a tilted face with glasses and teeth, a
+full-length portrait (4024×6048), and two people, one in profile
+(6048×4024).
+
+- **Models.** YuNet is OpenCV Zoo's ONNX file. MediaPipe only publishes
+  the other two as TFLite. `tf2onnx` converts both cleanly, and so do the
+  ONNX copies on Hugging Face from `senty-au`: all four match TFLite to
+  within 5e-4 on random inputs. `fetch-models.sh` downloads those copies,
+  pinned by revision and checksum, so it needs no Python or TensorFlow.
+- **Inputs.** From the TFLite metadata: the segmenter wants RGB in −1 to
+  1, and the landmarker RGB in 0 to 1. YuNet wants BGR in 0 to 255, in a
+  640 × 640 square. The segmenter's classes are background, hair, body
+  skin, face skin, clothes and others (glasses, jewellery).
+- **Crops.** The face crop is 1.5 times the face's box, turned so the eyes
+  are level, then found again from the first pass's points, as MediaPipe
+  does. Tilted faces come out as well as upright ones.
+- **Outlines.** Rings of landmark indices for the eyes, brows, lips, mouth
+  opening, irises and face oval are in `face::outline`. All of them fit
+  on the test photos.
+- **Speed**, warm, with CUDA: 24 MP, both faces, 0.23 s (0.87 s on the
+  CPU). Most of it is shrinking the image for the detector and
+  segmenter, which a mip level would make cheaper. Headshots take about
+  50 ms. Refining the skin mask at 24 MP takes 0.09 s. The first run of
+  each model takes 0.2–0.6 s more.
+- **Found wanting:**
+  - A face in profile is detected (score 0.64), but the landmarker says
+    there's no face in its crop, so it has no feature outlines. Its skin
+    still comes from the segmenter.
+  - At 256 px across the whole image, the segmenter misses small areas of
+    skin, such as a shin in the full-length shot. A second pass on a crop
+    around each person helps there.
+  - An orange pumpkin (a costume) comes out partly as skin. Splitting skin
+    between people with SAM, prompted by their faces, should drop it.
 
 ## Decisions
 

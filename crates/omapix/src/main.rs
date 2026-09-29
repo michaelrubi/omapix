@@ -7,6 +7,7 @@ mod commands;
 mod content_fill;
 mod drop;
 mod editor;
+mod face_selection;
 mod free_transform;
 mod gpu;
 mod histogram_panel;
