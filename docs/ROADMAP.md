@@ -140,6 +140,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
 - [x] Smart Sharpen at 100 % on a portrait: Amount, Radius, Reduce Noise, Remove (Gaussian Blur or Lens Blur), and Shadows/Highlights Fade Amount with live preview
 - [ ] Smart Blur at 100 % on a portrait: Radius, Threshold, Quality (Low, Medium, High), and Mode (Normal, Edge Only, Overlay Edge) with live preview
+- [ ] Filter preview box: 100 % preview in Unsharp Mask, Smart Sharpen, Reduce Noise, and Smart Blur dialogs, pannable by dragging, holding mouse down shows unfiltered original, and follows slider adjustments
 - [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
 - [ ] Mask Density: slider 0–100 %, live preview, within a selection, from Layer menu and mask context menu, and undo
 - [x] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
@@ -255,7 +256,7 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - ~~Photoshop's **Unsharp Mask**~~ (done): Filter › Sharpen › Unsharp Mask… with Amount, Radius and Threshold, on luminance only (the same offset goes to red, green and blue), so edges don't get colour fringes. Previewed live on the canvas; settings are remembered.
   - ~~**Smart Sharpen**~~ (done): Filter › Sharpen › Smart Sharpen… with Amount, Radius, Reduce Noise, Gaussian or Lens Blur removal, and shadow/highlight fading, on luminance only. Previewed live on the canvas; settings are remembered.
   - ~~A one-click **High Pass sharpening** setup~~ (done): Retouch › High Pass Sharpening… asks for a radius (1–3 px for fine detail) and adds a "High Pass Sharpening" layer in Overlay above the selected layer, holding the High Pass of the visible image's luminance, so it sharpens without colour fringes. Its opacity sets the strength and a mask keeps it off skin. Filter › Other › High Pass… applies the filter itself to a layer. Filter › Other › High Pass… is previewed live on the canvas, like Gaussian Blur and Unsharp Mask; the sharpening setup isn't yet.
-  - Previewed at 100 % in the dialog (Photoshop's filter preview box), since sharpening can't be judged zoomed out.
+  - ~~**Previewed at 100 % in the dialog**~~ (done): Photoshop's filter preview box (240 px square) in Unsharp Mask, Smart Sharpen, Reduce Noise, and Smart Blur dialogs, showing 100 % preview of the active layer centred on the canvas view, draggable to pan, holding click to see unfiltered pixels, and cached on filter settings and centre.
   - Later, output sharpening for the export size, once exports can resize (see Batch export).
 - ~~**Add Noise**~~ (done): Filter › Noise › Add Noise… opens a dialog with Photoshop's controls (Amount, Uniform or Gaussian, Monochromatic) plus film-like Grain Size and Roughness, and tonal falloff in shadows/highlights. By default the result goes on a new Grain layer in Overlay mode carrying the grain, with live preview while the dialog is open.
   - Later: grain added at output size once exports can resize.

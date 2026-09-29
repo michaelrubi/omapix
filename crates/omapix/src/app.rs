@@ -168,6 +168,15 @@ enum Extension {
     Transparent,
 }
 
+/// The 100 % preview box in a filter's dialog: where it looks, and what it
+/// shows there with the settings it was made for, and without the filter.
+struct FilterPreview {
+    centre: Pos2,
+    key: (LayerFilter, (u32, u32)),
+    filtered: egui::TextureHandle,
+    unfiltered: egui::TextureHandle,
+}
+
 /// Result of a background save or export: the document revision written,
 /// where, and whether it was a native save (vs a flattened export).
 type Written = Result<(u64, PathBuf, bool), String>;
@@ -308,6 +317,7 @@ pub struct App {
     picking: Option<(Purpose, Receiver<Option<PathBuf>>)>,
     file_job: Option<FileJob>,
     dialog: Option<Dialog>,
+    filter_preview: Option<FilterPreview>,
     /// A transient message for the status bar, and whether it's an error.
     status: Option<(String, bool, Instant)>,
     /// Filter settings as last used, kept between runs.
@@ -389,6 +399,7 @@ impl App {
             picking: None,
             file_job: None,
             dialog: None,
+            filter_preview: None,
             status: None,
             filters,
             defaults,
@@ -1793,9 +1804,15 @@ self.filters.remember(&filter);
         }
         let defaults = &self.defaults;
         let auto_separation = self.editor.as_ref().map(separation_radius);
+        let editor = self.editor.as_ref();
+        let preview_cache = &mut self.filter_preview;
         let Some(dialog) = &mut self.dialog else {
+            self.filter_preview = None;
             return;
         };
+        if !matches!(dialog, Dialog::Filter { filter, .. } if has_preview_box(filter)) {
+            *preview_cache = None;
+        }
         let mut close = false;
         let mut action: Option<DialogAction> = None;
         let hint = self.theme.dark_foreground;
@@ -1890,6 +1907,9 @@ self.filters.remember(&filter);
                 Dialog::Filter { filter, preview } => {
                     ui.heading(filter.name());
                     ui.add_space(8.0);
+                    if has_preview_box(filter) {
+                        filter_preview_box(ui, filter, editor, preview_cache);
+                    }
                     match filter {
                         LayerFilter::GaussianBlur { radius } | LayerFilter::HighPass { radius } => {
                             radius_field(ui, radius, "Radius", 0.1..=250.0);
@@ -2150,6 +2170,7 @@ self.filters.remember(&filter);
         });
         if close || response.should_close() {
             self.dialog = None;
+            self.filter_preview = None;
         }
         // Show the separation or blur preview while its dialog is open.
         if let Some(editor) = &mut self.editor {
@@ -3038,6 +3059,67 @@ fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     });
     ui.add_space(4.0);
     ui.checkbox(&mut options.tonal_falloff, "Shadow/highlight falloff");
+}
+
+/// Filters judged at 100 %, which show a preview box in their dialogs.
+fn has_preview_box(filter: &LayerFilter) -> bool {
+    matches!(
+        filter,
+        LayerFilter::UnsharpMask { .. } | LayerFilter::SmartSharpen(_) | LayerFilter::ReduceNoise(_) | LayerFilter::SmartBlur(_)
+    )
+}
+
+/// Photoshop's 100 % preview box in a filter's dialog: the active layer
+/// filtered, dragged to look around, and as it was while the button is
+/// held on it. (Filtering a mask, it still shows the layer's pixels.)
+fn filter_preview_box(ui: &mut Ui, filter: &LayerFilter, editor: Option<&Editor>, cache: &mut Option<FilterPreview>) {
+    const SIDE: u32 = 240;
+    let Some(editor) = editor else {
+        return;
+    };
+    let Some(layer) = editor.doc.layer(editor.active) else {
+        return;
+    };
+    let image = &layer.pixels;
+    let (w, h) = (SIDE.min(image.width()), SIDE.min(image.height()));
+    let (rect, response) = ui
+        .vertical_centered(|ui| ui.allocate_exact_size(vec2(w as f32, h as f32), Sense::drag()))
+        .inner;
+    let mut centre = cache.as_ref().map_or_else(|| editor.canvas.view_centre(), |p| p.centre);
+    if response.dragged() {
+        centre -= response.drag_delta();
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    // The box's top left corner, keeping it on the image.
+    let corner = |c: f32, side: u32, size: u32| (c - side as f32 / 2.0).clamp(0.0, (size - side) as f32).round() as u32;
+    let (x, y) = (corner(centre.x, w, image.width()), corner(centre.y, h, image.height()));
+    let key = (*filter, (x, y));
+    if cache.as_ref().is_none_or(|p| p.key != key) {
+        let texture = |name: &str, pixels: Vec<omapix_engine::Pixel>| {
+            let mut rgba = vec![[0u8; 4]; pixels.len()];
+            editor.canvas.transform().convert(&pixels, &mut rgba);
+            let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], bytemuck::cast_slice(&rgba));
+            ui.ctx().load_texture(name, image, egui::TextureOptions::NEAREST)
+        };
+        *cache = Some(FilterPreview {
+            centre,
+            key,
+            filtered: texture("filter-preview", filter.preview(image, x, y, w, h)),
+            unfiltered: texture("filter-preview-before", image.crop(x, y, w, h)),
+        });
+    }
+    let Some(preview) = cache.as_mut() else {
+        return;
+    };
+    preview.centre = pos2(x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
+    let shown = if response.is_pointer_button_down_on() { &preview.unfiltered } else { &preview.filtered };
+    let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    ui.painter().image(shown.id(), rect, uv, egui::Color32::WHITE);
+    let stroke = egui::Stroke::new(1.0, ui.visuals().window_stroke().color);
+    ui.painter().rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Outside);
+    ui.add_space(8.0);
 }
 
 /// Smart Sharpen's settings, for its dialog.
@@ -4466,6 +4548,7 @@ mod tests {
             picking: None,
             file_job: None,
             dialog: None,
+            filter_preview: None,
             status: None,
             filters: FilterSettings::default(),
             defaults: FilterSettings::default(),
@@ -4526,6 +4609,101 @@ mod tests {
         assert_eq!(editor.undo_label(), Some("Unsharp Mask"));
         app.run(Command::UnsharpMask, &ctx);
         assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == stronger));
+    }
+
+    #[test]
+    fn filter_preview_box_dialog_interaction() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::UnsharpMask, &ctx);
+
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        fn frame(ctx: &egui::Context, app: &mut App, mut input: egui::RawInput, screen_rect: egui::Rect) -> egui::FullOutput {
+            input.screen_rect = Some(screen_rect);
+            let mut out = ctx.run_ui(input, |ctx| app.dialogs(ctx));
+            out.textures_delta.clear();
+            out
+        }
+
+        fn find_box(shape: &egui::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Rect(r) if (r.rect.width() - 240.0).abs() < 1.0 => Some(r.rect),
+                egui::Shape::Vec(v) => v.iter().find_map(find_box),
+                _ => None,
+            }
+        }
+
+        // First frame: modal laid out
+        frame(&ctx, &mut app, egui::RawInput::default(), screen_rect);
+        assert!(app.filter_preview.is_some());
+        let center = app.filter_preview.as_ref().unwrap().centre;
+        // Image is 600x400, canvas center is (300, 200)
+        assert_eq!(center, egui::pos2(300.0, 200.0));
+
+        // Second frame: modal visible, find box center
+        let out = frame(&ctx, &mut app, egui::RawInput::default(), screen_rect);
+        let box_rect = out.shapes.iter().find_map(|s| find_box(&s.shape)).expect("preview box");
+        let drag_start = box_rect.center();
+
+        // Drag inside the preview box:
+        frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(drag_start),
+                    egui::Event::PointerButton {
+                        pos: drag_start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+            screen_rect,
+        );
+        frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(drag_start + egui::vec2(20.0, 10.0)),
+                ],
+                ..Default::default()
+            },
+            screen_rect,
+        );
+        let new_center = app.filter_preview.as_ref().unwrap().centre;
+        assert!(new_center.x < center.x);
+
+        // Releasing mouse:
+        frame(
+            &ctx,
+            &mut app,
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerButton {
+                        pos: drag_start + egui::vec2(20.0, 10.0),
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+            screen_rect,
+        );
+
+        // Closing dialog resets preview:
+        app.dialog = None;
+        frame(&ctx, &mut app, egui::RawInput::default(), screen_rect);
+        assert!(app.filter_preview.is_none());
+
+        // GaussianBlur does not have a preview box:
+        app.run(Command::GaussianBlur, &ctx);
+        frame(&ctx, &mut app, egui::RawInput::default(), screen_rect);
+        assert!(app.filter_preview.is_none());
     }
 
     #[test]

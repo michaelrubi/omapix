@@ -202,6 +202,29 @@ impl LayerFilter {
             Self::SmartBlur(options) => smart_blur(image, &options),
         }
     }
+
+    /// How far a filter reaches, in pixels, so a preview of part of the
+    /// image needs this much around it to come out as the whole would.
+    fn margin(&self) -> u32 {
+        let r = match self {
+            Self::UnsharpMask { radius, .. } | Self::GaussianBlur { radius } | Self::HighPass { radius } => *radius,
+            Self::SmartSharpen(opts) => opts.radius,
+            Self::SmartBlur(opts) => opts.radius,
+            Self::ReduceNoise(_) => 6.0,
+            _ => 0.0,
+        };
+        (r * 3.0).ceil() as u32 + 4
+    }
+
+    /// The `w` × `h` area of `image` at (`x`, `y`), filtered as it would be
+    /// in the whole image (the dialogs' 100 % preview). Row-major.
+    pub fn preview(&self, image: &Tiled<Pixel>, x: u32, y: u32, w: u32, h: u32) -> Vec<Pixel> {
+        let m = self.margin();
+        let (x0, y0) = (x.saturating_sub(m), y.saturating_sub(m));
+        let (x1, y1) = ((x + w + m).min(image.width()), (y + h + m).min(image.height()));
+        let around = Tiled::from_slice(x1 - x0, y1 - y0, [0; 4], &image.crop(x0, y0, x1 - x0, y1 - y0));
+        self.apply(&around).crop(x - x0, y - y0, w, h)
+    }
 }
 
 /// Lower a layer mask's opacity destructively.
@@ -1627,6 +1650,27 @@ mod tests {
         // Edges are drawn in white.
         assert_eq!(out_overlay.get(49, 5), [65535, 65535, 65535, 65535]);
         assert_eq!(out_overlay.get(50, 5), [65535, 65535, 65535, 65535]);
+    }
+
+    #[test]
+    fn previews_match_the_filter_on_the_whole_image() {
+        let (w, h) = (500, 500);
+        let pixels: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let v = ((x * 0.1).sin() * (y * 0.1).cos() * 20000.0 + 32768.0) as u16;
+                [v, v, v, 65535]
+            })
+            .collect();
+        let image = Tiled::from_slice(w, h, [0; 4], &pixels);
+        let smart_sharpen = LayerFilter::SmartSharpen(SmartSharpenOptions { radius: 5.0, ..Default::default() });
+        for filter in [LayerFilter::UnsharpMask { amount: 2.0, radius: 2.0, threshold: 0.0 }, smart_sharpen] {
+            let whole = filter.apply(&image);
+            // In the middle, and at the image's corner.
+            for (x, y) in [(130, 130), (0, 0)] {
+                assert_eq!(filter.preview(&image, x, y, 240, 240), whole.crop(x, y, 240, 240));
+            }
+        }
     }
 }
 

@@ -550,6 +550,16 @@ impl Canvas {
             .to_pos2()
     }
 
+    /// The image point in the middle of the view (the image's middle
+    /// before the canvas is laid out).
+    pub fn view_centre(&self) -> Pos2 {
+        if self.rect.is_positive() {
+            self.to_image(self.rect.center())
+        } else {
+            (self.image_size() * 0.5).to_pos2()
+        }
+    }
+
     /// Draw the canvas and handle navigation. `brush` is the diameter of the
     /// active brush in image pixels, to draw its outline at the pointer;
     /// `source` marks where a clone or heal tool copies from. Returns pointer
