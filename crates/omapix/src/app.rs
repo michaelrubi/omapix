@@ -1826,7 +1826,7 @@ self.filters.remember(&filter);
                 } else if self.tools.tool == crate::tools::Tool::Crop {
                     let [x0, y0, x1, y1] = self.crop_box();
                     let (w, h) = ((x1 - x0).round(), (y1 - y0).round());
-                    let text = format!("Crop: {w} × {h} px — Enter to crop, Esc to reset");
+                    let text = format!("Crop: {w} × {h} px — Enter to crop, Esc to exit");
                     ui.label(RichText::new(text).color(self.theme.accent));
                     ui.separator();
                 }
@@ -2595,14 +2595,18 @@ self.filters.remember(&filter);
         }
     }
 
-    /// The Crop tool's box, round the whole image until it's changed.
+    /// The Crop tool's box, until it's changed round the selection's
+    /// bounds, as in Photoshop, or else the whole image.
     fn crop_box(&self) -> [f64; 4] {
-        let whole = self.editor.as_ref().map_or([0.0; 4], |e| [0.0, 0.0, e.doc.width.into(), e.doc.height.into()]);
-        self.crop.unwrap_or(whole)
+        let start = self.editor.as_ref().map_or([0.0; 4], |e| match e.doc.selection.as_ref().and_then(|s| s.bounds()) {
+            Some([x, y, w, h]) => [x, y, x + w, y + h].map(f64::from),
+            None => [0.0, 0.0, e.doc.width.into(), e.doc.height.into()],
+        });
+        self.crop.unwrap_or(start)
     }
 
-    /// Enter crops to the Crop tool's box, and Esc puts it back round the
-    /// whole image.
+    /// Enter crops to the Crop tool's box, and Esc drops it and goes back
+    /// to the tool before.
     fn check_crop_keys(&mut self, ctx: &egui::Context) {
         if self.tools.tool != crate::tools::Tool::Crop || self.dialog.is_some() || ctx.egui_wants_keyboard_input() {
             return;
@@ -2613,7 +2617,9 @@ self.filters.remember(&filter);
             if let Some(editor) = &mut self.editor {
                 crop(editor, x0, y0, (x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32);
             }
-        } else if !key(egui::Key::Escape) {
+        } else if key(egui::Key::Escape) {
+            self.tools.leave_crop();
+        } else {
             return;
         }
         (self.crop, self.crop_drag) = (None, None);
@@ -6334,19 +6340,34 @@ mod tests {
         let none = egui::Modifiers::NONE;
         app.tools.select(crate::tools::Tool::Crop);
 
-        // The box starts round the whole 600 × 400 image. Its bottom right
+        // With a selection, the box starts on its bounds, as in Photoshop.
+        assert_eq!(app.crop_box(), [100.0, 100.0, 200.0, 200.0]);
+        app.run(Command::Deselect, &ctx);
+        // Esc drops the box and goes back to the tool before.
+        drag(&mut app, (580.0, 380.0), (400.0, 300.0), none);
+        key(&mut app, egui::Key::Escape);
+        assert_eq!(app.tools.tool, crate::tools::Tool::Brush);
+        app.tools.select(crate::tools::Tool::Marquee);
+        app.tools.select(crate::tools::Tool::Crop);
+        key(&mut app, egui::Key::Escape);
+        assert_eq!(app.tools.tool, crate::tools::Tool::Marquee);
+        app.tools.select(crate::tools::Tool::Crop);
+
+        // Without, it starts round the whole 600 × 400 image. Its bottom right
         // corner goes freely to (500, 250), then Shift keeps 2:1 from the top left.
         assert_eq!(app.crop_box(), [0.0, 0.0, 600.0, 400.0]);
         drag(&mut app, (600.0, 400.0), (500.0, 250.0), none);
         assert_eq!(app.crop_box(), [0.0, 0.0, 500.0, 250.0]);
         drag(&mut app, (500.0, 250.0), (300.0, 150.0), egui::Modifiers::SHIFT);
         assert_eq!(app.crop_box(), [0.0, 0.0, 300.0, 150.0]);
-        // Inside moves it; outside draws a new one; Esc puts it back.
+        // Inside moves it; outside draws a new one.
         drag(&mut app, (100.0, 100.0), (150.0, 120.0), none);
         assert_eq!(app.crop_box(), [50.0, 20.0, 350.0, 170.0]);
         drag(&mut app, (580.0, 380.0), (400.0, 300.0), none);
         assert_eq!(app.crop_box(), [400.0, 300.0, 580.0, 380.0]);
+        // Esc and back again: round the whole image.
         key(&mut app, egui::Key::Escape);
+        app.tools.select(crate::tools::Tool::Crop);
         assert_eq!(app.crop_box(), [0.0, 0.0, 600.0, 400.0]);
 
         // Enter crops to it, and the box goes back round the cropped image.

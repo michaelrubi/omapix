@@ -1,16 +1,17 @@
 //! Flattened exports for handing work to other apps or the web.
 
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use image::ImageEncoder;
-use image::codecs::jpeg::JpegEncoder;
 use rayon::prelude::*;
 use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
 use tiff::tags::Tag;
+use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, Exif, PixelLayout, Unstoppable};
+use zenjpeg::encoder::Error as JpegError;
 
-use crate::{DisplayTransform, Document, Error, Result};
+use crate::color::LinearSrgbTransform;
+use crate::{Document, Error, Pixel, Result};
 
 fn create(path: &Path) -> Result<BufWriter<File>> {
     File::create(path)
@@ -191,36 +192,46 @@ fn write_tiff_metadata<W: std::io::Write + std::io::Seek, K: tiff::encoder::Tiff
     Ok(())
 }
 
-/// Flattened 8-bit sRGB JPEG for the web and clients, with transparency
-/// flattened onto white.
+/// Flattened sRGB JPEG for the web and clients, with transparency
+/// flattened onto white. Encoded with jpegli's methods (zenjpeg) from 16-bit
+/// linear light, keeping full-resolution colour as jpegli does: about a
+/// quarter smaller than a plain baseline encoder for the same quality, and
+/// smooth backdrops don't band.
 pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
     let image = doc.composite();
-    let transform = DisplayTransform::to_srgb(&doc.profile)?;
-    let mut rgba = vec![[0u8; 4]; image.pixels().len()];
-    rgba.par_chunks_mut(65536)
+    let transform = LinearSrgbTransform::new(&doc.profile)?;
+    let mut rgb = vec![[0u16; 3]; image.pixels().len()];
+    rgb.par_chunks_mut(65536)
         .zip(image.pixels().par_chunks(65536))
-        .for_each(|(out, src)| transform.convert(src, out));
-    let rgb: Vec<u8> = rgba
-        .iter()
-        .flat_map(|p| {
-            let a = u32::from(p[3]);
-            let over_white = |c: u8| ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
-            [over_white(p[0]), over_white(p[1]), over_white(p[2])]
-        })
-        .collect();
-    let mut encoder = JpegEncoder::new_with_quality(create(path)?, quality);
+        .for_each(|(out, src)| {
+            // Onto white in the document's colour space, where white is
+            // full scale, as Photoshop flattens.
+            let over_white = |c: u16, a: u32| ((u32::from(c) * a + 65535 * (65535 - a) + 32767) / 65535) as u16;
+            let flat: Vec<Pixel> = src
+                .iter()
+                .map(|&[r, g, b, a]| {
+                    let a = u32::from(a);
+                    [over_white(r, a), over_white(g, a), over_white(b, a), u16::MAX]
+                })
+                .collect();
+            transform.convert(&flat, out);
+        });
     let srgb = lcms2::Profile::new_srgb().icc().map_err(Error::Color)?;
-    let _ = encoder.set_icc_profile(srgb);
+    let config = EncoderConfig::ycbcr(quality, ChromaSubsampling::None);
+    let mut request = config.request().icc_profile(&srgb);
     if let Some(exif) = doc.exif.as_deref().and_then(fit_jpeg_exif) {
-        let _ = encoder.set_exif_metadata(exif);
+        request = request.exif(Exif::raw(exif));
     }
-    encoder.write_image(
-        &rgb,
-        image.width(),
-        image.height(),
-        image::ExtendedColorType::Rgb8,
-    )?;
-    Ok(())
+    let jpeg_error = |e: JpegError| Error::Unsupported(format!("JPEG: {e}"));
+    let mut encoder = request
+        .encode_from_bytes(image.width(), image.height(), PixelLayout::Rgb16Linear)
+        .map_err(jpeg_error)?;
+    encoder.push_packed(bytemuck::cast_slice(&rgb), Unstoppable).map_err(jpeg_error)?;
+    let bytes = encoder.finish().map_err(jpeg_error)?;
+    create(path)?.write_all(&bytes).map_err(|source| Error::Read {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 /// File › Batch Export for one file: `source` opened, shrunk so its long
@@ -307,6 +318,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(back.composite().pixels(), &px[..]);
         assert_eq!((jpeg_back.width, jpeg_back.height), (w, h));
+    }
+
+    #[test]
+    fn jpeg_converts_to_srgb_and_flattens_onto_white() {
+        // A linear-light document: skin tone on the left, half-transparent
+        // black in the middle, transparent on the right.
+        let profile = ColorProfile::srgb().with_gamma(1.0).unwrap();
+        let skin = profile.from_srgb8([200, 150, 120]).unwrap();
+        let (w, h) = (48, 16);
+        let px: Vec<crate::Pixel> = (0..w * h)
+            .map(|i| match (i % w) / 16 {
+                0 => skin,
+                1 => [0, 0, 0, 32768],
+                _ => [0; 4],
+            })
+            .collect();
+        let doc = Document::from_image("x.tif".into(), &Raster::new(w, h, px), profile, 16);
+        let dir = std::env::temp_dir().join(format!("omapix-jpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.jpg");
+        jpeg(&doc, &path, 90).unwrap();
+        let back = image::open(&path).unwrap().to_rgb8();
+        std::fs::remove_dir_all(&dir).ok();
+        let near = |x: u32, want: [u8; 3]| {
+            let got = back.get_pixel(x, 8).0;
+            assert!(got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 3), "at {x}: {got:?}, want {want:?}");
+        };
+        near(8, [200, 150, 120]);
+        // Half black over white, mixed in the document's linear light.
+        near(24, [188, 188, 188]);
+        near(40, [255, 255, 255]);
     }
 
     /// Walk a JPEG's segments up to the scan: a wrapped length lands off a

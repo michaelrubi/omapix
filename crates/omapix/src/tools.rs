@@ -432,6 +432,9 @@ pub struct Tools {
     last_wand: Tool,
     #[serde(skip)]
     last_gradient: Tool,
+    /// The tool before the Crop tool, which Esc goes back to.
+    #[serde(skip)]
+    before_crop: Tool,
     /// The tool key being held, the tool before it, and when it went down.
     #[serde(skip)]
     held: Option<(Key, Tool, f64)>,
@@ -498,6 +501,7 @@ impl Default for Tools {
             last_healing: Tool::SpotHealing,
             last_wand: Tool::MagicWand,
             last_gradient: Tool::Gradient,
+            before_crop: Tool::Marquee,
             held: None,
             kept_colours: None,
             brush: BrushSettings::default(),
@@ -698,6 +702,9 @@ impl Tools {
 
     /// Select a tool, remembering it as the last-used tool in its group.
     pub fn select(&mut self, tool: Tool) {
+        if self.tool != Tool::Crop {
+            self.before_crop = self.tool;
+        }
         self.tool = tool;
         self.sync_last_used();
     }
@@ -711,6 +718,14 @@ impl Tools {
             Tool::Gradient | Tool::PaintBucket => self.last_gradient = self.tool,
             _ => {}
         }
+        if self.tool != Tool::Crop {
+            self.before_crop = self.tool;
+        }
+    }
+
+    /// Esc with the Crop tool: back to the tool before it.
+    pub fn leave_crop(&mut self) {
+        self.select(self.before_crop);
     }
 
     /// The tool to show or pick for a group (the tool last used from it).

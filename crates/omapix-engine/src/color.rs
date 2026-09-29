@@ -192,6 +192,32 @@ impl DisplayTransform {
     }
 }
 
+/// Converts document pixels to 16-bit linear-light sRGB, dropping alpha,
+/// for the JPEG encoder: it rounds to 8 bits only after its own maths, so
+/// smooth gradients don't band.
+pub struct LinearSrgbTransform {
+    transform: Transform<Pixel, [u16; 3], GlobalContext, DisallowCache>,
+}
+
+impl LinearSrgbTransform {
+    pub fn new(source: &ColorProfile) -> Result<Self> {
+        let transform = Transform::new_flags_context(
+            GlobalContext::new(),
+            &source.lcms_profile()?,
+            PixelFormat::RGBA_16,
+            &ColorProfile::srgb().with_gamma(1.0)?.lcms_profile()?,
+            PixelFormat::RGB_16,
+            Intent::RelativeColorimetric,
+            Flags::NO_CACHE | Flags::BLACKPOINT_COMPENSATION,
+        )?;
+        Ok(Self { transform })
+    }
+
+    pub fn convert(&self, src: &[Pixel], dst: &mut [[u16; 3]]) {
+        self.transform.transform_pixels(src, dst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
