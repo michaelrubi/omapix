@@ -173,6 +173,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Filter settings kept between runs: apply a few filters and Frequency Separation, quit, reopen and check their dialogs; the Defaults buttons; and a default changed in defaults.toml
 - [ ] Tool settings kept between runs: change brush sizes/pressure buttons on a few tools, restart, check
 - [ ] Quick Selection and Threshold: painting, adding, Alt, Shift, and the threshold slider on a click, a box and a painted selection
+- [ ] Select › Eyes, Lips and Teeth: a headshot with an open smile and one with a closed mouth ("Found no teeth"), a group shot, glasses, Shift and Alt, and the edges at 100 %
 - [ ] Select › Skin and Hair: a headshot, a 24 MP half-length and a group shot, with Shift and Alt, the first use (loading), eyes, brows and lips left out of Skin at 100 %, then Feather and a mask from it, and the message without the models
 - [ ] Object Selection: W then Shift+W, click a face, a dress and a prop, drag boxes, Shift and Alt, the first use (model loading) and after editing (analysed again), and how the edges look at 100 %
 - [ ] Navigator and Histogram panels: Window menu toggles strip, Navigator thumbnail drag pans canvas, zoom slider and field, and Histogram Colors and Luminosity views with statistics
@@ -320,7 +321,8 @@ The goal is Evoto-style one-click cleanup, running locally on the GPU with no su
 - Skin and face-part segmentation (skin, eyes, lips, teeth, hair) to make masks automatically, per face and per person.
   - ~~**Select › Skin and Hair**~~ (done): select all the skin (faces, necks, arms, hands) or all the hair in the image in one step, with Shift to add to the selection and Alt to take away. Skin leaves out each face's eyes, brows and lips (with the teeth), grown a little and feathered, so smoothing through it won't touch them. Three small models find faces (YuNet), put 478 points on each (MediaPipe Face Landmarker) and tell hair, face skin and body skin apart (MediaPipe multiclass selfie segmentation); `scripts/fetch-models.sh` installs them (21 MB). The rough mask is snapped to the photo's edges with the guided filter, as for Object Selection. About 0.45 s at 24 MP on the GPU, plus about a second to load the models the first time.
     - Known gaps: skin-coloured things (an orange pumpkin) can come out as skin; small patches of skin in a full-length shot (a shin) can be missed; a face in profile gets no feature cut-outs. Splitting skin between people, and a closer look round each person, are next.
-    - Next: Select › Eyes, Lips and Teeth, and Layer › Layer Mask › From Skin (and the rest).
+  - ~~**Select › Eyes, Lips and Teeth**~~ (done): drawn from each face's points, for whitening, sharpening and colour. Eyes are the eye openings (whites and irises, not the lashes), Lips the lips without the mouth between them, and Teeth the open mouth; a closed mouth has none ("Found no teeth"). Feathered slightly, by a fraction of the distance between the eyes. Shift and Alt as with Skin. A face in profile has no points, so it gets none of these.
+    - Later, if two clicks get tedious: Layer › Layer Mask › From Skin (and the rest). Select › Skin then Add Mask does the same now.
 - Automatic blemish detection that feeds the Spot Healing Brush, onto its own layer.
 - Skin smoothing that keeps texture, built on frequency separation plus the segmentation masks.
 - Even tone: the Dodge & Burn setup with its masks filled in automatically.
