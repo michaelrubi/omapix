@@ -21,22 +21,33 @@ const LANDMARK_SIZE: usize = 256;
 pub const SEGMENT_SIZE: usize = 256;
 /// The segmenter's classes, in the order of its output.
 pub const CLASSES: [&str; 6] = ["background", "hair", "body skin", "face skin", "clothes", "others"];
+pub const HAIR: usize = 1;
+pub const BODY_SKIN: usize = 2;
+pub const FACE_SKIN: usize = 3;
 
 /// Outlines of the features, as indices into the landmarker's points, in
 /// order round each one. "Left" is the left of the image.
 pub mod outline {
-    pub const LEFT_EYE: [usize; 16] = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7];
-    pub const RIGHT_EYE: [usize; 16] = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249];
+    pub const LEFT_EYE: [usize; 16] = [
+        33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7,
+    ];
+    pub const RIGHT_EYE: [usize; 16] = [
+        263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249,
+    ];
     pub const LEFT_BROW: [usize; 10] = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46];
     pub const RIGHT_BROW: [usize; 10] = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
     /// Round the outside of the lips.
-    pub const LIPS: [usize; 20] = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146];
+    pub const LIPS: [usize; 20] = [
+        61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146,
+    ];
     /// Between the lips: the mouth, and the teeth when they show.
-    pub const MOUTH: [usize; 20] = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95];
+    pub const MOUTH: [usize; 20] = [
+        78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95,
+    ];
     /// Round the face, from the top of the forehead.
     pub const FACE: [usize; 36] = [
-        10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150,
-        136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
+        10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149,
+        150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
     ];
     /// Each iris: its centre, then four points round it.
     pub const LEFT_IRIS: [usize; 5] = [468, 469, 470, 471, 472];
@@ -154,7 +165,8 @@ fn error(e: impl std::fmt::Display) -> String {
 }
 
 fn load(id: &str, file: &str) -> Result<Session> {
-    let dir = find_model(id).ok_or_else(|| format!("Face analysis needs the {id} model: run scripts/fetch-models.sh"))?;
+    let dir =
+        find_model(id).ok_or_else(|| format!("Face analysis needs the {id} model: run scripts/fetch-models.sh"))?;
     session(&dir.join(file))
 }
 
@@ -177,10 +189,17 @@ impl Faces {
     pub fn detect(&mut self, image: &Image) -> Result<Vec<Detection>> {
         // The whole image, fitted into the top left of the square.
         let side = image.width.max(image.height) as f32;
-        let crop = Crop { centre: [side / 2.0; 2], side, angle: 0.0 };
+        let crop = Crop {
+            centre: [side / 2.0; 2],
+            side,
+            angle: 0.0,
+        };
         let pixels = image.sample(&crop, DETECT_SIZE);
         // Blue, green, red planes, 0–255.
-        let planar: Vec<f32> = [2, 1, 0].iter().flat_map(|&c| pixels.iter().map(move |p| p[c] * 255.0)).collect();
+        let planar: Vec<f32> = [2, 1, 0]
+            .iter()
+            .flat_map(|&c| pixels.iter().map(move |p| p[c] * 255.0))
+            .collect();
         let n = DETECT_SIZE as i64;
         let input = Tensor::from_array((vec![1, 3, n, n], planar)).map_err(error)?;
         let outputs = self.detector.run(ort::inputs!["input" => input]).map_err(error)?;
@@ -188,7 +207,9 @@ impl Faces {
         let mut found = Vec::new();
         for stride in [8usize, 16, 32] {
             let get = |name: &str| -> Result<Vec<f32>> {
-                let (_, data) = outputs[format!("{name}_{stride}").as_str()].try_extract_tensor::<f32>().map_err(error)?;
+                let (_, data) = outputs[format!("{name}_{stride}").as_str()]
+                    .try_extract_tensor::<f32>()
+                    .map_err(error)?;
                 Ok(data.to_vec())
             };
             let (cls, obj, bbox, kps) = (get("cls")?, get("obj")?, get("bbox")?, get("kps")?);
@@ -207,7 +228,8 @@ impl Faces {
                 found.push(Detection {
                     score,
                     bounds: [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0].map(|v| v * to_image),
-                    points: [0, 1, 2, 3, 4].map(|p| [(k[2 * p] + col) * s * to_image, (k[2 * p + 1] + row) * s * to_image]),
+                    points: [0, 1, 2, 3, 4]
+                        .map(|p| [(k[2 * p] + col) * s * to_image, (k[2 * p + 1] + row) * s * to_image]),
                 });
             }
         }
@@ -280,6 +302,64 @@ impl Faces {
     }
 }
 
+/// What the models found in an image.
+pub struct Analysis {
+    /// Each face, with its points if the landmarker saw it (not in
+    /// profile, for one).
+    pub faces: Vec<(Detection, Option<Vec<[f32; 3]>>)>,
+    width: usize,
+    height: usize,
+    /// The whole image's segmentation, over the square round it.
+    segmentation: Vec<[f32; 6]>,
+}
+
+impl Faces {
+    /// Find the faces in `image`, their points, and its segmentation.
+    pub fn analyse(&mut self, image: &Image) -> Result<Analysis> {
+        let mut faces = Vec::new();
+        for face in self.detect(image)? {
+            let points = self.landmarks(image, &face)?.map(|(_, points)| points);
+            faces.push((face, points));
+        }
+        let (w, h) = (image.width as f32, image.height as f32);
+        let whole = Crop {
+            centre: [w / 2.0, h / 2.0],
+            side: w.max(h),
+            angle: 0.0,
+        };
+        let segmentation = self.segment(image, &whole)?;
+        Ok(Analysis {
+            faces,
+            width: image.width,
+            height: image.height,
+            segmentation,
+        })
+    }
+}
+
+impl Analysis {
+    /// How likely each point is to be one of `classes`, as logits (above
+    /// 0 more likely than not) on a grid stretched over the image, and the
+    /// grid's width and height: what `refine::mask_coverage` takes.
+    pub fn logits(&self, classes: &[usize]) -> (Vec<f32>, usize, usize) {
+        // The image's part of the square the segmenter saw.
+        let longest = self.width.max(self.height);
+        let (lw, lh) = (
+            (SEGMENT_SIZE * self.width / longest).max(1),
+            (SEGMENT_SIZE * self.height / longest).max(1),
+        );
+        let (ox, oy) = ((SEGMENT_SIZE - lw) / 2, (SEGMENT_SIZE - lh) / 2);
+        let logits = (0..lw * lh)
+            .map(|i| {
+                let p = &self.segmentation[(oy + i / lw) * SEGMENT_SIZE + ox + i % lw];
+                let p: f32 = classes.iter().map(|&c| p[c]).sum::<f32>().clamp(1e-4, 1.0 - 1e-4);
+                (p / (1.0 - p)).ln()
+            })
+            .collect();
+        (logits, lw, lh)
+    }
+}
+
 fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
     let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
@@ -293,7 +373,11 @@ mod tests {
 
     #[test]
     fn a_crop_turned_a_quarter_maps_right_to_down() {
-        let crop = Crop { centre: [100.0, 50.0], side: 20.0, angle: std::f32::consts::FRAC_PI_2 };
+        let crop = Crop {
+            centre: [100.0, 50.0],
+            side: 20.0,
+            angle: std::f32::consts::FRAC_PI_2,
+        };
         let [x, y] = crop.to_image(1.0, 0.5);
         assert!((x - 100.0).abs() < 1e-4 && (y - 60.0).abs() < 1e-4, "{x} {y}");
     }
@@ -305,13 +389,26 @@ mod tests {
     fn a_blank_image_has_no_faces_and_is_all_background() {
         let mut faces = Faces::load().unwrap();
         let pixels = vec![[128u8, 128, 128, 255]; 300 * 200];
-        let image = Image { pixels: &pixels, width: 300, height: 200 };
+        let image = Image {
+            pixels: &pixels,
+            width: 300,
+            height: 200,
+        };
         assert!(faces.detect(&image).unwrap().is_empty());
-        let whole = Crop { centre: [150.0, 100.0], side: 300.0, angle: 0.0 };
+        let whole = Crop {
+            centre: [150.0, 100.0],
+            side: 300.0,
+            angle: 0.0,
+        };
         let seg = faces.segment(&image, &whole).unwrap();
         assert_eq!(seg.len(), SEGMENT_SIZE * SEGMENT_SIZE);
         let background = seg.iter().filter(|p| p[0] > 0.5).count();
         assert!(background > seg.len() * 9 / 10, "{background}");
+        let analysis = faces.analyse(&image).unwrap();
+        assert!(analysis.faces.is_empty());
+        let (logits, w, h) = analysis.logits(&[BODY_SKIN, FACE_SKIN]);
+        assert_eq!((w, h), (256, 170));
+        assert!(logits.iter().all(|&l| l < 0.0));
     }
 
     #[test]

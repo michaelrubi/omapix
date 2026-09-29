@@ -7,10 +7,17 @@
 //! - `out/skin.png`: face and body skin as a refined full-size mask
 use std::time::Instant;
 
-use omapix_ai::face::{Crop, Faces, Image, SEGMENT_SIZE};
+use omapix_ai::face::{BODY_SKIN, Crop, FACE_SKIN, Faces, Image, SEGMENT_SIZE};
 use omapix_engine::DisplayTransform;
 
-const TINTS: [[f32; 3]; 6] = [[0.0; 3], [255.0, 200.0, 0.0], [255.0, 0.0, 0.0], [255.0, 128.0, 160.0], [0.0, 0.0, 255.0], [0.0, 255.0, 0.0]];
+const TINTS: [[f32; 3]; 6] = [
+    [0.0; 3],
+    [255.0, 200.0, 0.0],
+    [255.0, 0.0, 0.0],
+    [255.0, 128.0, 160.0],
+    [0.0, 0.0, 255.0],
+    [0.0, 255.0, 0.0],
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -21,27 +28,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (w, h) = (raster.width() as usize, raster.height() as usize);
     let mut srgb = vec![[0u8; 4]; raster.pixels().len()];
     DisplayTransform::to_srgb(&doc.profile)?.convert(raster.pixels(), &mut srgb);
-    let image = Image { pixels: &srgb, width: w, height: h };
+    let image = Image {
+        pixels: &srgb,
+        width: w,
+        height: h,
+    };
 
     let t = Instant::now();
     let mut faces = Faces::load()?;
     println!("{w}×{h}, loaded in {:?}", t.elapsed());
     let side = w.max(h) as f32;
-    let whole = Crop { centre: [w as f32 / 2.0, h as f32 / 2.0], side, angle: 0.0 };
+    let whole = Crop {
+        centre: [w as f32 / 2.0, h as f32 / 2.0],
+        side,
+        angle: 0.0,
+    };
     let (mut found, mut marks, mut seg) = (Vec::new(), Vec::new(), Vec::new());
     for run in 0..3 {
         let t = Instant::now();
         found = faces.detect(&image)?;
         let detect = t.elapsed();
         let t = Instant::now();
-        marks = found.iter().map(|f| faces.landmarks(&image, f)).collect::<Result<Vec<_>, _>>()?;
+        marks = found
+            .iter()
+            .map(|f| faces.landmarks(&image, f))
+            .collect::<Result<Vec<_>, _>>()?;
         let landmarks = t.elapsed();
         let t = Instant::now();
         seg = faces.segment(&image, &whole)?;
-        println!("run {run}: {} faces, detect {detect:?}, landmarks {landmarks:?}, segment {:?}", found.len(), t.elapsed());
+        println!(
+            "run {run}: {} faces, detect {detect:?}, landmarks {landmarks:?}, segment {:?}",
+            found.len(),
+            t.elapsed()
+        );
     }
     for (i, (d, m)) in found.iter().zip(&marks).enumerate() {
-        println!("face {i}: score {:.2}, bounds {:?}, points {}", d.score, d.bounds.map(|v| v as i32), m.is_some());
+        println!(
+            "face {i}: score {:.2}, bounds {:?}, points {}",
+            d.score,
+            d.bounds.map(|v| v as i32),
+            m.is_some()
+        );
     }
 
     // Overview: the segmentation tinted over a small copy, boxes, points.
@@ -52,7 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (sx, sy) = ((x as f32 + 0.5) * scale, (y as f32 + 0.5) * scale);
         let s = srgb[sy as usize * w + sx as usize];
         // The whole image's segmentation covers the square `whole`.
-        let (u, v) = ((sx - (w as f32 - side) / 2.0) / side, (sy - (h as f32 - side) / 2.0) / side);
+        let (u, v) = (
+            (sx - (w as f32 - side) / 2.0) / side,
+            (sy - (h as f32 - side) / 2.0) / side,
+        );
         let p = seg[(v * SEGMENT_SIZE as f32) as usize * SEGMENT_SIZE + (u * SEGMENT_SIZE as f32) as usize];
         *pixel = image::Rgb(tint(s, &p));
     }
@@ -60,7 +90,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let [x0, y0, x1, y1] = d.bounds.map(|v| v / scale);
         for t in 0..=100 {
             let f = t as f32 / 100.0;
-            for p in [[x0 + (x1 - x0) * f, y0], [x0 + (x1 - x0) * f, y1], [x0, y0 + (y1 - y0) * f], [x1, y0 + (y1 - y0) * f]] {
+            for p in [
+                [x0 + (x1 - x0) * f, y0],
+                [x0 + (x1 - x0) * f, y1],
+                [x0, y0 + (y1 - y0) * f],
+                [x1, y0 + (y1 - y0) * f],
+            ] {
                 dot(&mut img, p, [0, 255, 0], 0);
             }
         }
@@ -82,7 +117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let n = 512u32;
         let mut img = image::RgbImage::new(2 * n, n);
         let face = image.sample(crop, n as usize);
-        let body = Crop { centre: crop.to_image(0.5, 0.9), side: crop.side * 3.0, angle: 0.0 };
+        let body = Crop {
+            centre: crop.to_image(0.5, 0.9),
+            side: crop.side * 3.0,
+            angle: 0.0,
+        };
         let t = Instant::now();
         let seg = faces.segment(&image, &body)?;
         println!("face {i}: segmented its person in {:?}", t.elapsed());
@@ -91,7 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for x in 0..n {
                 let to8 = |p: [f32; 3]| [p[0], p[1], p[2], 1.0].map(|v| (v * 255.0) as u8);
                 img.put_pixel(x, y, image::Rgb(to8(face[(y * n + x) as usize])[..3].try_into()?));
-                let s = seg[(y as usize * SEGMENT_SIZE / n as usize) * SEGMENT_SIZE + x as usize * SEGMENT_SIZE / n as usize];
+                let s = seg
+                    [(y as usize * SEGMENT_SIZE / n as usize) * SEGMENT_SIZE + x as usize * SEGMENT_SIZE / n as usize];
                 img.put_pixel(n + x, y, image::Rgb(tint(to8(people[(y * n + x) as usize]), &s)));
             }
         }
@@ -99,7 +139,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (sin, cos) = crop.angle.sin_cos();
         let at = |p: [f32; 3]| {
             let (dx, dy) = (p[0] - crop.centre[0], p[1] - crop.centre[1]);
-            [((dx * cos + dy * sin) / crop.side + 0.5) * n as f32, ((-dx * sin + dy * cos) / crop.side + 0.5) * n as f32]
+            [
+                ((dx * cos + dy * sin) / crop.side + 0.5) * n as f32,
+                ((-dx * sin + dy * cos) / crop.side + 0.5) * n as f32,
+            ]
         };
         for &p in points {
             dot(&mut img, at(p), [0, 255, 255], 0);
@@ -121,7 +164,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (a, b) = (at(points[a]), at(points[ring[(k + 1) % ring.len()]]));
                 for t in 0..=40 {
                     let f = t as f32 / 40.0;
-                    dot(&mut img, [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], colour, 0);
+                    dot(
+                        &mut img,
+                        [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f],
+                        colour,
+                        0,
+                    );
                 }
             }
         }
@@ -129,26 +177,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Skin (face and body) from the whole image's segmentation, refined at
-    // full size, as Select › Skin would. The segmentation covers a square
-    // bigger than the image, so cut the image's part out as logits.
+    // full size, as Select › Skin does.
     let t = Instant::now();
-    let (lw, lh) = (SEGMENT_SIZE * w / w.max(h), SEGMENT_SIZE * h / w.max(h));
-    let (ox, oy) = ((SEGMENT_SIZE - lw) / 2, (SEGMENT_SIZE - lh) / 2);
-    let logits: Vec<f32> = (0..lw * lh)
-        .map(|i| {
-            let p = seg[(oy + i / lw) * SEGMENT_SIZE + ox + i % lw];
-            let skin = (p[2] + p[3]).clamp(1e-4, 1.0 - 1e-4);
-            (skin / (1.0 - skin)).ln()
-        })
-        .collect();
+    let (logits, lw, lh) = faces.analyse(&image)?.logits(&[BODY_SKIN, FACE_SKIN]);
     let coverage = omapix_engine::refine::mask_coverage(&logits, lw, lh, 0.0, &raster);
-    println!("skin refined at full size in {:?}", t.elapsed());
+    println!("analysed again, skin refined at full size in {:?}", t.elapsed());
     let mut img = image::RgbImage::new(ow as u32, oh as u32);
     for (x, y, pixel) in img.enumerate_pixels_mut() {
         let (sx, sy) = (((x as f32 + 0.5) * scale) as u32, ((y as f32 + 0.5) * scale) as u32);
         let s = srgb[sy as usize * w + sx as usize];
         let k = f32::from(coverage.get(sx, sy)) / 65535.0;
-        *pixel = image::Rgb([0, 1, 2].map(|c| (f32::from(s[c]) * (1.0 - 0.6 * k) + [255.0, 0.0, 80.0][c] * 0.6 * k) as u8));
+        *pixel =
+            image::Rgb([0, 1, 2].map(|c| (f32::from(s[c]) * (1.0 - 0.6 * k) + [255.0, 0.0, 80.0][c] * 0.6 * k) as u8));
     }
     img.save(out.join("skin.png"))?;
     // Dropping CUDA sessions can crash the process as it exits (docs/AI.md).
