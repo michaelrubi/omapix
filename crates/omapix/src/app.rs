@@ -338,6 +338,8 @@ pub struct App {
     /// round the whole image.
     crop: Option<[f64; 4]>,
     crop_drag: Option<CropDrag>,
+    /// Where Liquify's brush is while its button is held.
+    liquify_at: Option<Pos2>,
     /// The Object Selection tool's model, running on its own thread.
     objects: crate::object_selection::ObjectSelection,
     /// Steps to run once an image is open, from `OMAPIX_SCRIPT`. For testing
@@ -391,6 +393,7 @@ impl App {
             transform_drag: None,
             crop: None,
             crop_drag: None,
+            liquify_at: None,
             objects: Default::default(),
             tools,
             tools_path,
@@ -848,6 +851,7 @@ impl App {
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
             Command::Crop => editor.doc.selection.is_some(),
+            Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
             Command::FillForeground
             | Command::FillBackground
@@ -910,6 +914,13 @@ impl App {
             Command::CanvasSize,
             Command::Crop,
         ];
+        // Liquify is applied before anything but zooming.
+        let zoom = [Command::ZoomIn, Command::ZoomOut, Command::FitOnScreen, Command::ActualPixels];
+        if !zoom.contains(&cmd)
+            && let Some(editor) = &mut self.editor
+        {
+            editor.commit_liquify();
+        }
         if finishing.contains(&cmd) {
             (self.transform_drag, self.crop) = (None, None);
             if let Some(editor) = &mut self.editor {
@@ -948,6 +959,13 @@ impl App {
                     options: self.filters.noise,
                     preview: true,
                 });
+            }
+            Command::Liquify => {
+                if let Some(editor) = &mut self.editor
+                    && let Err(why) = editor.begin_liquify()
+                {
+                    self.message(why, true);
+                }
             }
             Command::ImageSize | Command::CanvasSize => {
                 let Some(doc) = self.editor.as_ref().map(|e| &e.doc) else {
@@ -1628,6 +1646,8 @@ self.filters.remember(&filter);
                 );
             });
             ui.menu_button("Filter", |ui| {
+                self.menu_item(ui, Command::Liquify, None);
+                ui.separator();
                 ui.menu_button("Noise", |ui| {
                     self.menu_item(ui, Command::AddNoise, None);
                     self.menu_item(ui, Command::ReduceNoise, None);
@@ -1711,6 +1731,10 @@ self.filters.remember(&filter);
                 }
                 if let Some((_, t)) = editor.transform() {
                     ui.label(RichText::new(crate::free_transform::readout(&t)).color(self.theme.accent));
+                    ui.separator();
+                } else if editor.liquifying() {
+                    let text = "Liquify — Enter to apply, Esc to cancel";
+                    ui.label(RichText::new(text).color(self.theme.accent));
                     ui.separator();
                 } else if self.tools.tool == crate::tools::Tool::Crop {
                     let [x0, y0, x1, y1] = self.crop_box();
@@ -2471,9 +2495,88 @@ self.filters.remember(&filter);
         }
     }
 
+    /// While Liquify is open: Enter applies it, Esc cancels it, and its
+    /// own keys pick a brush and its size.
+    fn check_liquify_keys(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if !editor.liquifying() || self.dialog.is_some() || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let key = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
+        if key(egui::Key::Enter) {
+            editor.commit_liquify();
+        } else if key(egui::Key::Escape) {
+            editor.cancel_liquify();
+        } else {
+            self.tools.liquify.keys(ctx);
+            return;
+        }
+        self.liquify_at = None;
+    }
+
+    /// Liquify's brush on the canvas. Forward Warp and Push Left follow the
+    /// pointer; the others work while the button is held ([`Self::liquify_held`]).
+    fn liquify_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let options = self.tools.liquify;
+        match input {
+            ToolInput::StrokeBegin(p) => self.liquify_at = Some(p),
+            ToolInput::StrokeMove(p) => {
+                let Some(from) = self.liquify_at.replace(p) else {
+                    return;
+                };
+                if options.brush.continuous() {
+                    return;
+                }
+                // In steps of a quarter of the brush, so fast drags stay smooth.
+                let radius = options.size / 2.0;
+                let d = p - from;
+                let steps = (d.length() / (radius / 4.0).max(1.0)).ceil().max(1.0);
+                // Alt pushes right.
+                let step = d / steps * if modifiers.alt { -1.0 } else { 1.0 };
+                let dabs: Vec<_> = (1..=steps as u32)
+                    .map(|n| from + d * (n as f32 / steps))
+                    .map(|at| ([at.x, at.y], [step.x, step.y]))
+                    .collect();
+                editor.liquify(options.brush, &dabs, radius, options.pressure);
+            }
+            ToolInput::StrokeEnd => self.liquify_at = None,
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
+        }
+    }
+
+    /// Reconstruct, Pucker and Bloat work a little every frame while the
+    /// button is held, as in Photoshop. Alt swaps Pucker and Bloat.
+    fn liquify_held(&mut self, ctx: &egui::Context) {
+        use omapix_engine::warp::Brush;
+        let (Some(editor), Some(at)) = (&mut self.editor, self.liquify_at) else {
+            return;
+        };
+        let options = self.tools.liquify;
+        if !editor.liquifying() || !options.brush.continuous() {
+            return;
+        }
+        let brush = match (options.brush, ctx.input(|i| i.modifiers.alt)) {
+            (Brush::Pucker, true) => Brush::Bloat,
+            (Brush::Bloat, true) => Brush::Pucker,
+            (brush, _) => brush,
+        };
+        let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        editor.liquify(brush, &[([at.x, at.y], [0.0; 2])], options.size / 2.0, options.pressure * dt);
+        ctx.request_repaint();
+    }
+
     fn tool_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
         if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) {
             self.transform_input(input, modifiers);
+            return;
+        }
+        if self.editor.as_ref().is_some_and(Editor::liquifying) {
+            self.liquify_input(input, modifiers);
             return;
         }
         if let ToolInput::BrushDrag { size, hardness } = input {
@@ -3834,12 +3937,16 @@ impl eframe::App for App {
         if let Some(editor) = &self.editor {
             self.tools.follow_target(editor.target);
         }
+        self.check_liquify_keys(ctx);
+        let liquifying = self.editor.as_ref().is_some_and(Editor::liquifying);
         // While a text field (layer rename) has focus, keys edit the text.
         if self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
             for cmd in Command::pressed(ctx, &mut self.v_down) {
                 self.run(cmd, ctx);
             }
-            if let Some(opacity) = self.tools.keys(ctx)
+            if liquifying {
+                // Liquify's keys are its own.
+            } else if let Some(opacity) = self.tools.keys(ctx)
                 && let Some(editor) = &mut self.editor
             {
                 let id = editor.active;
@@ -3866,6 +3973,7 @@ impl eframe::App for App {
         self.check_escape(ctx);
         self.check_transform_keys(ctx);
         self.check_crop_keys(ctx);
+        self.liquify_held(ctx);
         if let Some(editor) = &mut self.editor {
             if !ctx.input(|i| i.pointer.any_down()) {
                 editor.end_live();
@@ -3899,7 +4007,13 @@ impl eframe::App for App {
             let target = editor.target;
             egui::Panel::top("options")
                 .frame(bar)
-                .show(ui, |ui| self.tools.options_bar(ui, target, &self.theme));
+                .show(ui, |ui| {
+                    if editor.liquifying() {
+                        self.tools.liquify.options_bar(ui, &self.theme);
+                    } else {
+                        self.tools.options_bar(ui, target, &self.theme);
+                    }
+                });
             egui::Panel::left("tools")
                 .frame(bar)
                 .exact_size(44.0)
@@ -4039,8 +4153,10 @@ impl eframe::App for App {
                 let modifiers = ui.input(|i| i.modifiers);
                 // An armed Curves or Levels eyedropper, or Free Transform, takes the
                 // pointer from the tools.
-                let tools_off =
-                    self.properties.eyedropper.is_some() || editor.transform().is_some();
+                let liquify_brush = editor.liquifying().then_some(self.tools.liquify.size);
+                let tools_off = self.properties.eyedropper.is_some()
+                    || editor.transform().is_some()
+                    || liquify_brush.is_some();
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
                     alt_samples: !tools_off && tool.paints(),
@@ -4050,7 +4166,8 @@ impl eframe::App for App {
                     brush: (!tools_off
                         && tool.has_brush()
                         && !(modifiers.alt && tool.alt_picks_colour() && !ui.input(|i| i.pointer.secondary_down())))
-                    .then_some(brush.size),
+                    .then_some(brush.size)
+                    .or(liquify_brush),
                     moves: !tools_off && tool == crate::tools::Tool::Move,
                     source,
                     selection: outlines,
@@ -4559,6 +4676,7 @@ mod tests {
             transform_drag: None,
             crop: None,
             crop_drag: None,
+            liquify_at: None,
             objects: Default::default(),
             script: VecDeque::new(),
             clipboard: Clipboard::new(false),
@@ -5870,6 +5988,67 @@ mod tests {
             app.editor.as_ref().unwrap().undo_label(),
             Some("Set Gray Point")
         );
+    }
+
+    #[test]
+    fn liquify_warps_applies_carries_on_and_cancels() {
+        use omapix_engine::warp::Brush;
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let red = [65535, 0, 0, 65535];
+        let editor = app.editor.as_mut().unwrap();
+        editor.edit("Deselect", |doc, _| {
+            doc.selection = None;
+            for y in 190..210 {
+                for x in 290..310 {
+                    doc.layers[0].pixels.tile_mut(x / 256, y / 256)[((y % 256) * 256 + x % 256) as usize] = red;
+                }
+            }
+        });
+        let key = |app: &mut App, key| {
+            let mut input = egui::RawInput::default();
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut out = ctx.run_ui(input, |ui| app.check_liquify_keys(ui.ctx()));
+            out.textures_delta.clear();
+        };
+        let none = egui::Modifiers::NONE;
+        let pixel = |app: &App, x, y| app.editor.as_ref().unwrap().doc.layers[0].pixels.get(x, y);
+        let original = app.editor.as_ref().unwrap().doc.layers[0].pixels.clone();
+        assert_ne!(original.get(320, 200), red);
+
+        // Forward Warp drags the square's right edge 15 px right, as one step.
+        app.run(Command::Liquify, &ctx);
+        assert!(app.editor.as_ref().unwrap().liquifying() && !app.enabled(Command::Liquify));
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(300.0, 200.0)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(315.0, 200.0)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        assert_eq!(pixel(&app, 320, 200), red);
+        key(&mut app, egui::Key::Enter);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(!editor.liquifying());
+        assert_eq!(editor.undo_label(), Some("Liquify"));
+
+        // Liquify again carries on from the same mesh, so Reconstruct has a
+        // warp to take out (a new mesh would have none), and the square's
+        // edge goes back towards where it was.
+        app.run(Command::Liquify, &ctx);
+        key(&mut app, egui::Key::R);
+        assert_eq!(app.tools.liquify.brush, Brush::Reconstruct);
+        app.editor.as_mut().unwrap().liquify(Brush::Reconstruct, &[([300.0, 200.0], [0.0; 2])], 200.0, 1.0);
+        assert!(pixel(&app, 320, 200) == original.get(320, 200) && pixel(&app, 305, 200) == red);
+
+        // Esc puts it back as it was when Liquify opened.
+        key(&mut app, egui::Key::Escape);
+        assert_eq!(pixel(&app, 320, 200), red);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Liquify"));
+        key(&mut app, egui::Key::W);
+        assert_eq!(app.tools.liquify.brush, Brush::Reconstruct, "keys are Liquify's only while it's open");
     }
 
     #[test]

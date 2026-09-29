@@ -27,6 +27,7 @@ pub mod selection;
 pub mod tiled;
 pub mod tiles;
 pub mod transform;
+pub mod warp;
 
 pub use blend::BlendMode;
 pub use clip::PasteKind;
