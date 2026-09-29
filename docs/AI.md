@@ -78,9 +78,9 @@ to go:
 2. **Results are layers.** Auto Retouch builds a layer group you could
    have built by hand. Undo is one step. Hiding the group shows the before.
 3. **Opt-in and offline.** Omapix never goes online. Models are installed
-   by a script the user runs, and verified by checksum. Without a model or
-   the runtime, the AI commands are greyed out with a status-bar hint, and
-   nothing else changes.
+   by a script the user runs, and verified by checksum. Without a model,
+   the AI commands are greyed out, saying which model they need when
+   hovered, and nothing else changes.
 4. **Safe for client work by default.** Omapix is for client and personal
    work alike. Every model in the default set has weights *and* training
    data that allow commercial use. Models that don't (several popular face

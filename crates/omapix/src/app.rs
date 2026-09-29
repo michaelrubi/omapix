@@ -161,6 +161,27 @@ enum Dialog {
     AiModels(Vec<Option<HashMap<&'static str, PathBuf>>>),
 }
 
+/// The AI model `cmd` needs, if any.
+fn model_for(cmd: Command) -> Option<&'static str> {
+    match cmd {
+        Command::SelectSubject => Some(omapix_ai::subject::MODEL),
+        Command::ContentAwareFill => Some(omapix_ai::lama::MODEL),
+        _ => None,
+    }
+}
+
+/// Which AI models are on disk, found on a thread of its own.
+fn check_models(ctx: &egui::Context) -> Receiver<HashMap<&'static str, bool>> {
+    let (tx, rx) = channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let models = omapix_ai::models::models();
+        let _ = tx.send(models.iter().map(|m| (m.id, omapix_ai::find_model(m.id).is_some())).collect());
+        ctx.request_repaint();
+    });
+    rx
+}
+
 /// A drag on the Crop tool's box: on a handle or inside (with the box as
 /// it was), or outside, drawing a new box from there.
 #[derive(Clone, Copy)]
@@ -379,6 +400,11 @@ pub struct App {
     content_fill: ContentFill,
     select_subject: SelectSubject,
     face_selection: FaceSelection,
+    /// Which AI models are on disk, by id, as last checked: on a thread at
+    /// startup (finding a shared model means reading it through), and
+    /// whenever Help › AI Models opens.
+    models: HashMap<&'static str, bool>,
+    models_check: Option<Receiver<HashMap<&'static str, bool>>>,
 }
 
 impl App {
@@ -453,6 +479,8 @@ impl App {
             content_fill: ContentFill::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            models: HashMap::new(),
+            models_check: Some(check_models(ctx)),
         };
         let warnings = crate::hotkeys::load();
         if !warnings.is_empty() {
@@ -661,6 +689,12 @@ impl App {
 
     /// Pick up results from background work.
     fn poll(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.models_check
+            && let Ok(models) = rx.try_recv()
+        {
+            self.models = models;
+            self.models_check = None;
+        }
         if let Some(theme) = self.theme_rx.try_iter().last() {
             ctx.set_visuals(theme.visuals());
             self.theme = theme;
@@ -842,6 +876,9 @@ impl App {
         if editor.busy().is_some() && !view && !matches!(cmd, Command::Quit) {
             return false;
         }
+        if model_for(cmd).is_some_and(|id| self.models.get(id) == Some(&false)) {
+            return false;
+        }
         let doc = &editor.doc;
         let index = editor.active_index();
         let layer = doc.layer(editor.active);
@@ -1006,7 +1043,9 @@ impl App {
                 });
             }
             Command::AiModels => {
-                let found = omapix_ai::models::models().iter().map(|m| omapix_ai::find_model(m.id)).collect();
+                let models = omapix_ai::models::models();
+                let found: Vec<_> = models.iter().map(|m| omapix_ai::find_model(m.id)).collect();
+                self.models = models.iter().zip(&found).map(|(m, f)| (m.id, f.is_some())).collect();
                 self.dialog = Some(Dialog::AiModels(found));
             }
             Command::Finish => self.finish(),
@@ -1473,7 +1512,11 @@ self.filters.remember(&filter);
         if let Some(shortcut) = cmd.shortcut() {
             button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
         }
-        if ui.add_enabled(self.enabled(cmd), button).clicked() {
+        let mut response = ui.add_enabled(self.enabled(cmd), button);
+        if let Some(model) = model_for(cmd).and_then(|id| omapix_ai::models::models().iter().find(|m| m.id == id)) {
+            response = response.on_disabled_hover_text(format!("Needs the {} model: see Help › AI Models", model.name));
+        }
+        if response.clicked() {
             let ctx = ui.ctx().clone();
             self.run(cmd, &ctx);
         }
@@ -4987,6 +5030,8 @@ mod tests {
             content_fill: ContentFill::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            models: HashMap::new(),
+            models_check: None,
         }
     }
 
@@ -6765,6 +6810,19 @@ mod tests {
             }],
         );
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn ai_commands_are_greyed_out_without_their_model() {
+        let mut app = test_app();
+        assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
+        // Not checked yet: nothing's greyed out.
+        assert!(app.enabled(Command::SelectSubject) && app.enabled(Command::ContentAwareFill));
+        app.models = HashMap::from([(omapix_ai::subject::MODEL, false), (omapix_ai::lama::MODEL, true)]);
+        assert!(!app.enabled(Command::SelectSubject));
+        assert!(app.enabled(Command::ContentAwareFill));
+        app.models.insert(omapix_ai::lama::MODEL, false);
+        assert!(!app.enabled(Command::ContentAwareFill));
     }
 
     #[test]
