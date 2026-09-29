@@ -2,6 +2,8 @@
 //! displacement field over the image, shaped by brush dabs, and images
 //! resampled through it.
 
+use std::ops::RangeInclusive;
+
 use crate::Pixel;
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::transform::{Resample, Resampling};
@@ -121,11 +123,61 @@ impl Field {
         for (k, v) in changes {
             self.d[k] = v;
         }
-        // Interpolation carries a grid point's change a step either side.
+        Some(self.shown(&across, &down))
+    }
+
+    /// The area of the image that changes with grid points `across` ×
+    /// `down`: interpolation carries a point's change a step either side.
+    fn shown(&self, across: &RangeInclusive<usize>, down: &RangeInclusive<usize>) -> [u32; 4] {
         let lo = |g: usize| g.saturating_sub(1) as u32 * STEP;
         let hi = |g: usize, n: u32| ((g as u32 + 1) * STEP + 1).min(n);
-        Some([lo(*across.start()), lo(*down.start()), hi(*across.end(), self.width), hi(*down.end(), self.height)])
+        [lo(*across.start()), lo(*down.start()), hi(*across.end(), self.width), hi(*down.end(), self.height)]
     }
+
+    /// The grid's values over `area` of the image (x0, y0, x1, y1), to put
+    /// back with [`Self::swap`].
+    pub fn patch(&self, [x0, y0, x1, y1]: [u32; 4]) -> Patch {
+        let range = |a: u32, b: u32, n: usize| (a / STEP) as usize..=(b.div_ceil(STEP) as usize).min(n - 1);
+        let (across, down) = (range(x0, x1, self.cols), range(y0, y1, self.rows));
+        let d = down.clone().flat_map(|j| across.clone().map(move |i| self.d[j * self.cols + i])).collect();
+        Patch { across, down, d }
+    }
+
+    /// Put `patch` back, leaving what it replaced in it, so swapping it
+    /// again undoes that. Returns the area of the image that changed.
+    pub fn swap(&mut self, patch: &mut Patch) -> [u32; 4] {
+        let cols = self.cols;
+        let points = patch.down.clone().flat_map(|j| patch.across.clone().map(move |i| j * cols + i));
+        for (k, v) in points.zip(&mut patch.d) {
+            std::mem::swap(&mut self.d[k], v);
+        }
+        self.shown(&patch.across, &patch.down)
+    }
+
+    /// Scale the whole warp by `k`: 0 takes it all out.
+    pub fn scale(&mut self, k: f32) {
+        for v in &mut self.d {
+            *v = v.map(|v| v * k);
+        }
+    }
+
+    /// The area of the image the warp moves, if it moves any.
+    pub fn extent(&self) -> Option<[u32; 4]> {
+        let (mut across, mut down) = ((usize::MAX, 0), (usize::MAX, 0));
+        for (k, _) in self.d.iter().enumerate().filter(|(_, v)| **v != [0.0; 2]) {
+            let (i, j) = (k % self.cols, k / self.cols);
+            across = (across.0.min(i), across.1.max(i));
+            down = (down.0.min(j), down.1.max(j));
+        }
+        (across.0 <= across.1).then(|| self.shown(&(across.0..=across.1), &(down.0..=down.1)))
+    }
+}
+
+/// Part of a [`Field`]'s grid, as it was.
+pub struct Patch {
+    across: RangeInclusive<usize>,
+    down: RangeInclusive<usize>,
+    d: Vec<[f32; 2]>,
 }
 
 /// Write `source` warped by `field` into `dest` within `area` (x0, y0, x1,
@@ -250,6 +302,25 @@ mod tests {
         let out = warped(&image, &field);
         assert_eq!(out.get(87, 100), RED);
         assert_eq!(out.get(108, 100), GREY);
+    }
+
+    #[test]
+    fn a_patch_swapped_back_undoes_a_dab_and_swapped_again_redoes_it() {
+        let mut field = Field::new(200, 200);
+        assert_eq!(field.extent(), None);
+        let before = field.clone();
+        let area = field.dab(Brush::Bloat, [60.0, 70.0], 20.0, 0.5, [0.0; 2]).unwrap();
+        let after = field.clone();
+        let mut patch = before.patch(area);
+        let swapped = field.swap(&mut patch);
+        assert!(swapped[0] <= area[0] && swapped[1] <= area[1] && swapped[2] >= area[2] && swapped[3] >= area[3]);
+        assert_eq!(field.d, before.d);
+        field.swap(&mut patch);
+        assert_eq!(field.d, after.d);
+        let extent = field.extent().unwrap();
+        assert!(extent[0] >= area[0] && extent[1] >= area[1] && extent[2] <= area[2] && extent[3] <= area[3]);
+        field.scale(0.0);
+        assert_eq!(field.extent(), None);
     }
 
     #[test]

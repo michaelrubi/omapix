@@ -350,11 +350,13 @@ pub struct Liquify {
     pub size: f32,
     /// How strongly it works, 0–1.
     pub pressure: f32,
+    /// A pen's pressure scales `pressure`.
+    pub pen_pressure: bool,
 }
 
 impl Default for Liquify {
     fn default() -> Self {
-        Self { brush: LiquifyBrush::ForwardWarp, size: 100.0, pressure: 1.0 }
+        Self { brush: LiquifyBrush::ForwardWarp, size: 100.0, pressure: 1.0, pen_pressure: true }
     }
 }
 
@@ -386,7 +388,13 @@ impl Liquify {
         });
     }
 
-    pub fn options_bar(&mut self, ui: &mut Ui, theme: &Theme) {
+    /// Alt+right-drag: change the size by `by` pixels.
+    pub fn resize(&mut self, by: f32) {
+        self.size = (self.size + by).clamp(MIN_SIZE, MAX_SIZE);
+    }
+
+    /// `restore` is how much of the warp Restore All takes out, 0–1.
+    pub fn options_bar(&mut self, ui: &mut Ui, theme: &Theme, restore: &mut f32) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Liquify").strong());
             ui.separator();
@@ -399,6 +407,9 @@ impl Liquify {
             let size = egui::DragValue::new(&mut self.size).range(MIN_SIZE..=MAX_SIZE).suffix(" px").fixed_decimals(0);
             ui.add(size);
             percent(ui, "Pressure", &mut self.pressure);
+            ui.toggle_value(&mut self.pen_pressure, "✒").on_hover_text("A pen's pressure sets the pressure");
+            ui.separator();
+            percent(ui, "Restore All", restore);
             ui.separator();
             let hint = "Alt swaps Pucker and Bloat, and pushes right · Enter applies · Esc cancels";
             ui.label(RichText::new(hint).color(theme.dark_foreground));
