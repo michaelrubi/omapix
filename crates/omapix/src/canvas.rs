@@ -56,6 +56,9 @@ const MAX_ZOOM: f32 = 32.0;
 /// Tiles converted in parallel at most. Keeps the queue short so fast
 /// zooming doesn't leave a backlog of tiles for levels no longer on screen.
 const MAX_IN_FLIGHT: usize = 16;
+/// Display tiles not drawn for this many seconds are dropped, freeing their
+/// GPU memory, except the smallest level's (the placeholders).
+const UNUSED_FOR: f64 = 20.0;
 
 /// Size of one checkerboard square behind transparent areas, in points.
 const CHECKER: f32 = 8.0;
@@ -169,6 +172,8 @@ struct TileTexture {
     texture: TextureHandle,
     bounds: tiles::TileBounds,
     stamp: u64,
+    /// When it was last drawn (egui's time, seconds).
+    drawn: f64,
 }
 
 /// Where the image is on screen.
@@ -983,6 +988,7 @@ impl Canvas {
                             texture,
                             bounds,
                             stamp: tile.stamp,
+                            drawn: ctx.input(|i| i.time),
                         },
                     );
                 }
@@ -1072,6 +1078,7 @@ impl Canvas {
         let focus = (lo + hi) * 0.5;
 
         let mut wanted: Vec<(bool, f32, TileKey)> = Vec::new();
+        let mut drawn = Vec::new();
         for row in r0..r1 {
             for col in c0..c1 {
                 let key = TileKey {
@@ -1108,10 +1115,11 @@ impl Canvas {
                         col: (region.min.x / k.x) as u32 / tiles::TILE_SIZE,
                         row: (region.min.y / k.y) as u32 / tiles::TILE_SIZE,
                     };
-                    self.textures.get(&key).map(|t| (t, k))
+                    self.textures.get(&key).map(|t| (t, k, key))
                 });
                 match source {
-                    Some((t, k)) => {
+                    Some((t, k, key)) => {
+                        drawn.push(key);
                         let b = t.bounds;
                         let tex_min = vec2(b.tex_x as f32, b.tex_y as f32);
                         let tex_size = vec2(b.tex_w as f32, b.tex_h as f32);
@@ -1142,6 +1150,13 @@ impl Canvas {
             }
         }
 
+        let now = ui.input(|i| i.time);
+        for key in drawn {
+            if let Some(t) = self.textures.get_mut(&key) {
+                t.drawn = now;
+            }
+        }
+        self.textures.retain(|key, t| key.level == top || now - t.drawn < UNUSED_FOR);
         self.fresh = wanted.is_empty();
         // Placeholders first, then the tiles nearest the middle of the view.
         wanted.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.total_cmp(&b.1)));
@@ -1252,6 +1267,42 @@ mod tests {
             egui::Shape::LineSegment { points, .. } => *points,
             _ => panic!("expected LineSegment"),
         }
+    }
+
+    #[test]
+    fn display_tiles_not_drawn_for_a_while_are_freed() {
+        let ctx = egui::Context::default();
+        let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
+        let mut canvas = Canvas::new(2000, 1000, transform);
+        canvas.set_render(Arc::new(Render::new(Raster::new(2000, 1000, vec![[0; 4]; 2_000_000]))));
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        // Frames at `time` until every tile on screen has arrived.
+        let settle = |canvas: &mut Canvas, time: f64| {
+            for _ in 0..500 {
+                let input = egui::RawInput { time: Some(time), screen_rect: Some(view), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| {
+                    canvas.show(ui, Color32::BLACK, Overlay::default());
+                });
+                out.textures_delta.clear();
+                if canvas.fresh {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let at_level = |canvas: &Canvas, level| canvas.textures.keys().filter(|k| k.level == level).count();
+
+        // At 100 %, looking at the top left: 2 × 2 of the 4 × 2 full-size tiles.
+        canvas.lay_out_for_test(view, 1.0);
+        settle(&mut canvas, 0.0);
+        assert_eq!(at_level(&canvas, 0), 4);
+        // Zoomed out, they stay a while, then go; what's drawn stays.
+        canvas.view.zoom = 0.25;
+        settle(&mut canvas, 1.0);
+        let shown = at_level(&canvas, 2);
+        assert!(at_level(&canvas, 0) == 4 && shown > 0);
+        settle(&mut canvas, 1.0 + UNUSED_FOR);
+        assert_eq!((at_level(&canvas, 0), at_level(&canvas, 2)), (0, shown));
     }
 
     #[test]
