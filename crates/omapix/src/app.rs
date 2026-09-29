@@ -2595,14 +2595,18 @@ self.filters.remember(&filter);
         }
     }
 
-    /// The Crop tool's box, round the whole image until it's changed.
+    /// The Crop tool's box, until it's changed round the selection's
+    /// bounds, as in Photoshop, or else the whole image.
     fn crop_box(&self) -> [f64; 4] {
-        let whole = self.editor.as_ref().map_or([0.0; 4], |e| [0.0, 0.0, e.doc.width.into(), e.doc.height.into()]);
-        self.crop.unwrap_or(whole)
+        let start = self.editor.as_ref().map_or([0.0; 4], |e| match e.doc.selection.as_ref().and_then(|s| s.bounds()) {
+            Some([x, y, w, h]) => [x, y, x + w, y + h].map(f64::from),
+            None => [0.0, 0.0, e.doc.width.into(), e.doc.height.into()],
+        });
+        self.crop.unwrap_or(start)
     }
 
-    /// Enter crops to the Crop tool's box, and Esc puts it back round the
-    /// whole image.
+    /// Enter crops to the Crop tool's box, and Esc puts it back where it
+    /// started.
     fn check_crop_keys(&mut self, ctx: &egui::Context) {
         if self.tools.tool != crate::tools::Tool::Crop || self.dialog.is_some() || ctx.egui_wants_keyboard_input() {
             return;
@@ -6334,7 +6338,11 @@ mod tests {
         let none = egui::Modifiers::NONE;
         app.tools.select(crate::tools::Tool::Crop);
 
-        // The box starts round the whole 600 × 400 image. Its bottom right
+        // With a selection, the box starts on its bounds, as in Photoshop.
+        assert_eq!(app.crop_box(), [100.0, 100.0, 200.0, 200.0]);
+        app.run(Command::Deselect, &ctx);
+
+        // Without, it starts round the whole 600 × 400 image. Its bottom right
         // corner goes freely to (500, 250), then Shift keeps 2:1 from the top left.
         assert_eq!(app.crop_box(), [0.0, 0.0, 600.0, 400.0]);
         drag(&mut app, (600.0, 400.0), (500.0, 250.0), none);
