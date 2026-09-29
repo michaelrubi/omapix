@@ -168,10 +168,11 @@ enum Extension {
     Transparent,
 }
 
-/// Cached 100 % preview box for sharpening and blur filter dialogs.
+/// The 100 % preview box in a filter's dialog: where it looks, and what it
+/// shows there with the settings it was made for, and without the filter.
 struct FilterPreview {
-    center: Pos2,
-    key: Option<(LayerFilter, (i32, i32))>,
+    centre: Pos2,
+    key: (LayerFilter, (u32, u32)),
     filtered: egui::TextureHandle,
     unfiltered: egui::TextureHandle,
 }
@@ -1809,7 +1810,7 @@ self.filters.remember(&filter);
             self.filter_preview = None;
             return;
         };
-        if !matches!(dialog, Dialog::Filter { filter, .. } if filter.has_preview_box()) {
+        if !matches!(dialog, Dialog::Filter { filter, .. } if has_preview_box(filter)) {
             *preview_cache = None;
         }
         let mut close = false;
@@ -1906,7 +1907,7 @@ self.filters.remember(&filter);
                 Dialog::Filter { filter, preview } => {
                     ui.heading(filter.name());
                     ui.add_space(8.0);
-                    if filter.has_preview_box() {
+                    if has_preview_box(filter) {
                         filter_preview_box(ui, filter, editor, preview_cache);
                     }
                     match filter {
@@ -3060,136 +3061,64 @@ fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     ui.checkbox(&mut options.tonal_falloff, "Shadow/highlight falloff");
 }
 
-/// Photoshop-style 100 % preview box inside filter dialogs.
-fn filter_preview_box(
-    ui: &mut Ui,
-    filter: &LayerFilter,
-    editor: Option<&Editor>,
-    preview_cache: &mut Option<FilterPreview>,
-) {
-    let Some(editor) = editor else { return };
-    // If the filter targets a mask or has an active selection, preview the active layer's pixels only.
-    let Some(layer) = editor.doc.layer(editor.active) else { return };
+/// Filters judged at 100 %, which show a preview box in their dialogs.
+fn has_preview_box(filter: &LayerFilter) -> bool {
+    matches!(
+        filter,
+        LayerFilter::UnsharpMask { .. } | LayerFilter::SmartSharpen(_) | LayerFilter::ReduceNoise(_) | LayerFilter::SmartBlur(_)
+    )
+}
 
-    let box_size = 240.0;
-    let initial_center = editor.canvas.view_center_image();
-
-    let mut center = preview_cache.as_ref().map_or(initial_center, |p| p.center);
-    let (w, h) = (layer.pixels.width() as f32, layer.pixels.height() as f32);
-    if w >= box_size {
-        center.x = center.x.clamp(box_size * 0.5, w - box_size * 0.5);
-    } else {
-        center.x = w * 0.5;
+/// Photoshop's 100 % preview box in a filter's dialog: the active layer
+/// filtered, dragged to look around, and as it was while the button is
+/// held on it. (Filtering a mask, it still shows the layer's pixels.)
+fn filter_preview_box(ui: &mut Ui, filter: &LayerFilter, editor: Option<&Editor>, cache: &mut Option<FilterPreview>) {
+    const SIDE: u32 = 240;
+    let Some(editor) = editor else {
+        return;
+    };
+    let Some(layer) = editor.doc.layer(editor.active) else {
+        return;
+    };
+    let image = &layer.pixels;
+    let (w, h) = (SIDE.min(image.width()), SIDE.min(image.height()));
+    let (rect, response) = ui
+        .vertical_centered(|ui| ui.allocate_exact_size(vec2(w as f32, h as f32), Sense::drag()))
+        .inner;
+    let mut centre = cache.as_ref().map_or_else(|| editor.canvas.view_centre(), |p| p.centre);
+    if response.dragged() {
+        centre -= response.drag_delta();
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    if h >= box_size {
-        center.y = center.y.clamp(box_size * 0.5, h - box_size * 0.5);
-    } else {
-        center.y = h * 0.5;
+    // The box's top left corner, keeping it on the image.
+    let corner = |c: f32, side: u32, size: u32| (c - side as f32 / 2.0).clamp(0.0, (size - side) as f32).round() as u32;
+    let (x, y) = (corner(centre.x, w, image.width()), corner(centre.y, h, image.height()));
+    let key = (*filter, (x, y));
+    if cache.as_ref().is_none_or(|p| p.key != key) {
+        let texture = |name: &str, pixels: Vec<omapix_engine::Pixel>| {
+            let mut rgba = vec![[0u8; 4]; pixels.len()];
+            editor.canvas.transform().convert(&pixels, &mut rgba);
+            let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], bytemuck::cast_slice(&rgba));
+            ui.ctx().load_texture(name, image, egui::TextureOptions::NEAREST)
+        };
+        *cache = Some(FilterPreview {
+            centre,
+            key,
+            filtered: texture("filter-preview", filter.preview(image, x, y, w, h)),
+            unfiltered: texture("filter-preview-before", image.crop(x, y, w, h)),
+        });
     }
-
-    ui.vertical_centered(|ui| {
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(box_size, box_size),
-            egui::Sense::click_and_drag(),
-        );
-
-        if response.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            let delta = response.drag_delta();
-            center.x -= delta.x;
-            center.y -= delta.y;
-            if w >= box_size {
-                center.x = center.x.clamp(box_size * 0.5, w - box_size * 0.5);
-            } else {
-                center.x = w * 0.5;
-            }
-            if h >= box_size {
-                center.y = center.y.clamp(box_size * 0.5, h - box_size * 0.5);
-            } else {
-                center.y = h * 0.5;
-            }
-        } else if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
-
-        let center_key = (center.x.round() as i32, center.y.round() as i32);
-        let key = (*filter, center_key);
-        let need_update = preview_cache
-            .as_ref()
-            .is_none_or(|p| p.key != Some(key));
-
-        if need_update {
-            let crop = filter.preview_crop(
-                &layer.pixels,
-                center_key.0,
-                center_key.1,
-                box_size as u32,
-            );
-            let transform = editor.canvas.transform();
-            let mut filtered_srgb = vec![[0u8; 4]; (box_size * box_size) as usize];
-            let mut unfiltered_srgb = vec![[0u8; 4]; (box_size * box_size) as usize];
-            transform.convert(&crop.filtered, &mut filtered_srgb);
-            transform.convert(&crop.unfiltered, &mut unfiltered_srgb);
-
-            let filtered_img = egui::ColorImage::from_rgba_unmultiplied(
-                [box_size as usize, box_size as usize],
-                bytemuck::cast_slice(&filtered_srgb),
-            );
-            let unfiltered_img = egui::ColorImage::from_rgba_unmultiplied(
-                [box_size as usize, box_size as usize],
-                bytemuck::cast_slice(&unfiltered_srgb),
-            );
-
-            if let Some(cache) = preview_cache {
-                cache.center = center;
-                cache.key = Some(key);
-                cache.filtered.set(filtered_img, egui::TextureOptions::NEAREST);
-                cache.unfiltered.set(unfiltered_img, egui::TextureOptions::NEAREST);
-            } else {
-                let filtered = ui.ctx().load_texture(
-                    "filter_preview_filtered",
-                    filtered_img,
-                    egui::TextureOptions::NEAREST,
-                );
-                let unfiltered = ui.ctx().load_texture(
-                    "filter_preview_unfiltered",
-                    unfiltered_img,
-                    egui::TextureOptions::NEAREST,
-                );
-                *preview_cache = Some(FilterPreview {
-                    center,
-                    key: Some(key),
-                    filtered,
-                    unfiltered,
-                });
-            }
-        } else if let Some(cache) = preview_cache {
-            cache.center = center;
-        }
-
-        if let Some(cache) = preview_cache {
-            let show_unfiltered = response.is_pointer_button_down_on();
-            let tex = if show_unfiltered {
-                &cache.unfiltered
-            } else {
-                &cache.filtered
-            };
-
-            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(0x38));
-            ui.painter().image(
-                tex.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-            ui.painter().rect_stroke(
-                rect,
-                0.0,
-                egui::Stroke::new(1.0, ui.visuals().window_stroke().color),
-                egui::StrokeKind::Outside,
-            );
-        }
-    });
+    let Some(preview) = cache.as_mut() else {
+        return;
+    };
+    preview.centre = pos2(x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
+    let shown = if response.is_pointer_button_down_on() { &preview.unfiltered } else { &preview.filtered };
+    let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    ui.painter().image(shown.id(), rect, uv, egui::Color32::WHITE);
+    let stroke = egui::Stroke::new(1.0, ui.visuals().window_stroke().color);
+    ui.painter().rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Outside);
     ui.add_space(8.0);
 }
 
@@ -4707,7 +4636,7 @@ mod tests {
         // First frame: modal laid out
         frame(&ctx, &mut app, egui::RawInput::default(), screen_rect);
         assert!(app.filter_preview.is_some());
-        let center = app.filter_preview.as_ref().unwrap().center;
+        let center = app.filter_preview.as_ref().unwrap().centre;
         // Image is 600x400, canvas center is (300, 200)
         assert_eq!(center, egui::pos2(300.0, 200.0));
 
@@ -4745,7 +4674,7 @@ mod tests {
             },
             screen_rect,
         );
-        let new_center = app.filter_preview.as_ref().unwrap().center;
+        let new_center = app.filter_preview.as_ref().unwrap().centre;
         assert!(new_center.x < center.x);
 
         // Releasing mouse:

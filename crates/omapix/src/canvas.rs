@@ -545,13 +545,14 @@ impl Canvas {
     }
 
     /// Screen position (points) to image pixels.
-    pub fn to_image(&self, p: Pos2) -> Pos2 {
+    fn to_image(&self, p: Pos2) -> Pos2 {
         ((p - self.rect.min - self.snapped_origin(self.ppp)) / (self.view.zoom / self.ppp))
             .to_pos2()
     }
 
-    /// Image point at the centre of the canvas view.
-    pub fn view_center_image(&self) -> Pos2 {
+    /// The image point in the middle of the view (the image's middle
+    /// before the canvas is laid out).
+    pub fn view_centre(&self) -> Pos2 {
         if self.rect.is_positive() {
             self.to_image(self.rect.center())
         } else {
