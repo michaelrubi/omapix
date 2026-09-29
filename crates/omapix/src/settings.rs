@@ -62,6 +62,8 @@ pub struct FilterSettings {
     /// Frequency Separation's radius; unset, it's worked out from the
     /// image's size.
     pub separation_radius: Option<f32>,
+    /// Heal Blemishes' Sensitivity, 0–100.
+    pub blemish_sensitivity: f32,
     pub unsharp_mask: UnsharpMask,
     pub smart_sharpen: SmartSharpenOptions,
     pub reduce_noise: ReduceNoiseOptions,
@@ -88,6 +90,7 @@ impl Default for FilterSettings {
             select_and_mask: Default::default(),
             select_and_mask_output: Default::default(),
             separation_radius: None,
+            blemish_sensitivity: 50.0,
             // A moderate sharpening for a 24 MP portrait.
             unsharp_mask: UnsharpMask {
                 amount: 0.8,

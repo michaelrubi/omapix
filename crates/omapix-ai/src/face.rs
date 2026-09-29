@@ -50,6 +50,9 @@ pub mod outline {
         10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149,
         150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
     ];
+    /// Round the bottom of the nose: its wings, nostrils and tip
+    /// (MediaPipe's nose outline).
+    pub const NOSE: [usize; 16] = [98, 97, 2, 326, 327, 294, 278, 344, 440, 275, 4, 45, 220, 115, 48, 64];
     /// Each iris: its centre, then four points round it.
     pub const LEFT_IRIS: [usize; 5] = [468, 469, 470, 471, 472];
     pub const RIGHT_IRIS: [usize; 5] = [473, 474, 475, 476, 477];

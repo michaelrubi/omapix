@@ -223,6 +223,8 @@ pub struct Overlay<'a> {
     pub transform: Option<([Pos2; 4], CursorIcon)>,
     /// The box is the Crop tool's: what it leaves out is darkened.
     pub crop: bool,
+    /// Blemishes to be healed, circled.
+    pub spots: &'a [omapix_engine::blemish::Spot],
 }
 
 /// Pointer input meant for the active tool, in image pixels.
@@ -587,6 +589,7 @@ impl Canvas {
             badge,
             transform,
             crop,
+            spots,
         } = overlay;
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
@@ -617,6 +620,7 @@ impl Canvas {
         });
         self.pointer = response.hover_pos().map(|p| self.to_image(p));
         self.draw_outlines(ui, selection, drawing);
+        self.draw_spots(ui, spots);
         if let Some((corners, cursor)) = transform {
             self.draw_transform_box(ui, corners, crop);
             if response.hover_pos().is_some() && !navigating {
@@ -692,6 +696,18 @@ impl Canvas {
         }
         let centre = c[0] + (c[2] - c[0]) / 2.0;
         painter.circle_stroke(centre, 3.0, Stroke::new(1.0, Color32::WHITE));
+    }
+
+    /// A circle round each spot, as big as its heal, in dark and light rings
+    /// like the brush's outline.
+    fn draw_spots(&self, ui: &Ui, spots: &[omapix_engine::blemish::Spot]) {
+        let painter = ui.painter_at(self.rect);
+        for spot in spots {
+            let (centre, radius) = (self.to_screen((spot.x, spot.y)), spot.heal_size() / 2.0 * self.view.zoom / self.ppp);
+            let radius = radius.max(3.0);
+            painter.circle_stroke(centre, radius, Stroke::new(1.5, Color32::from_black_alpha(160)));
+            painter.circle_stroke(centre, radius, Stroke::new(0.75, Color32::from_white_alpha(200)));
+        }
     }
 
     /// Screen position (points) of an image position.
@@ -1296,6 +1312,36 @@ mod tests {
         frame(&mut canvas, button(true));
         let drag = frame(&mut canvas, egui::Event::PointerMoved(pos2(430.0, 300.0)));
         assert!(matches!(drag, Some(ToolInput::BrushDrag { size, .. }) if size > 0.0), "{drag:?}");
+    }
+
+    #[test]
+    fn spots_are_circled_as_big_as_their_heal() {
+        let ctx = egui::Context::default();
+        let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
+        let mut canvas = Canvas::new(800, 600, transform);
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        canvas.lay_out_for_test(view, 1.0);
+        let spot = omapix_engine::blemish::Spot { x: 400.0, y: 300.0, radius: 10.0, score: 20.0 };
+        let input = egui::RawInput { screen_rect: Some(view), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            let overlay = Overlay { spots: &[spot], ..Default::default() };
+            canvas.show(ui, Color32::BLACK, overlay);
+        });
+        out.textures_delta.clear();
+        let circles: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles.len(), 2);
+        let want = spot.heal_size() / 2.0 * canvas.view.zoom;
+        for c in circles {
+            assert_eq!(c.center, canvas.to_screen((400.0, 300.0)));
+            assert!((c.radius - want).abs() < 1e-3, "{} for {want}", c.radius);
+        }
     }
 
     #[test]
