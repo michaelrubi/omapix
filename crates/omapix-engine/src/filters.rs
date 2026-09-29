@@ -202,6 +202,114 @@ impl LayerFilter {
             Self::SmartBlur(options) => smart_blur(image, &options),
         }
     }
+
+    /// Safe margin in pixels around a cropped region so filter edge
+    /// clamping does not affect the interior.
+    pub fn margin(&self) -> u32 {
+        let r = match self {
+            Self::UnsharpMask { radius, .. } => *radius,
+            Self::SmartSharpen(opts) => opts.radius,
+            Self::SmartBlur(opts) => opts.radius,
+            Self::ReduceNoise(_) => 6.0,
+            Self::GaussianBlur { radius } | Self::HighPass { radius } => *radius,
+            _ => 0.0,
+        };
+        (r * 3.0).ceil() as u32 + 4
+    }
+
+    /// Whether this filter should show Photoshop's 100 % filter preview box.
+    pub fn has_preview_box(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsharpMask { .. }
+                | Self::SmartSharpen(_)
+                | Self::ReduceNoise(_)
+                | Self::SmartBlur(_)
+        )
+    }
+
+    /// A 100 % preview of this filter applied to a `size` × `size` area of `image`,
+    /// centred at `(cx, cy)` in image pixels. Returns both the filtered and unfiltered
+    /// pixels row-major.
+    pub fn preview_crop(
+        &self,
+        image: &Tiled<Pixel>,
+        cx: i32,
+        cy: i32,
+        size: u32,
+    ) -> FilterPreviewCrop {
+        let (w, h) = (image.width(), image.height());
+        if w == 0 || h == 0 || size == 0 {
+            let empty = vec![[0u16; 4]; (size * size) as usize];
+            return FilterPreviewCrop {
+                filtered: empty.clone(),
+                unfiltered: empty,
+            };
+        }
+
+        let half = (size / 2) as i32;
+        let (box_x, box_w) = if w >= size {
+            let bx = (cx - half).clamp(0, (w - size) as i32) as u32;
+            (bx, size)
+        } else {
+            (0, w)
+        };
+        let (box_y, box_h) = if h >= size {
+            let by = (cy - half).clamp(0, (h - size) as i32) as u32;
+            (by, size)
+        } else {
+            (0, h)
+        };
+
+        let margin = self.margin();
+        let crop_x0 = box_x.saturating_sub(margin);
+        let crop_y0 = box_y.saturating_sub(margin);
+        let crop_x1 = (box_x + box_w + margin).min(w);
+        let crop_y1 = (box_y + box_h + margin).min(h);
+        let crop_w = crop_x1 - crop_x0;
+        let crop_h = crop_y1 - crop_y0;
+
+        let cropped_pixels = image.crop(crop_x0, crop_y0, crop_w, crop_h);
+        let cropped_tiled = Tiled::from_slice(crop_w, crop_h, [0; 4], &cropped_pixels);
+        let filtered_tiled = self.apply(&cropped_tiled);
+
+        let offset_x = box_x - crop_x0;
+        let offset_y = box_y - crop_y0;
+        let filtered_box = filtered_tiled.crop(offset_x, offset_y, box_w, box_h);
+        let unfiltered_box = image.crop(box_x, box_y, box_w, box_h);
+
+        if box_w == size && box_h == size {
+            FilterPreviewCrop {
+                filtered: filtered_box,
+                unfiltered: unfiltered_box,
+            }
+        } else {
+            let mut filtered = vec![[0u16; 4]; (size * size) as usize];
+            let mut unfiltered = vec![[0u16; 4]; (size * size) as usize];
+            let dst_x = (size - box_w) / 2;
+            let dst_y = (size - box_h) / 2;
+            for y in 0..box_h {
+                let src_offset = (y * box_w) as usize;
+                let dst_offset = ((dst_y + y) * size + dst_x) as usize;
+                filtered[dst_offset..dst_offset + box_w as usize]
+                    .copy_from_slice(&filtered_box[src_offset..src_offset + box_w as usize]);
+                unfiltered[dst_offset..dst_offset + box_w as usize]
+                    .copy_from_slice(&unfiltered_box[src_offset..src_offset + box_w as usize]);
+            }
+            FilterPreviewCrop {
+                filtered,
+                unfiltered,
+            }
+        }
+    }
+}
+
+/// A 100 % preview of a filter over a square region, with both filtered
+/// and unfiltered pixels in document colour.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterPreviewCrop {
+    pub filtered: Vec<Pixel>,
+    pub unfiltered: Vec<Pixel>,
 }
 
 /// Lower a layer mask's opacity destructively.
@@ -1627,6 +1735,99 @@ mod tests {
         // Edges are drawn in white.
         assert_eq!(out_overlay.get(49, 5), [65535, 65535, 65535, 65535]);
         assert_eq!(out_overlay.get(50, 5), [65535, 65535, 65535, 65535]);
+    }
+
+    #[test]
+    fn filter_preview_margin_covers_radius() {
+        let usm = LayerFilter::UnsharpMask {
+            amount: 1.5,
+            radius: 2.0,
+            threshold: 0.0,
+        };
+        assert!(usm.margin() >= (2.0 * 3.0) as u32 + 4);
+        assert!(usm.has_preview_box());
+
+        let smart_sharpen = LayerFilter::SmartSharpen(SmartSharpenOptions {
+            radius: 5.0,
+            ..Default::default()
+        });
+        assert!(smart_sharpen.margin() >= (5.0 * 3.0) as u32 + 4);
+        assert!(smart_sharpen.has_preview_box());
+
+        let smart_blur = LayerFilter::SmartBlur(SmartBlurOptions {
+            radius: 10.0,
+            threshold: 15.0,
+            quality: SmartBlurQuality::High,
+            mode: SmartBlurMode::Normal,
+        });
+        assert!(smart_blur.margin() >= (10.0 * 3.0) as u32 + 4);
+        assert!(smart_blur.has_preview_box());
+
+        let reduce_noise = LayerFilter::ReduceNoise(ReduceNoiseOptions {
+            strength: 5.0,
+            preserve_details: 50.0,
+            reduce_color_noise: 50.0,
+            sharpen_details: 20.0,
+        });
+        assert!(reduce_noise.margin() >= (6.0 * 3.0) as u32 + 4);
+        assert!(reduce_noise.has_preview_box());
+
+        assert!(!LayerFilter::GaussianBlur { radius: 5.0 }.has_preview_box());
+        assert!(!LayerFilter::MaskDensity { density: 50.0 }.has_preview_box());
+    }
+
+    #[test]
+    fn filter_preview_crop_matches_full_image_filter() {
+        let (w, h) = (500u32, 500u32);
+        // An image with high frequencies so sharpening produces non-trivial changes.
+        let pixels: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32;
+                let y = (i / w) as f32;
+                let v = ((x * 0.1).sin() * (y * 0.1).cos() * 20000.0 + 32768.0) as u16;
+                [v, v, v, 65535]
+            })
+            .collect();
+        let image = Tiled::from_slice(w, h, [0; 4], &pixels);
+
+        let filter = LayerFilter::UnsharpMask {
+            amount: 2.0,
+            radius: 2.0,
+            threshold: 0.0,
+        };
+
+        let full_filtered = filter.apply(&image);
+
+        // 1. Interior box: centred at (250, 250), box is [130..370, 130..370].
+        let preview = filter.preview_crop(&image, 250, 250, 240);
+        let expected = full_filtered.crop(130, 130, 240, 240);
+        let expected_unfiltered = image.crop(130, 130, 240, 240);
+        assert_eq!(preview.filtered, expected);
+        assert_eq!(preview.unfiltered, expected_unfiltered);
+
+        // 2. Edge box: centred near (50, 50), box clamps to [0..240, 0..240].
+        let edge_preview = filter.preview_crop(&image, 50, 50, 240);
+        let expected_edge = full_filtered.crop(0, 0, 240, 240);
+        assert_eq!(edge_preview.filtered, expected_edge);
+    }
+
+    #[test]
+    fn filter_preview_crop_handles_small_image_without_panic() {
+        let (w, h) = (80u32, 60u32);
+        let pixels = vec![[20000, 20000, 20000, 65535]; (w * h) as usize];
+        let image = Tiled::from_slice(w, h, [0; 4], &pixels);
+        let filter = LayerFilter::UnsharpMask {
+            amount: 1.0,
+            radius: 1.0,
+            threshold: 0.0,
+        };
+
+        let preview = filter.preview_crop(&image, 40, 30, 240);
+        assert_eq!(preview.filtered.len(), 240 * 240);
+        assert_eq!(preview.unfiltered.len(), 240 * 240);
+        // Center of the 240x240 buffer has the image content.
+        let center_idx = (120 * 240 + 120) as usize;
+        assert_ne!(preview.filtered[center_idx], [0; 4]);
     }
 }
 

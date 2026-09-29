@@ -33,8 +33,9 @@ pub use clip::PasteKind;
 pub use color::{ColorProfile, DisplayTransform};
 pub use document::{AlphaChannel, Document};
 pub use filters::{
-    generate_grain, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
-    SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions,
+    generate_grain, FilterPreviewCrop, LayerFilter, NoiseDistribution, NoiseOptions,
+    ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions, SmartBlurQuality,
+    SmartSharpenOptions,
 };
 pub use histogram::{Histogram, HistogramStats};
 pub use layer::{Layer, Locks, Mask};
