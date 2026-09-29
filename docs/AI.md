@@ -618,9 +618,12 @@ Reordered on 2026-09-29 (see Decisions).
    - Done: Select › Skin and Hair, from the whole image's segmentation,
      with each face's eyes, brows and lips taken out of Skin (grown 0.03
      IOD, feathered 0.015 IOD). 0.45 s at 24 MP once loaded.
-   - Next: Select › Eyes, Lips and Teeth; masks from each; a second
-     segmentation pass round each person; skin split between people with
-     SAM.
+   - Done: Select › Eyes, Lips and Teeth, from the landmark outlines
+     (lips less the mouth; teeth only where the inner lips are more than
+     0.03 IOD apart), feathered 0.01 IOD.
+   - Left for when they're needed: Layer Mask › From Skin and the rest
+     (Select, then Add Mask, does it now); a second segmentation pass
+     round each person; skin split between people with SAM.
 3. **Blemishes.** The classical detector and Heal Blemishes, onto an empty
    layer (Sample Current & Below already heals onto one). The biggest time
    saver in everyday retouching.

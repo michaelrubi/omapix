@@ -167,7 +167,11 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
     match cmd {
         Command::SelectSubject => &[omapix_ai::subject::MODEL],
         Command::ContentAwareFill => &[omapix_ai::lama::MODEL],
-        Command::SelectSkin | Command::SelectHair => &[DETECTOR, LANDMARKER, SEGMENTER],
+        Command::SelectSkin
+        | Command::SelectHair
+        | Command::SelectEyes
+        | Command::SelectLips
+        | Command::SelectTeeth => &[DETECTOR, LANDMARKER, SEGMENTER],
         _ => &[],
     }
 }
@@ -950,7 +954,11 @@ impl App {
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
             Command::SelectSubject => !self.select_subject.busy(),
-            Command::SelectSkin | Command::SelectHair => self.face_selection.busy().is_none(),
+            Command::SelectSkin
+            | Command::SelectHair
+            | Command::SelectEyes
+            | Command::SelectLips
+            | Command::SelectTeeth => self.face_selection.busy().is_none(),
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
@@ -1180,8 +1188,18 @@ impl App {
                     self.message(e, true);
                 }
             }
-            Command::SelectSkin | Command::SelectHair => {
-                let part = if cmd == Command::SelectSkin { Part::Skin } else { Part::Hair };
+            Command::SelectSkin
+            | Command::SelectHair
+            | Command::SelectEyes
+            | Command::SelectLips
+            | Command::SelectTeeth => {
+                let part = match cmd {
+                    Command::SelectSkin => Part::Skin,
+                    Command::SelectHair => Part::Hair,
+                    Command::SelectEyes => Part::Eyes,
+                    Command::SelectLips => Part::Lips,
+                    _ => Part::Teeth,
+                };
                 // Shift adds to the selection, Alt takes away, as with the
                 // marquees.
                 let modifiers = ctx.input(|i| i.modifiers);
@@ -1801,6 +1819,9 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::SelectSubject, None);
                 self.menu_item(ui, Command::SelectSkin, None);
                 self.menu_item(ui, Command::SelectHair, None);
+                self.menu_item(ui, Command::SelectEyes, None);
+                self.menu_item(ui, Command::SelectLips, None);
+                self.menu_item(ui, Command::SelectTeeth, None);
                 ui.separator();
                 self.menu_item(ui, Command::SelectAndMask, None);
                 ui.menu_button("Modify", |ui| {
