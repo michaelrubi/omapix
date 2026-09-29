@@ -89,5 +89,10 @@ fn main() {
     let t = Instant::now();
     export::jpeg(&doc, &dir.join("bench.jpg"), 92).expect("jpeg");
     println!("export jpeg     {:>8.0?}", t.elapsed());
+    let t = Instant::now();
+    let sharpen = filters::LayerFilter::UnsharpMask { amount: 1.0, radius: 1.0, threshold: 0.0 };
+    let grain = omapix_engine::NoiseOptions::default();
+    export::batch_file(path.as_ref(), &dir, Some(2048), Some(&sharpen), Some(&grain), Some(92)).expect("batch");
+    println!("batch export    {:>8.0?}", t.elapsed());
     std::fs::remove_dir_all(&dir).ok();
 }
