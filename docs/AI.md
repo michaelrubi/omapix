@@ -643,11 +643,14 @@ Reordered on 2026-09-29 (see Decisions).
    - Done (2026-09-29): Filter › Noise › Denoise…, with Luminance and
      Color and a 100 % preview box, onto a new Denoise layer above the
      selected one. See "Denoise" below.
-5. **Smooth Skin**, with the dialog and preview, and the 3-band Frequency
-   Separation setup.
-   - Done (2026-09-29): Retouch › Smooth Skin…, onto a new Smooth Skin
-     layer masked to the skin, with Amount (its opacity), Smoothness and
-     Detail and a 100 % preview box. See "Smooth Skin" below.
+5. ~~**Smooth Skin**, with the dialog and preview, and the 3-band Frequency
+   Separation setup.~~ (done, 2026-09-29)
+   - Retouch › Smooth Skin…, onto a new Smooth Skin layer masked to the
+     skin, with Amount (its opacity), Smoothness and Detail and a 100 %
+     preview box. See "Smooth Skin" below.
+   - Retouch › Frequency Separation (3 Bands)…, with Fine and Coarse
+     radii, a preview of each band, and Low, Mid and High layers in a Pass
+     Through group, the Mid one selected.
 6. **Even Tone**, the automatic Dodge & Burn.
 7. **Auto Retouch**, with the face strip, per-face groups, presets and
    scripting.
