@@ -9,12 +9,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
-use egui::{Pos2, RichText, Sense, Slider, pos2, vec2};
+use egui::{Pos2, RichText, Slider};
 use omapix_ai::denoise::{Nind, SIZE};
 use omapix_engine::denoise::{self, Amounts};
 use omapix_engine::{ColorProfile, Layer, Raster};
 
 use crate::editor::Editor;
+use crate::preview_box::{PreviewBox, SIDE};
 use crate::theme::Theme;
 
 /// Loaded on first use and kept until Omapix quits: dropping CUDA sessions
@@ -30,9 +31,6 @@ fn model(square: &[f32]) -> Result<Vec<f32>, String> {
     };
     nind.denoise(square)
 }
-
-/// The preview box's side, as Photoshop's.
-const SIDE: u32 = 240;
 
 /// What the preview box shows: the box at `corner` of the image, in the
 /// document's colours, and before and after denoising in sRGB, ready for
@@ -98,12 +96,6 @@ impl Denoise {
         }
     }
 
-    /// The preview box's top left corner round `centre`, on the image.
-    fn corner(&self, source: &Raster) -> (u32, u32) {
-        let at = |c: f32, size: u32| (c - SIDE.min(size) as f32 / 2.0).clamp(0.0, (size - SIDE.min(size)) as f32).round() as u32;
-        (at(self.centre.x, source.width()), at(self.centre.y, source.height()))
-    }
-
     /// Show the dialog. Returns `Some(true)` once OK'd, `Some(false)` if
     /// cancelled, and an error if something went wrong.
     pub fn show(&mut self, ctx: &egui::Context, editor: &Editor, theme: &Theme) -> Result<Option<bool>, String> {
@@ -158,54 +150,35 @@ impl Denoise {
         Ok(result)
     }
 
-    /// Photoshop's 100 % preview box: the result, dragged to look around,
-    /// and the image as it was while the button is held on it.
+    /// The 100 % preview box: the result, and the image as it was while
+    /// the button is held on it.
     fn preview_box(&mut self, ui: &mut egui::Ui, editor: &Editor) {
         let Some(source) = self.source.clone() else {
             ui.add_space(SIDE as f32 + 8.0);
             return;
         };
-        let (w, h) = (SIDE.min(source.width()), SIDE.min(source.height()));
-        let (rect, response) = ui
-            .vertical_centered(|ui| ui.allocate_exact_size(vec2(w as f32, h as f32), Sense::drag()))
-            .inner;
-        if response.dragged() {
-            self.centre -= response.drag_delta();
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        } else if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
-        let corner = self.corner(&source);
-        self.centre = pos2(corner.0 as f32 + w as f32 / 2.0, corner.1 as f32 + h as f32 / 2.0);
+        let preview = PreviewBox::new(ui, &mut self.centre, (source.width(), source.height()));
+        let (corner, (w, h)) = (preview.corner, preview.size);
         // Denoise round the box once it stops moving.
-        if !response.dragged() && self.sampling.is_none() && self.sample.as_ref().is_none_or(|s| s.corner != corner) {
+        if !preview.dragged() && self.sampling.is_none() && self.sample.as_ref().is_none_or(|s| s.corner != corner) {
             self.sampling = Some(sample(ui.ctx(), &source, &self.profile, corner));
         }
         let amounts = [self.luminance, self.color].map(f32::to_bits);
         let ready = self.sample.as_ref().filter(|s| s.corner == corner);
         let stale = self.shown.as_ref().is_none_or(|s| s.2 != corner || (ready.is_some() && s.3 != amounts));
         if stale {
-            let texture = |name: &str, pixels: &[omapix_engine::Pixel]| {
-                let mut rgba = vec![[0u8; 4]; pixels.len()];
-                editor.canvas.transform().convert(pixels, &mut rgba);
-                let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], bytemuck::cast_slice(&rgba));
-                ui.ctx().load_texture(name, image, egui::TextureOptions::NEAREST)
-            };
             let before = crop(&source, corner.0, corner.1, w, h);
             let after = match ready.map(|s| denoise::finish(&s.image, &self.profile, &s.before, &s.after, self.amounts())) {
                 Some(Ok(after)) => after,
                 _ => before.clone(),
             };
             let key = if ready.is_some() { amounts } else { [u32::MAX; 2] };
-            self.shown = Some((texture("denoise-after", after.pixels()), texture("denoise-before", before.pixels()), corner, key));
+            let texture = |name, pixels: &Raster| preview.texture(ui.ctx(), editor, name, pixels.pixels());
+            self.shown = Some((texture("denoise-after", &after), texture("denoise-before", &before), corner, key));
         }
         if let Some((after, before, ..)) = &self.shown {
-            let shown = if response.is_pointer_button_down_on() { before } else { after };
-            let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            ui.painter().image(shown.id(), rect, uv, egui::Color32::WHITE);
+            preview.show(ui, after, before);
         }
-        let stroke = egui::Stroke::new(1.0, ui.visuals().window_stroke().color);
-        ui.painter().rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Outside);
         ui.add_space(8.0);
     }
 
@@ -320,6 +293,7 @@ impl Denoising {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::vec2;
     use omapix_engine::Document;
 
     #[test]
@@ -370,7 +344,9 @@ mod tests {
         let mut dialog = Denoise::open(&ctx, &editor, 80.0, 100.0).unwrap();
         dialog.opening.take().unwrap().recv().unwrap().unwrap();
         let source = Arc::new(image);
-        let corner = dialog.corner(&source);
+        // Where the box goes round the middle of the view.
+        let at = |c: f32, size: u32| (c - SIDE as f32 / 2.0).clamp(0.0, (size - SIDE) as f32).round() as u32;
+        let corner = (at(dialog.centre.x, 400), at(dialog.centre.y, 300));
         let boxed = crop(&source, corner.0, corner.1, SIDE, SIDE);
         dialog.sample = Some(Sample {
             corner,
@@ -431,7 +407,7 @@ mod tests {
         let rx = dialog.opening.take().unwrap();
         let source = rx.recv().unwrap().unwrap();
         let t = std::time::Instant::now();
-        let sample = sample(&ctx, &source, &dialog.profile, dialog.corner(&source)).recv().unwrap().unwrap();
+        let sample = sample(&ctx, &source, &dialog.profile, ((source.width() - SIDE) / 2, (source.height() - SIDE) / 2)).recv().unwrap().unwrap();
         eprintln!("preview in {:?} (loading the model too)", t.elapsed());
         let t = std::time::Instant::now();
         let again = super::sample(&ctx, &source, &dialog.profile, (0, 0)).recv().unwrap().unwrap();

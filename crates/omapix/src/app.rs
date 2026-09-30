@@ -23,6 +23,7 @@ use crate::tablet::Tablet;
 use crate::content_fill::ContentFill;
 use crate::select_subject::SelectSubject;
 use crate::face_selection::{FaceSelection, Part};
+use crate::preview_box::PreviewBox;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::editor::{Editor, Target, View};
@@ -128,6 +129,7 @@ enum Dialog {
     BlendingOptions(crate::blending_options::BlendingOptions),
     SelectAndMask(crate::select_and_mask::SelectAndMask),
     HealBlemishes(crate::heal_blemishes::HealBlemishes),
+    SmoothSkin(crate::smooth_skin::SmoothSkin),
     Denoise(crate::denoise::Denoise),
     /// Name the selected adjustment layers to keep as a preset.
     SavePreset {
@@ -175,7 +177,8 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::SelectEyes
         | Command::SelectLips
         | Command::SelectTeeth
-        | Command::HealBlemishes => &[DETECTOR, LANDMARKER, SEGMENTER],
+        | Command::HealBlemishes
+        | Command::SmoothSkin => &[DETECTOR, LANDMARKER, SEGMENTER],
         _ => &[],
     }
 }
@@ -1310,6 +1313,13 @@ impl App {
                     Err(e) => self.message(e, true),
                 }
             }
+            Command::SmoothSkin => {
+                let Some(editor) = &self.editor else { return };
+                match crate::smooth_skin::SmoothSkin::open(ctx, editor, self.filters.smooth_skin) {
+                    Ok(dialog) => self.dialog = Some(Dialog::SmoothSkin(dialog)),
+                    Err(e) => self.message(e, true),
+                }
+            }
             Command::FrequencySeparation => {
                 let Some(editor) = &self.editor else { return };
                 let radius = self.filters.separation_radius.unwrap_or_else(|| separation_radius(editor));
@@ -1897,6 +1907,7 @@ self.filters.remember(&filter);
             });
             ui.menu_button("Retouch", |ui| {
                 self.menu_item(ui, Command::HealBlemishes, None);
+                self.menu_item(ui, Command::SmoothSkin, None);
                 self.menu_item(ui, Command::FrequencySeparation, None);
                 self.menu_item(ui, Command::DodgeAndBurn, None);
                 self.menu_item(ui, Command::DodgeAndBurnCurves, None);
@@ -2097,6 +2108,20 @@ self.filters.remember(&filter);
                 Ok(Some(true)) => {
                     dialog.apply(ctx, editor);
                     self.filters.blemish_sensitivity = dialog.sensitivity;
+                    self.filters.save();
+                }
+                Ok(Some(false)) => {}
+                Ok(None) => return,
+                Err(e) => self.message(e, true),
+            }
+            self.dialog = None;
+            return;
+        }
+        if let (Some(Dialog::SmoothSkin(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
+            match dialog.show(ctx, editor, &self.theme) {
+                Ok(Some(true)) => {
+                    dialog.apply(ctx, editor);
+                    self.filters.smooth_skin = dialog.smoothing;
                     self.filters.save();
                 }
                 Ok(Some(false)) => {}
@@ -2310,7 +2335,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) | Dialog::Denoise(_) => {}
+                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::Denoise(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -3604,11 +3629,9 @@ fn has_preview_box(filter: &LayerFilter) -> bool {
     )
 }
 
-/// Photoshop's 100 % preview box in a filter's dialog: the active layer
-/// filtered, dragged to look around, and as it was while the button is
-/// held on it. (Filtering a mask, it still shows the layer's pixels.)
+/// The 100 % preview box in a filter's dialog: the active layer filtered.
+/// (Filtering a mask, it still shows the layer's pixels.)
 fn filter_preview_box(ui: &mut Ui, filter: &LayerFilter, editor: Option<&Editor>, cache: &mut Option<FilterPreview>) {
-    const SIDE: u32 = 240;
     let Some(editor) = editor else {
         return;
     };
@@ -3616,28 +3639,12 @@ fn filter_preview_box(ui: &mut Ui, filter: &LayerFilter, editor: Option<&Editor>
         return;
     };
     let image = &layer.pixels;
-    let (w, h) = (SIDE.min(image.width()), SIDE.min(image.height()));
-    let (rect, response) = ui
-        .vertical_centered(|ui| ui.allocate_exact_size(vec2(w as f32, h as f32), Sense::drag()))
-        .inner;
     let mut centre = cache.as_ref().map_or_else(|| editor.canvas.view_centre(), |p| p.centre);
-    if response.dragged() {
-        centre -= response.drag_delta();
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-    }
-    // The box's top left corner, keeping it on the image.
-    let corner = |c: f32, side: u32, size: u32| (c - side as f32 / 2.0).clamp(0.0, (size - side) as f32).round() as u32;
-    let (x, y) = (corner(centre.x, w, image.width()), corner(centre.y, h, image.height()));
+    let preview = PreviewBox::new(ui, &mut centre, (image.width(), image.height()));
+    let ((x, y), (w, h)) = (preview.corner, preview.size);
     let key = (*filter, (x, y));
     if cache.as_ref().is_none_or(|p| p.key != key) {
-        let texture = |name: &str, pixels: Vec<omapix_engine::Pixel>| {
-            let mut rgba = vec![[0u8; 4]; pixels.len()];
-            editor.canvas.transform().convert(&pixels, &mut rgba);
-            let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], bytemuck::cast_slice(&rgba));
-            ui.ctx().load_texture(name, image, egui::TextureOptions::NEAREST)
-        };
+        let texture = |name, pixels: Vec<omapix_engine::Pixel>| preview.texture(ui.ctx(), editor, name, &pixels);
         *cache = Some(FilterPreview {
             centre,
             key,
@@ -3645,15 +3652,11 @@ fn filter_preview_box(ui: &mut Ui, filter: &LayerFilter, editor: Option<&Editor>
             unfiltered: texture("filter-preview-before", image.crop(x, y, w, h)),
         });
     }
-    let Some(preview) = cache.as_mut() else {
+    let Some(cached) = cache.as_mut() else {
         return;
     };
-    preview.centre = pos2(x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
-    let shown = if response.is_pointer_button_down_on() { &preview.unfiltered } else { &preview.filtered };
-    let uv = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-    ui.painter().image(shown.id(), rect, uv, egui::Color32::WHITE);
-    let stroke = egui::Stroke::new(1.0, ui.visuals().window_stroke().color);
-    ui.painter().rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Outside);
+    cached.centre = centre;
+    preview.show(ui, &cached.filtered, &cached.unfiltered);
     ui.add_space(8.0);
 }
 

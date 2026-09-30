@@ -7,13 +7,12 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
 
 use egui::{Color32, RichText, Slider, vec2};
-use omapix_ai::face::Analysis;
 use omapix_engine::blemish::{self, LEAST_SCORE, Spot};
 use omapix_engine::ColorProfile;
 
 use crate::canvas::Render;
 use crate::editor::{Editor, Target};
-use crate::face_selection::{analyse, blemish_skin};
+use crate::face_selection::{analyse, blemish_skin, scale};
 use crate::theme::Theme;
 
 pub struct HealBlemishes {
@@ -136,22 +135,6 @@ fn find(image: &Render, profile: &ColorProfile) -> Result<Vec<Spot>, String> {
             Ok(blemish::find(&srgb, &skin, iod))
         })
         .ok_or("The image isn't ready yet")?
-}
-
-/// The distance between the eyes of the largest face the landmarker saw
-/// (the others aren't looked at), as it would be facing the camera: a
-/// turned face's eyes look closer together, so it's at least a third of
-/// the face's height, as it is on faces facing the camera.
-fn scale(analysis: &Analysis) -> Option<f32> {
-    analysis
-        .faces
-        .iter()
-        .filter(|(_, points)| points.is_some())
-        .map(|(face, _)| {
-            let [l, r] = [face.points[0], face.points[1]];
-            (r[0] - l[0]).hypot(r[1] - l[1]).max((face.bounds[3] - face.bounds[1]) / 3.0)
-        })
-        .reduce(f32::max)
 }
 
 #[cfg(test)]
