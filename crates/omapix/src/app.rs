@@ -129,6 +129,7 @@ enum Dialog {
     SelectAndMask(crate::select_and_mask::SelectAndMask),
     HealBlemishes(crate::heal_blemishes::HealBlemishes),
     SmoothSkin(crate::smooth_skin::SmoothSkin),
+    EvenTone(crate::even_tone::EvenTone),
     Denoise(crate::denoise::Denoise),
     /// Name the selected adjustment layers to keep as a preset.
     SavePreset {
@@ -177,7 +178,8 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::SelectLips
         | Command::SelectTeeth
         | Command::HealBlemishes
-        | Command::SmoothSkin => &[DETECTOR, LANDMARKER, SEGMENTER],
+        | Command::SmoothSkin
+        | Command::EvenTone => &[DETECTOR, LANDMARKER, SEGMENTER],
         _ => &[],
     }
 }
@@ -1328,6 +1330,13 @@ impl App {
                     Err(e) => self.message(e, true),
                 }
             }
+            Command::EvenTone => {
+                let Some(editor) = &self.editor else { return };
+                match crate::even_tone::EvenTone::open(ctx, editor, self.filters.even_tone) {
+                    Ok(dialog) => self.dialog = Some(Dialog::EvenTone(dialog)),
+                    Err(e) => self.message(e, true),
+                }
+            }
             Command::FrequencySeparation => {
                 let Some(editor) = &self.editor else { return };
                 let radius = self.filters.separation_radius.unwrap_or_else(|| separation_radius(editor));
@@ -1944,6 +1953,7 @@ self.filters.remember(&filter);
             ui.menu_button("Retouch", |ui| {
                 self.menu_item(ui, Command::HealBlemishes, None);
                 self.menu_item(ui, Command::SmoothSkin, None);
+                self.menu_item(ui, Command::EvenTone, None);
                 self.menu_item(ui, Command::FrequencySeparation, None);
                 self.menu_item(ui, Command::FrequencySeparation3, None);
                 self.menu_item(ui, Command::DodgeAndBurn, None);
@@ -2159,6 +2169,20 @@ self.filters.remember(&filter);
                 Ok(Some(true)) => {
                     dialog.apply(ctx, editor);
                     self.filters.smooth_skin = dialog.smoothing;
+                    self.filters.save();
+                }
+                Ok(Some(false)) => {}
+                Ok(None) => return,
+                Err(e) => self.message(e, true),
+            }
+            self.dialog = None;
+            return;
+        }
+        if let (Some(Dialog::EvenTone(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
+            match dialog.show(ctx, editor, &self.theme) {
+                Ok(Some(true)) => {
+                    dialog.apply(ctx, editor);
+                    self.filters.even_tone = dialog.evening;
                     self.filters.save();
                 }
                 Ok(Some(false)) => {}
@@ -2392,7 +2416,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::Denoise(_) => {}
+                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::EvenTone(_) | Dialog::Denoise(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");

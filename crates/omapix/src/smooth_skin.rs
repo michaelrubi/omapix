@@ -7,25 +7,14 @@
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
 
-use egui::{Pos2, RichText, Slider, pos2};
-use omapix_ai::face::{BODY_SKIN, FACE_SKIN};
+use egui::{Pos2, RichText, Slider};
 use omapix_engine::skin::{self, Smoothing};
-use omapix_engine::{ColorProfile, Pixel, Raster, Selection};
+use omapix_engine::Pixel;
 
 use crate::editor::{Editor, Target};
-use crate::face_selection::{analyse, scale, skin};
+use crate::face_selection::{FoundSkin, find_skin};
 use crate::preview_box::{PreviewBox, SIDE};
 use crate::theme::Theme;
-
-/// What the layer is made from: what the active layer and those below it
-/// show, the skin in it, the distance between the eyes of its largest
-/// face, and that face's cheek.
-struct Found {
-    image: Raster,
-    skin: Selection,
-    iod: f32,
-    cheek: Pos2,
-}
 
 /// Which part of the image a sample is, and at which blurs (as bits).
 type Key = ((u32, u32), [u32; 2]);
@@ -43,8 +32,8 @@ pub struct SmoothSkin {
     pub smoothing: Smoothing,
     /// The layer it goes above.
     layer: u64,
-    finding: Option<Receiver<Result<Found, String>>>,
-    found: Option<Arc<Found>>,
+    finding: Option<Receiver<Result<FoundSkin, String>>>,
+    found: Option<Arc<FoundSkin>>,
     /// Where the preview box looks.
     centre: Pos2,
     sample: Option<Sample>,
@@ -64,7 +53,7 @@ impl SmoothSkin {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(find(doc.composite_current_and_below(index), &doc.profile));
+            let _ = tx.send(find_skin(doc.composite_current_and_below(index), &doc.profile));
             ctx.request_repaint();
         });
         Ok(Self {
@@ -199,25 +188,9 @@ impl SmoothSkin {
     }
 }
 
-/// The skin in `image`, its faces and body, measured by its largest face.
-fn find(image: Raster, profile: &ColorProfile) -> Result<Found, String> {
-    let (_, analysis) = analyse(&image, profile)?;
-    let iod = scale(&analysis).ok_or("Found no faces facing the camera")?;
-    let skin = skin(&analysis, &image, &[BODY_SKIN, FACE_SKIN]);
-    // Halfway between the largest face's eye and the corner of its mouth
-    // below it.
-    let height = |b: &[f32; 4]| b[3] - b[1];
-    let face = analysis.faces.iter().map(|(f, _)| f).max_by(|a, b| height(&a.bounds).total_cmp(&height(&b.bounds)));
-    let cheek = face.map_or(pos2(image.width() as f32 / 2.0, image.height() as f32 / 2.0), |f| {
-        let [eye, mouth] = [f.points[0], f.points[3]];
-        pos2((eye[0] + mouth[0]) / 2.0, (eye[1] + mouth[1]) / 2.0)
-    });
-    Ok(Found { image, skin, iod, cheek })
-}
-
 /// The `size` box at `key`'s corner smoothed with blurs of `radii`, on a
 /// thread.
-fn sample(ctx: &egui::Context, found: &Arc<Found>, key: Key, (w, h): (u32, u32), radii: [f32; 2]) -> Receiver<Sample> {
+fn sample(ctx: &egui::Context, found: &Arc<FoundSkin>, key: Key, (w, h): (u32, u32), radii: [f32; 2]) -> Receiver<Sample> {
     let (found, ctx) = (Arc::clone(found), ctx.clone());
     let (tx, rx) = channel();
     std::thread::spawn(move || {
@@ -238,8 +211,8 @@ fn sample(ctx: &egui::Context, found: &Arc<Found>, key: Key, (w, h): (u32, u32),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::vec2;
-    use omapix_engine::Document;
+    use egui::{pos2, vec2};
+    use omapix_engine::{ColorProfile, Document, Raster, Selection};
 
     /// Skin-coloured with a soft dark blotch round (200, 150), all skin,
     /// eyes 300 px apart, and the dialog open on it with the skin found.
@@ -258,11 +231,12 @@ mod tests {
             smoothing: Smoothing::default(),
             layer: editor.active,
             finding: None,
-            found: Some(Arc::new(Found {
+            found: Some(Arc::new(FoundSkin {
                 skin: Selection::all(400, 300),
                 image,
                 iod: 300.0,
                 cheek: pos2(200.0, 150.0),
+                nose: pos2(200.0, 150.0),
             })),
             centre: pos2(200.0, 150.0),
             sample: None,
@@ -369,7 +343,7 @@ mod tests {
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
             let Ok(mut doc) = omapix_engine::io::load(&path) else { continue };
             let t = std::time::Instant::now();
-            let found = match find(doc.composite(), &doc.profile) {
+            let found = match find_skin(doc.composite(), &doc.profile) {
                 Ok(found) => found,
                 Err(e) => {
                     eprintln!("{name}: {e}");

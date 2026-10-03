@@ -70,6 +70,8 @@ pub struct FilterSettings {
     pub blemish_sensitivity: f32,
     /// Smooth Skin's Amount, Smoothness and Detail.
     pub smooth_skin: omapix_engine::skin::Smoothing,
+    /// Even Tone's Amount and Size.
+    pub even_tone: omapix_engine::tone::Evening,
     /// Denoise's Luminance and Color, 0–100.
     pub denoise_luminance: f32,
     pub denoise_color: f32,
@@ -103,6 +105,7 @@ impl Default for FilterSettings {
             separation3_coarse: None,
             blemish_sensitivity: 50.0,
             smooth_skin: Default::default(),
+            even_tone: Default::default(),
             // Leaves a little fine grain at high ISO, which looks natural.
             denoise_luminance: 80.0,
             denoise_color: 100.0,

@@ -524,19 +524,27 @@ pub fn grain_layer(
     layer
 }
 
+/// The Dodge & Burn setup's two curves: Dodge lifts the midtones from 50 %
+/// to 65 %, and Burn lowers them to 35 %.
+pub fn dodge_and_burn_adjustments() -> [Adjustment; 2] {
+    [0.65, 0.35].map(|mid| {
+        Adjustment::Curves(Curves {
+            master: Curve {
+                points: vec![(0.0, 0.0), (0.5, mid), (1.0, 1.0)],
+            },
+            ..Default::default()
+        })
+    })
+}
+
 /// The curves-based dodge & burn setup retouchers use: a "Dodge & Burn"
 /// group holding a brightening and a darkening Curves layer, each with a
 /// black mask, so painting white on a mask lightens or darkens there.
 /// Placed above layer index `above`. Returns (dodge id, burn id).
 pub fn dodge_and_burn_curves(doc: &mut Document, above: usize) -> (u64, u64) {
     let (w, h) = (doc.width, doc.height);
-    let mut curves = |name: &str, mid: f32| {
-        let adjustment = Adjustment::Curves(Curves {
-            master: Curve {
-                points: vec![(0.0, 0.0), (0.5, mid), (1.0, 1.0)],
-            },
-            ..Default::default()
-        });
+    let [dodge, burn] = dodge_and_burn_adjustments();
+    let mut curves = |name: &str, adjustment: Adjustment| {
         let mut layer = Layer::adjustment(doc.next_layer_id(), adjustment, w, h);
         layer.name = name.into();
         if let Some(mask) = &mut layer.mask {
@@ -544,8 +552,8 @@ pub fn dodge_and_burn_curves(doc: &mut Document, above: usize) -> (u64, u64) {
         }
         layer
     };
-    let burn = curves("Burn", 0.35);
-    let dodge = curves("Dodge", 0.65);
+    let burn = curves("Burn", burn);
+    let dodge = curves("Dodge", dodge);
     let (dodge_id, burn_id) = (dodge.id, burn.id);
     let group = new_setup_group(doc, above, "Dodge & Burn");
     let at = doc.insert_above(group, burn);

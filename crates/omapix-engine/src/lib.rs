@@ -29,6 +29,7 @@ pub mod selection;
 pub mod skin;
 pub mod tiled;
 pub mod tiles;
+pub mod tone;
 pub mod transform;
 pub mod warp;
 

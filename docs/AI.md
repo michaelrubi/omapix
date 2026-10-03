@@ -370,6 +370,9 @@ which spots a professional removed.
 This lifts shadowy patches and calms hot spots, without flattening the
 face's shape: large-scale light is left alone by `r_large`.
 
+As built, the group's opacity is the Even Tone amount, and the masks are
+what would bring each patch level (see "Even Tone" below).
+
 ### 6. Auto Retouch
 
 *Evoto's one click.*
@@ -562,6 +565,7 @@ the spike:
 | Healing the spots found (CPU) | 0.1–0.3 s for 10–20 spots | same |
 | Denoise (NIND) at 24 MP | (measured: 7 s, 54 squares at 0.12 s each) | minutes |
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) (measured: 0.4 s) | same |
+| Even Tone (masks at 24 MP) | < 0.3 s (CPU) (measured: under 0.1 s) | same |
 | Auto Retouch end to end, per face | < 3 s | < 10 s |
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
 | Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) | same |
@@ -651,7 +655,11 @@ Reordered on 2026-09-29 (see Decisions).
    - Retouch › Frequency Separation (3 Bands)…, with Fine and Coarse
      radii, a preview of each band, and Low, Mid and High layers in a Pass
      Through group, the Mid one selected.
-6. **Even Tone**, the automatic Dodge & Burn.
+6. ~~**Even Tone**, the automatic Dodge & Burn.~~ (done, 2026-10-03)
+   - Retouch › Even Tone…, as a Dodge & Burn group above the selected
+     layer with its two masks filled in on the skin, with Amount (the
+     group's opacity) and Size, and a preview box of the whole face. See
+     "Even Tone" below.
 7. **Auto Retouch**, with the face strip, per-face groups, presets and
    scripting.
 8. ~~**Warps and Liquify**~~ (done): the warp engine, and brush Liquify
@@ -843,6 +851,60 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
 - **Left:** each face at its own scale; stronger smoothing that keeps the
   shading needs an edge-aware coarse blur (a guided filter), rather than
   a larger Gaussian.
+
+### Even Tone
+
+As built (`omapix_engine::tone`, `crates/omapix/src/even_tone.rs`), looked
+at on the acne photos in `~/Pictures/blemish-tests` and Michael's portraits
+through the ignored test `even_tone_in_photos`, which puts each face
+before, after and as its masks side by side:
+
+```
+OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
+  cargo test --release -p omapix even_tone_in_photos -- --ignored
+```
+
+- **Where.** The same skin as Smooth Skin, from Current & Below of the
+  selected layer, so it goes on after Smooth Skin.
+- **On a small copy.** Unevenness has no fine detail, so it's worked out
+  on a copy of the skin's part of the image with the eyes at most 80 px
+  apart (a whole number of the image's pixels to each of its own). The
+  masks are scaled back up and limited to the skin at full size, so their
+  edges are the skin's.
+- **Luminance, not L\*.** The document's own encoded values (0.3 R +
+  0.59 G + 0.11 B, as the histogram), which is what the curves work on:
+  each mask is then exactly how far its curve has to be let through to
+  bring that skin level. Linear documents are already converted to gamma
+  1.8 on opening, so it's near enough perceptual in every document.
+- **Masks.** `D` from blurs weighted by the skin, as Smooth Skin's are.
+  Where `D` is negative, Dodge's mask is `−D` over how far the Dodge curve
+  moves that skin's colour at full strength, and likewise Burn's where
+  it's positive. So the masks are grey, mostly under a third, and painting
+  on them carries on from there.
+- **Amount** is the group's opacity (60 % to start), as Smooth Skin's is
+  its layer's: the group is left selected, so it's there in the Layers
+  panel afterwards.
+- **Radii.** The design's wide band, tried first at 0.05–0.3 IOD and full
+  strength, took light and shade for unevenness: cheekbone highlights were
+  burned away and the shaded edge of the face dodged, and the masks were
+  solid black and white. Three things keep the shape:
+  - `r_small` is 0.04 IOD (just under Smooth Skin's coarse blur), and
+    `r_large` 0.15 IOD at Size 50, from 0.075 to 0.3.
+  - A patch is moved by 8 % of the range at most (`D` through a tanh).
+    Small differences, which are the unevenness, go entirely; a highlight
+    or the shadow under the jaw only moves that far.
+  - Nothing's evened where less than half of what the large blur sees is
+    skin, rising to all of it where it's all skin: the edge of a face is
+    in shade.
+- **Preview.** The box shows the small copy, so the whole face, starting
+  on the nose: evenness is judged from a distance, and it costs nothing.
+  Amount only re-mixes it; Size evens the copy again on a thread.
+- **Speed.** 5–50 ms to shrink and even at up to 24 MP, and 3–35 ms for
+  the two masks, after the 0.2–0.7 s to find the skin.
+- **Left:** the shadow under the jaw is lifted a little (it's inside the
+  skin); each face at its own scale; a preview on the canvas, if the box
+  turns out too small to judge by; colour unevenness (redness), which is
+  Smooth Skin's and a later step's.
 
 ## Decisions
 
