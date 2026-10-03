@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use egui::{RichText, Slider, vec2};
 use omapix_ai::face::outline;
 use omapix_engine::Document;
-use omapix_engine::reshape::{Face, Shape, Sides};
+use omapix_engine::reshape::{Face, Shape, Sides, facing};
 
 use crate::editor::Editor;
 use crate::face_selection::analyse;
@@ -23,13 +23,18 @@ type Value = fn(&mut Shape) -> &mut f32;
 /// What Symmetry's sliders say when hovered, after their own hints.
 const FACING: &str = "For faces looking at the camera: less is done as a face turns away, and nothing turned far";
 
-/// A group of sliders: its name and their least value, then each slider's
-/// name, what dragging it right does, and its value.
-type Group = (&'static str, f32, &'static [(&'static str, &'static str, Value)]);
+/// A group of sliders: its name, whether it starts open and their least
+/// value, then each slider's name, what dragging it right does, and its
+/// value.
+type Group = (&'static str, bool, f32, &'static [(&'static str, &'static str, Value)]);
 
-const SLIDERS: [Group; 5] = [
+/// The width of the sliders' names, so each group's line up.
+const NAMES: f32 = 84.0;
+
+const SLIDERS: [Group; 9] = [
     (
         "Symmetry",
+        true,
         0.0,
         &[
             ("Eyes", "Evens the eyes' height, size and shape", |s| &mut s.symmetry.eyes),
@@ -41,14 +46,59 @@ const SLIDERS: [Group; 5] = [
     ),
     (
         "Eyes",
+        true,
         -100.0,
         &[
             ("Eye Size", "Larger eyes", |s| &mut s.eye_size),
             ("Eye Distance", "Eyes further apart", |s| &mut s.eye_distance),
         ],
     ),
+    // Each eye and brow on its own: left is the left of the picture.
+    (
+        "Left Eye",
+        false,
+        -100.0,
+        &[
+            ("Size", "A larger eye, on top of Eye Size", |s| &mut s.left_eye.size),
+            ("Height", "A taller eye", |s| &mut s.left_eye.height),
+            ("Width", "A wider eye", |s| &mut s.left_eye.width),
+            ("Tilt", "Its outer corner up", |s| &mut s.left_eye.tilt),
+            ("Lift", "The eye higher up", |s| &mut s.left_eye.lift),
+        ],
+    ),
+    (
+        "Right Eye",
+        false,
+        -100.0,
+        &[
+            ("Size", "A larger eye, on top of Eye Size", |s| &mut s.right_eye.size),
+            ("Height", "A taller eye", |s| &mut s.right_eye.height),
+            ("Width", "A wider eye", |s| &mut s.right_eye.width),
+            ("Tilt", "Its outer corner up", |s| &mut s.right_eye.tilt),
+            ("Lift", "The eye higher up", |s| &mut s.right_eye.lift),
+        ],
+    ),
+    (
+        "Left Brow",
+        false,
+        -100.0,
+        &[
+            ("Lift", "The eyebrow higher up", |s| &mut s.left_brow.lift),
+            ("Tilt", "Its outer end up", |s| &mut s.left_brow.tilt),
+        ],
+    ),
+    (
+        "Right Brow",
+        false,
+        -100.0,
+        &[
+            ("Lift", "The eyebrow higher up", |s| &mut s.right_brow.lift),
+            ("Tilt", "Its outer end up", |s| &mut s.right_brow.tilt),
+        ],
+    ),
     (
         "Nose",
+        true,
         -100.0,
         &[
             ("Nose Length", "A longer nose", |s| &mut s.nose_length),
@@ -57,6 +107,7 @@ const SLIDERS: [Group; 5] = [
     ),
     (
         "Mouth",
+        true,
         -100.0,
         &[
             ("Smile", "The corners of the mouth up", |s| &mut s.smile),
@@ -66,6 +117,7 @@ const SLIDERS: [Group; 5] = [
     ),
     (
         "Face Shape",
+        true,
         -100.0,
         &[
             ("Forehead", "A higher forehead", |s| &mut s.forehead),
@@ -98,6 +150,8 @@ impl FaceLiquify {
     pub fn show(&mut self, ctx: &egui::Context, editor: &mut Editor, theme: &Theme, open: &mut bool) {
         self.find(ctx, editor);
         let mut shapes: Option<Vec<Shape>> = editor.liquify_faces().map(|faces| faces.iter().map(|(_, shape)| *shape).collect());
+        // How much of its symmetry each face is given.
+        let facing: Vec<f32> = editor.liquify_faces().unwrap_or_default().iter().map(|(face, _)| facing(face)).collect();
         let mut preview = editor.liquify_faces_shown();
         egui::Window::new("Face-Aware Liquify")
             .open(open)
@@ -110,7 +164,7 @@ impl FaceLiquify {
                     let why = self.failed.as_deref().unwrap_or("Found no faces facing the camera");
                     ui.label(RichText::new(why).color(theme.dark_foreground));
                 }
-                Some(shapes) => self.sliders(ui, shapes, &mut preview),
+                Some(shapes) => self.sliders(ui, shapes, &facing, &mut preview, theme),
             });
         if preview != editor.liquify_faces_shown() {
             editor.show_liquify_faces(preview);
@@ -151,10 +205,11 @@ impl FaceLiquify {
         editor.set_liquify_faces(layer, found.unwrap_or_default());
     }
 
-    /// The face to shape, if there's more than one, then its sliders, and
-    /// `preview`: off, the faces are shown as they were, and the sliders
-    /// wait.
-    fn sliders(&mut self, ui: &mut egui::Ui, shapes: &mut [Shape], preview: &mut bool) {
+    /// The face to shape, if there's more than one, then its sliders in
+    /// groups that fold away, and `preview`: off, the faces are shown as
+    /// they were, and the sliders wait. `facing` is how much of its symmetry
+    /// each face is given.
+    fn sliders(&mut self, ui: &mut egui::Ui, shapes: &mut [Shape], facing: &[f32], preview: &mut bool, theme: &Theme) {
         self.selected = self.selected.min(shapes.len() - 1);
         if shapes.len() > 1 {
             ui.horizontal_wrapped(|ui| {
@@ -166,17 +221,36 @@ impl FaceLiquify {
             ui.add_space(4.0);
         }
         let shape = &mut shapes[self.selected];
-        ui.add_enabled_ui(*preview, |ui| egui::Grid::new("face-liquify").num_columns(2).show(ui, |ui| {
-            for (group, least, sliders) in SLIDERS {
-                ui.label(RichText::new(group).strong());
-                ui.end_row();
-                for (name, hint, value) in sliders {
-                    ui.label(*name);
-                    let slider = ui.add(Slider::new(value(shape), least..=100.0).fixed_decimals(0)).on_hover_text(*hint);
-                    if group == "Symmetry" {
-                        slider.on_hover_text(FACING);
+        // With more groups open than the screen has room for, they scroll.
+        let room = ui.ctx().content_rect().height() - 220.0;
+        let scroll = egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room);
+        scroll.show(ui, |ui| ui.add_enabled_ui(*preview, |ui| {
+            for (group, open, least, sliders) in SLIDERS {
+                // A dot says a folded group has sliders set.
+                let set = sliders.iter().any(|(.., value)| *value(shape) != 0.0);
+                let title = RichText::new(if set { format!("{group} •") } else { group.into() }).strong();
+                let folding = egui::CollapsingHeader::new(title).id_salt(group).default_open(open).show(ui, |ui| {
+                    if group == "Symmetry" && facing[self.selected] < 1.0 {
+                        let why = match facing[self.selected] * 100.0 {
+                            0.0 => "Turned too far: nothing is done".into(),
+                            part => format!("Turned away: held back to {part:.0} %"),
+                        };
+                        ui.label(RichText::new(why).color(theme.dark_foreground)).on_hover_text(FACING);
                     }
-                    ui.end_row();
+                    egui::Grid::new(group).num_columns(2).min_col_width(NAMES).show(ui, |ui| {
+                        for (name, hint, value) in sliders {
+                            ui.label(*name);
+                            let slider = ui.add(Slider::new(value(shape), least..=100.0).fixed_decimals(0)).on_hover_text(*hint);
+                            if group == "Symmetry" {
+                                slider.on_hover_text(FACING);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                });
+                // Those that start folded are one eye's or brow's own.
+                if !open {
+                    folding.header_response.on_hover_text("Left and right as they are in the picture");
                 }
             }
         }));
@@ -296,21 +370,36 @@ mod tests {
 
     /// A frame of the panel, with the mouse button `down` or not.
     fn frame(ctx: &egui::Context, panel: &mut FaceLiquify, editor: &mut Editor, down: bool) -> bool {
+        frame_at(ctx, panel, editor, Pos2::new(10.0, 500.0), down).0
+    }
+
+    /// A frame of the panel with the mouse at `at`, its button `down` or
+    /// not: whether the panel's still open, and what it wrote.
+    fn frame_at(ctx: &egui::Context, panel: &mut FaceLiquify, editor: &mut Editor, at: Pos2, down: bool) -> (bool, Vec<(String, Pos2)>) {
         let button = egui::Event::PointerButton {
-            pos: Pos2::new(10.0, 500.0),
+            pos: at,
             button: egui::PointerButton::Primary,
             pressed: down,
             modifiers: egui::Modifiers::NONE,
         };
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
-            events: vec![egui::Event::PointerMoved(Pos2::new(10.0, 500.0)), button],
+            events: vec![egui::Event::PointerMoved(at), button],
             ..Default::default()
         };
         let mut open = true;
         let mut out = ctx.run_ui(input, |ui| panel.show(ui.ctx(), editor, &Theme::default(), &mut open));
         out.textures_delta.clear();
-        open
+        fn written(shape: &egui::Shape, texts: &mut Vec<(String, Pos2)>) {
+            match shape {
+                egui::Shape::Text(text) => texts.push((text.galley.text().to_owned(), text.pos)),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| written(shape, texts)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        out.shapes.iter().for_each(|clipped| written(&clipped.shape, &mut texts));
+        (open, texts)
     }
 
     fn shapes(editor: &Editor) -> Vec<Shape> {
@@ -387,6 +476,48 @@ mod tests {
     }
 
     #[test]
+    fn each_eye_and_brow_has_a_group_that_starts_folded() {
+        use omapix_engine::reshape::Brow;
+        let ctx = egui::Context::default();
+        let (mut editor, mut panel) = (liquifying(), FaceLiquify::default());
+        // A second face, turned 35° from the camera.
+        let (sin, cos) = 35f32.to_radians().sin_cos();
+        let turned: Vec<_> = landmarks().iter().map(|p| [300.0 + (p[0] - 300.0) * cos, p[1], (p[0] - 300.0) * sin]).collect();
+        editor.cancel_liquify();
+        editor.begin_liquify().unwrap();
+        editor.set_liquify_faces(editor.active, vec![face(&landmarks()), face(&turned)]);
+        let away = Pos2::new(10.0, 500.0);
+        let has = |texts: &[(String, Pos2)], text: &str| texts.iter().any(|(t, _)| t == text);
+        frame_at(&ctx, &mut panel, &mut editor, away, false);
+        let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
+
+        // The groups there were are open, and each eye's and brow's folded.
+        assert!(has(&texts, "Eye Size") && has(&texts, "Face Width") && has(&texts, "Left Eye") && has(&texts, "Right Brow"));
+        assert!(!has(&texts, "Tilt") && !has(&texts, "Lift"));
+        // A click on one unfolds it.
+        let header = texts.iter().find(|(t, _)| t == "Left Eye").unwrap().1 + vec2(10.0, 5.0);
+        frame_at(&ctx, &mut panel, &mut editor, header, true);
+        // It takes a few frames to open.
+        for _ in 0..10 {
+            frame_at(&ctx, &mut panel, &mut editor, header, false);
+        }
+        let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
+        assert_eq!(texts.iter().filter(|(t, _)| t == "Tilt").count(), 1, "{texts:?}");
+
+        // A folded group with a slider set says so.
+        let lifted = Shape { right_brow: Brow { lift: 30.0, ..Default::default() }, ..Default::default() };
+        panel.shape(&ctx, &mut editor, &[lifted, Shape::default()]);
+        let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
+        assert!(has(&texts, "Right Brow •") && has(&texts, "Left Brow") && has(&texts, "Symmetry"));
+
+        // Symmetry says when it's held back: for the turned face only.
+        assert!(!has(&texts, "Turned too far: nothing is done"));
+        panel.selected = 1;
+        let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
+        assert!(has(&texts, "Turned too far: nothing is done") && has(&texts, "Right Brow"));
+    }
+
+    #[test]
     fn a_dragged_slider_is_a_quick_look_until_it_is_let_go() {
         use crate::canvas::Render;
         use std::sync::Arc;
@@ -457,7 +588,8 @@ mod tests {
     /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder
     /// of them), each face before and after `SHAPE` side by side as
     /// `<photo>-face-<n>.png` in `OMAPIX_FACE_OUT`. `SHAPE` is sliders by
-    /// name, as `Symmetry=100` (all five), `Jaw=50,Face Width=-40`. Needs
+    /// name, as `Symmetry=100` (all five), `Jaw=50,Face Width=-40`, and with
+    /// its group's where several share one, `Left Eye Size=60`. Needs
     /// the models (scripts/fetch-models.sh) and ImageMagick.
     #[test]
     #[ignore]
@@ -470,7 +602,8 @@ mod tests {
             let (name, value) = setting.split_once('=').unwrap();
             let value: f32 = value.parse().unwrap();
             let group = SLIDERS.iter().find(|(group, ..)| *group == name).map(|(.., sliders)| *sliders);
-            let slider = SLIDERS.iter().flat_map(|(.., sliders)| *sliders).find(|(slider, ..)| *slider == name);
+            let named = |group: &str, slider: &str| slider == name || format!("{group} {slider}") == name;
+            let slider = SLIDERS.iter().flat_map(|(group, .., sliders)| sliders.iter().filter(move |(slider, ..)| named(group, slider)));
             for (.., at) in group.into_iter().flatten().chain(slider) {
                 *at(&mut shape) = value;
             }
@@ -530,7 +663,7 @@ mod tests {
                 let bound = |c: usize, least: bool| xs().map(|p| p[c]).fold(if least { f32::MAX } else { f32::MIN }, if least { f32::min } else { f32::max });
                 let [l, t, r, b] = [bound(0, true), bound(1, true), bound(0, false), bound(1, false)];
                 let iod = (face.eyes.right[0][0] - face.eyes.left[0][0]).hypot(face.eyes.right[0][1] - face.eyes.left[0][1]);
-                eprintln!("  face {}: {:.0} × {:.0}, eyes' outer corners {iod:.0} apart", n + 1, r - l, b - t);
+                eprintln!("  face {}: {:.0} × {:.0}, eyes' outer corners {iod:.0} apart, Symmetry at {:.0} %", n + 1, r - l, b - t, facing(face) * 100.0);
                 let pad = (r - l).max(b - t) * 0.3;
                 let [x0, y0, x1, y1] = [(l - pad).max(0.0), (t - pad).max(0.0), (r + pad).min(iw), (b + pad).min(ih)];
                 let step = ((x1 - x0) / 800.0).max(1.0);

@@ -63,13 +63,40 @@ pub struct Symmetry {
     pub jaw: f32,
 }
 
+/// One eye's own sliders, from −100 to 100: its size is on top of both
+/// eyes'.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Eye {
+    pub size: f32,
+    pub height: f32,
+    pub width: f32,
+    /// Its outer corner up.
+    pub tilt: f32,
+    /// The whole eye up.
+    pub lift: f32,
+}
+
+/// One eyebrow's sliders, from −100 to 100.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Brow {
+    /// The whole brow up.
+    pub lift: f32,
+    /// Its outer end up.
+    pub tilt: f32,
+}
+
 /// How a face is reshaped: its symmetry, then each of Face-Aware Liquify's
-/// sliders, from −100 to 100. 0 leaves it as it is.
+/// sliders, from −100 to 100. 0 leaves it as it is. Left is the left of
+/// the image.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Shape {
     pub symmetry: Symmetry,
     pub eye_size: f32,
     pub eye_distance: f32,
+    pub left_eye: Eye,
+    pub right_eye: Eye,
+    pub left_brow: Brow,
+    pub right_brow: Brow,
     pub nose_length: f32,
     pub nose_width: f32,
     pub smile: f32,
@@ -81,10 +108,18 @@ pub struct Shape {
     pub face_width: f32,
 }
 
-/// What each slider does at 100: sizes and widths as a part of the
-/// feature's own, the rest as a part of the distance between the eyes.
+/// What each slider does at 100: sizes, heights and widths as a part of
+/// the feature's own, tilts in radians (10° and 6°), and the rest as a part
+/// of the distance between the eyes. A brow's are less than an eye's: its
+/// outer end is near the face's outline, which stays put.
 const EYE_SIZE: f32 = 0.2;
 const EYE_DISTANCE: f32 = 0.08;
+const EYE_HEIGHT: f32 = 0.3;
+const EYE_WIDTH: f32 = 0.15;
+const EYE_LIFT: f32 = 0.05;
+const EYE_TILT: f32 = 0.175;
+const BROW_LIFT: f32 = 0.06;
+const BROW_TILT: f32 = 0.1;
 const NOSE_LENGTH: f32 = 0.1;
 const NOSE_WIDTH: f32 = 0.25;
 const SMILE: f32 = 0.1;
@@ -148,6 +183,20 @@ impl Frame {
         p[1] += u * self.across[1] + v * self.across[0];
     }
 
+    /// Stretch `points` by `scale` across and down about their middle, turn
+    /// them by `angle` (clockwise in the image), and move them `by`.
+    fn reshape(&self, points: &mut [Point], scale: [f32; 2], angle: f32, by: [f32; 2]) {
+        let centre = middle(points);
+        let [cu, cv] = self.place(centre[0], centre[1]);
+        let (sin, cos) = angle.sin_cos();
+        for p in points {
+            let [u, v] = self.place(p[0], p[1]);
+            let (u, v) = (u - cu, v - cv);
+            let (su, sv) = (u * scale[0], v * scale[1]);
+            self.shift(p, su * cos - sv * sin - u + by[0], su * sin + sv * cos - v + by[1]);
+        }
+    }
+
     /// Where each of `points` is, across and down.
     fn places<'a>(&self, points: impl Iterator<Item = &'a Point>) -> Vec<[f32; 2]> {
         points.map(|p| self.place(p[0], p[1])).collect()
@@ -174,13 +223,10 @@ fn ramp(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Make `face`'s two sides alike, in depth too: a face turned a little
-/// from the camera, whose far side looks narrower, is as symmetrical as it
-/// would be facing it.
-fn symmetrise(face: &mut Face, amounts: &Symmetry) {
-    if *amounts == Symmetry::default() {
-        return;
-    }
+/// `face`'s mirror plane, the one that brings each point nearest its
+/// pair's: a point on it, and the way it faces (to the right). `None` for
+/// a face with no points.
+fn mirror(face: &Face) -> Option<([f64; 3], [f64; 3])> {
     // Each pair's middle and the way from its left to its right, and the
     // midline's points.
     let pairs = |sides: &Sides| -> Vec<(Point, Point)> {
@@ -191,10 +237,10 @@ fn symmetrise(face: &mut Face, amounts: &Symmetry) {
     let pairs: Vec<_> = face.features().into_iter().flat_map(pairs).collect();
     let n = pairs.len().max(1) as f64;
     let centre = [0, 1, 2].map(|c| pairs.iter().map(|(m, _)| f64::from(m[c])).sum::<f64>() / n);
-    // The mirror plane that brings each point nearest its pair's: through
-    // the middles' centre, facing the way that's most along the pairs and
-    // least along the spread of their middles (by least squares, the
-    // greatest eigenvector of the matrix below, found by power iteration).
+    // Through the middles' centre, facing the way that's most along the
+    // pairs and least along the spread of their middles (by least squares,
+    // the greatest eigenvector of the matrix below, found by power
+    // iteration).
     let (mut matrix, mut spread, mut normal) = ([[0.0f64; 3]; 3], 0.0f64, [0.0f64; 3]);
     for (m, d) in &pairs {
         let (m, d) = ([0, 1, 2].map(|c| f64::from(m[c]) - centre[c]), d.map(f64::from));
@@ -211,10 +257,36 @@ fn symmetrise(face: &mut Face, amounts: &Symmetry) {
         let next = [0, 1, 2].map(|i| (0..3).map(|j| matrix[i][j] * normal[j]).sum::<f64>() + spread * normal[i]);
         let length = next.iter().map(|v| v * v).sum::<f64>().sqrt();
         if length == 0.0 {
-            return;
+            return None;
         }
         normal = next.map(|v| v / length);
     }
+    Some((centre, normal))
+}
+
+/// How much of its symmetry `face` is given: all of it (1) looking at the
+/// camera, less as it turns away, and none (0) turned far. The far side of
+/// a face turned from the camera is the landmarker's guess, and looks
+/// uneven when it isn't.
+pub fn facing(face: &Face) -> f32 {
+    mirror(face).map_or(0.0, |(_, normal)| held_back(&normal))
+}
+
+fn held_back(normal: &[f64; 3]) -> f32 {
+    ramp(TURNED[1], TURNED[0], normal[2].abs() as f32)
+}
+
+/// Make `face`'s two sides alike, in depth too: a face turned a little
+/// from the camera, whose far side looks narrower, is as symmetrical as it
+/// would be facing it.
+fn symmetrise(face: &mut Face, amounts: &Symmetry) {
+    if *amounts == Symmetry::default() {
+        return;
+    }
+    let Some((centre, normal)) = mirror(face) else {
+        return;
+    };
+    let facing = held_back(&normal);
     // How far `p` is from the plane, to the right.
     let beyond = |p: &Point| (0..3).map(|c| (f64::from(p[c]) - centre[c]) * normal[c]).sum::<f64>() as f32;
     let normal = normal.map(|v| v as f32);
@@ -231,9 +303,6 @@ fn symmetrise(face: &mut Face, amounts: &Symmetry) {
         (mouth, amounts.mouth),
         (outline, amounts.jaw),
     ];
-    // The far side of a face turned from the camera is the landmarker's
-    // guess, and looks uneven when it isn't: less is done as it turns.
-    let facing = ramp(TURNED[1], TURNED[0], normal[2].abs());
     for (sides, amount) in features {
         let k = amount / 100.0 * facing;
         if k == 0.0 {
@@ -284,15 +353,15 @@ fn shaped(face: &Face, shape: &Shape) -> Face {
     let iod = frame.iod;
     let part = |amount: f32| amount / 100.0;
 
-    // Each eye about its own middle, and apart.
-    for (eye, out) in [(&mut to.eyes.left, -1.0), (&mut to.eyes.right, 1.0)] {
-        let centre = middle(eye);
-        for p in eye {
-            for c in 0..2 {
-                p[c] += (p[c] - centre[c]) * EYE_SIZE * part(shape.eye_size);
-            }
-            frame.shift(p, out * EYE_DISTANCE * iod * part(shape.eye_distance), 0.0);
-        }
+    // Each eye about its own middle, and apart; then each brow.
+    for (eye, own, out) in [(&mut to.eyes.left, &shape.left_eye, -1.0), (&mut to.eyes.right, &shape.right_eye, 1.0)] {
+        let size = 1.0 + EYE_SIZE * part(shape.eye_size + own.size);
+        let scale = [size * (1.0 + EYE_WIDTH * part(own.width)), size * (1.0 + EYE_HEIGHT * part(own.height))];
+        let by = [out * EYE_DISTANCE * iod * part(shape.eye_distance), -EYE_LIFT * iod * part(own.lift)];
+        frame.reshape(eye, scale, -out * EYE_TILT * part(own.tilt), by);
+    }
+    for (brow, own, out) in [(&mut to.brows.left, &shape.left_brow, -1.0), (&mut to.brows.right, &shape.right_brow, 1.0)] {
+        frame.reshape(brow, [1.0; 2], -out * BROW_TILT * part(own.tilt), [0.0, -BROW_LIFT * iod * part(own.lift)]);
     }
 
     // The nose: nothing at the top of its bridge, and the most at its base.
@@ -519,6 +588,64 @@ mod tests {
         assert!(300.0 - to.outline.left[4][0] > 108.0, "not at the cheekbones");
         let (jaw, was) = (to.outline.left[7][0], face.outline.left[7][0]);
         assert!(near(300.0 - jaw, (300.0 - was) * 0.85), "{jaw} {was}");
+    }
+
+    #[test]
+    fn each_eye_and_brow_has_its_own_sliders() {
+        let face = face();
+        let near = |a: f32, b: f32| (a - b).abs() < 0.05;
+        // An eye's inner corner is its first point and its outer its fifth;
+        // its top and bottom are the seventh and third.
+        let size = |eye: &[Point]| [(eye[0][0] - eye[4][0]).abs(), eye[2][1] - eye[6][1]];
+        let eye = |left_eye: Eye, right_eye: Eye| shaped(&face, &Shape { left_eye, right_eye, ..Default::default() });
+
+        // The eye on the left larger, on top of both eyes' size: the other
+        // is as it was.
+        let to = eye(Eye { size: 100.0, ..Default::default() }, Eye::default());
+        assert!(near(size(&to.eyes.left)[0], 36.0 * 1.2) && near(size(&to.eyes.left)[1], 16.0 * 1.2));
+        assert!(near(middle(&to.eyes.left)[0], 250.0));
+        assert_eq!((&to.eyes.right, &to.brows, &to.nose), (&face.eyes.right, &face.brows, &face.nose));
+        let both = Shape { eye_size: 50.0, left_eye: Eye { size: 50.0, ..Default::default() }, ..Default::default() };
+        let both = shaped(&face, &both);
+        assert!(near(size(&both.eyes.left)[0], 36.0 * 1.2) && near(size(&both.eyes.right)[0], 36.0 * 1.1));
+
+        // Taller, wider, and higher up.
+        let to = eye(Eye::default(), Eye { height: 100.0, width: -100.0, lift: 100.0, ..Default::default() });
+        let [w, h] = size(&to.eyes.right);
+        assert!(near(w, 36.0 * 0.85) && near(h, 16.0 * 1.3), "{w} {h}");
+        let [x, y] = middle(&to.eyes.right);
+        assert!(near(x, 350.0) && near(y, 300.0 - 5.0), "{x} {y}");
+        assert_eq!(to.eyes.left, face.eyes.left);
+
+        // Tilted, each eye's outer corner goes up and its inner one down,
+        // about its middle.
+        let tilted = Eye { tilt: 100.0, ..Default::default() };
+        let to = eye(tilted, tilted);
+        let rise = 18.0 * EYE_TILT.sin();
+        for eye in [&to.eyes.left, &to.eyes.right] {
+            assert!(near(eye[4][1], 300.0 - rise) && near(eye[0][1], 300.0 + rise), "{eye:?}");
+            assert!(near(middle(eye)[1], 300.0) && near(size(eye)[0], 36.0 * EYE_TILT.cos()));
+        }
+
+        // The brows: one up, the other's outer end up.
+        let brows = Shape {
+            left_brow: Brow { lift: 100.0, ..Default::default() },
+            right_brow: Brow { tilt: 100.0, ..Default::default() },
+            ..Default::default()
+        };
+        let to = shaped(&face, &brows);
+        assert!(to.brows.left.iter().zip(&face.brows.left).all(|(p, was)| near(p[0], was[0]) && near(p[1], 275.0 - 6.0)));
+        let (inner, outer) = (to.brows.right[4], to.brows.right[0]);
+        assert!(near(outer[1], 275.0 - 24.0 * BROW_TILT.sin()) && near(inner[1], 275.0 + 24.0 * BROW_TILT.sin()), "{inner:?} {outer:?}");
+        assert_eq!((&to.eyes, &to.outline), (&face.eyes, &face.outline));
+    }
+
+    #[test]
+    fn facing_says_how_much_symmetry_a_turned_face_gets() {
+        assert_eq!(facing(&face()), 1.0);
+        let a_little = facing(&turned(face(), 12.0));
+        assert!(a_little > 0.3 && a_little < 0.9, "{a_little}");
+        assert_eq!(facing(&turned(face(), 35.0)), 0.0);
     }
 
     #[test]
