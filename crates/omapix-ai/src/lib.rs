@@ -7,6 +7,7 @@ pub mod face;
 pub mod flux;
 pub mod lama;
 pub mod models;
+pub mod pose;
 pub mod sam;
 pub mod subject;
 pub mod upscale;

@@ -171,6 +171,8 @@ enum Dialog {
 
 /// The models that find faces, their points and their skin.
 const FACE_MODELS: &[&str] = &[omapix_ai::face::DETECTOR, omapix_ai::face::LANDMARKER, omapix_ai::face::SEGMENTER];
+/// The one that finds people and their joints.
+const POSE_MODELS: &[&str] = &[omapix_ai::pose::MODEL];
 
 /// The AI models `cmd` needs.
 fn models_for(cmd: Command) -> &'static [&'static str] {
@@ -459,6 +461,7 @@ pub struct App {
     select_subject: SelectSubject,
     face_selection: FaceSelection,
     face_liquify: crate::face_liquify::FaceLiquify,
+    body_liquify: crate::body_liquify::BodyLiquify,
     /// Which AI models are on disk, by id, as last checked: on a thread at
     /// startup (finding a shared model means reading it through), and
     /// whenever Help › AI Models opens.
@@ -541,6 +544,7 @@ impl App {
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             face_liquify: Default::default(),
+            body_liquify: Default::default(),
             models: HashMap::new(),
             models_check: Some(check_models(ctx)),
         };
@@ -3147,17 +3151,20 @@ self.filters.remember(&filter);
         self.liquify_at = None;
     }
 
-    /// Face-Aware Liquify's panel, while Liquify is open and it's switched
-    /// on (and the face models are there).
+    /// Face-Aware Liquify's panel and Body Reshape's, while Liquify is open
+    /// and each is switched on (and its models are there).
     fn face_liquify(&mut self, ctx: &egui::Context) {
-        let open = &mut self.tools.liquify.face_aware;
+        let liquify = &mut self.tools.liquify;
         match &mut self.editor {
             Some(editor) if editor.liquifying() => {
-                if *open && missing(FACE_MODELS, &self.models).is_empty() {
-                    self.face_liquify.show(ctx, editor, &self.theme, open);
+                if liquify.face_aware && missing(FACE_MODELS, &self.models).is_empty() {
+                    self.face_liquify.show(ctx, editor, &self.theme, &mut liquify.face_aware);
+                }
+                if liquify.body && missing(POSE_MODELS, &self.models).is_empty() {
+                    self.body_liquify.show(ctx, editor, &self.theme, &mut liquify.body);
                 }
             }
-            _ => self.face_liquify = Default::default(),
+            _ => (self.face_liquify, self.body_liquify) = Default::default(),
         }
     }
 
@@ -4674,8 +4681,8 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     if editor.liquifying() {
                         let mut restore = editor.liquify_restore();
-                        let missing = missing(FACE_MODELS, &self.models);
-                        self.tools.liquify.options_bar(ui, &self.theme, &mut restore, &missing);
+                        let missing = [FACE_MODELS, POSE_MODELS].map(|models| missing(models, &self.models));
+                        self.tools.liquify.options_bar(ui, &self.theme, &mut restore, [&missing[0], &missing[1]]);
                         if restore != editor.liquify_restore() {
                             editor.set_liquify_restore(restore);
                         }
@@ -5366,6 +5373,7 @@ mod tests {
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             face_liquify: Default::default(),
+            body_liquify: Default::default(),
             models: HashMap::new(),
             models_check: None,
         }
@@ -6746,6 +6754,11 @@ mod tests {
         assert!(app.tools.liquify.face_aware);
         key(&mut app, egui::Key::A);
         assert!(!app.tools.liquify.face_aware);
+        // And Y Body Reshape's.
+        key(&mut app, egui::Key::Y);
+        assert!(app.tools.liquify.body);
+        key(&mut app, egui::Key::Y);
+        assert!(!app.tools.liquify.body);
     }
 
     #[test]

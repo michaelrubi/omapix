@@ -208,14 +208,20 @@ fn find(image: &Render, profile: &ColorProfile, part: Part) -> Result<Selection,
         .ok_or("The image isn't ready yet")?
 }
 
-/// `image` in 8-bit sRGB, as the models see it, and what they find in it.
-pub fn analyse(image: &Raster, profile: &ColorProfile) -> Result<(Vec<[u8; 4]>, Analysis), String> {
+/// `image` in 8-bit sRGB, as the models see it.
+pub fn srgb(image: &Raster, profile: &ColorProfile) -> Result<Vec<[u8; 4]>, String> {
     let transform = DisplayTransform::to_srgb(profile).map_err(|e| e.to_string())?;
     let mut srgb = vec![[0u8; 4]; image.pixels().len()];
     // In parallel: a 24 MP image takes half a second on one thread.
     srgb.par_chunks_mut(1 << 16)
         .zip(image.pixels().par_chunks(1 << 16))
         .for_each(|(out, pixels)| transform.convert(pixels, out));
+    Ok(srgb)
+}
+
+/// `image` in 8-bit sRGB, and what the face models find in it.
+pub fn analyse(image: &Raster, profile: &ColorProfile) -> Result<(Vec<[u8; 4]>, Analysis), String> {
+    let srgb = srgb(image, profile)?;
     let mut models = MODELS.lock().map_err(|e| e.to_string())?;
     let faces = match &mut *models {
         Some(faces) => faces,

@@ -1,5 +1,5 @@
-//! Warps, for Liquify and its face sliders (reshape.rs, and later Body
-//! Reshape, see AI.md): a displacement field over the image, shaped by
+//! Warps, for Liquify and its face and body sliders (reshape.rs and
+//! body.rs, see AI.md): a displacement field over the image, shaped by
 //! brush dabs or by points that move, and images resampled through it.
 
 use std::ops::RangeInclusive;
@@ -135,11 +135,21 @@ impl Field {
     /// not all in a line. The spline is worked out at every `every`th grid
     /// point each way and interpolated between: it's smooth, so points far
     /// apart need no more.
-    pub fn move_points(
+    pub fn move_points(&mut self, moves: &[([f32; 2], [f32; 2])], area: [u32; 4], every: usize, fade: impl Fn([f32; 2]) -> f32 + Sync) {
+        if let Some(spline) = Spline::through(moves) {
+            self.add(area, every, |p| spline.at(p), fade);
+        }
+    }
+
+    /// Add the warp that reads each point within `area` (x0, y0, x1, y1)
+    /// from `offset` away, scaled at each point by `fade` (0–1). `offset` is
+    /// worked out at every `every`th grid point each way and interpolated
+    /// between.
+    pub fn add(
         &mut self,
-        moves: &[([f32; 2], [f32; 2])],
         [x0, y0, x1, y1]: [u32; 4],
         every: usize,
+        offset: impl Fn([f32; 2]) -> [f32; 2] + Sync,
         fade: impl Fn([f32; 2]) -> f32 + Sync,
     ) {
         let range = |a: u32, b: u32, n: usize| a.div_ceil(STEP) as usize..=((b / STEP) as usize).min(n - 1);
@@ -147,17 +157,14 @@ impl Field {
         if across.is_empty() || down.is_empty() {
             return;
         }
-        let Some(spline) = Spline::through(moves) else {
-            return;
-        };
         let (step, every) = (STEP as f32, every.max(1));
-        // The spline at every `every`th grid point from the first, to the
-        // last or just past it.
+        // At every `every`th grid point from the first, to the last or just
+        // past it.
         let (first, top) = (*across.start(), *down.start());
         let (wide, tall) = ((across.end() - first).div_ceil(every) + 1, (down.end() - top).div_ceil(every) + 1);
         let coarse: Vec<[f32; 2]> = (0..wide * tall)
             .into_par_iter()
-            .map(|k| spline.at([(first + k % wide * every) as f32 * step, (top + k / wide * every) as f32 * step]))
+            .map(|k| offset([(first + k % wide * every) as f32 * step, (top + k / wide * every) as f32 * step]))
             .collect();
         self.d.par_chunks_mut(self.cols).enumerate().filter(|(j, _)| down.contains(j)).for_each(|(j, row)| {
             let (b, fy) = ((j - top) / every, ((j - top) % every) as f32 / every as f32);
@@ -174,6 +181,16 @@ impl Field {
                 let d = lerp(lerp(at(a, b), at(right, b), fx), lerp(at(a, below), at(right, below), fx), fy);
                 row[i] = [row[i][0] + d[0] * fade, row[i][1] + d[1] * fade];
             }
+        });
+    }
+
+    /// Put this warp over `under`, as one: `under` is done first, and this
+    /// warps the result.
+    pub fn over(&mut self, under: &Field) {
+        let (cols, step) = (self.cols, STEP as f32);
+        self.d.par_iter_mut().enumerate().for_each(|(k, d)| {
+            let below = under.at((k % cols) as f32 * step + d[0], (k / cols) as f32 * step + d[1]);
+            *d = [d[0] + below[0], d[1] + below[1]];
         });
     }
 
@@ -582,6 +599,28 @@ mod tests {
             assert_eq!(both.get(x, y), in_turn.get(x, y), "{x}, {y}");
         }
         assert_eq!(both.get(120, 100), RED, "bloated");
+    }
+
+    #[test]
+    fn a_warp_put_over_another_is_both_as_one() {
+        let image = disc(10.0);
+        let mut under = Field::new(200, 200);
+        let right = [[0.0, 0.0], [200.0, 0.0], [0.0, 200.0]].map(|p| (p, [p[0] + 8.0, p[1]]));
+        under.move_points(&right, [0, 0, 200, 200], 1, |_| 1.0);
+        let mut over = Field::new(200, 200);
+        over.dab(Brush::Bloat, [108.0, 100.0], 40.0, 0.3, [0.0; 2]);
+        let mut in_turn = image.clone();
+        warp_area(&image, &over, Some(&under), &mut in_turn, [0, 0, 200, 200], 0);
+        // At a grid point: its own offset, and the one under where that
+        // reads from.
+        let own = over.at(100.0, 92.0);
+        let below = under.at(100.0 + own[0], 92.0 + own[1]);
+        over.over(&under);
+        assert_eq!(over.at(100.0, 92.0), [own[0] + below[0], own[1] + below[1]]);
+        let both = warped(&image, &over);
+        for (x, y) in [(108, 100), (120, 100), (96, 100), (108, 112), (60, 60)] {
+            assert_eq!(both.get(x, y), in_turn.get(x, y), "{x}, {y}");
+        }
     }
 
     #[test]

@@ -905,7 +905,7 @@ fn fill_ellipse(width: u32, height: u32, cx: f32, cy: f32, rx: f32, ry: f32) -> 
 }
 
 /// Transpose a row-major 2D single-channel buffer of size `w` × `h` to `h` × `w`.
-fn transpose_f32(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn transpose_f32(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
     const BLOCK: usize = 64;
     out.par_chunks_mut(h * BLOCK)
@@ -924,7 +924,7 @@ fn transpose_f32(src: &[f32], w: usize, h: usize) -> Vec<f32> {
 }
 
 /// 1D Euclidean distance transform along every row in parallel.
-fn edt_rows(buf: &mut [f32], len: usize) {
+pub(crate) fn edt_rows(buf: &mut [f32], len: usize) {
     buf.par_chunks_mut(len).for_each(|row| {
         let mut v = vec![0usize; len];
         let mut z = vec![0.0f64; len + 1];

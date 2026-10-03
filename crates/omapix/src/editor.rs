@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
 use omapix_engine::adjust::Adjustment;
+use omapix_engine::body::{self, Body};
 use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
 use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
@@ -196,12 +197,11 @@ struct Liquifying {
     source: Tiled<Pixel>,
     /// The brushes' warp.
     field: Field,
-    /// The faces found in the layer and the shape each is given, once
-    /// they've been looked for, and the warp those make, which the brushes'
-    /// goes over.
-    faces: Option<Vec<(Face, Shape)>>,
+    /// The faces and bodies found in the layer, and the warp their shapes
+    /// make, which the brushes' goes over.
+    figures: Figures,
     shaped: Option<Field>,
-    /// The faces' warp isn't shown (the panel's Preview is off), until
+    /// The sliders' warp isn't shown (a panel's Preview is off), until
     /// Liquify is applied.
     hidden: bool,
     /// How much of the brushes' warp Restore All is taking out (0–1):
@@ -209,9 +209,9 @@ struct Liquifying {
     restore: f32,
     /// The stroke in progress: the field before it, and the area it changed.
     stroke: Option<(Field, [u32; 4])>,
-    /// A face's slider is being dragged: all of it is one step.
+    /// A face's or body's slider is being dragged: all of it is one step.
     shaping: bool,
-    /// While it's dragged, the faces' warp is only shown, as a quick look at
+    /// While it's dragged, the sliders' warp is only shown, as a quick look at
     /// the size on screen: the area the layer is still to be warped in once
     /// the drag ends, and the layer's pixels before, shrunk to that size.
     pending: Option<[u32; 4]>,
@@ -227,30 +227,103 @@ struct Liquifying {
 enum LiquifyStep {
     /// A stroke: the part of the field it changed.
     Stroke(Patch),
-    /// The faces' shapes.
-    Shapes(Vec<Shape>),
+    /// The faces' and bodies' shapes.
+    Shapes(Vec<Shape>, Vec<body::Shape>),
 }
 
 /// A layer's last Liquify: its pixels before, the brushes' warp, its faces
-/// and their shapes, and the pixels those made.
+/// and bodies and their shapes, and the pixels those made.
 struct Mesh {
     source: Tiled<Pixel>,
     field: Field,
-    faces: Option<Vec<(Face, Shape)>>,
+    figures: Figures,
     made: Tiled<Pixel>,
 }
 
-/// The warp that gives each of `faces` its shape, in a `width` × `height`
-/// image, if any has one: for a quick look at the display pyramid's
-/// `level`, or with 0, exactly.
-fn shaped(faces: &[(Face, Shape)], width: u32, height: u32, level: usize) -> Option<Field> {
-    faces.iter().any(|(_, shape)| *shape != Shape::default()).then(|| {
-        let mut field = Field::new(width, height);
-        for (face, shape) in faces {
-            reshape::reshape(&mut field, face, shape, level as u32);
+/// What Liquify's sliders shape: the faces and the bodies found in the
+/// layer and the shape each is given, once they've been looked for.
+#[derive(Clone, Default)]
+pub struct Figures {
+    faces: Option<Vec<(Face, Shape)>>,
+    bodies: Option<Vec<(Body, body::Shape)>>,
+}
+
+impl Figures {
+    /// The warp that gives each its shape, in a `width` × `height` image,
+    /// if any has one: for a quick look at the display pyramid's `level`,
+    /// or with 0, exactly. The bodies' goes over the faces', since it can
+    /// move a head.
+    fn warp(&self, width: u32, height: u32, level: usize) -> Option<Field> {
+        fn shaped<F: Figure>(all: &Option<Vec<(F, F::Shape)>>, width: u32, height: u32, level: usize) -> Option<Field> {
+            let all = all.as_deref().unwrap_or_default();
+            all.iter().any(|(_, shape)| *shape != F::Shape::default()).then(|| {
+                let mut field = Field::new(width, height);
+                for (figure, shape) in all {
+                    figure.reshape(&mut field, shape, level as u32);
+                }
+                field
+            })
         }
-        field
-    })
+        let faces = shaped(&self.faces, width, height, level);
+        let Some(mut bodies) = shaped(&self.bodies, width, height, level) else {
+            return faces;
+        };
+        if let Some(faces) = &faces {
+            bodies.over(faces);
+        }
+        Some(bodies)
+    }
+
+    fn shapes(&self) -> (Vec<Shape>, Vec<body::Shape>) {
+        fn shapes<F: Figure>(all: &Option<Vec<(F, F::Shape)>>) -> Vec<F::Shape> {
+            all.iter().flatten().map(|(_, shape)| *shape).collect()
+        }
+        (shapes(&self.faces), shapes(&self.bodies))
+    }
+}
+
+/// A face or a body: what one of Liquify's panels of sliders shapes.
+pub trait Figure: Sized {
+    /// Its sliders.
+    type Shape: Copy + Default + PartialEq;
+    /// Those found, among `figures`.
+    fn all(figures: &Figures) -> &Option<Vec<(Self, Self::Shape)>>;
+    fn all_mut(figures: &mut Figures) -> &mut Option<Vec<(Self, Self::Shape)>>;
+    /// Add to `field` the warp that gives it `shape` (see
+    /// [`reshape::reshape`]).
+    fn reshape(&self, field: &mut Field, shape: &Self::Shape, level: u32);
+}
+
+impl Figure for Face {
+    type Shape = Shape;
+
+    fn all(figures: &Figures) -> &Option<Vec<(Self, Shape)>> {
+        &figures.faces
+    }
+
+    fn all_mut(figures: &mut Figures) -> &mut Option<Vec<(Self, Shape)>> {
+        &mut figures.faces
+    }
+
+    fn reshape(&self, field: &mut Field, shape: &Shape, level: u32) {
+        reshape::reshape(field, self, shape, level);
+    }
+}
+
+impl Figure for Body {
+    type Shape = body::Shape;
+
+    fn all(figures: &Figures) -> &Option<Vec<(Self, body::Shape)>> {
+        &figures.bodies
+    }
+
+    fn all_mut(figures: &mut Figures) -> &mut Option<Vec<(Self, body::Shape)>> {
+        &mut figures.bodies
+    }
+
+    fn reshape(&self, field: &mut Field, shape: &body::Shape, level: u32) {
+        body::reshape(field, self, shape, level);
+    }
 }
 
 /// A Move drag, or a slider drag on one layer's settings, shown live on the
@@ -1238,16 +1311,16 @@ impl Editor {
             return Err("Could not liquify because the layer is locked");
         }
         let (width, height) = (self.doc.width, self.doc.height);
-        let (source, field, faces) = match self.meshes.get(&layer.id) {
-            Some(mesh) if mesh.made.same_tiles(&layer.pixels) => (mesh.source.clone(), mesh.field.clone(), mesh.faces.clone()),
-            _ => (layer.pixels.clone(), Field::new(width, height), None),
+        let (source, field, figures) = match self.meshes.get(&layer.id) {
+            Some(mesh) if mesh.made.same_tiles(&layer.pixels) => (mesh.source.clone(), mesh.field.clone(), mesh.figures.clone()),
+            _ => (layer.pixels.clone(), Field::new(width, height), Figures::default()),
         };
         self.liquifying = Some(Liquifying {
             layer: layer.id,
             source,
             field,
-            shaped: faces.as_deref().and_then(|faces| shaped(faces, width, height, 0)),
-            faces,
+            shaped: figures.warp(width, height, 0),
+            figures,
             hidden: false,
             restore: 0.0,
             stroke: None,
@@ -1287,8 +1360,8 @@ impl Editor {
         }
     }
 
-    /// The stroke, or the drag of a face's slider, is over: it's undone as
-    /// one step.
+    /// The stroke, or the drag of a slider, is over: it's undone as one
+    /// step.
     pub fn end_liquify_stroke(&mut self) {
         let Some(liquifying) = &mut self.liquifying else {
             return;
@@ -1302,7 +1375,7 @@ impl Editor {
     }
 
     /// The document as it was before Liquify's warp, and the layer being
-    /// liquified: where its faces are found.
+    /// liquified: where its faces and bodies are found.
     pub fn liquify_original(&self) -> Option<(Document, u64)> {
         let liquifying = self.liquifying.as_ref()?;
         let mut doc = self.doc.clone();
@@ -1310,55 +1383,55 @@ impl Editor {
         Some((doc, liquifying.layer))
     }
 
-    /// The faces Liquify's sliders shape, from left to right, and the shape
-    /// each has: `None` until they've been looked for.
-    pub fn liquify_faces(&self) -> Option<&[(Face, Shape)]> {
-        self.liquifying.as_ref()?.faces.as_deref()
+    /// The faces (or bodies) Liquify's sliders shape, from left to right,
+    /// and the shape each has: `None` until they've been looked for.
+    pub fn liquify_figures<F: Figure>(&self) -> Option<&[(F, F::Shape)]> {
+        F::all(&self.liquifying.as_ref()?.figures).as_deref()
     }
 
-    /// The faces found in `layer`'s [`Self::liquify_original`], if it's
-    /// still the one being liquified.
-    pub fn set_liquify_faces(&mut self, layer: u64, faces: Vec<Face>) {
-        if let Some(liquifying) = self.liquifying.as_mut().filter(|l| l.layer == layer && l.faces.is_none()) {
-            liquifying.faces = Some(faces.into_iter().map(|face| (face, Shape::default())).collect());
+    /// The faces (or bodies) found in `layer`'s [`Self::liquify_original`],
+    /// if it's still the one being liquified.
+    pub fn set_liquify_figures<F: Figure>(&mut self, layer: u64, found: Vec<F>) {
+        if let Some(liquifying) = self.liquifying.as_mut().filter(|l| l.layer == layer && F::all(&l.figures).is_none()) {
+            *F::all_mut(&mut liquifying.figures) = Some(found.into_iter().map(|figure| (figure, F::Shape::default())).collect());
         }
     }
 
-    /// Give the faces `shapes`, shown at once. Until
+    /// Give the faces (or bodies) `shapes`, shown at once. Until
     /// [`Self::end_liquify_stroke`], it's one step to undo while Liquify is
     /// open, and it's only a quick look (see [`Self::preview_liquify`]).
-    pub fn shape_liquify_faces(&mut self, shapes: &[Shape]) {
+    pub fn shape_liquify<F: Figure>(&mut self, shapes: &[F::Shape]) {
         self.keep_liquify_restore();
         let Some(liquifying) = &mut self.liquifying else {
             return;
         };
-        let Some(faces) = &mut liquifying.faces else {
+        let before = liquifying.figures.shapes();
+        let Some(all) = F::all_mut(&mut liquifying.figures) else {
             return;
         };
-        let before: Vec<Shape> = faces.iter().map(|(_, shape)| *shape).collect();
-        if before == shapes {
+        if all.iter().map(|(_, shape)| shape).eq(shapes) {
             return;
         }
         if !liquifying.shaping {
             liquifying.shaping = true;
-            liquifying.undo.push(LiquifyStep::Shapes(before));
+            liquifying.undo.push(LiquifyStep::Shapes(before.0, before.1));
             liquifying.redo.clear();
         }
-        for ((_, shape), to) in faces.iter_mut().zip(shapes) {
+        for ((_, shape), to) in all.iter_mut().zip(shapes) {
             *shape = *to;
         }
         self.reshape_liquify();
     }
 
-    /// Whether the faces' warp is shown: the panel's Preview.
-    pub fn liquify_faces_shown(&self) -> bool {
+    /// Whether the sliders' warp is shown: the panels' Preview.
+    pub fn liquify_shapes_shown(&self) -> bool {
         self.liquifying.as_ref().is_none_or(|l| !l.hidden)
     }
 
-    /// Show the layer with the faces' warp, or without it to see them as
-    /// they were. Their shapes are kept, and applied with Liquify either
-    /// way.
-    pub fn show_liquify_faces(&mut self, shown: bool) {
+    /// Show the layer with the sliders' warp, or without it to see the
+    /// faces and bodies as they were. Their shapes are kept, and applied
+    /// with Liquify either way.
+    pub fn show_liquify_shapes(&mut self, shown: bool) {
         self.end_liquify_stroke();
         self.keep_liquify_restore();
         let Some(liquifying) = self.liquifying.as_mut().filter(|l| l.hidden == shown) else {
@@ -1368,7 +1441,7 @@ impl Editor {
         self.reshape_liquify();
     }
 
-    /// Make the faces' warp anew from their shapes, and show it: warping
+    /// Make the sliders' warp anew from their shapes, and show it: warping
     /// the layer, or while a slider's dragged and the canvas shows the
     /// image, as a quick look.
     fn reshape_liquify(&mut self) {
@@ -1380,8 +1453,7 @@ impl Editor {
         };
         let level = level.filter(|_| liquifying.shaping);
         let before = liquifying.shaped.as_ref().and_then(Field::extent);
-        let faces = liquifying.faces.as_deref().filter(|_| !liquifying.hidden);
-        liquifying.shaped = faces.and_then(|faces| shaped(faces, width, height, level.unwrap_or(0)));
+        liquifying.shaped = if liquifying.hidden { None } else { liquifying.figures.warp(width, height, level.unwrap_or(0)) };
         let after = liquifying.shaped.as_ref().and_then(Field::extent);
         // Where the brushes have been, they may show a face from elsewhere.
         let area = [before, after, liquifying.field.extent()].into_iter().flatten().reduce(union);
@@ -1398,7 +1470,7 @@ impl Editor {
         }
     }
 
-    /// Show the faces' warp within `area` where it's on screen, at the
+    /// Show the sliders' warp within `area` where it's on screen, at the
     /// display pyramid's `level`, leaving the layer as it is: its pixels
     /// before, shrunk to that level and warped, in place of its own among
     /// the layers shrunk likewise. Far less work than warping the layer,
@@ -1447,7 +1519,7 @@ impl Editor {
         self.canvas.invalidate_tiles(level, &tiles);
     }
 
-    /// Warp the layer where the faces' warp has only been shown.
+    /// Warp the layer where the sliders' warp has only been shown.
     fn finish_liquify_preview(&mut self) {
         let (width, height) = (self.doc.width, self.doc.height);
         let Some(liquifying) = &mut self.liquifying else {
@@ -1456,8 +1528,7 @@ impl Editor {
         let Some(area) = liquifying.pending.take() else {
             return;
         };
-        let faces = liquifying.faces.as_deref().filter(|_| !liquifying.hidden);
-        liquifying.shaped = faces.and_then(|faces| shaped(faces, width, height, 0));
+        liquifying.shaped = if liquifying.hidden { None } else { liquifying.figures.warp(width, height, 0) };
         liquifying.small = Reduced::default();
         self.show_liquify(area);
     }
@@ -1496,7 +1567,7 @@ impl Editor {
         liquifying.restore = 0.0;
     }
 
-    /// Undo (or redo) a step of Liquify: a stroke, or the faces' shapes.
+    /// Undo (or redo) a step of Liquify: a stroke, or the sliders' shapes.
     fn step_liquify(&mut self, undo: bool) {
         self.end_liquify_stroke();
         self.keep_liquify_restore();
@@ -1510,11 +1581,11 @@ impl Editor {
                 to.push(LiquifyStep::Stroke(patch));
                 self.show_liquify(area);
             }
-            Some(LiquifyStep::Shapes(mut shapes)) => {
-                for ((_, shape), other) in liquifying.faces.iter_mut().flatten().zip(&mut shapes) {
-                    std::mem::swap(shape, other);
-                }
-                to.push(LiquifyStep::Shapes(shapes));
+            Some(LiquifyStep::Shapes(mut faces, mut bodies)) => {
+                let Figures { faces: face, bodies: body } = &mut liquifying.figures;
+                face.iter_mut().flatten().zip(&mut faces).for_each(|((_, shape), other)| std::mem::swap(shape, other));
+                body.iter_mut().flatten().zip(&mut bodies).for_each(|((_, shape), other)| std::mem::swap(shape, other));
+                to.push(LiquifyStep::Shapes(faces, bodies));
                 self.reshape_liquify();
             }
             None => {}
@@ -1552,7 +1623,7 @@ impl Editor {
     /// undone, it's as if it never opened.
     pub fn commit_liquify(&mut self) {
         self.end_liquify_stroke();
-        self.show_liquify_faces(true);
+        self.show_liquify_shapes(true);
         self.keep_liquify_restore();
         let Some(liquifying) = self.liquifying.take() else {
             return;
@@ -1565,8 +1636,8 @@ impl Editor {
             && let Some(layer) = self.doc.layer(liquifying.layer)
         {
             let made = layer.pixels.clone();
-            let Liquifying { source, field, faces, .. } = liquifying;
-            self.meshes.insert(liquifying.layer, Mesh { source, field, faces, made });
+            let Liquifying { source, field, figures, .. } = liquifying;
+            self.meshes.insert(liquifying.layer, Mesh { source, field, figures, made });
         }
     }
 

@@ -1,7 +1,8 @@
 //! Face-Aware Liquify and Face Symmetry (docs/AI.md, features 7 and 8):
 //! while Liquify is open, sliders that reshape each face the face models
 //! find in the layer (`omapix_engine::reshape`), with the brushes' warp
-//! over theirs.
+//! over theirs. Body Reshape's panel (body_liquify.rs) is the same one,
+//! with its own sliders.
 
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
@@ -10,32 +11,33 @@ use omapix_ai::face::outline;
 use omapix_engine::Document;
 use omapix_engine::reshape::{Face, Shape, Sides, facing};
 
-use crate::editor::Editor;
+use crate::editor::{Editor, Figure};
 use crate::face_selection::analyse;
 use crate::theme::Theme;
 
 /// Down the bridge of the nose, from between the eyes.
 const BRIDGE: [usize; 5] = [168, 6, 197, 195, 5];
 
-/// A slider's value in a face's shape.
-type Value = fn(&mut Shape) -> &mut f32;
+/// A slider's value in a shape.
+type Value<S> = fn(&mut S) -> &mut f32;
 
 /// What Symmetry's sliders say when hovered, after their own hints.
 const FACING: &str = "For faces looking at the camera: less is done as a face turns away, and nothing turned far";
 
-/// A group of sliders: its name, whether it starts open and their least
-/// value, then each slider's name, what dragging it right does, and its
-/// value.
-type Group = (&'static str, bool, f32, &'static [(&'static str, &'static str, Value)]);
+/// A group of sliders: its name, whether it starts open, their least value
+/// and what they all say when hovered, after their own hints; then each
+/// slider's name, what dragging it right does, and its value.
+pub type Group<S> = (&'static str, bool, f32, Option<&'static str>, &'static [(&'static str, &'static str, Value<S>)]);
 
 /// The width of the sliders' names, so each group's line up.
 const NAMES: f32 = 84.0;
 
-const SLIDERS: [Group; 9] = [
+const SLIDERS: [Group<Shape>; 9] = [
     (
         "Symmetry",
         true,
         0.0,
+        Some(FACING),
         &[
             ("Eyes", "Evens the eyes' height, size and shape", |s| &mut s.symmetry.eyes),
             ("Brows", "Evens the eyebrows", |s| &mut s.symmetry.brows),
@@ -48,6 +50,7 @@ const SLIDERS: [Group; 9] = [
         "Eyes",
         true,
         -100.0,
+        None,
         &[
             ("Eye Size", "Larger eyes", |s| &mut s.eye_size),
             ("Eye Distance", "Eyes further apart", |s| &mut s.eye_distance),
@@ -58,6 +61,7 @@ const SLIDERS: [Group; 9] = [
         "Left Eye",
         false,
         -100.0,
+        None,
         &[
             ("Size", "A larger eye, on top of Eye Size", |s| &mut s.left_eye.size),
             ("Height", "A taller eye", |s| &mut s.left_eye.height),
@@ -70,6 +74,7 @@ const SLIDERS: [Group; 9] = [
         "Right Eye",
         false,
         -100.0,
+        None,
         &[
             ("Size", "A larger eye, on top of Eye Size", |s| &mut s.right_eye.size),
             ("Height", "A taller eye", |s| &mut s.right_eye.height),
@@ -82,6 +87,7 @@ const SLIDERS: [Group; 9] = [
         "Left Brow",
         false,
         -100.0,
+        None,
         &[
             ("Lift", "The eyebrow higher up", |s| &mut s.left_brow.lift),
             ("Tilt", "Its outer end up", |s| &mut s.left_brow.tilt),
@@ -91,6 +97,7 @@ const SLIDERS: [Group; 9] = [
         "Right Brow",
         false,
         -100.0,
+        None,
         &[
             ("Lift", "The eyebrow higher up", |s| &mut s.right_brow.lift),
             ("Tilt", "Its outer end up", |s| &mut s.right_brow.tilt),
@@ -100,6 +107,7 @@ const SLIDERS: [Group; 9] = [
         "Nose",
         true,
         -100.0,
+        None,
         &[
             ("Nose Length", "A longer nose", |s| &mut s.nose_length),
             ("Nose Width", "A wider nose", |s| &mut s.nose_width),
@@ -109,6 +117,7 @@ const SLIDERS: [Group; 9] = [
         "Mouth",
         true,
         -100.0,
+        None,
         &[
             ("Smile", "The corners of the mouth up", |s| &mut s.smile),
             ("Lip Fullness", "Fuller lips", |s| &mut s.lips),
@@ -119,6 +128,7 @@ const SLIDERS: [Group; 9] = [
         "Face Shape",
         true,
         -100.0,
+        None,
         &[
             ("Forehead", "A higher forehead", |s| &mut s.forehead),
             ("Chin Height", "A longer chin", |s| &mut s.chin),
@@ -128,46 +138,97 @@ const SLIDERS: [Group; 9] = [
     ),
 ];
 
-/// Where the faces arrive once they're found.
-type Found = Receiver<Result<Vec<Face>, String>>;
+/// What a panel of Liquify's sliders shapes: faces, or bodies.
+pub trait Sliders: Figure + Send + 'static {
+    /// The panel's name, how far from the window's right it starts, and
+    /// what it calls one of these.
+    const TITLE: &'static str;
+    const PLACE: f32;
+    const NAME: &'static str;
+    /// What it says while they're looked for, and with none found.
+    const FINDING: &'static str;
+    const NONE: &'static str;
+    const GROUPS: &'static [Group<Self::Shape>];
 
-#[derive(Default)]
-pub struct FaceLiquify {
+    /// Those in `doc`, from left to right.
+    fn find(doc: &Document) -> Result<Vec<Self>, String>;
+
+    /// A group of this one's sliders, and what's to be said above them.
+    fn note(&self) -> Option<(&'static str, String)> {
+        None
+    }
+}
+
+impl Sliders for Face {
+    const TITLE: &'static str = "Face-Aware Liquify";
+    const PLACE: f32 = 320.0;
+    const NAME: &'static str = "Face";
+    const FINDING: &'static str = "Finding faces…";
+    const NONE: &'static str = "Found no faces facing the camera";
+    const GROUPS: &'static [Group<Shape>] = &SLIDERS;
+
+    fn find(doc: &Document) -> Result<Vec<Face>, String> {
+        find(doc)
+    }
+
+    /// How much of its symmetry the face is given, if not all.
+    fn note(&self) -> Option<(&'static str, String)> {
+        let why = match facing(self) * 100.0 {
+            100.0.. => return None,
+            0.0 => "Turned too far: nothing is done".into(),
+            part => format!("Turned away: held back to {part:.0} %"),
+        };
+        Some(("Symmetry", why))
+    }
+}
+
+pub type FaceLiquify = Panel<Face>;
+
+/// Where the faces (or bodies) arrive once they're found.
+type Found<F> = Receiver<Result<Vec<F>, String>>;
+
+pub struct Panel<F: Sliders> {
     /// The layer whose faces are being found.
-    finding: Option<(u64, Found)>,
+    finding: Option<(u64, Found<F>)>,
     /// Why there are none, if finding them went wrong.
     failed: Option<String>,
-    /// The face the sliders are for.
+    /// The one the sliders are for.
     selected: usize,
     /// A slider's being dragged: its changes are one step to undo.
     dragging: bool,
 }
 
-impl FaceLiquify {
+impl<F: Sliders> Default for Panel<F> {
+    fn default() -> Self {
+        Self { finding: None, failed: None, selected: 0, dragging: false }
+    }
+}
+
+impl<F: Sliders> Panel<F> {
     /// The panel, while Liquify is open: finds the layer's faces the first
     /// time, then shows the selected face's sliders. `open` is its close
     /// button.
     pub fn show(&mut self, ctx: &egui::Context, editor: &mut Editor, theme: &Theme, open: &mut bool) {
         self.find(ctx, editor);
-        let mut shapes: Option<Vec<Shape>> = editor.liquify_faces().map(|faces| faces.iter().map(|(_, shape)| *shape).collect());
-        // How much of its symmetry each face is given.
-        let facing: Vec<f32> = editor.liquify_faces().unwrap_or_default().iter().map(|(face, _)| facing(face)).collect();
-        let mut preview = editor.liquify_faces_shown();
-        egui::Window::new("Face-Aware Liquify")
+        let found = editor.liquify_figures::<F>();
+        let mut shapes: Option<Vec<F::Shape>> = found.map(|all| all.iter().map(|(_, shape)| *shape).collect());
+        let notes: Vec<_> = found.unwrap_or_default().iter().map(|(figure, _)| figure.note()).collect();
+        let mut preview = editor.liquify_shapes_shown();
+        egui::Window::new(F::TITLE)
             .open(open)
             .resizable(false)
             .pivot(egui::Align2::RIGHT_TOP)
-            .default_pos(ctx.content_rect().right_top() + vec2(-320.0, 90.0))
+            .default_pos(ctx.content_rect().right_top() + vec2(-F::PLACE, 90.0))
             .show(ctx, |ui| match &mut shapes {
-                None => drop(ui.label(RichText::new("Finding faces…").color(theme.dark_foreground))),
+                None => drop(ui.label(RichText::new(F::FINDING).color(theme.dark_foreground))),
                 Some(shapes) if shapes.is_empty() => {
-                    let why = self.failed.as_deref().unwrap_or("Found no faces facing the camera");
+                    let why = self.failed.as_deref().unwrap_or(F::NONE);
                     ui.label(RichText::new(why).color(theme.dark_foreground));
                 }
-                Some(shapes) => self.sliders(ui, shapes, &facing, &mut preview, theme),
+                Some(shapes) => self.sliders(ui, shapes, &notes, &mut preview, theme),
             });
-        if preview != editor.liquify_faces_shown() {
-            editor.show_liquify_faces(preview);
+        if preview != editor.liquify_shapes_shown() {
+            editor.show_liquify_shapes(preview);
         }
         if let Some(shapes) = shapes {
             self.shape(ctx, editor, &shapes);
@@ -178,7 +239,7 @@ impl FaceLiquify {
     /// before, if they haven't been looked for; and once they're found,
     /// they're the editor's.
     fn find(&mut self, ctx: &egui::Context, editor: &mut Editor) {
-        if editor.liquify_faces().is_some() {
+        if editor.liquify_figures::<F>().is_some() {
             self.finding = None;
             return;
         }
@@ -189,33 +250,33 @@ impl FaceLiquify {
             let (tx, rx) = channel();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(find(&doc));
+                let _ = tx.send(F::find(&doc));
                 ctx.request_repaint();
             });
             (self.finding, self.failed, self.selected) = (Some((layer, rx)), None, 0);
         }
         let found = match self.finding.as_ref().map(|(_, rx)| rx.try_recv()) {
             Some(Ok(found)) => found,
-            Some(Err(TryRecvError::Disconnected)) => Err("Finding faces stopped unexpectedly".into()),
+            Some(Err(TryRecvError::Disconnected)) => Err("Looking stopped unexpectedly".into()),
             _ => return,
         };
         self.finding = None;
         // With none, they aren't looked for again.
         self.failed = found.as_ref().err().cloned();
-        editor.set_liquify_faces(layer, found.unwrap_or_default());
+        editor.set_liquify_figures(layer, found.unwrap_or_default());
     }
 
     /// The face to shape, if there's more than one, then its sliders in
     /// groups that fold away, and `preview`: off, the faces are shown as
-    /// they were, and the sliders wait. `facing` is how much of its symmetry
-    /// each face is given.
-    fn sliders(&mut self, ui: &mut egui::Ui, shapes: &mut [Shape], facing: &[f32], preview: &mut bool, theme: &Theme) {
+    /// they were, and the sliders wait. `notes` is what each face has to
+    /// say above one of its groups.
+    fn sliders(&mut self, ui: &mut egui::Ui, shapes: &mut [F::Shape], notes: &[Option<(&str, String)>], preview: &mut bool, theme: &Theme) {
         self.selected = self.selected.min(shapes.len() - 1);
         if shapes.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 for n in 0..shapes.len() {
-                    ui.selectable_value(&mut self.selected, n, format!("Face {}", n + 1))
-                        .on_hover_text("Faces are numbered from left to right");
+                    ui.selectable_value(&mut self.selected, n, format!("{} {}", F::NAME, n + 1))
+                        .on_hover_text("Numbered from left to right");
                 }
             });
             ui.add_space(4.0);
@@ -225,24 +286,20 @@ impl FaceLiquify {
         let room = ui.ctx().content_rect().height() - 220.0;
         let scroll = egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room);
         scroll.show(ui, |ui| ui.add_enabled_ui(*preview, |ui| {
-            for (group, open, least, sliders) in SLIDERS {
+            for &(group, open, least, all, sliders) in F::GROUPS {
                 // A dot says a folded group has sliders set.
                 let set = sliders.iter().any(|(.., value)| *value(shape) != 0.0);
                 let title = RichText::new(if set { format!("{group} •") } else { group.into() }).strong();
                 let folding = egui::CollapsingHeader::new(title).id_salt(group).default_open(open).show(ui, |ui| {
-                    if group == "Symmetry" && facing[self.selected] < 1.0 {
-                        let why = match facing[self.selected] * 100.0 {
-                            0.0 => "Turned too far: nothing is done".into(),
-                            part => format!("Turned away: held back to {part:.0} %"),
-                        };
-                        ui.label(RichText::new(why).color(theme.dark_foreground)).on_hover_text(FACING);
+                    if let Some((_, why)) = notes[self.selected].as_ref().filter(|(noted, _)| *noted == group) {
+                        ui.label(RichText::new(why).color(theme.dark_foreground)).on_hover_text(all.unwrap_or_default());
                     }
                     egui::Grid::new(group).num_columns(2).min_col_width(NAMES).show(ui, |ui| {
                         for (name, hint, value) in sliders {
                             ui.label(*name);
                             let slider = ui.add(Slider::new(value(shape), least..=100.0).fixed_decimals(0)).on_hover_text(*hint);
-                            if group == "Symmetry" {
-                                slider.on_hover_text(FACING);
+                            if let Some(all) = all {
+                                slider.on_hover_text(all);
                             }
                             ui.end_row();
                         }
@@ -256,18 +313,18 @@ impl FaceLiquify {
         }));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(*preview && *shape != Shape::default(), egui::Button::new("Reset")).clicked() {
-                *shape = Shape::default();
+            if ui.add_enabled(*preview && *shape != F::Shape::default(), egui::Button::new("Reset")).clicked() {
+                *shape = F::Shape::default();
             }
-            ui.checkbox(preview, "Preview").on_hover_text("Off, the faces are shown as they were");
+            ui.checkbox(preview, "Preview").on_hover_text("Off, the picture is shown without the sliders' work");
         });
     }
 
     /// Give the faces `shapes`. A slider's whole drag is one step to undo.
-    fn shape(&mut self, ctx: &egui::Context, editor: &mut Editor, shapes: &[Shape]) {
-        let before = editor.liquify_faces().is_some_and(|faces| faces.iter().map(|(_, shape)| shape).eq(shapes));
+    fn shape(&mut self, ctx: &egui::Context, editor: &mut Editor, shapes: &[F::Shape]) {
+        let before = editor.liquify_figures::<F>().is_some_and(|all| all.iter().map(|(_, shape)| shape).eq(shapes));
         if !before {
-            editor.shape_liquify_faces(shapes);
+            editor.shape_liquify::<F>(shapes);
             self.dragging = true;
         }
         if self.dragging && !ctx.input(|i| i.pointer.any_down()) {
@@ -315,7 +372,7 @@ fn face(points: &[[f32; 3]]) -> Face {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use egui::{Pos2, Rect};
     use omapix_engine::{ColorProfile, Raster};
@@ -354,6 +411,11 @@ mod tests {
         points
     }
 
+    /// [`landmarks`]' face.
+    pub(crate) fn a_face() -> Face {
+        face(&landmarks())
+    }
+
     /// Liquify open on a grey image with a red eye, 16 px across, where
     /// [`landmarks`] has its left one, and that face found.
     fn liquifying() -> Editor {
@@ -364,18 +426,18 @@ mod tests {
         let image = Raster::new(W, H, pixels.collect());
         let mut editor = Editor::new(Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16)).unwrap();
         editor.begin_liquify().unwrap();
-        editor.set_liquify_faces(editor.active, vec![face(&landmarks())]);
+        editor.set_liquify_figures(editor.active, vec![face(&landmarks())]);
         editor
     }
 
     /// A frame of the panel, with the mouse button `down` or not.
-    fn frame(ctx: &egui::Context, panel: &mut FaceLiquify, editor: &mut Editor, down: bool) -> bool {
+    pub(crate) fn frame<F: Sliders>(ctx: &egui::Context, panel: &mut Panel<F>, editor: &mut Editor, down: bool) -> bool {
         frame_at(ctx, panel, editor, Pos2::new(10.0, 500.0), down).0
     }
 
     /// A frame of the panel with the mouse at `at`, its button `down` or
     /// not: whether the panel's still open, and what it wrote.
-    fn frame_at(ctx: &egui::Context, panel: &mut FaceLiquify, editor: &mut Editor, at: Pos2, down: bool) -> (bool, Vec<(String, Pos2)>) {
+    pub(crate) fn frame_at<F: Sliders>(ctx: &egui::Context, panel: &mut Panel<F>, editor: &mut Editor, at: Pos2, down: bool) -> (bool, Vec<(String, Pos2)>) {
         let button = egui::Event::PointerButton {
             pos: at,
             button: egui::PointerButton::Primary,
@@ -403,7 +465,7 @@ mod tests {
     }
 
     fn shapes(editor: &Editor) -> Vec<Shape> {
-        editor.liquify_faces().unwrap().iter().map(|(_, shape)| *shape).collect()
+        editor.liquify_figures::<Face>().unwrap().iter().map(|(_, shape)| *shape).collect()
     }
 
     #[test]
@@ -468,7 +530,7 @@ mod tests {
         assert_eq!(editor.undo_label(), Some("Liquify"));
         editor.begin_liquify().unwrap();
         assert_eq!(shapes(&editor)[0].eye_size, 100.0);
-        editor.shape_liquify_faces(&[Shape::default()]);
+        editor.shape_liquify::<Face>(&[Shape::default()]);
         assert!(red(&editor, 250, 300) && !red(&editor, 238, 300));
         // Esc puts it back as it was applied.
         editor.cancel_liquify();
@@ -485,7 +547,7 @@ mod tests {
         let turned: Vec<_> = landmarks().iter().map(|p| [300.0 + (p[0] - 300.0) * cos, p[1], (p[0] - 300.0) * sin]).collect();
         editor.cancel_liquify();
         editor.begin_liquify().unwrap();
-        editor.set_liquify_faces(editor.active, vec![face(&landmarks()), face(&turned)]);
+        editor.set_liquify_figures(editor.active, vec![face(&landmarks()), face(&turned)]);
         let away = Pos2::new(10.0, 500.0);
         let has = |texts: &[(String, Pos2)], text: &str| texts.iter().any(|(t, _)| t == text);
         frame_at(&ctx, &mut panel, &mut editor, away, false);
@@ -567,22 +629,22 @@ mod tests {
         let mut editor = liquifying();
         let red = |editor: &Editor, x, y| editor.doc.layers[0].pixels.get(x, y)[1] < 10000;
         let bigger = Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() };
-        editor.shape_liquify_faces(&[bigger]);
+        editor.shape_liquify::<Face>(&[bigger]);
         editor.end_liquify_stroke();
-        assert!(editor.liquify_faces_shown() && red(&editor, 235, 300));
+        assert!(editor.liquify_shapes_shown() && red(&editor, 235, 300));
         // Off: the eye is where it was, and the sliders are where they are.
-        editor.show_liquify_faces(false);
-        assert!(!editor.liquify_faces_shown() && red(&editor, 250, 300) && !red(&editor, 235, 300));
+        editor.show_liquify_shapes(false);
+        assert!(!editor.liquify_shapes_shown() && red(&editor, 250, 300) && !red(&editor, 235, 300));
         assert_eq!(shapes(&editor), [bigger]);
-        editor.show_liquify_faces(true);
+        editor.show_liquify_shapes(true);
         assert!(red(&editor, 235, 300));
         // Applied with it off, the face has its shape all the same.
-        editor.show_liquify_faces(false);
+        editor.show_liquify_shapes(false);
         editor.commit_liquify();
         assert!(red(&editor, 235, 300));
         assert_eq!(editor.undo_label(), Some("Liquify"));
         editor.begin_liquify().unwrap();
-        assert!(editor.liquify_faces_shown());
+        assert!(editor.liquify_shapes_shown());
     }
 
     /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder
@@ -636,16 +698,16 @@ mod tests {
             editor.canvas.set_render(std::sync::Arc::new(crate::canvas::Render::new(before.clone())));
             editor.canvas.lay_out_for_test(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0)), zoom);
             editor.begin_liquify().unwrap();
-            editor.set_liquify_faces(editor.active, faces.clone());
+            editor.set_liquify_figures(editor.active, faces.clone());
             let mut half = shape;
             for (.., at) in SLIDERS.iter().flat_map(|(.., sliders)| *sliders) {
                 *at(&mut half) /= 2.0;
             }
             let t = std::time::Instant::now();
-            editor.shape_liquify_faces(&vec![half; faces.len()]);
+            editor.shape_liquify::<Face>(&vec![half; faces.len()]);
             let first = t.elapsed();
             let t = std::time::Instant::now();
-            editor.shape_liquify_faces(&vec![shape; faces.len()]);
+            editor.shape_liquify::<Face>(&vec![shape; faces.len()]);
             let quick = t.elapsed();
             let t = std::time::Instant::now();
             editor.end_liquify_stroke();
@@ -696,7 +758,7 @@ mod tests {
         let (tx, rx) = channel();
         panel.finding = Some((editor.active, rx));
         frame(&ctx, &mut panel, &mut editor, false);
-        assert!(editor.liquify_faces().is_none());
+        assert!(editor.liquify_figures::<Face>().is_none());
         tx.send(Ok(vec![face(&landmarks()), face(&landmarks())])).unwrap();
         frame(&ctx, &mut panel, &mut editor, false);
         assert_eq!(shapes(&editor), [Shape::default(); 2]);

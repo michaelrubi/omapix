@@ -314,6 +314,7 @@ fn cut(image: &Raster, selection: Option<Selection>, profile: &ColorProfile) -> 
 /// The other models give the card up, since the transformer needs nearly
 /// all of it. They load again when next used.
 fn free_the_card() {
+    crate::body_liquify::unload();
     crate::content_fill::unload();
     crate::denoise::unload();
     crate::face_selection::unload();
