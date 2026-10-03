@@ -64,8 +64,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = std::path::Path::new(path).file_stem().unwrap().to_string_lossy();
         png.save(out.join(format!("{name}.png")))?;
     }
-    // Dropping CUDA sessions can crash the process as it exits (docs/AI.md).
-    std::mem::forget(nind);
-    std::mem::forget(faces);
     Ok(())
 }

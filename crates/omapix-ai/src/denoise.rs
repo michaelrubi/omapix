@@ -59,7 +59,6 @@ mod tests {
         let mean = out.iter().sum::<f32>() / out.len() as f32;
         assert!((mean - 0.5).abs() < 0.03, "{mean}");
         assert!(spread(&out) < spread(&noisy) / 3.0, "{} {}", spread(&out), spread(&noisy));
-        std::mem::forget(nind);
     }
 }
 

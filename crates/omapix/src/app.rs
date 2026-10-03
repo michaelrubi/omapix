@@ -995,7 +995,6 @@ impl App {
                 editor.doc.selection.is_some()
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
-            Command::GenerativeFill => editor.doc.selection.is_some(),
             Command::Denoise => self.denoising.busy().is_none(),
             Command::SelectSubject => !self.select_subject.busy(),
             Command::SelectSkin
@@ -7204,6 +7203,10 @@ mod tests {
         app.models.insert(omapix_ai::lama::MODEL, false);
         assert!(!app.enabled(Command::ContentAwareFill));
         assert!(app.enabled(Command::GenerativeFill));
+        // It needs no selection: without one it fills empty canvas.
+        let selection = app.editor.as_mut().unwrap().doc.selection.take();
+        assert!(app.enabled(Command::GenerativeFill) && !app.enabled(Command::ContentAwareFill));
+        app.editor.as_mut().unwrap().doc.selection = selection;
         app.models.insert(omapix_ai::flux::MODEL, false);
         assert!(!app.enabled(Command::GenerativeFill));
         assert_eq!(missing_models(Command::GenerativeFill, &app.models), ["FLUX.2 klein 4B (int4)"]);
@@ -8675,8 +8678,9 @@ mod tests {
 
     /// End to end: `GenerativeFill` as an `OMAPIX_SCRIPT` step on
     /// `OMAPIX_FILL_PHOTO` with the box `OMAPIX_FILL_BOX` (`x0 y0 x1 y1`)
-    /// selected, checking the layer it leaves. Needs the model
-    /// (scripts/fetch-models.sh fill-flux2-klein-4b) and the GPU.
+    /// selected, or with `OMAPIX_FILL_EXTEND=1`, with the canvas grown to
+    /// that box and nothing selected, checking the layer it leaves. Needs
+    /// the model (scripts/fetch-models.sh fill-flux2-klein-4b) and the GPU.
     #[test]
     #[ignore]
     fn the_generative_fill_script_step_leaves_a_masked_layer() {
@@ -8685,14 +8689,31 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = test_app();
         let mut doc = omapix_engine::io::load(std::path::Path::new(&photo)).unwrap();
-        let selection = Selection::rectangle(doc.width, doc.height, (corners[0], corners[1]), (corners[2], corners[3]));
-        doc.selection = Some(selection);
+        let extend = std::env::var_os("OMAPIX_FILL_EXTEND").is_some();
+        if extend {
+            let [x0, y0, x1, y1] = [0, 1, 2, 3].map(|i| corners[i] as i32);
+            doc.resize_canvas((x1 - x0) as u32, (y1 - y0) as u32, -x0, -y0, None);
+        } else {
+            doc.selection = Some(Selection::rectangle(doc.width, doc.height, (corners[0], corners[1]), (corners[2], corners[3])));
+        }
         let (render, _) = render_view(&doc, View::Image, [0; 4], None);
         let mut editor = Editor::new(doc).unwrap();
         editor.canvas.set_render(Arc::new(render));
         editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
-        let before = editor.doc.layers.len();
         app.editor = Some(editor);
+        // Content-Aware Fill first, so its model's on the card and has to
+        // give way.
+        if !extend {
+            app.run(Command::ContentAwareFill, &ctx);
+            while app.content_fill.busy() {
+                std::thread::sleep(Duration::from_millis(5));
+                app.content_fill.poll(app.editor.as_mut().unwrap());
+            }
+            let editor = app.editor.as_mut().unwrap();
+            assert_eq!(editor.undo_label(), Some("Content-Aware Fill"));
+            editor.undo();
+        }
+        let before = app.editor.as_ref().unwrap().doc.layers.len();
         app.script.push_back(ScriptStep::parse("GenerativeFill").unwrap());
         let done = |app: &App| app.script.is_empty() && app.dialog.is_none();
         for _ in 0..24000 {
@@ -8710,7 +8731,8 @@ mod tests {
         assert_eq!(editor.doc.layers.len(), before + 1, "{:?}", app.status);
         let layer = editor.doc.layer(editor.active).unwrap();
         assert_eq!(layer.name, "Generative Fill");
-        let (x, y) = (((corners[0] + corners[2]) / 2.0) as u32, ((corners[1] + corners[3]) / 2.0) as u32);
+        // The middle of the box, or the new canvas's first corner.
+        let (x, y) = if extend { (0, 0) } else { (((corners[0] + corners[2]) / 2.0) as u32, ((corners[1] + corners[3]) / 2.0) as u32) };
         assert_eq!(layer.mask.as_ref().unwrap().pixels.get(x, y), 65535);
         assert_eq!(layer.pixels.get(x, y)[3], 65535);
         assert_eq!(editor.undo_label(), Some("Generative Fill"));

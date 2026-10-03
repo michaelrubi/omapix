@@ -22,6 +22,9 @@ pub struct Patch {
     pub image: Vec<f32>,
     /// 1 where to fill, 0 where to keep, at the same size.
     pub mask: Vec<f32>,
+    /// 1 where the image has nothing (it's transparent), 0 where it's
+    /// solid, at the same size.
+    pub empty: Vec<f32>,
     pub width: usize,
     pub height: usize,
 }
@@ -30,11 +33,20 @@ impl Patch {
     /// For a model that works in cells `cell` pixels across: 1 for each
     /// cell with anything to fill in it, cell by cell in rows.
     pub fn cells(&self, cell: usize) -> Vec<f32> {
+        self.cells_with(&self.mask, cell)
+    }
+
+    /// Likewise, 1 for each cell where any of the image is missing.
+    pub fn empty_cells(&self, cell: usize) -> Vec<f32> {
+        self.cells_with(&self.empty, cell)
+    }
+
+    fn cells_with(&self, plane: &[f32], cell: usize) -> Vec<f32> {
         let (columns, rows) = (self.width / cell, self.height / cell);
         (0..columns * rows)
             .map(|i| {
                 let (x, y) = (i % columns * cell, i / columns * cell);
-                let any = (y..y + cell).any(|py| self.mask[py * self.width + x..py * self.width + x + cell].iter().any(|&m| m > 0.0));
+                let any = (y..y + cell).any(|py| plane[py * self.width + x..py * self.width + x + cell].iter().any(|&m| m > 0.01));
                 if any { 1.0 } else { 0.0 }
             })
             .collect()
@@ -96,6 +108,21 @@ pub fn patch_of_cells(
     cut(image, profile, selection, [x, y, cw, ch], width, height).map(Some)
 }
 
+/// Where `image` has nothing (it's transparent), as a selection to extend
+/// the picture into: it reaches `overlap` pixels into the picture and
+/// fades out over as much again, so what fills it blends in rather than
+/// meeting the picture at a line. `None` if the image is solid throughout.
+pub fn empty(image: &Raster, overlap: f32) -> Option<Selection> {
+    let clear: Vec<u16> = image.pixels().par_iter().map(|p| u16::MAX - p[3]).collect();
+    if clear.iter().all(|&c| c == 0) {
+        return None;
+    }
+    let (w, h) = (image.width(), image.height());
+    let soft = Selection::from_coverage(Tiled::from_slice(w, h, 0, &clear)).expand(overlap).feather(overlap / 2.0);
+    let coverage: Vec<u16> = soft.coverage.to_vec().into_iter().zip(clear).map(|(soft, clear)| soft.max(clear)).collect();
+    Some(Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage)))
+}
+
 /// The part of `image` in `rect`, stretched to `width` × `height`.
 fn cut(image: &Raster, profile: &ColorProfile, selection: &Selection, rect: [u32; 4], width: usize, height: usize) -> Result<Patch> {
     let [x, y, cw, ch] = rect;
@@ -108,6 +135,8 @@ fn cut(image: &Raster, profile: &ColorProfile, selection: &Selection, rect: [u32
         .map(|c| srgb.pixels().par_iter().map(|p| f32::from(p[c]) / 65535.0).collect())
         .collect();
     let image = planes.iter().flat_map(|plane| resample(plane, cw, ch, width, height)).collect();
+    let clear: Vec<f32> = srgb.pixels().par_iter().map(|p| 1.0 - f32::from(p[3]) / 65535.0).collect();
+    let empty = resample(&clear, cw, ch, width, height);
 
     // Anything selected under a model pixel, or next to it, is filled: the
     // model does best with a little of the object's surroundings too.
@@ -128,6 +157,7 @@ fn cut(image: &Raster, profile: &ColorProfile, selection: &Selection, rect: [u32
         rect,
         image,
         mask,
+        empty,
         width,
         height,
     })
@@ -266,6 +296,33 @@ mod tests {
         let (image, selection) = scene(300, 200, [100, 50, 50, 50]);
         let whole = patch_of_cells(&image, &ColorProfile::srgb(), &selection, 16, 1024).unwrap().unwrap();
         assert_eq!((whole.rect, whole.width, whole.height), ([0, 0, 288, 192], 288, 192));
+    }
+
+    #[test]
+    fn a_canvas_with_room_round_the_picture_selects_the_room_and_a_soft_overlap() {
+        // 200 × 100 with the right-hand 60 columns transparent.
+        let pixels = (0..200 * 100).map(|i| if i % 200 < 140 { [30000, 30000, 30000, 65535] } else { [0; 4] }).collect();
+        let image = Raster::new(200, 100, pixels);
+        let selection = empty(&image, 10.0).unwrap();
+        let at = |x: u32| selection.coverage.get(x, 50);
+        // All of the room, nearly all at the picture's edge, half of it 10
+        // pixels in, and nothing beyond 20.
+        assert_eq!((at(199), at(140)), (65535, 65535));
+        assert!(at(139) > 60000, "{}", at(139));
+        assert!((25000..40000).contains(&at(130)), "{}", at(130));
+        assert!(at(118) < 1500 && at(100) == 0, "{} {}", at(118), at(100));
+        // The model's told which of its cells have nothing in them.
+        let patch = patch_of_cells(&image, &ColorProfile::srgb(), &selection, 16, 1024).unwrap().unwrap();
+        assert_eq!((patch.rect, patch.width, patch.height), ([8, 2, 192, 96], 192, 96));
+        let (anew, clear) = (patch.cells(16), patch.empty_cells(16));
+        // In the middle row: solid and kept, solid and made anew (the
+        // overlap), part empty, and empty.
+        let row = |cells: &[f32]| [5, 7, 8, 11].map(|column| cells[3 * 12 + column]);
+        assert_eq!(row(&anew), [0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(row(&clear), [0.0, 0.0, 1.0, 1.0]);
+
+        let solid = Raster::new(20, 20, vec![[1, 2, 3, 65535]; 400]);
+        assert!(empty(&solid, 10.0).is_none());
     }
 
     #[test]

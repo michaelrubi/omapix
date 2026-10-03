@@ -128,17 +128,24 @@ goes in the engine, where it can be tested without models.
 - One `Session` per model, created on first use. Sessions not used for two
   minutes are dropped, to give GPU memory back (to darktable, or to GPU
   compositing later).
-  - Not yet: dropping a CUDA session (ONNX Runtime 1.29, cuDNN 9.25,
-    driver's `libcuda`) corrupts the heap, and the process aborts in
-    `libcuda` as it exits, about half the time (7 in 12 runs). Kept for
-    the whole run, 0 in 12. So for now sessions live until Omapix quits;
-    try unloading again with newer ONNX Runtime or drivers.
-  - Tried again on 2026-10-03 for Generative Fill (the same ONNX Runtime
-    1.29, cuDNN 9.25.1, driver 610.57): FLUX.2's sessions loaded, run and
-    dropped, 0 crashes in 12 runs, and the memory comes back (all but the
-    150 MB CUDA itself keeps). Generative Fill drops its sessions after
-    every use, since it has to; the other models still live until Omapix
-    quits, and could now be given their two minutes.
+  - Dropping a CUDA session made with the provider's defaults (ONNX
+    Runtime 1.29, cuDNN 9.25, driver's `libcuda`) corrupts the heap, and
+    the process aborts in `libcuda` as it exits: 7 in 12 runs on
+    2026-09-25, and still 10 in 36 on 2026-10-03, with SAM. Kept for the
+    whole run, 0 in 12.
+  - Found on 2026-10-03, from FLUX.2's sessions dropping cleanly: with
+    either of two of their settings it doesn't happen (0 in 36 runs
+    each, with SAM). They are the arena growing by what's asked for
+    rather than doubling, and cuDNN choosing each convolution's
+    algorithm by rule rather than trying them all. Why isn't known. Every
+    session is made with both now (`runtime::cuda`), SAM runs no slower
+    for it, and the examples and tests drop theirs: 0 in 12 runs each for
+    SAM, BiRefNet, the face models, NIND with the face models, and LaMa's
+    tests. The memory comes back, all but the 150 MB CUDA itself keeps.
+  - So far only Generative Fill uses this: it drops its own sessions when
+    it's done, and the others' before it starts, since it needs the card.
+    Otherwise they're kept until then or until Omapix quits; the two
+    minutes can now be built.
 - All inference runs on background threads through the existing
   `Editor::edit_in_background` / job mechanism, with the status bar showing
   what's running. The first CUDA run of a model is slower while the runtime
@@ -542,7 +549,9 @@ above (see "Generative Fill" under Milestones): it runs on ONNX Runtime
 prompt says what to change ("remove the person", "a red sports car"), and
 an empty one removes what's selected; prompt and seed aren't kept on the
 layer yet; and without CUDA the dialog says so when Generate is pressed,
-rather than the command being greyed out.
+rather than the command being greyed out. With nothing selected it fills
+the empty canvas the Crop tool leaves when it's dragged outwards
+(milestone 10.5).
 
 ## Models
 
@@ -746,9 +755,21 @@ Reordered on 2026-09-29 (see Decisions).
       shown on the canvas with arrows to go between them, as a Generative
       Fill layer above the selected one, masked to the selection; and
       `GenerativeFill a prompt` in `OMAPIX_SCRIPT`.
-    - Left: the prompt and seed kept on the layer; extending the canvas;
-      a larger fill (in tiles, or with a leaner export); matching the
-      photo's grain.
+    - Left: the prompt and seed kept on the layer; a larger fill (in
+      tiles, or with a leaner export); matching the photo's grain.
+
+10.5. ~~**Extending the canvas**, with Generative Fill.~~ (done,
+2026-10-03)
+
+- With nothing selected, Generative Fill fills the canvas that has nothing
+  on it, such as the Crop tool leaves when its box is dragged out past the
+  picture, with a soft overlap into the picture so the two blend. With no
+  prompt the picture is carried on; a prompt says what to put there.
+- The other models are dropped before it starts, so it has the card (see
+  Runtime: dropping sessions no longer crashes).
+- Left: the fill's tone can differ a little from the picture's, which the
+  overlap softens but doesn't always hide; more than about half as much
+  again each way comes out soft, being made at 450 px.
 11. **AI upscaling** for print enlargements in Image Size (darktable's RealPLKSR, MIT, already
     on disk).
 12. **Body Reshape**, with the pose model and background protection.
@@ -1179,6 +1200,7 @@ the engine, `crates/omapix/src/generative_fill.rs`), from a spike on
 ```
 cargo run --release -p omapix-ai --example genfill -- image out.png 512 "a red fox in snow"
 cargo run --release -p omapix-ai --example genfill -- fill out photo.jpg x0 y0 x1 y1 "remove the person"
+cargo run --release -p omapix-ai --example genfill -- extend out photo.jpg left top right bottom ""
 ```
 
 - **The model.** `hlhc/FLUX.2-klein-4B-onnx-int4` on Hugging Face, pinned
@@ -1217,8 +1239,8 @@ cargo run --release -p omapix-ai --example genfill -- fill out photo.jpg x0 y0 x
   while the next result is made. Three results take 34 s, the first there
   after 16 s; Generate Again with the same prompt skips the text encoder
   (about 3 s).
-- **Unloading** works here now (see Runtime): everything's dropped when
-  the results are made, and the card's memory comes back.
+- **Unloading** works (see Runtime): everything's dropped when the
+  results are made, and the card's memory comes back.
 - **The tokenizer** is Qwen's byte-pair one, written out in
   `omapix_ai::tokenizer` (150 lines, `regex` and `serde_json`) rather than
   bringing in Hugging Face's `tokenizers`. It gives the same ids on six
@@ -1227,8 +1249,9 @@ cargo run --release -p omapix-ai --example genfill -- fill out photo.jpg x0 y0 x
 - **The patch** isn't Content-Aware Fill's square: twice the selection's
   width and height (no narrower than a third of its length), shrunk to
   768 cells of 16 px in that shape, so a standing figure gets 320 × 576
-  to itself and its surroundings rather than a strip of a square. A small selection isn't
-  enlarged: it gets more of its surroundings, pixel for pixel.
+  to itself and its surroundings rather than a strip of a square. A small
+  selection isn't enlarged: it gets more of its surroundings, pixel for
+  pixel.
 - **Keeping the rest fixed isn't enough.** The design was ComfyUI's masked
   fill: at each step the cells outside the selection are put back, as
   noisy as the rest still is. With four steps that gave a different,
@@ -1257,19 +1280,48 @@ cargo run --release -p omapix-ai --example genfill -- fill out photo.jpg x0 y0 x
   commas in the prompt: they separate steps). The ignored test
   `the_generative_fill_script_step_leaves_a_masked_layer` runs it on
   `OMAPIX_FILL_PHOTO` with `OMAPIX_FILL_BOX` selected, in 17 s.
+- **Extending the canvas** (milestone 10.5). The Crop tool already grows
+  the canvas when its box is dragged out past the picture, leaving it
+  transparent, and Canvas Size can too. With nothing selected, Generative
+  Fill takes everything transparent in the visible image as what to fill
+  (`fill::empty`), so it's Crop, Enter, Generative Fill, Enter.
+  - **The overlap.** That selection reaches into the picture by 1/200 of
+    its longer side and fades out over as much again (a few of the
+    model's pixels), and is whole wherever there's nothing. Filled only
+    up to the old edge, the edge showed as a line wherever the fill's
+    tone was a little off.
+  - **What the model's shown.** Cells with anything missing in them are
+    left out of the reference (it takes cells in any number, each with
+    its place), so the model sees the picture and no black border. Shown
+    the border as black, one result in three kept a black block.
+  - **The prompt**, if empty, is "Extend the picture, continuing the
+    scene" when any cell to fill has nothing in it. A wall and panelling
+    carried on beside a speaker, a car park's ceiling above it, and snow
+    and trees round a fox; now and then something odd turns up in the
+    new part (a second tail), which is what the other two results are
+    for.
+  - Tried with `genfill extend`, and the ignored test with
+    `OMAPIX_FILL_EXTEND=1`, which grows the canvas to `OMAPIX_FILL_BOX`.
+- **Room on the card.** With Omapix's other models loaded (1.2 GB of them
+  on 2026-10-03) and 0.5 GB of desktop, the transformer ran out of memory
+  whatever the fill's size, since most of what it needs doesn't depend on
+  that. So the others are dropped first (`unload` in each command's
+  module), which Runtime's finding made safe; they load again when next
+  used.
 - **Left:**
   - The prompt and seed kept on the layer, to generate again later.
-  - Extending the canvas: there's nothing transparent to select yet.
   - A hard-edged selection can show as a faint edge where the fill's tone
-    differs a little from the photo: feather it first. What's made is
-    softer than a 24 MP photo round it, and has no grain.
+    differs a little from the photo: feather it first. An extension's
+    tone can be a little off too, softened by the overlap; matching the
+    fill's tone to the picture along the edge would deal with both.
+    What's made is softer than a 24 MP photo round it, and has no grain.
   - A larger fill: in overlapping tiles, or from an export with fused
     attention or 16-bit floats. ONNX Runtime 1.30 is worth trying when
     Arch has it, for speed if nothing else.
-  - The other models' sessions stay loaded beside it (under 2 GB), and
-    with those and a browser on the card it can run out: it says so.
-  - Greying the command out without CUDA, which can't be known without
-    loading something.
+  - Another program using a gigabyte or more of the card (darktable's
+    models, a browser) still leaves too little: it says so.
+  - Greying the command out without CUDA, or with nothing to fill, which
+    can't be known without loading or looking.
 
 ## Decisions
 

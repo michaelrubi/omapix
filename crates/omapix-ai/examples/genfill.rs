@@ -6,12 +6,15 @@
 //! ```
 //! cargo run --release -p omapix-ai --example genfill -- image out.png 512 "a red fox in snow"
 //! cargo run --release -p omapix-ai --example genfill -- fill out photo.jpg x0 y0 x1 y1 "remove the person"
+//! cargo run --release -p omapix-ai --example genfill -- extend out photo.jpg left top right bottom ""
 //! ```
+//!
+//! `extend` grows the canvas by so many pixels on each side and fills that.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use omapix_ai::flux::{self, CELL, CELLS, Progress, Request, STEPS, TextEncoder, Transformer, Vae};
+use omapix_ai::flux::{self, CELL, CELLS, Canvas, Progress, Request, STEPS, TextEncoder, Transformer, Vae};
 use omapix_engine::fill;
 use omapix_engine::selection::Selection;
 
@@ -93,19 +96,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             timed("VAE dropped", || drop(vae));
             save(&args[2], &image, size, size);
         }
-        "fill" => {
+        mode @ ("fill" | "extend") => {
             let out = &args[2];
-            let doc = omapix_engine::io::load(std::path::Path::new(&args[3]))?;
+            let mut doc = omapix_engine::io::load(std::path::Path::new(&args[3]))?;
+            let numbers: Vec<f32> = args[4..8].iter().map(|a| a.parse()).collect::<Result<_, _>>()?;
+            let selection = if mode == "extend" {
+                // The canvas grown by so much on each side, and what's new
+                // of it selected, as Generative Fill does with no selection.
+                let [left, top, right, bottom] = [0, 1, 2, 3].map(|i| numbers[i] as u32);
+                let (w, h) = (doc.width, doc.height);
+                doc.resize_canvas(w + left + right, h + top + bottom, left as i32, top as i32, None);
+                let overlap = doc.width.max(doc.height) as f32 / 200.0;
+                fill::empty(&doc.composite(), overlap).ok_or("no room made")?
+            } else {
+                Selection::rectangle(doc.width, doc.height, (numbers[0], numbers[1]), (numbers[2], numbers[3]))
+            };
             let visible = doc.composite();
-            let corner: Vec<f32> = args[4..8].iter().map(|a| a.parse()).collect::<Result<_, _>>()?;
-            let selection = Selection::rectangle(visible.width(), visible.height(), (corner[0], corner[1]), (corner[2], corner[3]));
             let patch = fill::patch_of_cells(&visible, &doc.profile, &selection, CELL, CELLS)?.ok_or("nothing selected")?;
             let (width, height) = (patch.width, patch.height);
             println!("patch {:?} at {width} x {height}", patch.rect);
             save(&format!("{out}/before.png"), &patch.image, width, height);
+            let canvas = Canvas { image: &patch.image, width, height, anew: &patch.cells(CELL), empty: &patch.empty_cells(CELL) };
             let (started, mut results) = (Instant::now(), 0);
             timed("filled", || {
-                flux::fill(prompt, &patch.image, width, height, &patch.cells(CELL), &[seed, seed + 1, seed + 2], |progress| {
+                flux::fill(prompt, &canvas, &[seed, seed + 1, seed + 2], |progress| {
                     match progress {
                         Progress::Prompt => println!("{:.1?}: reading the prompt", started.elapsed()),
                         Progress::Loading => println!("{:.1?}: loading", started.elapsed()),
@@ -114,9 +128,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Progress::Result(image) => {
                             println!("{:.1?}: result {results}", started.elapsed());
                             save(&format!("{out}/fill-{results}.png"), &image, width, height);
-                            // As the layer shows it: only where selected.
+                            // As the layer shows it: as much as is selected.
+                            let [x, y, w, h] = patch.rect;
                             let shown: Vec<f32> = (0..image.len())
-                                .map(|i| if patch.mask[i % (width * height)] > 0.0 { image[i] } else { patch.image[i] })
+                                .map(|i| {
+                                    let (px, py) = ((i % width) as u32, (i / width % height) as u32);
+                                    let (sx, sy) = (x + (px * w + w / 2) / width as u32, y + (py * h + h / 2) / height as u32);
+                                    let selected = selection.at(sx.min(x + w - 1), sy.min(y + h - 1));
+                                    patch.image[i] + (image[i] - patch.image[i]) * selected
+                                })
                                 .collect();
                             save(&format!("{out}/shown-{results}.png"), &shown, width, height);
                             results += 1;

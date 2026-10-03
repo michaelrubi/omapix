@@ -191,8 +191,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             image::Rgb([0, 1, 2].map(|c| (f32::from(s[c]) * (1.0 - 0.6 * k) + [255.0, 0.0, 80.0][c] * 0.6 * k) as u8));
     }
     img.save(out.join("skin.png"))?;
-    // Dropping CUDA sessions can crash the process as it exits (docs/AI.md).
-    std::mem::forget(faces);
     Ok(())
 }
 

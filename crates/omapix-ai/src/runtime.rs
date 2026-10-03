@@ -37,7 +37,7 @@ fn init() -> Result<()> {
 /// otherwise on the CPU.
 pub(crate) fn session(path: &Path) -> Result<Session> {
     init()?;
-    match open(path, Some(ep::CUDA::default()), true) {
+    match open(path, Some(cuda()), true) {
         Ok(session) => Ok(loaded(path, session, true)),
         Err(e) => {
             log::info!("{}: not on the GPU ({e})", path.display());
@@ -47,17 +47,22 @@ pub(crate) fn session(path: &Path) -> Result<Session> {
 }
 
 /// A session for the model in `path` on the GPU, or nothing: for models
-/// that would take minutes on the CPU. These nearly fill the card, so its
-/// memory grows by what's asked for rather than doubling, a run's memory
-/// isn't planned as one block from the run before, and convolutions
-/// aren't each tried every way first.
+/// that would take minutes on the CPU. These nearly fill the card, so a
+/// run's memory isn't planned as one block from the run before.
 pub(crate) fn gpu_session(path: &Path) -> Result<Session> {
     init()?;
-    let cuda = ep::CUDA::default()
-        .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
-        .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Heuristic);
-    let session = open(path, Some(cuda), false).map_err(|e| format!("Couldn't load {} on the GPU: {e}", path.display()))?;
+    let session = open(path, Some(cuda()), false).map_err(|e| format!("Couldn't load {} on the GPU: {e}", path.display()))?;
     Ok(loaded(path, session, true))
+}
+
+/// How sessions use the GPU: its memory grows by what's asked for rather
+/// than doubling, and convolutions aren't each tried every way first.
+/// Either is easier on the card's memory, and with either, dropping a
+/// session no longer crashes Omapix as it quits (docs/AI.md, Runtime).
+fn cuda() -> ep::CUDA {
+    ep::CUDA::default()
+        .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
+        .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Heuristic)
 }
 
 /// A session for the model in `path` on the CPU.

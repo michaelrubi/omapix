@@ -34,6 +34,8 @@ pub const STEPS: usize = 4;
 pub const CELLS: usize = 768;
 /// What an empty prompt asks for.
 const REMOVE: &str = "Remove the object, leaving only the background";
+/// And where there's no image to fill yet.
+const EXTEND: &str = "Extend the picture, continuing the scene";
 
 fn file(name: &str) -> Result<std::path::PathBuf> {
     let files = find_model(MODEL)
@@ -150,8 +152,9 @@ pub struct Request<'a> {
     /// while the new part is made to fit it.
     pub keep: Option<(&'a [f32], &'a [f32])>,
     /// Latents of an image for the prompt to speak of ("remove the
-    /// chair"), `columns` × `rows` cells too.
-    pub reference: Option<&'a [f32]>,
+    /// chair"), `columns` × `rows` cells too, and which of its cells to
+    /// show (1) or leave out (0), as where it has nothing in it.
+    pub reference: Option<(&'a [f32], &'a [f32])>,
 }
 
 /// The transformer, which makes latents from noise.
@@ -178,10 +181,14 @@ impl Transformer {
 
         // Where each cell is: time (0 for the image, 10 for a reference),
         // row, column and 0; a prompt token only has its place in line.
-        let place = |time: i64| (0..cells).flat_map(move |i| [time, (i / request.columns) as i64, (i % request.columns) as i64, 0]);
-        let mut image_ids: Vec<i64> = place(0).collect();
-        if request.reference.is_some() {
-            image_ids.extend(place(10));
+        let place = |time: i64, i: usize| [time, (i / request.columns) as i64, (i % request.columns) as i64, 0];
+        let mut image_ids: Vec<i64> = (0..cells).flat_map(|i| place(0, i)).collect();
+        let mut reference = Vec::new();
+        if let Some((latents, shown)) = request.reference {
+            for i in (0..cells).filter(|&i| shown[i] > 0.0) {
+                image_ids.extend(place(10, i));
+                reference.extend(&latents[i * CHANNELS..(i + 1) * CHANNELS]);
+            }
         }
         let all = image_ids.len() / 4;
         let text_ids: Vec<i64> = (0..TOKENS).flat_map(|i| [0, 0, 0, i as i64]).collect();
@@ -193,7 +200,7 @@ impl Transformer {
             }
             let (sigma, next) = (sigmas[step], sigmas[step + 1]);
             let mut hidden = latents.clone();
-            hidden.extend(request.reference.unwrap_or_default());
+            hidden.extend(&reference);
             let outputs = self
                 .session
                 .run_with_options(
@@ -235,26 +242,32 @@ pub enum Progress {
     Result(Vec<f32>),
 }
 
-/// `image` (sRGB 0–1, red, green then blue planes, `width` × `height`,
-/// both multiples of [`CELL`]) with the cells marked in `anew` (1 to make
-/// anew, 0 to keep) changed as `prompt` asks, or with what's there removed
-/// if it's empty: once for each of `seeds`. `tell` hears how it's going
-/// and each result as it's ready, and stops it by answering `false`.
+/// What [`fill`] works on.
+pub struct Canvas<'a> {
+    /// sRGB 0–1, red, green then blue planes, `width` × `height`, both
+    /// multiples of [`CELL`].
+    pub image: &'a [f32],
+    pub width: usize,
+    pub height: usize,
+    /// For each cell, in rows: 1 to make it anew, 0 to keep it.
+    pub anew: &'a [f32],
+    /// Likewise, 1 where the image has nothing yet.
+    pub empty: &'a [f32],
+}
+
+/// `canvas` with the cells marked to make anew changed as `prompt` asks,
+/// once for each of `seeds`. With no prompt, what's there is removed, or
+/// if nothing is, the picture is carried on into it. `tell` hears how
+/// it's going and each result as it's ready (in the image's form), and
+/// stops it by answering `false`.
 ///
 /// The transformer sees the image twice: as it is, for the prompt to
 /// speak of, and with the kept cells held to it at every step, so what's
 /// made fits what's round it. It needs the GPU nearly to itself, so the
 /// prompt is read first and that model dropped, and the VAE runs on the
 /// CPU, each result decoded while the next is made.
-pub fn fill(
-    prompt: &str,
-    image: &[f32],
-    width: usize,
-    height: usize,
-    anew: &[f32],
-    seeds: &[u64],
-    tell: impl FnMut(Progress) -> bool + Send,
-) -> Result<()> {
+pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progress) -> bool + Send) -> Result<()> {
+    let Canvas { image, width, height, anew, empty } = *canvas;
     // One at a time: a fill told to stop may still be finishing its step,
     // with the card to itself.
     static ONE: Mutex<()> = Mutex::new(());
@@ -262,7 +275,15 @@ pub fn fill(
     let tell = Mutex::new(tell);
     let tell = |progress| tell.lock().is_ok_and(|mut tell| tell(progress));
     let (columns, rows) = (width / CELL, height / CELL);
-    let prompt = if prompt.trim().is_empty() { REMOVE } else { prompt.trim() };
+    let extending = anew.iter().zip(empty).any(|(&anew, &empty)| anew > 0.0 && empty > 0.0);
+    let prompt = match prompt.trim() {
+        "" if extending => EXTEND,
+        "" => REMOVE,
+        prompt => prompt,
+    };
+    // The transformer isn't shown the cells with nothing in them: shown
+    // as black, it sometimes leaves them black.
+    let shown: Vec<f32> = empty.iter().map(|empty| 1.0 - empty).collect();
 
     // The last prompt's reading is kept: Generate again is usually the
     // same one.
@@ -306,7 +327,7 @@ pub fn fill(
                 rows,
                 seed,
                 keep: Some((&kept, anew)),
-                reference: Some(&kept),
+                reference: Some((&kept, &shown)),
             };
             let Some(latents) = transformer.generate(&request, |step| tell(Progress::Step(result, step))).map_err(friendly)? else {
                 break;

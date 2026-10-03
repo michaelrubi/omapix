@@ -1,29 +1,32 @@
 //! Edit › Generative Fill… (docs/AI.md, feature 9): the selection changed
 //! as a prompt asks, or what's in it removed, by FLUX.2 klein (see
-//! omapix-ai) on a thread of its own. Three results at a time, each shown
-//! on the canvas as a new layer masked to the selection; OK keeps the one
-//! showing, as one undo step.
+//! omapix-ai) on a thread of its own. With nothing selected, the empty
+//! canvas round the picture (as the Crop tool leaves when it's dragged
+//! outwards) is filled, extending the picture. Three results at a time,
+//! each shown on the canvas as a new layer masked to the selection; OK
+//! keeps the one showing, as one undo step.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Color32, RichText, TextEdit, vec2};
-use omapix_ai::flux::{self, CELL, CELLS, Progress, STEPS};
+use omapix_ai::flux::{self, CELL, CELLS, Canvas, Progress, STEPS};
 use omapix_engine::fill::{self, Patch};
 use omapix_engine::selection::Selection;
-use omapix_engine::{ColorProfile, Layer};
+use omapix_engine::{ColorProfile, Layer, Raster};
 
 use crate::editor::Editor;
 use crate::theme::Theme;
 
 const NAME: &str = "Generative Fill";
+const NOTHING: &str = "Select what to fill first, or make room round the picture with the Crop tool";
 /// Results made each time.
 const RESULTS: usize = 3;
 
 enum Message {
-    /// What the model sees, cut from the image.
-    Patch(Patch),
+    /// What the model sees, cut from the image, and what of it to fill.
+    Patch(Box<(Patch, Selection)>),
     Status(String),
     Result(Box<Layer>),
     Done,
@@ -33,13 +36,13 @@ pub struct GenerativeFill {
     pub prompt: String,
     /// Generate once ready, one result, and OK it: for scripts.
     pub accept: bool,
-    selection: Selection,
     profile: ColorProfile,
     /// The layer the fill goes above.
     above: usize,
-    /// Cut from the image as it was when this opened, before any result
-    /// was on it.
-    patch: Option<Arc<Patch>>,
+    /// What the model sees, cut from the image as it was when this opened,
+    /// before any result was on it, and what's filled: the selection, or
+    /// with none, the empty canvas round the picture.
+    patch: Option<Arc<(Patch, Selection)>>,
     working: Option<Receiver<Result<Message, String>>>,
     /// Tells the thread at work to stop.
     stop: Arc<AtomicBool>,
@@ -62,19 +65,14 @@ impl GenerativeFill {
         if omapix_ai::find_model(flux::MODEL).is_none() {
             return Err(format!("Generative Fill needs the FLUX.2 klein model: run scripts/fetch-models.sh {}", flux::MODEL));
         }
-        let (Some(image), Some(selection)) = (editor.canvas.render(), &editor.doc.selection) else {
-            return Err("Select what to fill first".into());
-        };
-        let (image, selection, profile) = (Arc::clone(image), selection.clone(), editor.doc.profile.clone());
+        let image = Arc::clone(editor.canvas.render().ok_or("The image isn't ready yet")?);
+        let (selection, profile) = (editor.doc.selection.clone(), editor.doc.profile.clone());
         let (tx, rx) = channel();
         {
-            let (selection, profile, ctx) = (selection.clone(), profile.clone(), ctx.clone());
+            let (profile, ctx) = (profile.clone(), ctx.clone());
             std::thread::spawn(move || {
-                let patch = image
-                    .with_image(|image| fill::patch_of_cells(image, &profile, &selection, CELL, CELLS))
-                    .ok_or("The image isn't ready yet".to_owned())
-                    .and_then(|patch| patch.map_err(|e| e.to_string())?.ok_or("Select what to fill first".to_owned()));
-                let _ = tx.send(patch.map(Message::Patch));
+                let cut = image.with_image(|image| cut(image, selection, &profile));
+                let _ = tx.send(cut.unwrap_or(Err("The image isn't ready yet".into())));
                 ctx.request_repaint();
             });
         }
@@ -86,7 +84,6 @@ impl GenerativeFill {
         Ok(Self {
             prompt: String::new(),
             accept: false,
-            selection,
             profile,
             above,
             patch: None,
@@ -105,7 +102,7 @@ impl GenerativeFill {
 
     /// Start making results for the prompt.
     fn generate(&mut self, ctx: &egui::Context) {
-        let Some(patch) = self.patch.clone() else {
+        let Some(cut) = self.patch.clone() else {
             return;
         };
         let count = if self.accept { 1 } else { RESULTS };
@@ -116,9 +113,10 @@ impl GenerativeFill {
         self.failed = false;
         self.status = "Starting…".into();
         let (tx, rx) = channel();
-        let (prompt, selection, profile) = (self.prompt.clone(), self.selection.clone(), self.profile.clone());
+        let (prompt, profile) = (self.prompt.clone(), self.profile.clone());
         let (stop, ctx) = (Arc::clone(&self.stop), ctx.clone());
         std::thread::spawn(move || {
+            let (patch, selection) = &*cut;
             let tell = |progress| {
                 let message = match progress {
                     Progress::Prompt => Ok(Message::Status("Reading the prompt…".into())),
@@ -126,7 +124,7 @@ impl GenerativeFill {
                     Progress::Step(result, step) => {
                         Ok(Message::Status(format!("Result {} of {count}, step {} of {STEPS}…", result + 1, step + 1)))
                     }
-                    Progress::Result(image) => fill::layer(0, NAME, &patch, &image, &profile, &selection)
+                    Progress::Result(image) => fill::layer(0, NAME, patch, &image, &profile, selection)
                         .map(|layer| Message::Result(Box::new(layer)))
                         .map_err(|e| e.to_string()),
                 };
@@ -134,7 +132,15 @@ impl GenerativeFill {
                 ctx.request_repaint();
                 sent && !stop.load(Ordering::Relaxed)
             };
-            let done = flux::fill(&prompt, &patch.image, patch.width, patch.height, &patch.cells(CELL), &seeds, tell);
+            free_the_card();
+            let canvas = Canvas {
+                image: &patch.image,
+                width: patch.width,
+                height: patch.height,
+                anew: &patch.cells(CELL),
+                empty: &patch.empty_cells(CELL),
+            };
+            let done = flux::fill(&prompt, &canvas, &seeds, tell);
             let _ = tx.send(done.map(|()| Message::Done));
             ctx.request_repaint();
         });
@@ -151,8 +157,8 @@ impl GenerativeFill {
                 Some(Err(TryRecvError::Empty)) | None => return,
             };
             match message {
-                Ok(Message::Patch(patch)) => {
-                    self.patch = Some(Arc::new(patch));
+                Ok(Message::Patch(cut)) => {
+                    self.patch = Some(Arc::from(cut));
                     self.working = None;
                     if self.accept {
                         self.generate(ctx);
@@ -295,14 +301,38 @@ impl GenerativeFill {
     }
 }
 
+/// What the model sees of `image`, and what's filled: `selection`, or with
+/// none, the empty canvas round the picture and a soft overlap with it, a
+/// few of the model's pixels wide.
+fn cut(image: &Raster, selection: Option<Selection>, profile: &ColorProfile) -> Result<Message, String> {
+    let overlap = image.width().max(image.height()) as f32 / 200.0;
+    let selection = selection.or_else(|| fill::empty(image, overlap)).ok_or(NOTHING)?;
+    let patch = fill::patch_of_cells(image, profile, &selection, CELL, CELLS).map_err(|e| e.to_string())?;
+    Ok(Message::Patch(Box::new((patch.ok_or(NOTHING)?, selection))))
+}
+
+/// The other models give the card up, since the transformer needs nearly
+/// all of it. They load again when next used.
+fn free_the_card() {
+    crate::content_fill::unload();
+    crate::denoise::unload();
+    crate::face_selection::unload();
+    crate::object_selection::unload();
+    crate::select_subject::unload();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omapix_engine::{Document, Raster};
+    use omapix_engine::Document;
+
+    /// The dialog's thread's end of the channel.
+    type Thread = std::sync::mpsc::Sender<Result<Message, String>>;
+    type Cut = (Patch, Selection);
 
     /// A grey document with a box selected, the dialog open on it, and the
     /// other end of the channel its thread would talk down.
-    fn open() -> (Editor, GenerativeFill, std::sync::mpsc::Sender<Result<Message, String>>, Patch) {
+    fn open() -> (Editor, GenerativeFill, Thread, Cut) {
         let image = Raster::new(600, 400, vec![[30000, 30000, 30000, 65535]; 600 * 400]);
         let doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
         let mut editor = Editor::new(doc).unwrap();
@@ -313,7 +343,6 @@ mod tests {
         let dialog = GenerativeFill {
             prompt: String::new(),
             accept: false,
-            selection,
             profile: ColorProfile::srgb(),
             above: 0,
             patch: None,
@@ -328,13 +357,13 @@ mod tests {
             awaited: true,
             focused: false,
         };
-        (editor, dialog, tx, patch)
+        (editor, dialog, tx, (patch, selection))
     }
 
     /// A result all of one grey.
-    fn result(dialog: &GenerativeFill, patch: &Patch, grey: f32) -> Result<Message, String> {
+    fn result(dialog: &GenerativeFill, (patch, selection): &Cut, grey: f32) -> Result<Message, String> {
         let image = vec![grey; 3 * patch.width * patch.height];
-        Ok(Message::Result(Box::new(fill::layer(0, NAME, patch, &image, &dialog.profile, &dialog.selection).unwrap())))
+        Ok(Message::Result(Box::new(fill::layer(0, NAME, patch, &image, &dialog.profile, selection).unwrap())))
     }
 
     fn shown(editor: &Editor) -> u16 {
@@ -443,10 +472,39 @@ mod tests {
     }
 
     #[test]
+    fn with_nothing_selected_the_empty_canvas_is_filled() {
+        // A picture with room made on its right, as the Crop tool leaves.
+        let pixels = (0..600 * 400).map(|i| if i % 600 < 456 { [30000, 30000, 30000, 65535] } else { [0; 4] }).collect();
+        let image = Raster::new(600, 400, pixels);
+        let Ok(Message::Patch(room)) = cut(&image, None, &ColorProfile::srgb()) else {
+            panic!("nothing to fill");
+        };
+        let (patch, selection) = *room;
+        let at = |x| selection.coverage.get(x, 200);
+        assert_eq!((at(599), at(456), at(400)), (65535, 65535, 0));
+        assert!(at(454) > 0 && at(454) < 65535, "{}", at(454));
+        // The model's told what's missing, and makes that and the overlap.
+        let (anew, empty) = (patch.cells(CELL), patch.empty_cells(CELL));
+        assert!(empty.iter().any(|&e| e > 0.0) && empty.iter().zip(&anew).all(|(e, a)| a >= e));
+        assert!(anew.iter().sum::<f32>() > empty.iter().sum::<f32>());
+
+        // A selection is used as it is, room or no room.
+        let chosen = Selection::rectangle(600, 400, (100.0, 100.0), (200.0, 150.0));
+        let Ok(Message::Patch(boxed)) = cut(&image, Some(chosen.clone()), &ColorProfile::srgb()) else {
+            panic!("nothing to fill");
+        };
+        assert_eq!(boxed.1.bounds(), chosen.bounds());
+
+        // With neither, there's nothing to do.
+        let solid = Raster::new(60, 40, vec![[30000, 30000, 30000, 65535]; 60 * 40]);
+        assert!(matches!(cut(&solid, None, &ColorProfile::srgb()), Err(e) if e == NOTHING));
+    }
+
+    #[test]
     fn a_failure_is_said_in_the_dialog_and_generate_can_be_tried_again() {
         let (mut editor, mut dialog, tx, patch) = open();
         let ctx = egui::Context::default();
-        tx.send(Ok(Message::Patch(patch))).unwrap();
+        tx.send(Ok(Message::Patch(Box::new(patch)))).unwrap();
         dialog.poll(&ctx, &mut editor);
         assert!(dialog.patch.is_some() && dialog.working.is_none());
 
