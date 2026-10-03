@@ -11,6 +11,7 @@ use omapix_ai::face::{Analysis, BODY_SKIN, Detection, FACE_SKIN, Faces, HAIR, Im
 use omapix_engine::blemish::{self, Spot};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, Tiled};
+use omapix_engine::whiten::{self, Whiten};
 use omapix_engine::{ColorProfile, DisplayTransform, Raster, refine, retouch};
 use rayon::prelude::*;
 
@@ -130,6 +131,53 @@ const TEETH: Shapes = Shapes {
 const MOUTH_GAP: [usize; 2] = [13, 14];
 const OPEN: f32 = 0.03;
 
+/// An eye on its own: its opening, its iris, its corners, and the middle
+/// of its upper and lower lids.
+struct Eye {
+    shape: Shapes,
+    iris: [usize; 5],
+    corners: [usize; 2],
+    lids: [usize; 2],
+}
+
+const EACH_EYE: [Eye; 2] = [
+    Eye {
+        shape: Shapes {
+            outlines: &[(&outline::LEFT_EYE, Combine::Add)],
+            grow: 0.0,
+            feather: 0.01,
+        },
+        iris: outline::LEFT_IRIS,
+        corners: [33, 133],
+        lids: [159, 145],
+    },
+    Eye {
+        shape: Shapes {
+            outlines: &[(&outline::RIGHT_EYE, Combine::Add)],
+            grow: 0.0,
+            feather: 0.01,
+        },
+        iris: outline::RIGHT_IRIS,
+        corners: [362, 263],
+        lids: [386, 374],
+    },
+];
+/// An eye whose lids are closer than this shows no white: a wink's were
+/// 0.06 apart and closed eyes' 0.04, and open eyes' 0.09 or more.
+const EYE_OPEN: f32 = 0.07;
+/// An eye this much narrower than the other is out of sight: with one at
+/// 0.38 the whites found were on the nose, and at 0.51 on the eye.
+const HIDDEN: f32 = 0.45;
+/// The top of the forehead and the chin: three distances between the eyes
+/// apart, on a face looking at the camera.
+const FACE_HEIGHT: [usize; 2] = [10, 152];
+/// What the whites of an eye leave out: its iris, grown to take in the dark
+/// ring round it.
+const IRIS: f32 = 1.15;
+/// How far the edges of teeth and whites are softened, in distances between
+/// the irises.
+const SOFTEN: f32 = 0.008;
+
 /// Where the selection arrives once it's found.
 type Found = Receiver<Result<Selection, String>>;
 
@@ -188,10 +236,7 @@ fn find(image: &Render, profile: &ColorProfile, part: Part) -> Result<Selection,
             let faces = points(&analysis);
             let found = match part {
                 Part::Skin => skin(&analysis, image, &[BODY_SKIN, FACE_SKIN]),
-                Part::Hair => {
-                    let (logits, lw, lh) = analysis.logits(&[HAIR]);
-                    Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image))
-                }
+                Part::Hair => segmented(&analysis, image, &[HAIR]),
                 Part::Eyes => draw(&faces, &EYES, width, height),
                 Part::Lips => draw(&faces, &LIPS, width, height),
                 Part::Teeth => {
@@ -302,18 +347,22 @@ pub fn find_skin(image: Raster, profile: &ColorProfile) -> Result<FoundSkin, Str
 
 /// What Auto Retouch works from, for one face: its box (left, top, right,
 /// bottom), the distance between its eyes, that person's share of the skin,
-/// face and body, and the spots on the face, most prominent first.
+/// face and body, the spots on the face, most prominent first, and its
+/// teeth and the whites of its eyes.
 pub struct FoundFace {
     pub bounds: [f32; 4],
     pub iod: f32,
     pub skin: Selection,
     pub spots: Vec<Spot>,
+    pub teeth: Selection,
+    pub eyes: Selection,
 }
 
 /// The faces in `image`, from left to right, each measured on its own. A
-/// face the landmarker didn't see (in profile) has skin but no spots, as
-/// in [`blemish_skin`]. One with neither (too small for the segmenter to
-/// see its skin, or not a face at all) is left out.
+/// face the landmarker didn't see (in profile) has skin but no spots, teeth
+/// or whites, as in [`blemish_skin`]. One with neither skin nor spots (too
+/// small for the segmenter to see its skin, or not a face at all) is left
+/// out.
 pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFace>, String> {
     let (srgb, analysis) = analyse(image, profile)?;
     let mut faces: Vec<_> = analysis.faces.iter().collect();
@@ -322,17 +371,24 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
     }
     faces.sort_by(|a, b| a.0.bounds[0].total_cmp(&b.0.bounds[0]));
     let all_skin = skin(&analysis, image, &[BODY_SKIN, FACE_SKIN]);
-    let face_skin = skin(&analysis, image, &[FACE_SKIN]);
+    let on_faces = segmented(&analysis, image, &[FACE_SKIN]);
+    let face_skin = on_faces.combine(&features(&analysis, image), Combine::Subtract);
     let places: Vec<_> = (faces.iter())
         .map(|(f, _)| ([(f.bounds[0] + f.bounds[2]) / 2.0, (f.bounds[1] + f.bounds[3]) / 2.0], face_scale(f)))
         .collect();
     let found = faces.iter().enumerate().map(|(n, (face, points))| {
         let iod = places[n].1;
+        let whites = |what| match points.as_deref() {
+            Some(p) => whites(&srgb, p, what, &on_faces),
+            None => Selection::from_coverage(Tiled::new(image.width(), image.height(), 0)),
+        };
         FoundFace {
             bounds: face.bounds,
             iod,
             skin: retouch::share(&all_skin, &places, n),
             spots: points.as_deref().map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),
+            teeth: whites(Whiten::Teeth),
+            eyes: whites(Whiten::Eyes),
         }
     });
     let found: Vec<_> = found.filter(|f| !f.skin.is_empty() || !f.spots.is_empty()).collect();
@@ -340,6 +396,58 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
         return Err("Found no skin on the faces".into());
     }
     Ok(found)
+}
+
+/// The teeth, or the whites of the eyes, of every face in `image` the
+/// landmarker saw.
+pub fn find_whites(image: &Raster, profile: &ColorProfile, what: Whiten) -> Result<Selection, String> {
+    let (srgb, analysis) = analyse(image, profile)?;
+    let face = segmented(&analysis, image, &[FACE_SKIN]);
+    let found = (points(&analysis).into_iter())
+        .map(|p| whites(&srgb, p, what, &face))
+        .reduce(|all, face| all.combine(&face, Combine::Add))
+        .filter(|found| !found.is_empty());
+    found.ok_or_else(|| match what {
+        Whiten::Teeth => "Found no teeth".into(),
+        Whiten::Eyes => "Found no eyes".into(),
+    })
+}
+
+/// A face's teeth (none, with its mouth closed) or the whites of its eyes
+/// (of those that are open): what's light and not red in `srgb` between its
+/// lips, or in its eyes less their irises. Only on `face`, what the
+/// segmentation takes for one.
+///
+/// On a face turned so far that one eye looks under [`HIDDEN`] of the
+/// other's width, that eye and the mouth are guesses (behind the nose, or
+/// out on the background), so only the nearer eye is looked in.
+fn whites(srgb: &[[u8; 4]], points: &[[f32; 3]], what: Whiten, face: &Selection) -> Selection {
+    let (width, height) = (face.width(), face.height());
+    // A turned face's eyes look closer together: as `face_scale`.
+    let scale = iod(points).max(apart(points, FACE_HEIGHT) / 3.0);
+    let widths = EACH_EYE.each_ref().map(|eye| apart(points, eye.corners));
+    let seen = |n: usize| widths[n] >= HIDDEN * widths[1 - n];
+    let mut within = Selection::from_coverage(Tiled::new(width, height, 0));
+    match what {
+        Whiten::Teeth => {
+            if seen(0) && seen(1) && apart(points, MOUTH_GAP) > OPEN * scale {
+                within = draw(&[points], &TEETH, width, height);
+            }
+        }
+        Whiten::Eyes => {
+            for (n, eye) in EACH_EYE.iter().enumerate() {
+                if !seen(n) || apart(points, eye.lids) <= EYE_OPEN * scale {
+                    continue;
+                }
+                let [[cx, cy, _], round @ ..] = eye.iris.map(|i| points[i]);
+                let r = IRIS * round.iter().map(|p| (p[0] - cx).hypot(p[1] - cy)).sum::<f32>() / round.len() as f32;
+                let iris = Selection::ellipse(width, height, (cx - r, cy - r), (cx + r, cy + r));
+                let opening = draw(&[points], &eye.shape, width, height);
+                within = within.combine(&opening.combine(&iris, Combine::Subtract), Combine::Add);
+            }
+        }
+    }
+    whiten::whites(srgb, &within.combine(face, Combine::Intersect), SOFTEN * scale)
 }
 
 /// The points of each face the landmarker saw.
@@ -350,11 +458,18 @@ fn points(analysis: &Analysis) -> Vec<&[[f32; 3]]> {
 /// The skin in `image` of `classes` (face skin, body skin or both), from its
 /// segmentation, less each face's eyes, brows and lips.
 pub fn skin(analysis: &Analysis, image: &Raster, classes: &[usize]) -> Selection {
+    segmented(analysis, image, classes).combine(&features(analysis, image), Combine::Subtract)
+}
+
+/// What `image`'s segmentation takes for `classes`, its edges the image's.
+fn segmented(analysis: &Analysis, image: &Raster, classes: &[usize]) -> Selection {
     let (logits, lw, lh) = analysis.logits(classes);
-    Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image)).combine(
-        &draw(&points(analysis), &FEATURES, image.width(), image.height()),
-        Combine::Subtract,
-    )
+    Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image))
+}
+
+/// Each face's eyes, brows and lips.
+fn features(analysis: &Analysis, image: &Raster) -> Selection {
+    draw(&points(analysis), &FEATURES, image.width(), image.height())
 }
 
 /// The distance between a face's irises' centres, which its features are
@@ -364,9 +479,14 @@ fn iod(points: &[[f32; 3]]) -> f32 {
     (r[0] - l[0]).hypot(r[1] - l[1])
 }
 
+/// How far apart two of a face's points are.
+fn apart(points: &[[f32; 3]], pair: [usize; 2]) -> f32 {
+    let [a, b] = pair.map(|i| points[i]);
+    (b[0] - a[0]).hypot(b[1] - a[1])
+}
+
 fn mouth_open(points: &[[f32; 3]]) -> bool {
-    let [a, b] = MOUTH_GAP.map(|i| points[i]);
-    (b[0] - a[0]).hypot(b[1] - a[1]) > OPEN * iod(points)
+    apart(points, MOUTH_GAP) > OPEN * iod(points)
 }
 
 /// `shapes` drawn round each face (from its points), in an image `width` ×
@@ -507,6 +627,57 @@ mod tests {
         // 2 px apart, with irises 100 apart.
         face[MOUTH_GAP[1]] = [300.0, 392.0, 0.0];
         assert!(!mouth_open(&face));
+    }
+
+    /// [`face`] with both eyes open, 40 × 20 round irises 12 across, in an
+    /// image that's white all over.
+    fn face_with_eyes() -> (Vec<[u8; 4]>, Vec<[f32; 3]>) {
+        let mut points = face();
+        outline_box(&mut points, &outline::RIGHT_EYE, [330.0, 270.0, 370.0, 290.0]);
+        for (iris, cx) in [(outline::LEFT_IRIS, 250.0), (outline::RIGHT_IRIS, 350.0)] {
+            for (i, (dx, dy)) in iris[1..].iter().zip([(6.0, 0.0), (0.0, -6.0), (-6.0, 0.0), (0.0, 6.0)]) {
+                points[*i] = [cx + dx, 280.0 + dy, 0.0];
+            }
+        }
+        (vec![[230, 228, 224, 255]; 600 * 500], points)
+    }
+
+    #[test]
+    fn whites_are_the_open_eyes_without_their_irises_and_the_open_mouth() {
+        let (srgb, points) = face_with_eyes();
+        let all = Selection::all(600, 500);
+        let eyes = whites(&srgb, &points, Whiten::Eyes, &all);
+        assert!(eyes.at(236, 280) > 0.9 && eyes.at(364, 280) > 0.9, "{} {}", eyes.at(236, 280), eyes.at(364, 280));
+        // Not the irises (grown to 6.9 px), nor the mouth.
+        assert!(eyes.at(250, 280) < 0.01 && eyes.at(355, 280) < 0.01 && eyes.at(300, 400) < 0.01);
+        let teeth = whites(&srgb, &points, Whiten::Teeth, &all);
+        assert!(teeth.at(300, 400) > 0.9 && teeth.at(236, 280) < 0.01);
+        // Only on what the segmentation takes for a face.
+        let left = Selection::rectangle(600, 500, (0.0, 0.0), (300.0, 500.0));
+        let eyes = whites(&srgb, &points, Whiten::Eyes, &left);
+        assert!(eyes.at(236, 280) > 0.9 && eyes.at(364, 280) < 0.01);
+
+        // A closed eye has no white, and a closed mouth no teeth.
+        let mut closed = points.clone();
+        let [upper, lower] = EACH_EYE[1].lids;
+        (closed[upper], closed[lower]) = ([350.0, 278.0, 0.0], [350.0, 282.0, 0.0]);
+        closed[MOUTH_GAP[1]] = [300.0, 392.0, 0.0];
+        let eyes = whites(&srgb, &closed, Whiten::Eyes, &all);
+        assert!(eyes.at(236, 280) > 0.9 && eyes.bounds().unwrap()[2] < 60, "{:?}", eyes.bounds());
+        assert!(whites(&srgb, &closed, Whiten::Teeth, &all).is_empty());
+    }
+
+    #[test]
+    fn a_face_turned_far_has_only_its_nearer_eye_whitened() {
+        // The right eye a fifth as wide as the left: out of sight.
+        let (srgb, mut points) = face_with_eyes();
+        let [inner, outer] = EACH_EYE[1].corners;
+        (points[inner], points[outer]) = ([346.0, 280.0, 0.0], [354.0, 281.0, 0.0]);
+        let all = Selection::all(600, 500);
+        let eyes = whites(&srgb, &points, Whiten::Eyes, &all);
+        assert!(eyes.at(236, 280) > 0.9 && eyes.bounds().unwrap()[2] < 60, "{:?}", eyes.bounds());
+        // Its mouth is a guess too.
+        assert!(whites(&srgb, &points, Whiten::Teeth, &all).is_empty());
     }
 
     /// A look at a real photo: each part found in `OMAPIX_FACE_PHOTO`,

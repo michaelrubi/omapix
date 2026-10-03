@@ -189,7 +189,9 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::AutoRetouch
         | Command::HealBlemishes
         | Command::SmoothSkin
-        | Command::EvenTone => FACE_MODELS,
+        | Command::EvenTone
+        | Command::WhitenTeeth
+        | Command::WhitenEyes => FACE_MODELS,
         _ => &[],
     }
 }
@@ -460,6 +462,7 @@ pub struct App {
     upscaling: crate::upscale::Upscaling,
     select_subject: SelectSubject,
     face_selection: FaceSelection,
+    whitening: crate::whiten::Whitening,
     face_liquify: crate::face_liquify::FaceLiquify,
     body_liquify: crate::body_liquify::BodyLiquify,
     /// Which AI models are on disk, by id, as last checked: on a thread at
@@ -543,6 +546,7 @@ impl App {
             upscaling: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            whitening: Default::default(),
             face_liquify: Default::default(),
             body_liquify: Default::default(),
             models: HashMap::new(),
@@ -777,6 +781,7 @@ impl App {
                 self.upscaling.poll(editor),
                 self.select_subject.poll(editor),
                 self.face_selection.poll(editor),
+                self.whitening.poll(editor),
             ];
             for e in errors.into_iter().flatten() {
                 self.message(e, true);
@@ -1012,6 +1017,7 @@ impl App {
             | Command::SelectEyes
             | Command::SelectLips
             | Command::SelectTeeth => self.face_selection.busy().is_none(),
+            Command::WhitenTeeth | Command::WhitenEyes => self.whitening.busy().is_none(),
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
@@ -1383,6 +1389,15 @@ impl App {
                 match crate::even_tone::EvenTone::open(ctx, editor, self.filters.even_tone) {
                     Ok(dialog) => self.dialog = Some(Dialog::EvenTone(dialog)),
                     Err(e) => self.message(e, true),
+                }
+            }
+            Command::WhitenTeeth | Command::WhitenEyes => {
+                use omapix_engine::whiten::Whiten;
+                let what = if matches!(cmd, Command::WhitenTeeth) { Whiten::Teeth } else { Whiten::Eyes };
+                if let Some(editor) = &self.editor
+                    && let Err(e) = self.whitening.start(ctx, editor, what)
+                {
+                    self.message(e, true);
                 }
             }
             Command::FrequencySeparation => {
@@ -2016,6 +2031,8 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::HealBlemishes, None);
                 self.menu_item(ui, Command::SmoothSkin, None);
                 self.menu_item(ui, Command::EvenTone, None);
+                self.menu_item(ui, Command::WhitenTeeth, None);
+                self.menu_item(ui, Command::WhitenEyes, None);
                 self.menu_item(ui, Command::FrequencySeparation, None);
                 self.menu_item(ui, Command::FrequencySeparation3, None);
                 self.menu_item(ui, Command::DodgeAndBurn, None);
@@ -2101,6 +2118,10 @@ self.filters.remember(&filter);
                 }
                 if let Some(part) = self.face_selection.busy() {
                     ui.label(RichText::new(part.finding()).color(self.theme.accent));
+                    ui.separator();
+                }
+                if let Some(what) = self.whitening.busy() {
+                    ui.label(RichText::new(crate::whiten::finding(what)).color(self.theme.accent));
                     ui.separator();
                 }
                 if let Some((_, t)) = editor.transform() {
@@ -3662,6 +3683,7 @@ self.filters.remember(&filter);
             && self.file_job.is_none()
             && self.dialog.is_none()
             && self.face_selection.busy().is_none()
+            && self.whitening.busy().is_none()
             && self
                 .editor
                 .as_ref()
@@ -5372,6 +5394,7 @@ mod tests {
             upscaling: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            whitening: Default::default(),
             face_liquify: Default::default(),
             body_liquify: Default::default(),
             models: HashMap::new(),

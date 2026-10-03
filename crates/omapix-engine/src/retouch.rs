@@ -1,10 +1,13 @@
 //! Auto Retouch (docs/AI.md, feature 6): Heal Blemishes, Smooth Skin and
 //! Even Tone done for each face in turn, each step made from what the last
-//! one shows, as a "Retouch" group holding a group for each face:
+//! one shows, and its teeth and eyes whitened, as a "Retouch" group holding
+//! a group for each face:
 //!
 //! ```text
 //! Retouch
 //!   ├─ Face 1
+//!   │    ├─ Whiten Teeth
+//!   │    ├─ Whiten Eyes
 //!   │    ├─ Dodge & Burn
 //!   │    ├─ Smooth Skin
 //!   │    └─ Blemishes
@@ -22,6 +25,7 @@ use crate::selection::Selection;
 use crate::skin::{self, Smoothing};
 use crate::tiled::{TILE, Tiled};
 use crate::tone::{self, Evening, Tone};
+use crate::whiten::{self, Whiten};
 
 /// A face to retouch, and how.
 pub struct Face<'a> {
@@ -35,6 +39,11 @@ pub struct Face<'a> {
     /// Without these, there's no Smooth Skin layer or Dodge & Burn group.
     pub smoothing: Option<Smoothing>,
     pub evening: Option<Evening>,
+    /// The whites of its eyes, and its teeth, each with how much it's
+    /// whitened (0–100): without, there's no Whiten Eyes or Whiten Teeth
+    /// layer.
+    pub eyes: Option<(&'a Selection, f32)>,
+    pub teeth: Option<(&'a Selection, f32)>,
 }
 
 /// The part of `skin` that's the person's whose face is `faces[which]`:
@@ -70,9 +79,10 @@ pub fn share(skin: &Selection, faces: &[([f32; 2], f32)], which: usize) -> Selec
 /// A "Retouch" group above the layer at `above`, with a group for each of
 /// `faces` (the first on top), each holding that face's steps: a Blemishes
 /// layer ([`blemish::heal`]), a Smooth Skin layer ([`skin::add_layer`]) made
-/// from the image with the blemishes healed, and a Dodge & Burn group
-/// ([`tone::add_layers`]) made from the image smoothed. Returns the Retouch
-/// group's id, or `None` if there was nothing to do.
+/// from the image with the blemishes healed, a Dodge & Burn group
+/// ([`tone::add_layers`]) made from the image smoothed, and Whiten Eyes and
+/// Whiten Teeth layers ([`whiten::add_layer`]). Returns the Retouch group's
+/// id, or `None` if there was nothing to do.
 pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u64> {
     let group = |doc: &mut Document, above: usize, name: String| {
         let id = doc.next_layer_id();
@@ -97,6 +107,11 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
             let image = doc.composite_current_and_below(at);
             if let Some(tone) = Tone::new(&image, face.skin, face.iod, evening.radii(face.iod)) {
                 tone::add_layers(doc, at, &tone, face.skin, evening.amount);
+            }
+        }
+        for (what, whites) in [(Whiten::Eyes, face.eyes), (Whiten::Teeth, face.teeth)] {
+            if let Some((whites, amount)) = whites {
+                whiten::add_layer(doc, index(doc, id), what, whites, amount);
             }
         }
         remove_if_empty(doc, id);
@@ -162,6 +177,8 @@ mod tests {
             spots,
             smoothing: Some(Smoothing::default()),
             evening: Some(Evening::default()),
+            eyes: None,
+            teeth: None,
         }
     }
 
@@ -249,6 +266,42 @@ mod tests {
         let no_skin = Selection::from_coverage(Tiled::new(W, H, 0));
         assert_eq!(add_layers(&mut doc, 0, &[none, face(2, &no_skin, &[])]), None);
         assert_eq!(doc.layers.len(), 1);
+    }
+
+    #[test]
+    fn eyes_and_teeth_are_whitened_on_top_of_a_faces_group() {
+        let mut doc = document();
+        let [left, _] = skins();
+        let before = doc.composite();
+        let eyes = Selection::rectangle(W, H, (100.0, 40.0), (120.0, 50.0));
+        let teeth = Selection::rectangle(W, H, (130.0, 240.0), (170.0, 250.0));
+        let none = Selection::from_coverage(Tiled::new(W, H, 0));
+        let whitened = Face {
+            smoothing: None,
+            eyes: Some((&eyes, 40.0)),
+            teeth: Some((&teeth, 50.0)),
+            ..face(1, &left, &[])
+        };
+        // A face with no teeth showing has no layer for them.
+        let closed = Face {
+            smoothing: None,
+            evening: None,
+            eyes: Some((&eyes, 40.0)),
+            teeth: Some((&none, 50.0)),
+            ..face(2, &left, &[])
+        };
+        add_layers(&mut doc, 0, &[whitened, closed]).unwrap();
+        let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names[1..3], ["Whiten Eyes", "Face 2"]);
+        assert_eq!(names[3..], ["Burn", "Dodge", "Dodge & Burn", "Whiten Eyes", "Whiten Teeth", "Face 1", "Retouch"]);
+        let layer = |name: &str| doc.layers.iter().rfind(|l| l.name == name).unwrap();
+        assert_eq!(layer("Whiten Teeth").parent, Some(layer("Face 1").id));
+        assert_eq!((layer("Whiten Eyes").opacity, layer("Whiten Teeth").opacity), (0.4, 0.5));
+        // Lighter and less coloured where they are, and nowhere else.
+        let after = doc.composite();
+        assert!(after.get(150, 245)[2] > before.get(150, 245)[2] + 1000);
+        assert!(after.get(110, 45)[2] > before.get(110, 45)[2] + 1000);
+        assert_eq!(after.get(450, 45), before.get(450, 45));
     }
 
     #[test]

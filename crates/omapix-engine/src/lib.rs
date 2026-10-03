@@ -36,6 +36,7 @@ pub mod tone;
 pub mod transform;
 pub mod upscale;
 pub mod warp;
+pub mod whiten;
 
 pub use blend::BlendMode;
 pub use clip::PasteKind;
