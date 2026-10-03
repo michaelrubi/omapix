@@ -17,9 +17,16 @@ use rayon::prelude::*;
 use crate::canvas::Render;
 use crate::editor::Editor;
 
-/// Loaded on first use and kept until Omapix quits: dropping CUDA sessions
-/// can crash it as it quits (docs/AI.md).
+/// Loaded on first use, and kept until Generative Fill needs the card.
 static MODELS: Mutex<Option<Faces>> = Mutex::new(None);
+
+/// Drop the model, giving its GPU memory back. It loads again when next
+/// used.
+pub fn unload() {
+    if let Ok(mut model) = MODELS.lock() {
+        *model = None;
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {

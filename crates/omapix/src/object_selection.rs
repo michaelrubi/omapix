@@ -11,7 +11,7 @@
 //! threshold, change the same object for as long as the selection is the
 //! one the session made.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use egui::Pos2;
@@ -243,11 +243,21 @@ fn sparse(points: &[(f32, f32, bool)]) -> Vec<(f32, f32, bool)> {
         .collect()
 }
 
+/// Loaded on first use, and kept until Generative Fill needs the card.
+static SAM: Mutex<Option<Sam>> = Mutex::new(None);
+
+/// Drop the model, giving its GPU memory back. It loads again when next
+/// used.
+pub fn unload() {
+    if let Ok(mut sam) = SAM.lock() {
+        *sam = None;
+    }
+}
+
 fn spawn() -> Worker {
     let (tx, requests) = channel::<Request>();
     let (answers, rx) = channel();
     std::thread::spawn(move || {
-        let mut sam: Option<Sam> = None;
         let mut encoded: Option<(u64, Encoded)> = None;
         let mut logits: Option<Vec<f32>> = None;
         while let Ok(mut request) = requests.recv() {
@@ -259,7 +269,7 @@ fn spawn() -> Worker {
                 request = Request { commit, ..newer };
                 count += 1;
             }
-            let coverage = find(&mut sam, &mut encoded, &mut logits, &request);
+            let coverage = find(&mut encoded, &mut logits, &request);
             let answer = Answer {
                 coverage,
                 commit: request.commit,
@@ -270,21 +280,18 @@ fn spawn() -> Worker {
             }
             request.ctx.request_repaint();
         }
-        // Dropping CUDA sessions can crash Omapix as it quits (docs/AI.md),
-        // so the model stays loaded until then.
-        std::mem::forget(sam);
     });
     (tx, rx)
 }
 
 fn find(
-    sam: &mut Option<Sam>,
     encoded: &mut Option<(u64, Encoded)>,
     logits: &mut Option<Vec<f32>>,
     request: &Request,
 ) -> Result<Tiled<u16>, String> {
     if let Job::Select(prompt, refine) = &request.job {
-        let sam = match sam {
+        let mut sam = SAM.lock().map_err(|e| e.to_string())?;
+        let sam = match &mut *sam {
             Some(sam) => sam,
             None => sam.insert(Sam::load()?),
         };

@@ -4,10 +4,12 @@
 mod runtime;
 pub mod denoise;
 pub mod face;
+pub mod flux;
 pub mod lama;
 pub mod models;
 pub mod sam;
 pub mod subject;
+mod tokenizer;
 
 pub use models::find_model;
 pub use runtime::on_gpu;

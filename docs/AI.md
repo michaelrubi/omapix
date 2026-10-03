@@ -128,11 +128,24 @@ goes in the engine, where it can be tested without models.
 - One `Session` per model, created on first use. Sessions not used for two
   minutes are dropped, to give GPU memory back (to darktable, or to GPU
   compositing later).
-  - Not yet: dropping a CUDA session (ONNX Runtime 1.29, cuDNN 9.25,
-    driver's `libcuda`) corrupts the heap, and the process aborts in
-    `libcuda` as it exits, about half the time (7 in 12 runs). Kept for
-    the whole run, 0 in 12. So for now sessions live until Omapix quits;
-    try unloading again with newer ONNX Runtime or drivers.
+  - Dropping a CUDA session made with the provider's defaults (ONNX
+    Runtime 1.29, cuDNN 9.25, driver's `libcuda`) corrupts the heap, and
+    the process aborts in `libcuda` as it exits: 7 in 12 runs on
+    2026-09-25, and still 10 in 36 on 2026-10-03, with SAM. Kept for the
+    whole run, 0 in 12.
+  - Found on 2026-10-03, from FLUX.2's sessions dropping cleanly: with
+    either of two of their settings it doesn't happen (0 in 36 runs
+    each, with SAM). They are the arena growing by what's asked for
+    rather than doubling, and cuDNN choosing each convolution's
+    algorithm by rule rather than trying them all. Why isn't known. Every
+    session is made with both now (`runtime::cuda`), SAM runs no slower
+    for it, and the examples and tests drop theirs: 0 in 12 runs each for
+    SAM, BiRefNet, the face models, NIND with the face models, and LaMa's
+    tests. The memory comes back, all but the 150 MB CUDA itself keeps.
+  - So far only Generative Fill uses this: it drops its own sessions when
+    it's done, and the others' before it starts, since it needs the card.
+    Otherwise they're kept until then or until Omapix quits; the two
+    minutes can now be built.
 - All inference runs on background threads through the existing
   `Editor::edit_in_background` / job mechanism, with the status bar showing
   what's running. The first CUDA run of a model is slower while the runtime
@@ -530,6 +543,16 @@ level on screen, as designed, and the layer warped when it's let go.
   fill is softer than the photo round it, so Add Noise or the Finish grain
   helps it match.
 
+Built in milestone 10, with what the spike found changing some of the
+above (see "Generative Fill" under Milestones): it runs on ONNX Runtime
+1.29 after all; an 8 GB card holds about 450 px square, not 1024; the
+prompt says what to change ("remove the person", "a red sports car"), and
+an empty one removes what's selected; prompt and seed aren't kept on the
+layer yet; and without CUDA the dialog says so when Generate is pressed,
+rather than the command being greyed out. With nothing selected it fills
+the empty canvas the Crop tool leaves when it's dragged outwards
+(milestone 10.5).
+
 ## Models
 
 Default set, all usable for commercial work:
@@ -543,7 +566,7 @@ Default set, all usable for commercial work:
 | Skin, hair | MediaPipe multiclass selfie segmentation | 16 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. 256×256 input, so the guided filter matters. |
 | Body points (Reshape) | MediaPipe Pose Landmarker | ~6–30 MB | Apache-2.0 | 33 points. Lite/Full/Heavy variants. |
 | Content-Aware Fill | LaMa | 208 MB | Apache-2.0 | Installed by `fetch-models.sh`. |
-| Generative Fill | FLUX.2 klein 4B (int4 ONNX) | 7.8 GB | Apache-2.0 | Optional download, GPU only. Needs ONNX Runtime 1.30. The 9B model is non-commercial, so it's left out. |
+| Generative Fill | FLUX.2 klein 4B (int4 ONNX) | 7.8 GB | Apache-2.0 | Optional download (`scripts/fetch-models.sh fill-flux2-klein-4b`), GPU only. `hlhc`'s export, with Qwen3 as its text encoder. Runs on ONNX Runtime 1.29. The 9B model is non-commercial, so it's left out. |
 
 About 600 MB total without BiRefNet's large variant and FLUX.2, on disk
 only. FLUX.2 is a separate, optional download because of its size. Loaded
@@ -583,9 +606,11 @@ the spike:
 | Auto Retouch end to end, per face | < 3 s (measured: 0.5–2.5 s in all, for one to three faces) | < 10 s |
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms (measured: 15–50 ms fitted in a 1600 × 1000 canvas) | same |
 | Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) (measured: 0.03–0.3 s, the most for a face that fills the frame) | same |
+| Generative Fill, three results | (measured: 34 s, the first after 16 s) | not offered |
 
 - **Memory:** GPU memory well under 2 GB with all default models loaded.
-  Idle unloading returns it.
+  Idle unloading returns it. Generative Fill is the exception: 6.9 GB
+  while it works, given back when it's done.
 - **CPU fallback:** everything works without a GPU, just slower. The
   heavy pixel work is CPU anyway.
 
@@ -719,10 +744,32 @@ Reordered on 2026-09-29 (see Decisions).
   both all the way, run into each other, and the brow on the far side of
   a turned face kinks at its outer end with Lift and Tilt both at 100.
 
-10. **Generative Fill.** After the portrait work, which is used on every
-    photo, while Generative Fill is for the occasional big removal or
-    extension. By then Arch's ONNX Runtime should have reached 1.30. Starts
-    with a spike: memory, speed, and unloading.
+10. ~~**Generative Fill.**~~ (done, 2026-10-03) After the portrait work,
+    which is used on every photo, while Generative Fill is for the
+    occasional big removal or extension.
+    - The spike: Arch's ONNX Runtime is still 1.29, and it runs the model
+      anyway. The transformer needs the card to itself (6.9 GB of the 8),
+      at about 450 px square; unloading works. See "Generative Fill"
+      below.
+    - Edit › Generative Fill…, with a prompt, three results at a time
+      shown on the canvas with arrows to go between them, as a Generative
+      Fill layer above the selected one, masked to the selection; and
+      `GenerativeFill a prompt` in `OMAPIX_SCRIPT`.
+    - Left: the prompt and seed kept on the layer; a larger fill (in
+      tiles, or with a leaner export); matching the photo's grain.
+
+10.5. ~~**Extending the canvas**, with Generative Fill.~~ (done,
+2026-10-03)
+
+- With nothing selected, Generative Fill fills the canvas that has nothing
+  on it, such as the Crop tool leaves when its box is dragged out past the
+  picture, with a soft overlap into the picture so the two blend. With no
+  prompt the picture is carried on; a prompt says what to put there.
+- The other models are dropped before it starts, so it has the card (see
+  Runtime: dropping sessions no longer crashes).
+- Left: the fill's tone can differ a little from the picture's, which the
+  overlap softens but doesn't always hide; more than about half as much
+  again each way comes out soft, being made at 450 px.
 11. **AI upscaling** for print enlargements in Image Size (darktable's RealPLKSR, MIT, already
     on disk).
 12. **Body Reshape**, with the pose model and background protection.
@@ -1144,6 +1191,138 @@ SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   handles on the canvas; faces in profile; keeping the sliders in the
   .ora.
 
+### Generative Fill
+
+As built (`omapix_ai::flux` and its `tokenizer`, `fill::patch_of_cells` in
+the engine, `crates/omapix/src/generative_fill.rs`), from a spike on
+2026-10-03 with freely licensed photos in `~/Pictures/denoise-tests`:
+
+```
+cargo run --release -p omapix-ai --example genfill -- image out.png 512 "a red fox in snow"
+cargo run --release -p omapix-ai --example genfill -- fill out photo.jpg x0 y0 x1 y1 "remove the person"
+cargo run --release -p omapix-ai --example genfill -- extend out photo.jpg left top right bottom ""
+```
+
+- **The model.** `hlhc/FLUX.2-klein-4B-onnx-int4` on Hugging Face, pinned
+  by revision and checksum in `models.txt` as an optional model:
+  `scripts/fetch-models.sh fill-flux2-klein-4b` downloads its 7.8 GB, and
+  the script without the id leaves it alone. Four graphs: Qwen3 as the
+  text encoder (3.1 GB), the transformer (4.4 GB), and the VAE's encoder
+  and decoder (0.3 GB), with the weights of the first two as 4-bit
+  `MatMulNBits` and everything computed in 32-bit floats.
+- **ONNX Runtime 1.29 runs it.** The export was made with 1.30, which Arch
+  still doesn't have (flagged out of date since 10 September), but it's
+  opset 17, and 1.29's CUDA provider has `MatMulNBits`. It unpacks each
+  layer's weights to floats every time it's used, which is what makes a
+  step slow whatever the image's size, and Arch's build prints a line for
+  each (`n=27648, k=3072, block_size=16…`) on standard output.
+- **Memory**, on the 8 GB card with the desktop using 0.6 GB:
+  - The transformer takes 4.6 GB loaded and 6.6–7.2 GB while it runs. Its
+    attention is plain matrix products, so memory grows with the square of
+    the tokens: the image's cells, as many again for the reference, and
+    the prompt's 512 (always, padded). 2100 tokens fit and 2800 don't:
+    without a reference 640 px square works and 768 doesn't, never mind
+    1024. A fill has a reference, so it gets 768 cells, about 450 px
+    square (`flux::CELLS`), at 6.9 GB.
+  - Nothing else fits beside it. The text encoder (3.2 GB on the GPU)
+    reads the prompt first and is dropped; the VAE (0.5 GB loaded, 2–3 GB
+    while decoding on the GPU) runs on the CPU.
+  - Three settings got it this far: the arena growing by what's asked for
+    rather than doubling, no memory plan carried from one run to the next
+    (0.4 GB less), and the arena shrunk after each run
+    (`memory.enable_memory_arena_shrinkage`), without which the first run's
+    scratch memory was never given back.
+- **Speed.** Text encoder: 2.1 s to load and 0.5 s a prompt on the GPU
+  (4.1 s on the CPU). Transformer: 1–2 s to load, then four steps in 3.7 s
+  at 256 px, 6.5 s at 512 px, 9.3 s at 640 px and 9 s for a fill. VAE on
+  the CPU: 1.2 s to encode and 2.8 s to decode a fill, the decoding done
+  while the next result is made. Three results take 34 s, the first there
+  after 16 s; Generate Again with the same prompt skips the text encoder
+  (about 3 s).
+- **Unloading** works (see Runtime): everything's dropped when the
+  results are made, and the card's memory comes back.
+- **The tokenizer** is Qwen's byte-pair one, written out in
+  `omapix_ai::tokenizer` (150 lines, `regex` and `serde_json`) rather than
+  bringing in Hugging Face's `tokenizers`. It gives the same ids on six
+  test strings (accents, CJK, emoji, odd whitespace), which the ignored
+  test `qwens_tokenizer_gives_the_ids_hugging_faces_does` checks.
+- **The patch** isn't Content-Aware Fill's square: twice the selection's
+  width and height (no narrower than a third of its length), shrunk to
+  768 cells of 16 px in that shape, so a standing figure gets 320 × 576
+  to itself and its surroundings rather than a strip of a square. A small
+  selection isn't enlarged: it gets more of its surroundings, pixel for
+  pixel.
+- **Keeping the rest fixed isn't enough.** The design was ComfyUI's masked
+  fill: at each step the cells outside the selection are put back, as
+  noisy as the rest still is. With four steps that gave a different,
+  sharper, brighter scene pasted into the box: the first step starts from
+  noise everywhere, so it lays the picture out from the prompt alone.
+- **The image as a reference** fixes it. FLUX.2 klein is an editing model:
+  given the patch as it is as a reference image, it sees the whole scene
+  from the first step, and with the kept cells still put back at each
+  step, the fill matches its surroundings' light, blur and grain.
+- **So the prompt is an instruction**, or a description of what should be
+  there: "remove the person" left a clean, empty car park, three times in
+  three, and "a red sports car" and "a framed landscape painting hanging
+  on the wall" put those there, lit to match.
+- **An empty prompt** asks for "Remove the object, leaving only the
+  background", which removed a figure and its reflection, and a cushion,
+  three times in three each. Tried and dropped: greying out the selection
+  in the reference, so the model can't see what's there. It then painted
+  the grey box, or put a person in it, as often as it filled it.
+- **The dialog** stays open over the canvas. Enter in the prompt
+  generates; the first result of each three is shown as it arrives, as a
+  layer above the one selected, and the arrows swap the others in; OK
+  keeps the one showing as a single undo step, and Cancel leaves nothing.
+  Closing it stops the work after the step it's on. Failures (no CUDA, not
+  enough free GPU memory) are said in the dialog.
+- **Scripts.** `GenerativeFill a prompt` makes one result and OKs it (no
+  commas in the prompt: they separate steps). The ignored test
+  `the_generative_fill_script_step_leaves_a_masked_layer` runs it on
+  `OMAPIX_FILL_PHOTO` with `OMAPIX_FILL_BOX` selected, in 17 s.
+- **Extending the canvas** (milestone 10.5). The Crop tool already grows
+  the canvas when its box is dragged out past the picture, leaving it
+  transparent, and Canvas Size can too. With nothing selected, Generative
+  Fill takes everything transparent in the visible image as what to fill
+  (`fill::empty`), so it's Crop, Enter, Generative Fill, Enter.
+  - **The overlap.** That selection reaches into the picture by 1/200 of
+    its longer side and fades out over as much again (a few of the
+    model's pixels), and is whole wherever there's nothing. Filled only
+    up to the old edge, the edge showed as a line wherever the fill's
+    tone was a little off.
+  - **What the model's shown.** Cells with anything missing in them are
+    left out of the reference (it takes cells in any number, each with
+    its place), so the model sees the picture and no black border. Shown
+    the border as black, one result in three kept a black block.
+  - **The prompt**, if empty, is "Extend the picture, continuing the
+    scene" when any cell to fill has nothing in it. A wall and panelling
+    carried on beside a speaker, a car park's ceiling above it, and snow
+    and trees round a fox; now and then something odd turns up in the
+    new part (a second tail), which is what the other two results are
+    for.
+  - Tried with `genfill extend`, and the ignored test with
+    `OMAPIX_FILL_EXTEND=1`, which grows the canvas to `OMAPIX_FILL_BOX`.
+- **Room on the card.** With Omapix's other models loaded (1.2 GB of them
+  on 2026-10-03) and 0.5 GB of desktop, the transformer ran out of memory
+  whatever the fill's size, since most of what it needs doesn't depend on
+  that. So the others are dropped first (`unload` in each command's
+  module), which Runtime's finding made safe; they load again when next
+  used.
+- **Left:**
+  - The prompt and seed kept on the layer, to generate again later.
+  - A hard-edged selection can show as a faint edge where the fill's tone
+    differs a little from the photo: feather it first. An extension's
+    tone can be a little off too, softened by the overlap; matching the
+    fill's tone to the picture along the edge would deal with both.
+    What's made is softer than a 24 MP photo round it, and has no grain.
+  - A larger fill: in overlapping tiles, or from an export with fused
+    attention or 16-bit floats. ONNX Runtime 1.30 is worth trying when
+    Arch has it, for speed if nothing else.
+  - Another program using a gigabyte or more of the card (darktable's
+    models, a browser) still leaves too little: it says so.
+  - Greying the command out without CUDA, or with nothing to fill, which
+    can't be known without loading or looking.
+
 ## Decisions
 
 From Michael, 24 September 2026:
@@ -1194,5 +1373,5 @@ From Michael, 29 September 2026:
 - [YuNet in OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT)
 - [MediaPipe Pose Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) (Apache-2.0)
 - [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker), [multiclass selfie segmentation ONNX](https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX) (Apache-2.0)
-- FLUX.2 klein from Black Forest Labs (4B: Apache-2.0; 9B: non-commercial), to be rechecked when packaged
+- FLUX.2 klein from Black Forest Labs (4B: Apache-2.0; 9B: non-commercial); [`hlhc`'s int4 ONNX export](https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4) (Apache-2.0), rechecked 2026-10-03
 - Excluded: [face-parsing](https://github.com/yakhyo/face-parsing) (MIT code, CelebAMask-HQ weights), [Sapiens](https://huggingface.co/facebook/sapiens), [Sapiens2](https://huggingface.co/facebook/sapiens2)

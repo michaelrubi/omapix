@@ -20,6 +20,8 @@ pub struct Model {
     /// The commands that use it.
     pub used_by: &'static str,
     pub licence: &'static str,
+    /// Only downloaded when asked for by its id: the big ones.
+    pub optional: bool,
     pub files: Vec<File>,
 }
 
@@ -43,8 +45,9 @@ fn parse(manifest: &'static str) -> Vec<Model> {
     let mut models: Vec<Model> = Vec::new();
     for line in manifest.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
         match line.split('|').collect::<Vec<_>>()[..] {
-            ["model", id, name, used_by, licence, ..] => {
-                models.push(Model { id, name, used_by, licence, files: Vec::new() })
+            [kind @ ("model" | "optional"), id, name, used_by, licence, ..] => {
+                let optional = kind == "optional";
+                models.push(Model { id, name, used_by, licence, optional, files: Vec::new() })
             }
             ["file", id, name, bytes, sha256, url] => {
                 let model = models.iter_mut().find(|m| m.id == id).expect("a file's model comes before it");
@@ -159,9 +162,11 @@ mod tests {
         let sam = models().iter().find(|m| m.id == crate::sam::MODEL).unwrap();
         assert_eq!(sam.files.iter().map(|f| f.name).collect::<Vec<_>>(), ["encoder.onnx", "decoder.onnx"]);
         assert!(sam.files.iter().all(|f| f.url.is_none() && f.sha256.len() == 64));
-        for id in [crate::lama::MODEL, crate::subject::MODEL] {
+        for id in [crate::lama::MODEL, crate::subject::MODEL, crate::flux::MODEL] {
             let model = models().iter().find(|m| m.id == id).unwrap();
             assert!(model.files.iter().all(|f| f.url.is_some_and(|u| u.starts_with("https://"))), "{id}");
+            // Only the big one has to be asked for.
+            assert_eq!(model.optional, id == crate::flux::MODEL);
         }
     }
 

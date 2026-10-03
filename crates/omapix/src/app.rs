@@ -132,6 +132,7 @@ enum Dialog {
     SmoothSkin(crate::smooth_skin::SmoothSkin),
     EvenTone(crate::even_tone::EvenTone),
     Denoise(crate::denoise::Denoise),
+    GenerativeFill(crate::generative_fill::GenerativeFill),
     /// Name the selected adjustment layers to keep as a preset.
     SavePreset {
         name: String,
@@ -174,6 +175,7 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
     match cmd {
         Command::SelectSubject => &[omapix_ai::subject::MODEL],
         Command::ContentAwareFill => &[omapix_ai::lama::MODEL],
+        Command::GenerativeFill => &[omapix_ai::flux::MODEL],
         Command::Denoise => &[omapix_ai::denoise::MODEL],
         Command::SelectSkin
         | Command::SelectHair
@@ -277,7 +279,9 @@ struct BatchJob {
 ///   `Look x y` (centre the view on an image point at 100 %),
 ///   `View image|mask|overlay|texture r|tone r|blur r` (what the canvas shows);
 /// - `AutoRetouch Natural|Standard|Strong`: Auto Retouch with that preset
-///   (or, with none, as last used), OK'd once the faces are found.
+///   (or, with none, as last used), OK'd once the faces are found;
+/// - `GenerativeFill a prompt`: Generative Fill of the selection (with no
+///   prompt, what's selected is removed), OK'd once a result is made.
 #[derive(Debug)]
 enum ScriptStep {
     Command(Command),
@@ -296,6 +300,7 @@ enum ScriptStep {
     /// Magic Wand tolerance (0–255).
     Tolerance(u8),
     AutoRetouch(Option<crate::auto_retouch::Preset>),
+    GenerativeFill(String),
 }
 
 impl ScriptStep {
@@ -316,6 +321,7 @@ impl ScriptStep {
                 Some(name) => Some(crate::auto_retouch::Preset::from_name(name)?),
                 None => None,
             }),
+            ("GenerativeFill", _) => ScriptStep::GenerativeFill(words.collect::<Vec<_>>().join(" ")),
             ("BlendIf", &[a, b, c, d]) => {
                 let under = step.split_whitespace().any(|w| w == "under");
                 ScriptStep::BlendIf(under, [a / 255.0, b / 255.0, c / 255.0, d / 255.0])
@@ -1219,6 +1225,13 @@ impl App {
                     self.message(e, true);
                 }
             }
+            Command::GenerativeFill => {
+                let Some(editor) = &mut self.editor else { return };
+                match crate::generative_fill::GenerativeFill::open(ctx, editor) {
+                    Ok(dialog) => self.dialog = Some(Dialog::GenerativeFill(dialog)),
+                    Err(e) => self.message(e, true),
+                }
+            }
             Command::SelectSubject => {
                 if let Some(editor) = &self.editor
                     && let Err(e) = self.select_subject.start(ctx, editor)
@@ -1670,6 +1683,7 @@ self.filters.remember(&filter);
             self.menu_item(ui, Command::SaveSelection, None);
             ui.separator();
             self.menu_item(ui, Command::ContentAwareFill, None);
+            self.menu_item(ui, Command::GenerativeFill, None);
             self.menu_item(ui, Command::FillForeground, None);
             self.menu_item(ui, Command::FillBackground, None);
             self.menu_item(ui, Command::Clear, None);
@@ -1841,6 +1855,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::FillBackground, None);
                 self.menu_item(ui, Command::Clear, None);
                 self.menu_item(ui, Command::ContentAwareFill, None);
+                self.menu_item(ui, Command::GenerativeFill, None);
             });
             ui.menu_button("Image", |ui| {
                 ui.menu_button("Adjustments", |ui| {
@@ -2177,6 +2192,12 @@ self.filters.remember(&filter);
             self.dialog = None;
             return;
         }
+        if let (Some(Dialog::GenerativeFill(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
+            if dialog.show(ctx, editor, &self.theme).is_some() {
+                self.dialog = None;
+            }
+            return;
+        }
         if let (Some(Dialog::AutoRetouch(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
             match dialog.show(ctx, editor, &self.theme) {
                 Ok(Some(true)) => {
@@ -2457,7 +2478,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::AutoRetouch(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::EvenTone(_) | Dialog::Denoise(_) => {}
+                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::AutoRetouch(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::EvenTone(_) | Dialog::Denoise(_) | Dialog::GenerativeFill(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -2623,7 +2644,8 @@ self.filters.remember(&filter);
                             }
                             None => {
                                 let size: u64 = model.files.iter().map(|f| f.bytes).sum();
-                                let text = format!("Not installed: run scripts/fetch-models.sh ({} MB)", size / 1_000_000);
+                                let id = if model.optional { format!(" {}", model.id) } else { String::new() };
+                                let text = format!("Not installed: run scripts/fetch-models.sh{id} ({} MB)", size / 1_000_000);
                                 ui.label(RichText::new(text).color(warning));
                             }
                         }
@@ -3695,6 +3717,13 @@ self.filters.remember(&filter);
                     if let Some(preset) = preset {
                         dialog.all = preset.settings();
                     }
+                    dialog.accept = true;
+                }
+            }
+            ScriptStep::GenerativeFill(prompt) => {
+                self.run(Command::GenerativeFill, ctx);
+                if let Some(Dialog::GenerativeFill(dialog)) = &mut self.dialog {
+                    dialog.prompt = prompt;
                     dialog.accept = true;
                 }
             }
@@ -7173,6 +7202,14 @@ mod tests {
         assert!(app.enabled(Command::ContentAwareFill));
         app.models.insert(omapix_ai::lama::MODEL, false);
         assert!(!app.enabled(Command::ContentAwareFill));
+        assert!(app.enabled(Command::GenerativeFill));
+        // It needs no selection: without one it fills empty canvas.
+        let selection = app.editor.as_mut().unwrap().doc.selection.take();
+        assert!(app.enabled(Command::GenerativeFill) && !app.enabled(Command::ContentAwareFill));
+        app.editor.as_mut().unwrap().doc.selection = selection;
+        app.models.insert(omapix_ai::flux::MODEL, false);
+        assert!(!app.enabled(Command::GenerativeFill));
+        assert_eq!(missing_models(Command::GenerativeFill, &app.models), ["FLUX.2 klein 4B (int4)"]);
         // Skin and Hair need all three face models.
         assert!(app.enabled(Command::SelectSkin) && app.enabled(Command::SelectHair));
         app.models.insert(omapix_ai::face::LANDMARKER, false);
@@ -8627,6 +8664,78 @@ mod tests {
         assert!(names.contains(&"Smooth Skin") && names.contains(&"Dodge & Burn"));
         assert_eq!(editor.undo_label(), Some("Auto Retouch"));
         assert_eq!(app.filters.auto_retouch, crate::auto_retouch::Preset::Natural.settings());
+    }
+
+    #[test]
+    fn a_script_step_runs_generative_fill_with_its_prompt() {
+        let prompt = |step| match ScriptStep::parse(step) {
+            Some(ScriptStep::GenerativeFill(prompt)) => Some(prompt),
+            _ => None,
+        };
+        assert_eq!(prompt("GenerativeFill remove the 2 chairs").as_deref(), Some("remove the 2 chairs"));
+        assert_eq!(prompt("GenerativeFill").as_deref(), Some(""));
+    }
+
+    /// End to end: `GenerativeFill` as an `OMAPIX_SCRIPT` step on
+    /// `OMAPIX_FILL_PHOTO` with the box `OMAPIX_FILL_BOX` (`x0 y0 x1 y1`)
+    /// selected, or with `OMAPIX_FILL_EXTEND=1`, with the canvas grown to
+    /// that box and nothing selected, checking the layer it leaves. Needs
+    /// the model (scripts/fetch-models.sh fill-flux2-klein-4b) and the GPU.
+    #[test]
+    #[ignore]
+    fn the_generative_fill_script_step_leaves_a_masked_layer() {
+        let (Ok(photo), Ok(corners)) = (std::env::var("OMAPIX_FILL_PHOTO"), std::env::var("OMAPIX_FILL_BOX")) else { return };
+        let corners: Vec<f32> = corners.split_whitespace().map(|c| c.parse().unwrap()).collect();
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let mut doc = omapix_engine::io::load(std::path::Path::new(&photo)).unwrap();
+        let extend = std::env::var_os("OMAPIX_FILL_EXTEND").is_some();
+        if extend {
+            let [x0, y0, x1, y1] = [0, 1, 2, 3].map(|i| corners[i] as i32);
+            doc.resize_canvas((x1 - x0) as u32, (y1 - y0) as u32, -x0, -y0, None);
+        } else {
+            doc.selection = Some(Selection::rectangle(doc.width, doc.height, (corners[0], corners[1]), (corners[2], corners[3])));
+        }
+        let (render, _) = render_view(&doc, View::Image, [0; 4], None);
+        let mut editor = Editor::new(doc).unwrap();
+        editor.canvas.set_render(Arc::new(render));
+        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
+        app.editor = Some(editor);
+        // Content-Aware Fill first, so its model's on the card and has to
+        // give way.
+        if !extend {
+            app.run(Command::ContentAwareFill, &ctx);
+            while app.content_fill.busy() {
+                std::thread::sleep(Duration::from_millis(5));
+                app.content_fill.poll(app.editor.as_mut().unwrap());
+            }
+            let editor = app.editor.as_mut().unwrap();
+            assert_eq!(editor.undo_label(), Some("Content-Aware Fill"));
+            editor.undo();
+        }
+        let before = app.editor.as_ref().unwrap().doc.layers.len();
+        app.script.push_back(ScriptStep::parse("GenerativeFill").unwrap());
+        let done = |app: &App| app.script.is_empty() && app.dialog.is_none();
+        for _ in 0..24000 {
+            app.run_script(&ctx);
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            app.editor.as_mut().unwrap().update(&ctx);
+            if done(&app) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(done(&app), "{:?}", app.status);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.doc.layers.len(), before + 1, "{:?}", app.status);
+        let layer = editor.doc.layer(editor.active).unwrap();
+        assert_eq!(layer.name, "Generative Fill");
+        // The middle of the box, or the new canvas's first corner.
+        let (x, y) = if extend { (0, 0) } else { (((corners[0] + corners[2]) / 2.0) as u32, ((corners[1] + corners[3]) / 2.0) as u32) };
+        assert_eq!(layer.mask.as_ref().unwrap().pixels.get(x, y), 65535);
+        assert_eq!(layer.pixels.get(x, y)[3], 65535);
+        assert_eq!(editor.undo_label(), Some("Generative Fill"));
     }
 
     #[test]
