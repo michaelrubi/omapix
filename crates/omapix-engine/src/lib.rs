@@ -4,6 +4,7 @@
 pub mod adjust;
 pub mod blemish;
 pub mod blend;
+pub mod body;
 pub mod brush;
 pub mod clip;
 pub mod color;

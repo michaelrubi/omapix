@@ -515,6 +515,12 @@ applied to the layer being liquified, under the brushes' warp, rather than
 to a Reshape layer; and while a slider's dragged it's shown on the shrunk
 level on screen, as designed, and the layer warped when it's let go.
 
+As built for bodies (see "Body Reshape" below): in Liquify too, beside the
+faces' panel. The pose model gives bones, not outlines, so each slider is a
+warp of its own about a bone rather than points for a spline; the matte is
+the pose model's own, for each person, rather than Select Subject's; and a
+move fades out over five times its own length from the person.
+
 ### 9. Generative Fill
 
 *Photoshop: Edit › Generative Fill.*
@@ -565,12 +571,12 @@ Default set, all usable for commercial work:
 | Faces | YuNet | <1 MB | MIT | Fast, fine on CPU. |
 | Face points | MediaPipe Face Landmarker | 4.9 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. |
 | Skin, hair | MediaPipe multiclass selfie segmentation | 16 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. 256×256 input, so the guided filter matters. |
-| Body points (Reshape) | MediaPipe Pose Landmarker | ~6–30 MB | Apache-2.0 | 33 points. Lite/Full/Heavy variants. |
+| Body points (Reshape) | MediaPipe Pose Landmarker (Heavy) | 70 MB | Apache-2.0 | Unity's ONNX conversion, with the pose detector (15 MB). 33 points and a matte of each person. Heavy rather than Full (13 MB): no slower to notice, and better on seated poses. |
 | Content-Aware Fill | LaMa | 208 MB | Apache-2.0 | Installed by `fetch-models.sh`. |
 | Upscaling | RealPLKSR (×2 and ×4) | 59 MB | MIT | Already installed via darktable. Trained on DF2K; Flickr2K has no explicit licence (darktable's model card), so like SAM it doesn't strictly meet principle 4. |
 | Generative Fill | FLUX.2 klein 4B (int4 ONNX) | 7.8 GB | Apache-2.0 | Optional download (`scripts/fetch-models.sh fill-flux2-klein-4b`), GPU only. `hlhc`'s export, with Qwen3 as its text encoder. Runs on ONNX Runtime 1.29. The 9B model is non-commercial, so it's left out. |
 
-About 600 MB total without BiRefNet's large variant and FLUX.2, on disk
+About 670 MB total without BiRefNet's large variant and FLUX.2, on disk
 only. FLUX.2 is a separate, optional download because of its size. Loaded
 on first use.
 
@@ -606,8 +612,9 @@ the spike:
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) (measured: 0.4 s) | same |
 | Even Tone (masks at 24 MP) | < 0.3 s (CPU) (measured: under 0.1 s) | same |
 | Auto Retouch end to end, per face | < 3 s (measured: 0.5–2.5 s in all, for one to three faces) | < 10 s |
-| Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms (measured: 15–50 ms fitted in a 1600 × 1000 canvas) | same |
-| Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) (measured: 0.03–0.3 s, the most for a face that fills the frame) | same |
+| Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms (measured: 15–50 ms fitted in a 1600 × 1000 canvas; a body 15–40 ms) | same |
+| Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) (measured: 0.03–0.3 s, the most for a face that fills the frame; a body 0.08–0.13 s) | same |
+| Finding bodies (detect, points, matte) | (measured: 0.06–0.3 s a person, 1.8 s the first time) | |
 | Generative Fill, three results | (measured: 34 s, the first after 16 s) | not offered |
 | AI upscaling, 24 MP to 96 MP | (measured: 3 min, 150 squares at 1.2 s each) | far longer |
 
@@ -724,9 +731,9 @@ Reordered on 2026-09-29 (see Decisions).
      with them when it's opened again. See "Face-Aware Liquify" below.
    - Done (2026-10-03): while a slider's dragged, a quick look at the size
      on screen, and the layer warped once it's let go.
-   - Left: a Reshape layer that keeps its settings and can be updated (it
-     comes with Body Reshape); thumbnails and clicking a face to pick it;
-     faces in profile.
+   - Left: a Reshape layer that keeps its settings and can be updated
+     (Body Reshape, milestone 12, went into Liquify too); thumbnails and
+     clicking a face to pick it; faces in profile.
 
 9.5. ~~**Each eye and brow on its own**, in Face-Aware Liquify.~~ (done,
 2026-10-03)
@@ -781,7 +788,17 @@ Reordered on 2026-09-29 (see Decisions).
       undo step. See "Upscaling" below.
     - Left: a preview; stopping it part way; a faster run (it's about
       3 minutes at 24 MP); `ImageSize` in `OMAPIX_SCRIPT`.
-12. **Body Reshape**, with the pose model and background protection.
+12. ~~**Body Reshape**, with the pose model and background protection.~~
+    (done, 2026-10-03)
+    - Body (Y) in Liquify's options bar opens a panel of sliders for each
+      person the pose model finds in the layer: Head Size and Neck Length,
+      Shoulders, Waist and Hips, and Arms, Legs and Leg Length. They warp
+      the layer under the brushes' warp and over the faces', a drag is a
+      step for Ctrl+Z, and they fade out away from the person. See "Body
+      Reshape" below.
+    - Left: the Reshape layer that keeps its settings and can be updated;
+      each arm and leg on its own; people the model misses (close-ups
+      without shoulders, small figures); legs under a long skirt.
 13. **Later:**
     - the optional learned blemish detector
     - eye and teeth whitening, shine, under-eye
@@ -1391,6 +1408,113 @@ cargo run --release -p omapix-ai --example upscale -- out photo.jpg
     stored.
   - `ImageSize` as an `OMAPIX_SCRIPT` step.
 
+### Body Reshape
+
+As built (`omapix_engine::body`, `omapix_ai::pose`,
+`crates/omapix/src/body_liquify.rs`), looked at on Michael's full-length
+portraits in `~/Pictures/sample`. The example draws what the models find
+in each photo (the matte, the square round each person and their bones),
+and with `SHAPE`, the photo before and after:
+
+```
+SHAPE="waist=-100,legs=-50" cargo run --release -p omapix-ai --example pose -- out photo.jpg
+OMAPIX_BODY_PHOTO=photos cargo test --release -p omapix body_reshape_in_photos -- --ignored --nocapture
+```
+
+- **The models.** Unity's ONNX conversion of MediaPipe's pose detector
+  (15 MB) and Pose Landmarker (Apache-2.0), pinned by revision and
+  checksum in `models.txt` and installed by `fetch-models.sh`.
+  - The detector sees the image fitted into 224 px and gives, for each
+    person, the middle of their hips and a point on the circle round
+    their body. The landmarker sees the square 1.25 times that circle,
+    turned upright, at 256 px, and looks twice, the second time in the
+    square round the body it found the first time, as MediaPipe tracks.
+  - It gives 33 points, each with how likely it is to be in view, and a
+    matte of the person over its square.
+  - Heavy (55 MB) rather than Full (13 MB): both take 0.06–0.3 s a person,
+    and on a seated and a crouching pose Full crossed legs that Heavy got
+    right.
+- **The matte is the landmarker's own**, not Select Subject's as designed.
+  It's one person's rather than everyone's, needs no 490 MB model, and is
+  only used to measure widths and to fade the warp out, for which 256 px
+  across a person is enough (a cell is about 20 px at 24 MP).
+- **Where it lives.** In Liquify, as the faces' sliders are: Body (Y) in
+  the options bar opens a panel beside Face-Aware's, greyed out without
+  the model. The two are one panel in the code
+  (`face_liquify::Panel`, over what `editor::Figure` it shapes), so the
+  body's sliders are found the first time it opens, are a step for Ctrl+Z
+  a drag, are a quick look while dragged, have Reset and Preview (which
+  hides both panels' work), and are kept with the layer's mesh, all as
+  the faces' are. With several people each has their own, numbered from
+  the left.
+- **Over the faces' warp.** Head Size and Neck Length move the head the
+  faces' sliders shape, so the bodies' warp is put over the faces'
+  (`Field::over`): the face is shaped where it was found, then moved.
+- **Not a spline through points.** A face's points are on its outlines;
+  a body's are its joints, and its outline has to come from the matte.
+  Points along each edge, moved in for a narrower waist, would have had
+  to be pinned or not wherever an arm hangs against the body, and a
+  spline through them reaches as far as its pins. So each slider is a
+  warp of its own about a bone, added up:
+  - **Widths** (Shoulders, Waist, Hips, Arms, Legs). A part is scaled
+    across its bone within its half-width, and beyond its edge what's
+    there goes with the edge, less the further out, to nothing three
+    half-widths away. So an arm beside a narrower waist comes in with it
+    rather than being squeezed, and two legs side by side each narrow
+    about their own bone.
+  - **Half-widths** are measured in the matte at points along each bone.
+    The torso's are its own each side, from above the shoulders to below
+    the hips, and no more than 0.45 of its length (or 0.75 of the
+    shoulders' width): beyond that is an arm against the body. A limb is
+    as wide as its narrower side, since the other may run into the body
+    or a sleeve. Each is the middle of three, so a stray edge doesn't
+    dent it.
+  - **Down the torso**, from the shoulders (0) to the hips (1), Shoulders
+    works most at 0, Waist at 0.62 and Hips at 1.05, each fading to
+    nothing either way. Arms and Legs leave the top of each limb to
+    Shoulders and Hips, and hand over at the elbow and knee.
+  - **Leg Length** leaves the hips where they are: each leg is stretched
+    along its bones from the hip, the foot going with the ankle, and
+    between two legs each has its say.
+  - **Head Size** scales the head about the middle of the shoulders,
+    which stay, and **Neck Length** lifts it; the head is as far as the
+    matte goes up and to the sides of the middle of the ears, hair and
+    all.
+  - **At 100:** Waist 20 % wider, Hips 15 %, Shoulders 12 %, Arms 25 %,
+    Legs 20 %; legs 8 % longer; the head 12 % larger; the neck longer by
+    12 % of the way from the shoulders to the ears.
+- **Background protection.** Outside the person (by a distance transform
+  of the matte) a move fades out over five times its own length, so a
+  10 px move is gone 50 px from them: small moves touch almost nothing
+  behind, and large ones are spread far enough not to tear. On the
+  portraits tried, looked at about 1000 px across, tree trunks and a log
+  beside and behind the figure don't visibly bend with the sliders at
+  either end. Still to look at: straight lines (a door frame, a horizon)
+  at full size.
+- **Parts out of view.** A limb needs both its joints likely in view
+  (above 0.5), and a body both shoulders; a slider with nothing to work
+  on does nothing.
+- **Speed.** Finding a person takes 0.06–0.3 s once the models are loaded
+  (1.8 s the first time). Fitted in a 1600 × 1000 canvas, a step of a
+  drag takes 15–40 ms, and warping the layer 0.02–0.1 s for the photos
+  up to 8 MP and 0.08–0.13 s at 24 MP. The warp itself is 2–6 ms: there's
+  no system to solve.
+- **Left:**
+  - The Reshape layer of the design, made from the image below with its
+    settings kept and an Update; and the sliders kept in the .ora.
+  - Each arm and leg on its own, and sliders greyed out for parts that
+    aren't in view.
+  - People the models miss: close-ups with no shoulders in view, a
+    tilted selfie, and a small figure from behind in a wide shot (the
+    detector found him and the landmarker didn't).
+  - Legs under a long skirt, and arms in wide sleeves: the matte's edge
+    is the cloth's, so Legs and Arms narrow the cloth, or little at all.
+  - Several people: each one's fade knows only their own matte, so
+    someone standing against them is carried along as background is.
+  - Leg Length pushes feet near the bottom edge off the picture.
+  - A line bent behind a body can't be taken back with Reconstruct, which
+    only undoes the brushes: push it back with Forward Warp.
+
 ## Decisions
 
 From Michael, 24 September 2026:
@@ -1439,7 +1563,7 @@ From Michael, 29 September 2026:
 - [SAM 2](https://github.com/facebookresearch/sam2) (Apache-2.0 weights)
 - [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (MIT), [MODNet](https://github.com/ZHKKKe/MODNet) (Apache-2.0)
 - [YuNet in OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (MIT)
-- [MediaPipe Pose Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) (Apache-2.0)
+- [MediaPipe Pose Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) (Apache-2.0), [Unity's ONNX conversion](https://huggingface.co/unity/inference-engine-blaze-pose) (Apache-2.0)
 - [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker), [multiclass selfie segmentation ONNX](https://huggingface.co/senty-au/selfie_multiclass_256x256-ONNX) (Apache-2.0)
 - FLUX.2 klein from Black Forest Labs (4B: Apache-2.0; 9B: non-commercial); [`hlhc`'s int4 ONNX export](https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4) (Apache-2.0), rechecked 2026-10-03
 - Excluded: [face-parsing](https://github.com/yakhyo/face-parsing) (MIT code, CelebAMask-HQ weights), [Sapiens](https://huggingface.co/facebook/sapiens), [Sapiens2](https://huggingface.co/facebook/sapiens2)

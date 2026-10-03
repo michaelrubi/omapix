@@ -218,7 +218,7 @@ fn span(places: &[[f32; 2]], c: usize) -> [f32; 3] {
 }
 
 /// From 0 at `a` to 1 at `b`, smoothly, and those beyond.
-fn ramp(a: f32, b: f32, x: f32) -> f32 {
+pub(crate) fn ramp(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }

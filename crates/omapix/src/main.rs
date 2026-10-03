@@ -1,6 +1,7 @@
 mod app;
 mod auto_retouch;
 mod blending_options;
+mod body_liquify;
 mod canvas;
 mod channels_panel;
 mod clipboard;
