@@ -497,7 +497,8 @@ engine in `omapix-engine` (plain CPU maths, headless tests):
 As built for faces (see "Face-Aware Liquify" below): the field is a
 thin-plate spline through the points, on Liquify's 4 px grid; the warp is
 applied to the layer being liquified, under the brushes' warp, rather than
-to a Reshape layer; and each change is warped at full size.
+to a Reshape layer; and while a slider's dragged it's shown on the shrunk
+level on screen, as designed, and the layer warped when it's let go.
 
 ### 9. Generative Fill
 
@@ -579,8 +580,8 @@ the spike:
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) (measured: 0.4 s) | same |
 | Even Tone (masks at 24 MP) | < 0.3 s (CPU) (measured: under 0.1 s) | same |
 | Auto Retouch end to end, per face | < 3 s (measured: 0.5–2.5 s in all, for one to three faces) | < 10 s |
-| Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
-| Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) (measured: 0.1–0.4 s for each change, the most for a face that fills the frame) | same |
+| Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms (measured: 15–50 ms fitted in a 1600 × 1000 canvas) | same |
+| Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) (measured: 0.03–0.3 s, the most for a face that fills the frame) | same |
 
 - **Memory:** GPU memory well under 2 GB with all default models loaded.
   Idle unloading returns it.
@@ -692,9 +693,11 @@ Reordered on 2026-09-29 (see Decisions).
      mouth and jaw, and eleven for its shape. They warp the layer under
      the brushes' warp, a drag is a step for Ctrl+Z, and Liquify carries on
      with them when it's opened again. See "Face-Aware Liquify" below.
-   - Left: a quick preview while a slider's dragged; a Reshape layer that
-     keeps its settings and can be updated (it comes with Body Reshape);
-     thumbnails and clicking a face to pick it; faces in profile.
+   - Done (2026-10-03): while a slider's dragged, a quick look at the size
+     on screen, and the layer warped once it's let go.
+   - Left: a Reshape layer that keeps its settings and can be updated (it
+     comes with Body Reshape); thumbnails and clicking a face to pick it;
+     faces in profile.
 10. **Generative Fill.** After the portrait work, which is used on every
     photo, while Generative Fill is for the occasional big removal or
     extension. By then Arch's ONNX Runtime should have reached 1.30. Starts
@@ -1063,12 +1066,29 @@ SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
     jaws and brows. So it's scaled down from a turn of 6° to nothing at
     24° (the sine of the turn, 0.1 to 0.4), and the sliders say so when
     hovered.
-- **Speed.** Each change makes the spline and warps the face again at full
-  size: 15–30 ms for faces 200–300 px across, 0.14 s for two faces 1000 px
-  across at 24 MP, 0.4 s for a face that fills a 21 MP frame. Finding the
-  faces takes 0.2–0.5 s once the models are loaded.
-- **Left:** a quick preview on the shrunk level while a slider's dragged;
-  a face cut off by the image's edge smears there when it's moved a lot;
+- **While a slider's dragged**, the layer isn't warped: the canvas shows
+  a pyramid level (half size, a quarter…) when zoomed out, so the layer's
+  pixels before, shrunk to that level, are warped where they're on screen
+  and composited with the other layers shrunk likewise
+  (`Editor::preview_liquify`, `warp_area`'s `level`), and the full-size
+  levels are left stale. When the drag ends (or anything else happens in
+  Liquify) the layer is warped over all the drag touched. A click on a
+  slider, a typed value and Reset warp it at once. At 100 % and closer
+  it's the full-size warp of what's on screen.
+- **The spline** is worked out at points IOD / 100 apart (at least the
+  4 px grid) and interpolated between: with every slider at its end, that
+  is within a pixel of the spline everywhere, and at IOD / 50 it was up
+  to 3 px out beside the eyes. For the quick look it's 2^level coarser, so
+  as close in the pixels shown.
+- **Speed.** Fitted in a 1600 × 1000 canvas, a step of a drag takes
+  15–50 ms (the most for a face that fills the frame at 28 %, which is
+  shown at half size), and the first of a drag 20–35 ms more to shrink
+  the layers. Warping the layer takes 30 ms for faces 200 px across,
+  0.13 s for two faces 1000 px across at 24 MP, and 0.3 s for a face that
+  fills a 21 MP frame, with the canvas redrawn. Finding the faces takes
+  0.2–0.5 s once the models are loaded.
+- **Left:** a face cut off by the image's edge smears there when it's
+  moved a lot;
   thumbnails of the faces, and clicking one to pick it; Photoshop's
   handles on the canvas; faces in profile; keeping the sliders in the
   .ora; telling the user when Symmetry is being held back for a face.

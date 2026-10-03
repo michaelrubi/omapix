@@ -104,6 +104,11 @@ const TURNED: [f32; 2] = [0.1, 0.4];
 /// outline to move into, and for what's beyond it to stretch over.
 const REACH: f32 = 1.6;
 const FADE: f32 = 1.3;
+/// How many times the distance between the eyes holds the distance between
+/// the points the warp's spline is worked out at (at least the field's
+/// grid): at 100, a face with every slider at its end is within a pixel of
+/// the spline everywhere, and at 50 up to 3 px out beside its eyes.
+const LATTICE: f32 = 100.0;
 /// Points pinned round the warp's edge.
 const PINS: usize = 32;
 
@@ -328,8 +333,10 @@ fn shaped(face: &Face, shape: &Shape) -> Face {
 
 /// Add to `field` the warp that gives `face` its `shape`: its points go
 /// where the shape puts them, the rest of the face follows, and it fades
-/// to nothing round the face.
-pub fn reshape(field: &mut Field, face: &Face, shape: &Shape) {
+/// to nothing round the face. For a quick look at the display pyramid's
+/// `level`, it's worked out 2^`level` times as coarsely: as close in the
+/// pixels shown as it is at full size.
+pub fn reshape(field: &mut Field, face: &Face, shape: &Shape, level: u32) {
     if *shape == Shape::default() {
         return;
     }
@@ -356,7 +363,8 @@ pub fn reshape(field: &mut Field, face: &Face, shape: &Shape) {
         if least { values.fold(f32::MAX, f32::min).max(0.0) as u32 } else { values.fold(0.0, f32::max).ceil() as u32 }
     };
     let area = [bound(0, true), bound(1, true), bound(0, false), bound(1, false)];
-    field.move_points(&moves, area, |[x, y]| {
+    let every = ((frame.iod / (LATTICE * crate::warp::STEP as f32)) as usize).max(1) << level;
+    field.move_points(&moves, area, every, |[x, y]| {
         let [u, v] = frame.place(x, y);
         ramp(REACH, FADE, ((u - across) / radii[0]).hypot((v - down) / radii[1]))
     });
@@ -438,7 +446,7 @@ mod tests {
         for face in [face(), turned] {
             assert!(apart(&shaped(&face, &symmetry), &face) < 0.01);
             let mut field = Field::new(600, 600);
-            reshape(&mut field, &face, &symmetry);
+            reshape(&mut field, &face, &symmetry, 0);
             assert_eq!(field.extent(), None);
         }
     }
@@ -527,7 +535,7 @@ mod tests {
         let image = Tiled::from_slice(600, 600, [0; 4], &pixels);
         let face = face();
         let mut field = Field::new(600, 600);
-        reshape(&mut field, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() });
+        reshape(&mut field, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() }, 0);
         // It's bigger, and further out; the eyebrow above has stayed.
         let out = warped(&image, &field);
         assert_eq!((out.get(242, 300), out.get(235, 300), out.get(242, 307)), (RED, RED, RED));
@@ -540,7 +548,12 @@ mod tests {
         assert!(x0 >= 120 && y0 >= 76 && x1 <= 481 && y1 <= 561, "{:?}", field.extent());
         // Other faces' warps add to it.
         let before = field.at(232.0, 300.0);
-        reshape(&mut field, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() });
+        reshape(&mut field, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() }, 0);
         assert!((field.at(232.0, 300.0)[0] - 2.0 * before[0]).abs() < 1e-3);
+        // For a quick look it's coarser, and much the same.
+        let mut quick = Field::new(600, 600);
+        reshape(&mut quick, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() }, 2);
+        let (quick, exact) = (quick.at(232.0, 300.0), before);
+        assert!(quick != exact && (quick[0] - exact[0]).hypot(quick[1] - exact[1]) < 2.0, "{quick:?} {exact:?}");
     }
 }

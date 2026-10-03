@@ -208,6 +208,11 @@ struct Liquifying {
     stroke: Option<(Field, [u32; 4])>,
     /// A face's slider is being dragged: all of it is one step.
     shaping: bool,
+    /// While it's dragged, the faces' warp is only shown, as a quick look at
+    /// the size on screen: the area the layer is still to be warped in once
+    /// the drag ends, and the layer's pixels before, shrunk to that size.
+    pending: Option<[u32; 4]>,
+    small: Reduced,
     /// Steps to undo and redo while Liquify is open.
     undo: Vec<LiquifyStep>,
     redo: Vec<LiquifyStep>,
@@ -233,12 +238,13 @@ struct Mesh {
 }
 
 /// The warp that gives each of `faces` its shape, in a `width` × `height`
-/// image, if any has one.
-fn shaped(faces: &[(Face, Shape)], width: u32, height: u32) -> Option<Field> {
+/// image, if any has one: for a quick look at the display pyramid's
+/// `level`, or with 0, exactly.
+fn shaped(faces: &[(Face, Shape)], width: u32, height: u32, level: usize) -> Option<Field> {
     faces.iter().any(|(_, shape)| *shape != Shape::default()).then(|| {
         let mut field = Field::new(width, height);
         for (face, shape) in faces {
-            reshape::reshape(&mut field, face, shape);
+            reshape::reshape(&mut field, face, shape, level as u32);
         }
         field
     })
@@ -1237,11 +1243,13 @@ impl Editor {
             layer: layer.id,
             source,
             field,
-            shaped: faces.as_deref().and_then(|faces| shaped(faces, width, height)),
+            shaped: faces.as_deref().and_then(|faces| shaped(faces, width, height, 0)),
             faces,
             restore: 0.0,
             stroke: None,
             shaping: false,
+            pending: None,
+            small: Reduced::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             started: false,
@@ -1258,6 +1266,7 @@ impl Editor {
     /// one stroke, to undo while Liquify is open, until
     /// [`Self::end_liquify_stroke`].
     pub fn liquify(&mut self, brush: warp::Brush, dabs: &[([f32; 2], [f32; 2])], radius: f32, amount: f32) {
+        self.finish_liquify_preview();
         self.keep_liquify_restore();
         let Some(liquifying) = &mut self.liquifying else {
             return;
@@ -1285,6 +1294,7 @@ impl Editor {
             liquifying.undo.push(LiquifyStep::Stroke(before.patch(area)));
             liquifying.redo.clear();
         }
+        self.finish_liquify_preview();
     }
 
     /// The document as it was before Liquify's warp, and the layer being
@@ -1312,7 +1322,7 @@ impl Editor {
 
     /// Give the faces `shapes`, shown at once. Until
     /// [`Self::end_liquify_stroke`], it's one step to undo while Liquify is
-    /// open.
+    /// open, and it's only a quick look (see [`Self::preview_liquify`]).
     pub fn shape_liquify_faces(&mut self, shapes: &[Shape]) {
         self.keep_liquify_restore();
         let Some(liquifying) = &mut self.liquifying else {
@@ -1336,20 +1346,96 @@ impl Editor {
         self.reshape_liquify();
     }
 
-    /// Make the faces' warp anew from their shapes, and show it.
+    /// Make the faces' warp anew from their shapes, and show it: warping
+    /// the layer, or while a slider's dragged and the canvas shows the
+    /// image, as a quick look.
     fn reshape_liquify(&mut self) {
+        let (width, height) = (self.doc.width, self.doc.height);
+        let quick = self.canvas.render().is_some() && self.view == View::Image;
+        let level = self.canvas.visible_area().filter(|_| quick).map(|(level, _)| level);
+        let Some(liquifying) = &mut self.liquifying else {
+            return;
+        };
+        let level = level.filter(|_| liquifying.shaping);
+        let before = liquifying.shaped.as_ref().and_then(Field::extent);
+        liquifying.shaped = liquifying.faces.as_deref().and_then(|faces| shaped(faces, width, height, level.unwrap_or(0)));
+        let after = liquifying.shaped.as_ref().and_then(Field::extent);
+        // Where the brushes have been, they may show a face from elsewhere.
+        let area = [before, after, liquifying.field.extent()].into_iter().flatten().reduce(union);
+        let Some(area) = area.filter(|_| before.is_some() || after.is_some()) else {
+            return;
+        };
+        let area = liquifying.pending.take().map_or(area, |pending| union(pending, area));
+        match level {
+            Some(level) => {
+                liquifying.pending = Some(area);
+                self.preview_liquify(area, level);
+            }
+            None => self.show_liquify(area),
+        }
+    }
+
+    /// Show the faces' warp within `area` where it's on screen, at the
+    /// display pyramid's `level`, leaving the layer as it is: its pixels
+    /// before, shrunk to that level and warped, in place of its own among
+    /// the layers shrunk likewise. Far less work than warping the layer,
+    /// zoomed out.
+    fn preview_liquify(&mut self, area: [u32; 4], level: usize) {
+        let (Some(render), Some((_, visible))) = (self.canvas.render(), self.canvas.visible_area()) else {
+            return;
+        };
+        let Some(liquifying) = &mut self.liquifying else {
+            return;
+        };
+        let mut layers = match level {
+            0 => self.doc.layers.clone(),
+            _ => self.reduced.lock().expect("reduced layers").layers(&self.doc.layers, level as u32),
+        };
+        let Some(layer) = layers.iter_mut().find(|l| l.id == liquifying.layer) else {
+            return;
+        };
+        let source = match level {
+            0 => liquifying.source.clone(),
+            _ => {
+                let before = Layer::from_pixels(layer.id, "", liquifying.source.clone());
+                liquifying.small.layers(&[before], level as u32).remove(0).pixels
+            }
+        };
+        let scale = 1u32 << level;
+        let on_screen = [
+            area[0].max(visible.0) / scale,
+            area[1].max(visible.1) / scale,
+            (area[2].min(visible.2).div_ceil(scale)).min(source.width()),
+            (area[3].min(visible.3).div_ceil(scale)).min(source.height()),
+        ];
+        layer.pixels = source.clone();
+        let shaped = liquifying.shaped.as_ref();
+        let tiles = warp::warp_area(&source, &liquifying.field, shaped, &mut layer.pixels, on_screen, level as u32);
+        if tiles.is_empty() {
+            return;
+        }
+        // A render in place of the layer as it is would paint over this.
+        if let Some(rendering) = &self.rendering {
+            rendering.cancel.store(true, Ordering::Release);
+        }
+        let groups = if level == 0 { &self.groups } else { &self.preview_groups };
+        let data = draw_tiles(&layers, self.view, self.overlay_colour, &tiles, Some(groups), self.doc.selection.as_ref());
+        render.write_tiles(level, &tiles, &data, None);
+        self.canvas.invalidate_tiles(level, &tiles);
+    }
+
+    /// Warp the layer where the faces' warp has only been shown.
+    fn finish_liquify_preview(&mut self) {
         let (width, height) = (self.doc.width, self.doc.height);
         let Some(liquifying) = &mut self.liquifying else {
             return;
         };
-        let before = liquifying.shaped.as_ref().and_then(Field::extent);
-        liquifying.shaped = liquifying.faces.as_deref().and_then(|faces| shaped(faces, width, height));
-        let after = liquifying.shaped.as_ref().and_then(Field::extent);
-        // Where the brushes have been, they may show a face from elsewhere.
-        let area = [before, after, liquifying.field.extent()].into_iter().flatten().reduce(union);
-        if let Some(area) = area.filter(|_| before.is_some() || after.is_some()) {
-            self.show_liquify(area);
-        }
+        let Some(area) = liquifying.pending.take() else {
+            return;
+        };
+        liquifying.shaped = liquifying.faces.as_deref().and_then(|faces| shaped(faces, width, height, 0));
+        liquifying.small = Reduced::default();
+        self.show_liquify(area);
     }
 
     /// How much of the warp Restore All is taking out, 0–1.
@@ -1434,7 +1520,7 @@ impl Editor {
             field
         });
         let field = restored.as_ref().unwrap_or(&liquifying.field);
-        let tiles = warp::warp_area(&liquifying.source, field, liquifying.shaped.as_ref(), &mut layer.pixels, area);
+        let tiles = warp::warp_area(&liquifying.source, field, liquifying.shaped.as_ref(), &mut layer.pixels, area, 0);
         self.redraw_tiles(&tiles);
     }
 
@@ -1461,6 +1547,8 @@ impl Editor {
 
     /// Put the layer back as it was (Esc).
     pub fn cancel_liquify(&mut self) {
+        // What's only been shown goes with the rest.
+        self.finish_liquify_preview();
         let Some(liquifying) = self.liquifying.take() else {
             return;
         };
@@ -1823,7 +1911,10 @@ impl Editor {
             .live_view
             .as_ref()
             .is_some_and(|v| v.edit.is_some() && v.stack.is_some() && v.until.is_none());
-        if self.rendering.is_none() && self.rendered != current && self.stroke.is_none() && !editing_live {
+        // Nor is a quick look at Liquify's faces painted over with the layer
+        // as it is.
+        let previewing = self.liquifying.as_ref().is_some_and(|l| l.pending.is_some());
+        if self.rendering.is_none() && self.rendered != current && self.stroke.is_none() && !editing_live && !previewing {
             self.start_render(ctx);
         }
     }

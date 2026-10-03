@@ -377,6 +377,51 @@ mod tests {
         assert!(red(&editor, 235, 300));
     }
 
+    #[test]
+    fn a_dragged_slider_is_a_quick_look_until_it_is_let_go() {
+        use crate::canvas::Render;
+        use std::sync::Arc;
+        let ctx = egui::Context::default();
+        let (mut editor, mut panel) = (liquifying(), FaceLiquify::default());
+        // The whole image on screen at 50 %: the canvas shows it at half
+        // size.
+        let render = Arc::new(Render::new(editor.doc.composite()));
+        editor.canvas.set_render(Arc::clone(&render));
+        editor.canvas.lay_out_for_test(Rect::from_min_size(Pos2::ZERO, vec2(W as f32, H as f32)), 0.5);
+        assert_eq!(editor.canvas.visible_area(), Some((1, (0, 0, W, H))));
+        let red = |p: omapix_engine::Pixel| p[1] < 10000;
+        let layer = |editor: &Editor, x, y| red(editor.doc.layers[0].pixels.get(x, y));
+        let shown = |x, y| red(render.level_for_test(1).get(x, y));
+        assert!(shown(125, 150) && !shown(118, 150));
+
+        // Dragged, the eye grows and moves out on screen, but the layer and
+        // the canvas at full size are as they were.
+        frame(&ctx, &mut panel, &mut editor, true);
+        let bigger = Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() };
+        panel.shape(&ctx, &mut editor, &[Shape { eye_size: 50.0, ..Default::default() }]);
+        panel.shape(&ctx, &mut editor, &[bigger]);
+        assert!(shown(118, 150) && !shown(129, 150));
+        assert!(layer(&editor, 250, 300) && !layer(&editor, 236, 300));
+        assert!(!red(render.sample_for_test(236, 300)));
+        assert_eq!(shapes(&editor), [bigger]);
+
+        // Let go, the layer's warped, and the canvas shows that.
+        frame(&ctx, &mut panel, &mut editor, false);
+        assert!(layer(&editor, 236, 300) && !layer(&editor, 258, 300));
+        assert!(red(render.sample_for_test(236, 300)) && shown(118, 150) && !shown(129, 150));
+
+        // Undone while it's dragged again, the look goes with the drag; and
+        // Esc mid-drag puts the layer back as it was.
+        frame(&ctx, &mut panel, &mut editor, true);
+        panel.shape(&ctx, &mut editor, &[Shape::default()]);
+        assert!(shown(125, 150) && !shown(118, 150) && layer(&editor, 236, 300));
+        editor.undo();
+        assert!(layer(&editor, 236, 300) && shown(118, 150));
+        panel.shape(&ctx, &mut editor, &[Shape::default()]);
+        editor.cancel_liquify();
+        assert!(layer(&editor, 250, 300) && !layer(&editor, 236, 300));
+    }
+
     /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder
     /// of them), each face before and after `SHAPE` side by side as
     /// `<photo>-face-<n>.png` in `OMAPIX_FACE_OUT`. `SHAPE` is sliders by
@@ -419,11 +464,32 @@ mod tests {
             };
             let found_in = t.elapsed();
             let mut editor = Editor::new(doc).unwrap();
+            // Fitted in a canvas 1600 × 1000, as a slider's dragged: a quick
+            // look at half the shape (the first shrinks the layers), then
+            // at all of it, then the layer's warped.
+            let zoom = (1600.0 / before.width() as f32).min(1000.0 / before.height() as f32).min(1.0);
+            editor.canvas.set_render(std::sync::Arc::new(crate::canvas::Render::new(before.clone())));
+            editor.canvas.lay_out_for_test(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0)), zoom);
             editor.begin_liquify().unwrap();
             editor.set_liquify_faces(editor.active, faces.clone());
+            let mut half = shape;
+            for (.., at) in SLIDERS.iter().flat_map(|(.., sliders)| *sliders) {
+                *at(&mut half) /= 2.0;
+            }
+            let t = std::time::Instant::now();
+            editor.shape_liquify_faces(&vec![half; faces.len()]);
+            let first = t.elapsed();
             let t = std::time::Instant::now();
             editor.shape_liquify_faces(&vec![shape; faces.len()]);
-            eprintln!("{name}: {} faces found in {found_in:?}, reshaped in {:?}", faces.len(), t.elapsed());
+            let quick = t.elapsed();
+            let t = std::time::Instant::now();
+            editor.end_liquify_stroke();
+            eprintln!(
+                "{name}: {} faces found in {found_in:?}; at {:.0} %, a quick look in {quick:?} (the first {first:?}), warped in {:?}",
+                faces.len(),
+                zoom * 100.0,
+                t.elapsed()
+            );
             editor.commit_liquify();
             let after = editor.doc.composite();
             let (iw, ih) = (before.width() as f32, before.height() as f32);
