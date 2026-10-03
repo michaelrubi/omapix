@@ -1075,6 +1075,10 @@ SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   Liquify) the layer is warped over all the drag touched. A click on a
   slider, a typed value and Reset warp it at once. At 100 % and closer
   it's the full-size warp of what's on screen.
+- **Preview** in the panel, off, shows the layer without the sliders'
+  warp (the brushes' stays), to compare with the faces as they were. The
+  sliders keep their values and wait, and Liquify applies them whether
+  it's on or off.
 - **The spline** is worked out at points IOD / 100 apart (at least the
   4 px grid) and interpolated between: with every slider at its end, that
   is within a pixel of the spline everywhere, and at IOD / 50 it was up

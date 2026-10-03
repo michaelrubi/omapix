@@ -98,6 +98,7 @@ impl FaceLiquify {
     pub fn show(&mut self, ctx: &egui::Context, editor: &mut Editor, theme: &Theme, open: &mut bool) {
         self.find(ctx, editor);
         let mut shapes: Option<Vec<Shape>> = editor.liquify_faces().map(|faces| faces.iter().map(|(_, shape)| *shape).collect());
+        let mut preview = editor.liquify_faces_shown();
         egui::Window::new("Face-Aware Liquify")
             .open(open)
             .resizable(false)
@@ -109,8 +110,11 @@ impl FaceLiquify {
                     let why = self.failed.as_deref().unwrap_or("Found no faces facing the camera");
                     ui.label(RichText::new(why).color(theme.dark_foreground));
                 }
-                Some(shapes) => self.sliders(ui, shapes),
+                Some(shapes) => self.sliders(ui, shapes, &mut preview),
             });
+        if preview != editor.liquify_faces_shown() {
+            editor.show_liquify_faces(preview);
+        }
         if let Some(shapes) = shapes {
             self.shape(ctx, editor, &shapes);
         }
@@ -147,8 +151,10 @@ impl FaceLiquify {
         editor.set_liquify_faces(layer, found.unwrap_or_default());
     }
 
-    /// The face to shape, if there's more than one, then its sliders.
-    fn sliders(&mut self, ui: &mut egui::Ui, shapes: &mut [Shape]) {
+    /// The face to shape, if there's more than one, then its sliders, and
+    /// `preview`: off, the faces are shown as they were, and the sliders
+    /// wait.
+    fn sliders(&mut self, ui: &mut egui::Ui, shapes: &mut [Shape], preview: &mut bool) {
         self.selected = self.selected.min(shapes.len() - 1);
         if shapes.len() > 1 {
             ui.horizontal_wrapped(|ui| {
@@ -160,7 +166,7 @@ impl FaceLiquify {
             ui.add_space(4.0);
         }
         let shape = &mut shapes[self.selected];
-        egui::Grid::new("face-liquify").num_columns(2).show(ui, |ui| {
+        ui.add_enabled_ui(*preview, |ui| egui::Grid::new("face-liquify").num_columns(2).show(ui, |ui| {
             for (group, least, sliders) in SLIDERS {
                 ui.label(RichText::new(group).strong());
                 ui.end_row();
@@ -173,11 +179,14 @@ impl FaceLiquify {
                     ui.end_row();
                 }
             }
-        });
+        }));
         ui.add_space(8.0);
-        if ui.add_enabled(*shape != Shape::default(), egui::Button::new("Reset")).clicked() {
-            *shape = Shape::default();
-        }
+        ui.horizontal(|ui| {
+            if ui.add_enabled(*preview && *shape != Shape::default(), egui::Button::new("Reset")).clicked() {
+                *shape = Shape::default();
+            }
+            ui.checkbox(preview, "Preview").on_hover_text("Off, the faces are shown as they were");
+        });
     }
 
     /// Give the faces `shapes`. A slider's whole drag is one step to undo.
@@ -420,6 +429,29 @@ mod tests {
         panel.shape(&ctx, &mut editor, &[Shape::default()]);
         editor.cancel_liquify();
         assert!(layer(&editor, 250, 300) && !layer(&editor, 236, 300));
+    }
+
+    #[test]
+    fn preview_off_shows_the_face_as_it_was_and_its_shape_is_still_applied() {
+        let mut editor = liquifying();
+        let red = |editor: &Editor, x, y| editor.doc.layers[0].pixels.get(x, y)[1] < 10000;
+        let bigger = Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() };
+        editor.shape_liquify_faces(&[bigger]);
+        editor.end_liquify_stroke();
+        assert!(editor.liquify_faces_shown() && red(&editor, 235, 300));
+        // Off: the eye is where it was, and the sliders are where they are.
+        editor.show_liquify_faces(false);
+        assert!(!editor.liquify_faces_shown() && red(&editor, 250, 300) && !red(&editor, 235, 300));
+        assert_eq!(shapes(&editor), [bigger]);
+        editor.show_liquify_faces(true);
+        assert!(red(&editor, 235, 300));
+        // Applied with it off, the face has its shape all the same.
+        editor.show_liquify_faces(false);
+        editor.commit_liquify();
+        assert!(red(&editor, 235, 300));
+        assert_eq!(editor.undo_label(), Some("Liquify"));
+        editor.begin_liquify().unwrap();
+        assert!(editor.liquify_faces_shown());
     }
 
     /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder

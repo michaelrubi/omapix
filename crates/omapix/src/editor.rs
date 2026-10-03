@@ -201,6 +201,9 @@ struct Liquifying {
     /// goes over.
     faces: Option<Vec<(Face, Shape)>>,
     shaped: Option<Field>,
+    /// The faces' warp isn't shown (the panel's Preview is off), until
+    /// Liquify is applied.
+    hidden: bool,
     /// How much of the brushes' warp Restore All is taking out (0–1):
     /// shown, but not yet in `field`.
     restore: f32,
@@ -1245,6 +1248,7 @@ impl Editor {
             field,
             shaped: faces.as_deref().and_then(|faces| shaped(faces, width, height, 0)),
             faces,
+            hidden: false,
             restore: 0.0,
             stroke: None,
             shaping: false,
@@ -1346,6 +1350,24 @@ impl Editor {
         self.reshape_liquify();
     }
 
+    /// Whether the faces' warp is shown: the panel's Preview.
+    pub fn liquify_faces_shown(&self) -> bool {
+        self.liquifying.as_ref().is_none_or(|l| !l.hidden)
+    }
+
+    /// Show the layer with the faces' warp, or without it to see them as
+    /// they were. Their shapes are kept, and applied with Liquify either
+    /// way.
+    pub fn show_liquify_faces(&mut self, shown: bool) {
+        self.end_liquify_stroke();
+        self.keep_liquify_restore();
+        let Some(liquifying) = self.liquifying.as_mut().filter(|l| l.hidden == shown) else {
+            return;
+        };
+        liquifying.hidden = !shown;
+        self.reshape_liquify();
+    }
+
     /// Make the faces' warp anew from their shapes, and show it: warping
     /// the layer, or while a slider's dragged and the canvas shows the
     /// image, as a quick look.
@@ -1358,7 +1380,8 @@ impl Editor {
         };
         let level = level.filter(|_| liquifying.shaping);
         let before = liquifying.shaped.as_ref().and_then(Field::extent);
-        liquifying.shaped = liquifying.faces.as_deref().and_then(|faces| shaped(faces, width, height, level.unwrap_or(0)));
+        let faces = liquifying.faces.as_deref().filter(|_| !liquifying.hidden);
+        liquifying.shaped = faces.and_then(|faces| shaped(faces, width, height, level.unwrap_or(0)));
         let after = liquifying.shaped.as_ref().and_then(Field::extent);
         // Where the brushes have been, they may show a face from elsewhere.
         let area = [before, after, liquifying.field.extent()].into_iter().flatten().reduce(union);
@@ -1433,7 +1456,8 @@ impl Editor {
         let Some(area) = liquifying.pending.take() else {
             return;
         };
-        liquifying.shaped = liquifying.faces.as_deref().and_then(|faces| shaped(faces, width, height, 0));
+        let faces = liquifying.faces.as_deref().filter(|_| !liquifying.hidden);
+        liquifying.shaped = faces.and_then(|faces| shaped(faces, width, height, 0));
         liquifying.small = Reduced::default();
         self.show_liquify(area);
     }
@@ -1528,6 +1552,7 @@ impl Editor {
     /// undone, it's as if it never opened.
     pub fn commit_liquify(&mut self) {
         self.end_liquify_stroke();
+        self.show_liquify_faces(true);
         self.keep_liquify_restore();
         let Some(liquifying) = self.liquifying.take() else {
             return;
