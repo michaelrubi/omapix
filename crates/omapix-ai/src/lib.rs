@@ -9,6 +9,7 @@ pub mod lama;
 pub mod models;
 pub mod sam;
 pub mod subject;
+pub mod upscale;
 mod tokenizer;
 
 pub use models::find_model;

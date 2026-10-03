@@ -13,16 +13,16 @@ use crate::tiled::Tiled;
 /// eighth of the square): NIND's outer 16 pixels are wrong, very dark. The
 /// image is reflected beyond its own edges so they're seen from inside a
 /// square too.
-const MARGIN: usize = 32;
+pub(crate) const MARGIN: usize = 32;
 /// How much the parts of neighbouring squares that are kept overlap (at
 /// most a quarter), for one answer to hand over to the next gradually.
-const OVERLAP: usize = 32;
+pub(crate) const OVERLAP: usize = 32;
 
 /// The model's answer is only trusted for detail: what it changes more
 /// broadly than this (a blur's standard deviation, in pixels) is put back.
 /// NIND darkens shadows and tints black and white photos a little, which
 /// noise doesn't do.
-const BROAD: f32 = 16.0;
+pub(crate) const BROAD: f32 = 16.0;
 
 /// Luma, from gamma-encoded sRGB, as noise is split into luminance and
 /// colour.
@@ -121,7 +121,7 @@ pub fn run(
 
 /// `plane` (`w` × `h`) blurred to about a Gaussian of `sigma`: three box
 /// blurs each way, with the edges held.
-fn blur(plane: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+pub(crate) fn blur(plane: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     let r = (((4.0 * sigma * sigma + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0) as usize;
     // One box blur along each row of `v` (`len` long, `rows` of them).
     let rows = |v: &mut [f32], len: usize| {
@@ -193,7 +193,7 @@ pub fn finish(
 
 /// Where the kept parts of squares, `size` across, start along a side
 /// `len` long, spread evenly so neighbours overlap by at least `overlap`.
-fn starts(len: usize, size: usize, overlap: usize) -> Vec<usize> {
+pub(crate) fn starts(len: usize, size: usize, overlap: usize) -> Vec<usize> {
     if len <= size {
         return vec![0];
     }
@@ -203,7 +203,7 @@ fn starts(len: usize, size: usize, overlap: usize) -> Vec<usize> {
 
 /// How much the kept part of a square starting at `start` counts, across
 /// it: fading in over `overlap` from each edge, except the image's own.
-fn ramp(start: usize, len: usize, size: usize, overlap: usize) -> Vec<f32> {
+pub(crate) fn ramp(start: usize, len: usize, size: usize, overlap: usize) -> Vec<f32> {
     let fade = |d: usize| ((d as f32 + 0.5) / overlap as f32).min(1.0);
     (0..size)
         .map(|i| {
@@ -215,7 +215,7 @@ fn ramp(start: usize, len: usize, size: usize, overlap: usize) -> Vec<f32> {
 }
 
 /// `i` reflected back into `0..len`.
-fn mirror(i: isize, len: usize) -> usize {
+pub(crate) fn mirror(i: isize, len: usize) -> usize {
     let period = (2 * len as isize - 2).max(1);
     let i = i.rem_euclid(period);
     (if i < len as isize { i } else { period - i }) as usize
