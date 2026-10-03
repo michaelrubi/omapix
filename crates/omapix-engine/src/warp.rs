@@ -1,8 +1,10 @@
-//! Warps, for Liquify (and later Face Symmetry and Reshape, see AI.md): a
-//! displacement field over the image, shaped by brush dabs, and images
-//! resampled through it.
+//! Warps, for Liquify and its face sliders (reshape.rs, and later Body
+//! Reshape, see AI.md): a displacement field over the image, shaped by
+//! brush dabs or by points that move, and images resampled through it.
 
 use std::ops::RangeInclusive;
+
+use rayon::prelude::*;
 
 use crate::Pixel;
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
@@ -126,6 +128,30 @@ impl Field {
         Some(self.shown(&across, &down))
     }
 
+    /// Add the smoothest warp that carries each of `moves`' first points to
+    /// its second (a thin-plate spline through them) within `area` (x0, y0,
+    /// x1, y1), scaled at each point by `fade` (0–1). A point that mustn't
+    /// move is pinned by a move to itself. It takes three points or more,
+    /// not all in a line.
+    pub fn move_points(&mut self, moves: &[([f32; 2], [f32; 2])], [x0, y0, x1, y1]: [u32; 4], fade: impl Fn([f32; 2]) -> f32 + Sync) {
+        let Some(spline) = Spline::through(moves) else {
+            return;
+        };
+        let range = |a: u32, b: u32, n: usize| a.div_ceil(STEP) as usize..=((b / STEP) as usize).min(n - 1);
+        let (across, down) = (range(x0, x1, self.cols), range(y0, y1, self.rows));
+        let step = STEP as f32;
+        self.d.par_chunks_mut(self.cols).enumerate().filter(|(j, _)| down.contains(j)).for_each(|(j, row)| {
+            for i in across.clone() {
+                let v = [i as f32 * step, j as f32 * step];
+                let fade = fade(v);
+                if fade > 0.0 {
+                    let d = spline.at(v);
+                    row[i] = [row[i][0] + d[0] * fade, row[i][1] + d[1] * fade];
+                }
+            }
+        });
+    }
+
     /// The area of the image that changes with grid points `across` ×
     /// `down`: interpolation carries a point's change a step either side.
     fn shown(&self, across: &RangeInclusive<usize>, down: &RangeInclusive<usize>) -> [u32; 4] {
@@ -173,6 +199,94 @@ impl Field {
     }
 }
 
+/// A thin-plate spline: the displacement that's given at some points, and
+/// bends the least in between.
+struct Spline {
+    /// The points, measured from `centre` in units of `scale`, so the sums
+    /// stay near 1 wherever and however big they are.
+    points: Vec<[f64; 2]>,
+    centre: [f64; 2],
+    scale: f64,
+    /// For x and for y: each point's weight, then a constant and a slope
+    /// each way.
+    weights: [Vec<f64>; 2],
+}
+
+impl Spline {
+    /// How closely the spline keeps to its points: a little slack, so points
+    /// nearly on top of each other don't tear it.
+    const SLACK: f64 = 1e-6;
+
+    /// The spline that, where each of `moves` ends up, reads from where it
+    /// was: what a [`Field`] holds. `None` if the points don't pin it down.
+    fn through(moves: &[([f32; 2], [f32; 2])]) -> Option<Self> {
+        let n = moves.len();
+        let count = n.max(1) as f64;
+        let centre = [0, 1].map(|c| moves.iter().map(|(_, to)| f64::from(to[c])).sum::<f64>() / count);
+        let spread = moves.iter().map(|(_, to)| (f64::from(to[0]) - centre[0]).powi(2) + (f64::from(to[1]) - centre[1]).powi(2));
+        let scale = (spread.sum::<f64>() / count).sqrt().max(1e-6);
+        let points: Vec<[f64; 2]> = moves.iter().map(|(_, to)| [0, 1].map(|c| (f64::from(to[c]) - centre[c]) / scale)).collect();
+        // Each point's displacement is the bends from every point, plus the
+        // constant and slopes; and the bends balance, so far away it's flat.
+        let size = n + 3;
+        let mut rows = vec![vec![0.0f64; size + 2]; size];
+        for (i, p) in points.iter().enumerate() {
+            for (j, q) in points.iter().enumerate() {
+                rows[i][j] = if i == j { Self::SLACK } else { bend(p, q) };
+            }
+            for (k, v) in [1.0, p[0], p[1]].into_iter().enumerate() {
+                (rows[i][n + k], rows[n + k][i]) = (v, v);
+            }
+            let (from, to) = moves[i];
+            (rows[i][size], rows[i][size + 1]) = (f64::from(from[0] - to[0]), f64::from(from[1] - to[1]));
+        }
+        // Gaussian elimination, with the largest pivot each time.
+        for k in 0..size {
+            let pivot = (k..size).max_by(|&a, &b| rows[a][k].abs().total_cmp(&rows[b][k].abs()))?;
+            if rows[pivot][k].abs() < 1e-12 {
+                return None;
+            }
+            rows.swap(k, pivot);
+            let (above, below) = rows.split_at_mut(k + 1);
+            let row = &above[k];
+            for other in below {
+                let factor = other[k] / row[k];
+                if factor != 0.0 {
+                    for c in k..size + 2 {
+                        other[c] -= factor * row[c];
+                    }
+                }
+            }
+        }
+        let mut weights = [vec![0.0f64; size], vec![0.0f64; size]];
+        for (c, weights) in weights.iter_mut().enumerate() {
+            for k in (0..size).rev() {
+                let known: f64 = (k + 1..size).map(|j| rows[k][j] * weights[j]).sum();
+                weights[k] = (rows[k][size + c] - known) / rows[k][k];
+            }
+        }
+        Some(Self { points, centre, scale, weights })
+    }
+
+    /// The displacement at `v`, in pixels.
+    fn at(&self, v: [f32; 2]) -> [f32; 2] {
+        let v = [0, 1].map(|c| (f64::from(v[c]) - self.centre[c]) / self.scale);
+        let n = self.points.len();
+        let mut d = [0, 1].map(|c| self.weights[c][n] + self.weights[c][n + 1] * v[0] + self.weights[c][n + 2] * v[1]);
+        for (i, p) in self.points.iter().enumerate() {
+            let bend = bend(&v, p);
+            d = [d[0] + self.weights[0][i] * bend, d[1] + self.weights[1][i] * bend];
+        }
+        d.map(|d| d as f32)
+    }
+}
+
+/// How a thin plate bent at `q` rises at `p`: r² ln r, at a distance of r.
+fn bend(p: &[f64; 2], q: &[f64; 2]) -> f64 {
+    let r2 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
+    if r2 > 0.0 { 0.5 * r2 * r2.ln() } else { 0.0 }
+}
+
 /// Part of a [`Field`]'s grid, as it was.
 pub struct Patch {
     across: RangeInclusive<usize>,
@@ -181,8 +295,15 @@ pub struct Patch {
 }
 
 /// Write `source` warped by `field` into `dest` within `area` (x0, y0, x1,
-/// y1), returning the tiles written.
-pub fn warp_area(source: &Tiled<Pixel>, field: &Field, dest: &mut Tiled<Pixel>, [x0, y0, x1, y1]: [u32; 4]) -> Vec<(u32, u32)> {
+/// y1), returning the tiles written. With `under`, the source is warped by
+/// that first, and `field` warps the result.
+pub fn warp_area(
+    source: &Tiled<Pixel>,
+    field: &Field,
+    under: Option<&Field>,
+    dest: &mut Tiled<Pixel>,
+    [x0, y0, x1, y1]: [u32; 4],
+) -> Vec<(u32, u32)> {
     if x0 >= x1 || y0 >= y1 {
         return Vec::new();
     }
@@ -196,7 +317,11 @@ pub fn warp_area(source: &Tiled<Pixel>, field: &Field, dest: &mut Tiled<Pixel>, 
         let (tx, ty) = (col * TILE, row * TILE);
         for y in y0.max(ty)..y1.min(ty + TILE) {
             for x in x0.max(tx)..x1.min(tx + TILE) {
-                let [dx, dy] = field.at(x as f32, y as f32);
+                let [mut dx, mut dy] = field.at(x as f32, y as f32);
+                if let Some(under) = under {
+                    let below = under.at(x as f32 + dx, y as f32 + dy);
+                    (dx, dy) = (dx + below[0], dy + below[1]);
+                }
                 tile[((y - ty) * TILE + x - tx) as usize] = if dx == 0.0 && dy == 0.0 {
                     source.get(x, y)
                 } else {
@@ -212,7 +337,7 @@ pub fn warp_area(source: &Tiled<Pixel>, field: &Field, dest: &mut Tiled<Pixel>, 
 /// `source` warped by `field`.
 pub fn warped(source: &Tiled<Pixel>, field: &Field) -> Tiled<Pixel> {
     let mut out = source.clone();
-    warp_area(source, field, &mut out, [0, 0, source.width(), source.height()]);
+    warp_area(source, field, None, &mut out, [0, 0, source.width(), source.height()]);
     out
 }
 
@@ -324,12 +449,68 @@ mod tests {
     }
 
     #[test]
+    fn moved_points_carry_what_is_round_them_and_pinned_points_stay() {
+        let image = disc(10.0);
+        let mut field = Field::new(200, 200);
+        // The disc goes 12 px right, with a ring of pins 60 px out.
+        let pins = (0..16).map(|k| {
+            let (sin, cos) = (k as f32 * std::f32::consts::TAU / 16.0).sin_cos();
+            [100.0 + 60.0 * cos, 100.0 + 60.0 * sin]
+        });
+        let mut moves: Vec<_> = pins.map(|p| (p, p)).collect();
+        moves.push(([100.0, 100.0], [112.0, 100.0]));
+        field.move_points(&moves, [20, 20, 180, 180], |_| 1.0);
+        let at = field.at(112.0, 100.0);
+        assert!((at[0] + 12.0).abs() < 1e-2 && at[1].abs() < 1e-2, "{at:?}");
+        let pinned = field.at(160.0, 100.0);
+        assert!(pinned[0].abs() < 1e-2 && pinned[1].abs() < 1e-2, "{pinned:?}");
+        let out = warped(&image, &field);
+        assert_eq!((out.get(105, 100), out.get(112, 100), out.get(119, 100)), (RED, RED, RED));
+        assert_eq!(out.get(98, 100), GREY, "carried whole, not smeared");
+        // Nothing outside the area, and nothing where it fades to nothing.
+        let extent = field.extent().unwrap();
+        assert!(extent[0] >= 16 && extent[1] >= 16 && extent[2] <= 185 && extent[3] <= 185, "{extent:?}");
+        let mut faded = Field::new(200, 200);
+        faded.move_points(&moves, [20, 20, 180, 180], |_| 0.0);
+        assert_eq!(faded.extent(), None);
+    }
+
+    #[test]
+    fn points_that_do_not_move_leave_no_warp() {
+        let mut field = Field::new(200, 200);
+        let pins = [[40.3, 50.7], [150.2, 60.1], [90.9, 160.4]].map(|p| (p, p));
+        field.move_points(&pins, [0, 0, 200, 200], |_| 1.0);
+        assert_eq!(field.extent(), None);
+    }
+
+    #[test]
+    fn a_warp_under_another_is_done_first() {
+        let image = disc(10.0);
+        // Under: everything 8 px right. Over: a bloat at the disc's new place.
+        let mut under = Field::new(200, 200);
+        let right = [[0.0, 0.0], [200.0, 0.0], [0.0, 200.0]].map(|p| (p, [p[0] + 8.0, p[1]]));
+        under.move_points(&right, [0, 0, 200, 200], |_| 1.0);
+        let moved = warped(&image, &under);
+        assert_eq!((moved.get(117, 100), moved.get(91, 100)), (RED, GREY));
+        let mut over = Field::new(200, 200);
+        over.dab(Brush::Bloat, [108.0, 100.0], 40.0, 0.3, [0.0; 2]);
+        let mut both = image.clone();
+        warp_area(&image, &over, Some(&under), &mut both, [0, 0, 200, 200]);
+        let in_turn = warped(&moved, &over);
+        // The same as one after the other, but for resampling twice.
+        for (x, y) in [(108, 100), (120, 100), (96, 100), (108, 112), (60, 60)] {
+            assert_eq!(both.get(x, y), in_turn.get(x, y), "{x}, {y}");
+        }
+        assert_eq!(both.get(120, 100), RED, "bloated");
+    }
+
+    #[test]
     fn a_dab_changes_only_the_area_it_reports() {
         let image = disc(10.0);
         let mut field = Field::new(200, 200);
         let area = field.dab(Brush::ForwardWarp, [50.0, 60.0], 10.0, 1.0, [5.0, 3.0]).unwrap();
         let mut dest = image.clone();
-        let tiles = warp_area(&image, &field, &mut dest, area);
+        let tiles = warp_area(&image, &field, None, &mut dest, area);
         assert_eq!(tiles, [(0, 0)]);
         assert_eq!(dest.to_vec(), warped(&image, &field).to_vec());
     }

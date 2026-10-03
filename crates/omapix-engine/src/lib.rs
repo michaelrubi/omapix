@@ -25,6 +25,7 @@ pub mod pyramid;
 pub mod raster;
 pub mod refine;
 pub mod reduced;
+pub mod reshape;
 pub mod retouch;
 pub mod selection;
 pub mod skin;
