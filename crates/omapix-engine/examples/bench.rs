@@ -63,7 +63,7 @@ fn main() {
         let t = Instant::now();
         let c = [doc.width as f32 / 2.0, doc.height as f32 / 2.0];
         let area = field.dab(omapix_engine::warp::Brush::ForwardWarp, c, radius, 1.0, [10.0, 0.0]).unwrap();
-        omapix_engine::warp::warp_area(&doc.layers[0].pixels, &field, &mut layer, area);
+        omapix_engine::warp::warp_area(&doc.layers[0].pixels, &field, None, &mut layer, area, 0);
         println!("liquify dab r{radius:<4} {:>8.1?}", t.elapsed());
     }
     {
@@ -77,7 +77,7 @@ fn main() {
         let mut shown = field.clone();
         shown.scale(0.5);
         let area = field.extent().unwrap();
-        omapix_engine::warp::warp_area(&doc.layers[0].pixels, &shown, &mut layer, area);
+        omapix_engine::warp::warp_area(&doc.layers[0].pixels, &shown, None, &mut layer, area, 0);
         println!("liquify restore {:>8.1?}", t.elapsed());
     }
 

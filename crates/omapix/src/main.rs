@@ -10,6 +10,7 @@ mod denoise;
 mod select_subject;
 mod drop;
 mod even_tone;
+mod face_liquify;
 mod editor;
 mod face_selection;
 mod heal_blemishes;

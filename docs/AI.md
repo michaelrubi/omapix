@@ -439,6 +439,10 @@ Also from the same masks, later:
 - The moves become a smooth warp (see Warps below), limited to the face
   and faded out before the hairline and the face's edge.
 
+As built (see "Face-Aware Liquify" below), the mirror is a plane fitted in
+depth to every pair of points, each side of a feature moves as a whole, and
+less is done the more a face is turned from the camera.
+
 ### 8. Reshape (easy Liquify)
 
 *Evoto's face and body shaping. Liquify with sliders instead of brushes.
@@ -489,6 +493,12 @@ engine in `omapix-engine` (plain CPU maths, headless tests):
   delete that matter.
 - **Live preview:** the warp applied to the shrunk pyramid level on screen
   while a slider moves, then at full size.
+
+As built for faces (see "Face-Aware Liquify" below): the field is a
+thin-plate spline through the points, on Liquify's 4 px grid; the warp is
+applied to the layer being liquified, under the brushes' warp, rather than
+to a Reshape layer; and while a slider's dragged it's shown on the shrunk
+level on screen, as designed, and the layer warped when it's let go.
 
 ### 9. Generative Fill
 
@@ -570,8 +580,8 @@ the spike:
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) (measured: 0.4 s) | same |
 | Even Tone (masks at 24 MP) | < 0.3 s (CPU) (measured: under 0.1 s) | same |
 | Auto Retouch end to end, per face | < 3 s (measured: 0.5–2.5 s in all, for one to three faces) | < 10 s |
-| Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
-| Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) | same |
+| Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms (measured: 15–50 ms fitted in a 1600 × 1000 canvas) | same |
+| Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) (measured: 0.03–0.3 s, the most for a face that fills the frame) | same |
 
 - **Memory:** GPU memory well under 2 GB with all default models loaded.
   Idle unloading returns it.
@@ -676,8 +686,18 @@ Reordered on 2026-09-29 (see Decisions).
      people with SAM.
 8. ~~**Warps and Liquify**~~ (done): the warp engine, and brush Liquify
    (roadmap section 3), the way to touch up what the sliders do.
-9. **Face-Aware Liquify and Face Symmetry**, in the Liquify dialog. Cheap
-   once face points (2) and the warp engine (8) exist.
+9. ~~**Face-Aware Liquify and Face Symmetry**, in the Liquify dialog.~~
+   (done, 2026-10-03)
+   - Face-Aware (A) in Liquify's options bar opens a panel of sliders for
+     each face found in the layer: Symmetry for the eyes, brows, nose,
+     mouth and jaw, and eleven for its shape. They warp the layer under
+     the brushes' warp, a drag is a step for Ctrl+Z, and Liquify carries on
+     with them when it's opened again. See "Face-Aware Liquify" below.
+   - Done (2026-10-03): while a slider's dragged, a quick look at the size
+     on screen, and the layer warped once it's let go.
+   - Left: a Reshape layer that keeps its settings and can be updated (it
+     comes with Body Reshape); thumbnails and clicking a face to pick it;
+     faces in profile.
 10. **Generative Fill.** After the portrait work, which is used on every
     photo, while Generative Fill is for the occasional big removal or
     extension. By then Arch's ONNX Runtime should have reached 1.30. Starts
@@ -971,6 +991,111 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   its eyes in a 24 MP group shot had no skin found, so it was left out);
   skin split between people with SAM; a preview of the smoothing and
   evening (the circles are all the dialog shows).
+
+### Face-Aware Liquify
+
+As built (`omapix_engine::reshape`, `Field::move_points` in
+`omapix_engine::warp`, `crates/omapix/src/face_liquify.rs`), looked at on
+Michael's portraits and group shots and the photos in
+`~/Pictures/blemish-tests` (nearly all turned from the camera, which is
+what showed where Symmetry goes wrong) through the ignored test
+`face_liquify_in_photos`, which puts each face before and after side by
+side (`SHAPE` sets the sliders by name: all of Symmetry at 100 if unset):
+
+```
+SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
+  cargo test --release -p omapix face_liquify_in_photos -- --ignored
+```
+
+- **Where it lives.** In Liquify: Face-Aware (A, the key of Photoshop's
+  Face tool) in the options bar opens the panel, greyed out without the
+  face models. The faces are looked for the first time it opens, in the
+  document as it was before Liquify's warp, so nothing loads for someone
+  who only wants the brushes. Faces the landmarker can't see (profiles)
+  have no sliders.
+- **Points.** From the landmarks: each eye's and brow's outline, the
+  nose's (and five points down its bridge), the lips' outer and inner
+  edges and the face's outline, about 150 points, as pairs that mirror
+  each other and points on the midline (`reshape::Face`). The rings'
+  orders give the pairs: on front-facing photos, a point's mirror image
+  lands within 1–2 % of the distance between the eyes of its pair.
+- **Under the brushes.** The sliders' warp is a field of its own, made
+  anew from the layer as it was at each change; the brushes' field goes
+  over it (`warp_area`'s `under`). So the brushes touch up what the
+  sliders did, and Reconstruct and Restore All take back only the brushes'
+  work, as in Photoshop: the sliders, and Reset, undo their own. A drag is
+  one step for Ctrl+Z among the strokes, and the faces and their sliders
+  are kept with the layer's mesh for the next Liquify.
+- **The warp.** The design's rigid moving least squares was tried first.
+  Weighted by the inverse square of the distance, an edge between two
+  moved points sagged towards the unmoved ones, and the jaw came out
+  scalloped; by the fourth power the scallops went, but the warp broke
+  into a cell round each point, and a narrowed cheek came out jagged
+  where the outline's points are near the eye's and the lips'. A
+  thin-plate spline through the points (one small linear system for each
+  change) has neither. It's worked out on Liquify's 4 px grid within an
+  ellipse 1.6 times the face's outline, pinned at 32 points round it and
+  faded out from 1.3, so there's room for the jaw to move and for hair
+  and background to stretch.
+- **Sliders**, from −100 to 100, in the face's own axes (across is from
+  eye to eye). At 100: Eye Size 20 % larger about each eye's middle; Eye
+  Distance 0.08 IOD further out each; Nose Length 0.1 IOD and Nose Width
+  25 %, nothing at the top of the bridge and the most at the base; Smile
+  the corners of the mouth up 0.1 IOD; Lip Fullness the lips' outer edge
+  35 % further from their inner edge; Mouth Width 15 %; Forehead its top
+  up 0.15 IOD; Chin Height the chin down 0.12 IOD; Jawline 15 % wider from
+  the mouth down; Face Width 12 % wider from the eyes down. Features a
+  slider doesn't move are pinned where they are, so a narrower face
+  squeezes the cheeks, not the nose. Each at 100 or −100 comes out
+  smooth on the portraits tried, a few at once too. Jawline and Face
+  Width both at −100 is about as far as hair beside the face will
+  stretch.
+- **Symmetry**, from 0 to 100 for the eyes, brows, nose, mouth and jaw.
+  - The mirror is a plane, fitted by least squares to every pair and
+    midline point with the landmarks' depth, rather than a line through
+    the midline. The depth is to the same scale as x and y: scaling it by
+    anything but 1 made every test face less symmetrical.
+  - Each side of a feature moves as a whole (shifted, turned and scaled
+    half way to the other side's mirror image), and midline points go
+    onto the plane. Point by point, the landmarks' noise made the jaw
+    wavy.
+  - On faces looking at the camera the two sides differ by 0.2–1.4 % of
+    IOD, so Symmetry is subtle, as it should be. On faces turned 25° or
+    more they seem to differ by 3–15 %, most of all the outline and the
+    brows, because the far side's points are guesses, and at 100 that bent
+    jaws and brows. So it's scaled down from a turn of 6° to nothing at
+    24° (the sine of the turn, 0.1 to 0.4), and the sliders say so when
+    hovered.
+- **While a slider's dragged**, the layer isn't warped: the canvas shows
+  a pyramid level (half size, a quarter…) when zoomed out, so the layer's
+  pixels before, shrunk to that level, are warped where they're on screen
+  and composited with the other layers shrunk likewise
+  (`Editor::preview_liquify`, `warp_area`'s `level`), and the full-size
+  levels are left stale. When the drag ends (or anything else happens in
+  Liquify) the layer is warped over all the drag touched. A click on a
+  slider, a typed value and Reset warp it at once. At 100 % and closer
+  it's the full-size warp of what's on screen.
+- **Preview** in the panel, off, shows the layer without the sliders'
+  warp (the brushes' stays), to compare with the faces as they were. The
+  sliders keep their values and wait, and Liquify applies them whether
+  it's on or off.
+- **The spline** is worked out at points IOD / 100 apart (at least the
+  4 px grid) and interpolated between: with every slider at its end, that
+  is within a pixel of the spline everywhere, and at IOD / 50 it was up
+  to 3 px out beside the eyes. For the quick look it's 2^level coarser, so
+  as close in the pixels shown.
+- **Speed.** Fitted in a 1600 × 1000 canvas, a step of a drag takes
+  15–50 ms (the most for a face that fills the frame at 28 %, which is
+  shown at half size), and the first of a drag 20–35 ms more to shrink
+  the layers. Warping the layer takes 30 ms for faces 200 px across,
+  0.13 s for two faces 1000 px across at 24 MP, and 0.3 s for a face that
+  fills a 21 MP frame, with the canvas redrawn. Finding the faces takes
+  0.2–0.5 s once the models are loaded.
+- **Left:** a face cut off by the image's edge smears there when it's
+  moved a lot;
+  thumbnails of the faces, and clicking one to pick it; Photoshop's
+  handles on the canvas; faces in profile; keeping the sliders in the
+  .ora; telling the user when Symmetry is being held back for a face.
 
 ## Decisions
 

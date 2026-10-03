@@ -166,9 +166,11 @@ enum Dialog {
     AiModels(Vec<Option<HashMap<&'static str, PathBuf>>>),
 }
 
+/// The models that find faces, their points and their skin.
+const FACE_MODELS: &[&str] = &[omapix_ai::face::DETECTOR, omapix_ai::face::LANDMARKER, omapix_ai::face::SEGMENTER];
+
 /// The AI models `cmd` needs.
 fn models_for(cmd: Command) -> &'static [&'static str] {
-    use omapix_ai::face::{DETECTOR, LANDMARKER, SEGMENTER};
     match cmd {
         Command::SelectSubject => &[omapix_ai::subject::MODEL],
         Command::ContentAwareFill => &[omapix_ai::lama::MODEL],
@@ -181,7 +183,7 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::AutoRetouch
         | Command::HealBlemishes
         | Command::SmoothSkin
-        | Command::EvenTone => &[DETECTOR, LANDMARKER, SEGMENTER],
+        | Command::EvenTone => FACE_MODELS,
         _ => &[],
     }
 }
@@ -189,9 +191,14 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
 /// The names of the models `cmd` needs that aren't on disk, as last
 /// checked.
 fn missing_models(cmd: Command, on_disk: &HashMap<&'static str, bool>) -> Vec<&'static str> {
+    missing(models_for(cmd), on_disk)
+}
+
+/// The names of those of the models `ids` that aren't on disk, as last
+/// checked.
+fn missing(ids: &[&str], on_disk: &HashMap<&'static str, bool>) -> Vec<&'static str> {
     let models = omapix_ai::models::models();
-    models_for(cmd)
-        .iter()
+    ids.iter()
         .filter(|id| on_disk.get(*id) == Some(&false))
         .filter_map(|id| models.iter().find(|m| m.id == *id).map(|m| m.name))
         .collect()
@@ -442,6 +449,7 @@ pub struct App {
     denoising: crate::denoise::Denoising,
     select_subject: SelectSubject,
     face_selection: FaceSelection,
+    face_liquify: crate::face_liquify::FaceLiquify,
     /// Which AI models are on disk, by id, as last checked: on a thread at
     /// startup (finding a shared model means reading it through), and
     /// whenever Help › AI Models opens.
@@ -522,6 +530,7 @@ impl App {
             denoising: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            face_liquify: Default::default(),
             models: HashMap::new(),
             models_check: Some(check_models(ctx)),
         };
@@ -3074,6 +3083,20 @@ self.filters.remember(&filter);
         self.liquify_at = None;
     }
 
+    /// Face-Aware Liquify's panel, while Liquify is open and it's switched
+    /// on (and the face models are there).
+    fn face_liquify(&mut self, ctx: &egui::Context) {
+        let open = &mut self.tools.liquify.face_aware;
+        match &mut self.editor {
+            Some(editor) if editor.liquifying() => {
+                if *open && missing(FACE_MODELS, &self.models).is_empty() {
+                    self.face_liquify.show(ctx, editor, &self.theme, open);
+                }
+            }
+            _ => self.face_liquify = Default::default(),
+        }
+    }
+
     /// Liquify's brush on the canvas. Forward Warp and Push Left follow the
     /// pointer; the others work while the button is held ([`Self::liquify_held`]).
     fn liquify_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
@@ -4580,7 +4603,8 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     if editor.liquifying() {
                         let mut restore = editor.liquify_restore();
-                        self.tools.liquify.options_bar(ui, &self.theme, &mut restore);
+                        let missing = missing(FACE_MODELS, &self.models);
+                        self.tools.liquify.options_bar(ui, &self.theme, &mut restore, &missing);
                         if restore != editor.liquify_restore() {
                             editor.set_liquify_restore(restore);
                         }
@@ -4797,6 +4821,7 @@ impl eframe::App for App {
             response.context_menu(|ui| self.canvas_menu(ui));
         }
         let ctx = ui.ctx().clone();
+        self.face_liquify(&ctx);
         self.dialogs(&ctx);
         if let Some(tablet) = &self.tablet {
             tablet.set_cursor(ctx.output(|o| o.cursor_icon));
@@ -5268,6 +5293,7 @@ mod tests {
             denoising: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
+            face_liquify: Default::default(),
             models: HashMap::new(),
             models_check: None,
         }
@@ -6639,7 +6665,15 @@ mod tests {
         assert_eq!(pixel(&app, 320, 200), red);
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Liquify"));
         key(&mut app, egui::Key::W);
+        key(&mut app, egui::Key::A);
         assert_eq!(app.tools.liquify.brush, Brush::Reconstruct, "keys are Liquify's only while it's open");
+        assert!(!app.tools.liquify.face_aware);
+        // A opens and closes Face-Aware Liquify's panel.
+        app.run(Command::Liquify, &ctx);
+        key(&mut app, egui::Key::A);
+        assert!(app.tools.liquify.face_aware);
+        key(&mut app, egui::Key::A);
+        assert!(!app.tools.liquify.face_aware);
     }
 
     #[test]
