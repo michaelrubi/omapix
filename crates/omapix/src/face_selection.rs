@@ -6,6 +6,7 @@
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
+use egui::{Pos2, pos2};
 use omapix_ai::face::{Analysis, BODY_SKIN, FACE_SKIN, Faces, HAIR, Image, outline};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, Tiled};
@@ -248,6 +249,34 @@ pub fn scale(analysis: &Analysis) -> Option<f32> {
             (r[0] - l[0]).hypot(r[1] - l[1]).max((face.bounds[3] - face.bounds[1]) / 3.0)
         })
         .reduce(f32::max)
+}
+
+/// What Smooth Skin and Even Tone work from: what the active layer and
+/// those below it show, the skin in it, the distance between the eyes of
+/// its largest face, and that face's cheek and nose.
+pub struct FoundSkin {
+    pub image: Raster,
+    pub skin: Selection,
+    pub iod: f32,
+    pub cheek: Pos2,
+    pub nose: Pos2,
+}
+
+/// The skin in `image`, its faces and body, measured by its largest face.
+pub fn find_skin(image: Raster, profile: &ColorProfile) -> Result<FoundSkin, String> {
+    let (_, analysis) = analyse(&image, profile)?;
+    let iod = scale(&analysis).ok_or("Found no faces facing the camera")?;
+    let skin = skin(&analysis, &image, &[BODY_SKIN, FACE_SKIN]);
+    let height = |b: &[f32; 4]| b[3] - b[1];
+    let face = analysis.faces.iter().map(|(f, _)| f).max_by(|a, b| height(&a.bounds).total_cmp(&height(&b.bounds)));
+    let middle = pos2(image.width() as f32 / 2.0, image.height() as f32 / 2.0);
+    // The cheek: halfway between an eye and the corner of the mouth below
+    // it.
+    let (cheek, nose) = face.map_or((middle, middle), |f| {
+        let [eye, nose, mouth] = [f.points[0], f.points[2], f.points[3]];
+        (pos2((eye[0] + mouth[0]) / 2.0, (eye[1] + mouth[1]) / 2.0), pos2(nose[0], nose[1]))
+    });
+    Ok(FoundSkin { image, skin, iod, cheek, nose })
 }
 
 /// The points of each face the landmarker saw.
