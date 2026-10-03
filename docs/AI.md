@@ -182,8 +182,9 @@ goes in the engine, where it can be tested without models.
   `~/.config/omapix/model_folders`, one a line.
 - `scripts/fetch-models.sh` downloads the default set with `curl`, checks
   the checksums, and prints each model's size and licence before
-  downloading. Omapix itself never touches the network. SAM 2.1 has no
-  download URL yet: darktable installs it (as a zipped `.dtmodel`).
+  downloading. Omapix itself never touches the network. SAM 2.1, NIND and
+  RealPLKSR have no download URL yet: darktable installs them (as zipped
+  `.dtmodel`s).
 - A Help › AI Models dialog lists what's installed, where from, the licence
   and GPU/CPU, and says how to run the script for what's missing.
 
@@ -566,6 +567,7 @@ Default set, all usable for commercial work:
 | Skin, hair | MediaPipe multiclass selfie segmentation | 16 MB | Apache-2.0 | `senty-au`'s ONNX conversion, checked against the TFLite. 256×256 input, so the guided filter matters. |
 | Body points (Reshape) | MediaPipe Pose Landmarker | ~6–30 MB | Apache-2.0 | 33 points. Lite/Full/Heavy variants. |
 | Content-Aware Fill | LaMa | 208 MB | Apache-2.0 | Installed by `fetch-models.sh`. |
+| Upscaling | RealPLKSR (×2 and ×4) | 59 MB | MIT | Already installed via darktable. Trained on DF2K; Flickr2K has no explicit licence (darktable's model card), so like SAM it doesn't strictly meet principle 4. |
 | Generative Fill | FLUX.2 klein 4B (int4 ONNX) | 7.8 GB | Apache-2.0 | Optional download (`scripts/fetch-models.sh fill-flux2-klein-4b`), GPU only. `hlhc`'s export, with Qwen3 as its text encoder. Runs on ONNX Runtime 1.29. The 9B model is non-commercial, so it's left out. |
 
 About 600 MB total without BiRefNet's large variant and FLUX.2, on disk
@@ -607,6 +609,7 @@ the spike:
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms (measured: 15–50 ms fitted in a 1600 × 1000 canvas) | same |
 | Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) (measured: 0.03–0.3 s, the most for a face that fills the frame) | same |
 | Generative Fill, three results | (measured: 34 s, the first after 16 s) | not offered |
+| AI upscaling, 24 MP to 96 MP | (measured: 3 min, 150 squares at 1.2 s each) | far longer |
 
 - **Memory:** GPU memory well under 2 GB with all default models loaded.
   Idle unloading returns it. Generative Fill is the exception: 6.9 GB
@@ -770,8 +773,14 @@ Reordered on 2026-09-29 (see Decisions).
 - Left: the fill's tone can differ a little from the picture's, which the
   overlap softens but doesn't always hide; more than about half as much
   again each way comes out soft, being made at 450 px.
-11. **AI upscaling** for print enlargements in Image Size (darktable's RealPLKSR, MIT, already
-    on disk).
+11. ~~**AI upscaling** for print enlargements in Image Size (darktable's
+    RealPLKSR, MIT, already on disk).~~ (done, 2026-10-03)
+    - Enlarge with AI in Image › Image Size…, for a larger size: the
+      model enlarges what the image shows onto a new Upscale layer, over
+      the layers, masks and selection enlarged as before (bicubic), as one
+      undo step. See "Upscaling" below.
+    - Left: a preview; stopping it part way; a faster run (it's about
+      3 minutes at 24 MP); `ImageSize` in `OMAPIX_SCRIPT`.
 12. **Body Reshape**, with the pose model and background protection.
 13. **Later:**
     - the optional learned blemish detector
@@ -1322,6 +1331,65 @@ cargo run --release -p omapix-ai --example genfill -- extend out photo.jpg left 
     models, a browser) still leaves too little: it says so.
   - Greying the command out without CUDA, or with nothing to fill, which
     can't be known without loading or looking.
+
+### Upscaling
+
+As built (`omapix_engine::upscale`, `omapix_ai::upscale`,
+`crates/omapix/src/upscale.rs`). RealPLKSR is the upscaler darktable
+installs as `upscale-realplksr`, as two files: ×2 (a fixed 512 × 512
+square in, 1024 out) and ×4 (256 in, 1024 out), sRGB from 0 to 1 as red,
+green and blue planes. Looked at on a 24 MP portrait and a small JPEG from
+Facebook:
+
+```
+cargo run --release -p omapix-ai --example upscale -- out photo.jpg
+```
+
+- **A layer on top.** The layers of a retouch aren't photos (a Blemishes
+  layer is mostly empty, a frequency separation's High layer is grey), and
+  a model's answers for each wouldn't add up to the picture again as
+  bicubic's do. So the document is resized as before, and the model
+  enlarges what it shows onto an Upscale layer on top, as Denoise does:
+  hiding it shows the ordinary enlargement, and its opacity or a mask
+  holds the model back.
+- **Squares**, as Denoise cuts them: 32 pixels thrown away on each side,
+  the kept parts overlapping by 32 and fading from one to the next, the
+  image reflected beyond its edges.
+- **Any size.** Up to twice the size uses ×2, anything larger ×4, and the
+  answer is fitted to the size asked for (bicubic), so 150 % or 300 % work,
+  and so does 500 %, the last step being bicubic.
+- **Only detail changes**, as with Denoise. RealPLKSR lightens reds and
+  greens by 1.3 levels in 255, so where its answer, shrunk back, differs
+  broadly from the image (a blur of σ 16 px), that's taken out. Means
+  before and after now match to 0.01 levels.
+- **Wide gamut and transparency.** What the model adds goes on as a
+  change to the bicubic enlargement in the document's colours, so ProPhoto
+  colours aren't clipped to sRGB, and the layer's transparency is the
+  bicubic one's.
+- **Slow.** 1.2 s a square on the GPU (it's working flat out: the model
+  runs 28 blocks at full size, where NIND shrinks the image first), so
+  11 s for 1 MP and 3 minutes for 24 MP at ×2, with the status bar
+  counting squares. ×4 takes as long for the same image, with four times
+  the squares at a quarter the size. cuDNN trying every algorithm rather
+  than choosing by rule (Runtime) is no faster. The model is loaded for
+  the job and dropped after it (1.1 GB of the card).
+- **What it's good for.** Hair, lashes, brows and edges come out clearly
+  sharper than bicubic's; skin keeps its texture. On a heavily compressed
+  JPEG it sharpens the blocks too: Denoise first.
+- **Meanwhile** Omapix carries on, and Image Size is greyed out. When the
+  model's done the document is resized as it then is, so edits made
+  meanwhile are kept, under the Upscale layer; if its size has changed
+  (a crop), the enlargement is dropped with a message.
+- **Left:**
+  - A preview box, as Denoise has.
+  - Stopping it part way.
+  - Speed: 16-bit floats or TensorRT, as for Denoise.
+  - Memory: up to 7.8 GB going from 24 MP to 96 MP (measured with the
+    example), while it puts the result together: the copies made between
+    steps could be fewer.
+  - Transparent edges: the model sees the colour under them as it's
+    stored.
+  - `ImageSize` as an `OMAPIX_SCRIPT` step.
 
 ## Decisions
 
