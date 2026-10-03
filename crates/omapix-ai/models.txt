@@ -36,3 +36,7 @@ file|fill-flux2-klein-4b|text_encoder.onnx.data|3089182720|2e35627881f7ea3ffa7cc
 file|fill-flux2-klein-4b|vae_encoder.onnx|137811547|d64bb37f97bffb9162cd00ab833ca85d4bc23ad7ec62145756a2b58616ae44fe|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/vae_encoder.onnx
 file|fill-flux2-klein-4b|vae_decoder.onnx|198603667|20817bfe5cc1a81043bc3dc320c4d4944d5ac3f10f7573e42e0e8379fcc39c3b|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/vae_decoder.onnx
 file|fill-flux2-klein-4b|tokenizer.json|11422650|be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/tokenizer/tokenizer.json
+
+model|upscale-realplksr|RealPLKSR|Image Size|MIT (trained on DF2K: DIV2K, and Flickr2K, which has no explicit licence)|Dongheon Lee et al. (University of Seoul)|https://github.com/dslisleedh/PLKSR|upscale|plksr
+file|upscale-realplksr|model_x2.onnx|29627920|d7abb65092f3808d3aa255ffdab42b1d672883915d90adbdd321204168b9f293|
+file|upscale-realplksr|model_x4.onnx|29711010|8ce692652494e2e5c31e1f7c7ab61eb084e9a450cde727a374f5d6746cfe054b|

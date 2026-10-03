@@ -141,11 +141,13 @@ enum Dialog {
     DeletePreset {
         name: String,
     },
-    /// Image › Image Size, in pixels; `constrain` keeps the proportions.
+    /// Image › Image Size, in pixels; `constrain` keeps the proportions,
+    /// and `ai` enlarges with the model (`crate::upscale`).
     ImageSize {
         width: u32,
         height: u32,
         constrain: bool,
+        ai: bool,
     },
     /// Image › Canvas Size: the image goes at `anchor` (0–2 across, 0–2
     /// down), and new areas of the bottom layer are `extension`.
@@ -453,6 +455,7 @@ pub struct App {
     tablet: Option<Tablet>,
     content_fill: ContentFill,
     denoising: crate::denoise::Denoising,
+    upscaling: crate::upscale::Upscaling,
     select_subject: SelectSubject,
     face_selection: FaceSelection,
     face_liquify: crate::face_liquify::FaceLiquify,
@@ -534,6 +537,7 @@ impl App {
             tablet: Tablet::connect(cc),
             content_fill: ContentFill::default(),
             denoising: Default::default(),
+            upscaling: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             face_liquify: Default::default(),
@@ -766,6 +770,7 @@ impl App {
                 self.objects.poll(ctx, editor),
                 self.content_fill.poll(editor),
                 self.denoising.poll(editor),
+                self.upscaling.poll(editor),
                 self.select_subject.poll(editor),
                 self.face_selection.poll(editor),
             ];
@@ -996,6 +1001,7 @@ impl App {
             }
             Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
             Command::Denoise => self.denoising.busy().is_none(),
+            Command::ImageSize => self.upscaling.busy().is_none(),
             Command::SelectSubject => !self.select_subject.busy(),
             Command::SelectSkin
             | Command::SelectHair
@@ -1140,7 +1146,7 @@ impl App {
                 };
                 let (width, height) = (doc.width, doc.height);
                 self.dialog = Some(if cmd == Command::ImageSize {
-                    Dialog::ImageSize { width, height, constrain: true }
+                    Dialog::ImageSize { width, height, constrain: true, ai: false }
                 } else {
                     Dialog::CanvasSize { width, height, anchor: (1, 1), extension: Extension::Background }
                 });
@@ -1447,6 +1453,16 @@ impl App {
             && (width, height) != (editor.doc.width, editor.doc.height)
         {
             editor.edit("Image Size", |doc, _| doc.resize_image(width, height));
+        }
+    }
+
+    /// Image › Image Size with Enlarge with AI: the model starts on what
+    /// the image shows, and the document is resized when it's done.
+    fn upscale_image(&mut self, width: u32, height: u32, ctx: &egui::Context) {
+        if let Some(editor) = &self.editor
+            && self.upscaling.busy().is_none()
+        {
+            self.upscaling.start(ctx, editor, width, height);
         }
     }
 
@@ -2071,6 +2087,10 @@ self.filters.remember(&filter);
                     ui.label(RichText::new(format!("Denoising… {done} of {total}")).color(self.theme.accent));
                     ui.separator();
                 }
+                if let Some((done, total)) = self.upscaling.busy() {
+                    ui.label(RichText::new(format!("Enlarging with AI… {done} of {total}")).color(self.theme.accent));
+                    ui.separator();
+                }
                 if self.select_subject.busy() {
                     ui.label(RichText::new("Finding the subject…").color(self.theme.accent));
                     ui.separator();
@@ -2275,6 +2295,7 @@ self.filters.remember(&filter);
             .map(|e| e.doc.file_name())
             .unwrap_or_default();
         let (now_w, now_h) = self.editor.as_ref().map_or((1, 1), |e| (e.doc.width, e.doc.height));
+        let upscaler_missing = !missing(&[omapix_ai::upscale::MODEL], &self.models).is_empty();
         let mut modal = egui::Modal::new(egui::Id::new("dialog"));
         if matches!(dialog, Dialog::Radius { .. }) {
             // Keep the image visible while choosing a radius.
@@ -2540,7 +2561,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::ImageSize { width, height, constrain } => {
+                Dialog::ImageSize { width, height, constrain, ai } => {
                     ui.heading("Image Size");
                     ui.add_space(8.0);
                     ui.label(RichText::new(format!("Now {now_w} × {now_h} px")).color(hint));
@@ -2557,6 +2578,21 @@ self.filters.remember(&filter);
                         *width = scaled(*height, now_w, now_h);
                     }
                     ui.checkbox(constrain, "Constrain Proportions");
+                    // The model only enlarges.
+                    let larger = *width > now_w || *height > now_h;
+                    let why = if upscaler_missing { "Needs the RealPLKSR model: see Help › AI Models" } else { "For a larger size" };
+                    ui.add_enabled(larger && !upscaler_missing, egui::Checkbox::new(ai, "Enlarge with AI")).on_disabled_hover_text(why);
+                    let with_ai = *ai && larger && !upscaler_missing;
+                    if with_ai {
+                        ui.label(
+                            RichText::new(
+                                "RealPLKSR sharpens what the image shows, onto a new\n\
+                                 Upscale layer over the layers enlarged as usual.\n\
+                                 A large photo takes a few minutes.",
+                            )
+                            .color(hint),
+                        );
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let ok = ui.button("OK").clicked()
@@ -2566,7 +2602,13 @@ self.filters.remember(&filter);
                         }
                         if ok {
                             let (w, h) = (*width, *height);
-                            action = Some(Box::new(move |app, _| app.resize_image(w, h)));
+                            action = Some(Box::new(move |app, ctx| {
+                                if with_ai {
+                                    app.upscale_image(w, h, ctx);
+                                } else {
+                                    app.resize_image(w, h);
+                                }
+                            }));
                             close = true;
                         }
                     });
@@ -5320,6 +5362,7 @@ mod tests {
             tablet: None,
             content_fill: ContentFill::default(),
             denoising: Default::default(),
+            upscaling: Default::default(),
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             face_liquify: Default::default(),
@@ -8505,6 +8548,63 @@ mod tests {
     }
 
     #[test]
+    fn image_size_only_enlarges_with_ai_when_larger_and_the_model_is_there() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        // A frame of the dialog; whether Enlarge with AI's note was shown.
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            fn find(shape: &egui::Shape) -> bool {
+                match shape {
+                    egui::Shape::Text(t) => t.galley.text().contains("Upscale layer"),
+                    egui::Shape::Vec(v) => v.iter().any(find),
+                    _ => false,
+                }
+            }
+            out.shapes.iter().any(|s| find(&s.shape))
+        };
+        // A modal is laid out, unseen, on its first frame; Enter on the
+        // second.
+        let enter = |app: &mut App| {
+            let key = egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(app, vec![]) | frame(app, vec![key])
+        };
+        let size = |app: &App| {
+            let doc = &app.editor.as_ref().unwrap().doc;
+            (doc.width, doc.height, doc.layers.len())
+        };
+        let layers = size(&app).2;
+
+        // Smaller: the ordinary way, though AI was ticked.
+        app.dialog = Some(Dialog::ImageSize { width: 300, height: 200, constrain: true, ai: true });
+        assert!(!enter(&mut app));
+        assert_eq!((size(&app), app.upscaling.busy()), ((300, 200, layers), None));
+        app.run(Command::Undo, &ctx);
+
+        // Larger, without the model: the ordinary way too.
+        app.models.insert(omapix_ai::upscale::MODEL, false);
+        app.dialog = Some(Dialog::ImageSize { width: 1200, height: 800, constrain: true, ai: true });
+        assert!(!enter(&mut app));
+        assert_eq!((size(&app), app.upscaling.busy()), ((1200, 800, layers), None));
+        app.run(Command::Undo, &ctx);
+
+        // Larger, with it: the note says where the model's work goes.
+        app.models.insert(omapix_ai::upscale::MODEL, true);
+        app.dialog = Some(Dialog::ImageSize { width: 1200, height: 800, constrain: true, ai: true });
+        frame(&mut app, vec![]);
+        assert!(frame(&mut app, vec![]));
+        assert_eq!(size(&app), (600, 400, layers));
+    }
+
+    #[test]
     fn image_size_canvas_size_and_crop_run_and_undo() {
         let ctx = egui::Context::default();
         let mut app = test_app();
@@ -8515,7 +8615,7 @@ mod tests {
 
         // The dialogs start at the current size; OK applies what's typed.
         app.run(Command::ImageSize, &ctx);
-        assert!(matches!(app.dialog, Some(Dialog::ImageSize { width: 600, height: 400, constrain: true })));
+        assert!(matches!(app.dialog, Some(Dialog::ImageSize { width: 600, height: 400, constrain: true, ai: false })));
         app.dialog = None;
         app.resize_image(300, 200);
         assert_eq!((size(&app), app.editor.as_ref().unwrap().undo_label()), ((300, 200), Some("Image Size")));
