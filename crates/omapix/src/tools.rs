@@ -352,13 +352,14 @@ pub struct Liquify {
     pub pressure: f32,
     /// A pen's pressure scales `pressure`.
     pub pen_pressure: bool,
-    /// Face-Aware Liquify's panel is open.
+    /// Face-Aware Liquify's panel is open, and Body Reshape's.
     pub face_aware: bool,
+    pub body: bool,
 }
 
 impl Default for Liquify {
     fn default() -> Self {
-        Self { brush: LiquifyBrush::ForwardWarp, size: 100.0, pressure: 1.0, pen_pressure: true, face_aware: false }
+        Self { brush: LiquifyBrush::ForwardWarp, size: 100.0, pressure: 1.0, pen_pressure: true, face_aware: false, body: false }
     }
 }
 
@@ -375,12 +376,15 @@ impl Liquify {
     }
 
     /// While Liquify is open, its keys pick a brush, [ and ] change the
-    /// size, and A (Photoshop's Face tool) opens and closes Face-Aware
-    /// Liquify.
+    /// size, A (Photoshop's Face tool) opens and closes Face-Aware Liquify,
+    /// and Y Body Reshape.
     pub fn keys(&mut self, ctx: &egui::Context) {
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::A) {
                 self.face_aware = !self.face_aware;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Y) {
+                self.body = !self.body;
             }
             for brush in LiquifyBrush::ALL {
                 if i.consume_key(Modifiers::NONE, Self::key(brush)) {
@@ -401,9 +405,9 @@ impl Liquify {
     }
 
     /// `restore` is how much of the brushes' warp Restore All takes out,
-    /// 0–1, and `missing` the face models Face-Aware Liquify needs that
-    /// aren't installed.
-    pub fn options_bar(&mut self, ui: &mut Ui, theme: &Theme, restore: &mut f32, missing: &[&str]) {
+    /// 0–1, and `missing` the models Face-Aware Liquify and Body Reshape
+    /// need that aren't installed.
+    pub fn options_bar(&mut self, ui: &mut Ui, theme: &Theme, restore: &mut f32, missing: [&[&str]; 2]) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Liquify").strong());
             ui.separator();
@@ -420,13 +424,17 @@ impl Liquify {
             ui.separator();
             percent(ui, "Restore All", restore);
             ui.separator();
-            ui.add_enabled_ui(missing.is_empty(), |ui| {
-                let plural = if missing.len() > 1 { "s" } else { "" };
-                let needs = format!("Needs the {} model{plural}: see Help › AI Models", missing.join(", "));
-                ui.toggle_value(&mut self.face_aware, "Face-Aware (A)")
-                    .on_hover_text("Sliders for each face's shape and symmetry")
-                    .on_disabled_hover_text(needs);
-            });
+            let panels = [
+                (&mut self.face_aware, "Face-Aware (A)", "Sliders for each face's shape and symmetry"),
+                (&mut self.body, "Body (Y)", "Sliders for each person's shape"),
+            ];
+            for ((open, name, hint), missing) in panels.into_iter().zip(missing) {
+                ui.add_enabled_ui(missing.is_empty(), |ui| {
+                    let plural = if missing.len() > 1 { "s" } else { "" };
+                    let needs = format!("Needs the {} model{plural}: see Help › AI Models", missing.join(", "));
+                    ui.toggle_value(open, name).on_hover_text(hint).on_disabled_hover_text(needs);
+                });
+            }
             ui.separator();
             let hint = "Alt swaps Pucker and Bloat, and pushes right · Enter applies · Esc cancels";
             ui.label(RichText::new(hint).color(theme.dark_foreground));

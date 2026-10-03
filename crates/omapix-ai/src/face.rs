@@ -364,7 +364,7 @@ impl Analysis {
     }
 }
 
-fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+pub(crate) fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
     let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
     let area = |r: &[f32; 4]| (r[2] - r[0]) * (r[3] - r[1]);
