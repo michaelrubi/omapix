@@ -36,6 +36,7 @@ mod tablet;
 mod theme;
 mod tools;
 mod upscale;
+mod whiten;
 
 use std::path::PathBuf;
 

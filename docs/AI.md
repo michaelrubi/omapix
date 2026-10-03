@@ -410,6 +410,8 @@ no default shortcut, since Photoshop has no equivalent to match (and
 ```
 Retouch
   ├─ Face 1
+  │    ├─ Whiten Teeth       (Hue/Saturation, masked to the teeth)
+  │    ├─ Whiten Eyes        (Hue/Saturation, masked to the whites)
   │    ├─ Dodge & Burn       (group: Brighten, Darken curves, with masks)
   │    ├─ Smooth Skin        (pixel layer, this face's skin mask)
   │    └─ Blemishes          (heal patches on an empty layer)
@@ -424,16 +426,17 @@ Retouch
   and can redo the group from the current image.
 
 Every step is also its own command (Select › Skin, Filter › Retouch ›
-Smooth Skin…, Heal Blemishes…, Even Tone…, Face Symmetry…, Reshape…), so
-any one can be run alone.
+Smooth Skin…, Heal Blemishes…, Even Tone…, Whiten Teeth, Whiten Eyes, Face
+Symmetry…, Reshape…), so any one can be run alone.
 It's scriptable through `OMAPIX_SCRIPT` (for example
 `AutoRetouch Natural`), which is also how it gets its end-to-end tests.
 
 As built (see "Auto Retouch" below), the strip only shows when there's
 more than one face, and the settings aren't kept on the group yet.
 
-Also from the same masks, later:
-- whiten eyes and teeth (Hue/Saturation layers masked to eyes and teeth)
+Also from the same masks:
+- whiten eyes and teeth (Hue/Saturation layers masked to eyes and teeth):
+  done, see "Whitening" below
 - reduce shine (highlights within the skin mask)
 - lift under-eye shadows (landmarks mark the area)
 
@@ -801,7 +804,11 @@ Reordered on 2026-09-29 (see Decisions).
       without shoulders, small figures); legs under a long skirt.
 13. **Later:**
     - the optional learned blemish detector
-    - eye and teeth whitening, shine, under-eye
+    - ~~eye and teeth whitening~~ (done, 2026-10-03): Retouch › Whiten
+      Teeth and Whiten Eyes, each a Hue/Saturation layer masked to the
+      teeth or the whites of every face, and two more steps in Auto
+      Retouch. See "Whitening" below.
+    - shine, under-eye
     - checking whether an opt-in face parser beats the landmark polygons
 
 ### Face analysis spike
@@ -1058,11 +1065,13 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
 - **Order.** For each face: Blemishes, then Smooth Skin from the image
   with them healed, then Dodge & Burn from the image smoothed, each from
   Current & Below of the face's group so far. They're the commands' own
-  functions, with Smoothness, Detail and Size at 50.
-- **Presets.** Sensitivity, Smooth Skin's amount and Even Tone's: Natural
-  35, 40 and 40; Standard 50, 70 and 60 (each command's own default);
-  Strong 65, 90 and 80. The settings last OK'd for All Faces are kept
-  between runs.
+  functions, with Smoothness, Detail and Size at 50. Whiten Eyes and
+  Whiten Teeth go on top (milestone 13): their masks are found with the
+  faces, and the steps under them don't touch eyes or teeth.
+- **Presets.** Sensitivity, Smooth Skin's amount, Even Tone's and the
+  whitening's: Natural 35, 40, 40 and 30; Standard 50, 70, 60 and 50 (each
+  command's own default); Strong 65, 90, 80 and 70. The settings last OK'd
+  for All Faces are kept between runs.
 - **The strip.** With more than one face: All Faces, then a thumbnail of
   each. A face follows All Faces until its own settings are changed. It
   can be switched off, and clicking it on the canvas selects it. Faces
@@ -1514,6 +1523,75 @@ OMAPIX_BODY_PHOTO=photos cargo test --release -p omapix body_reshape_in_photos -
   - Leg Length pushes feet near the bottom edge off the picture.
   - A line bent behind a body can't be taken back with Reconstruct, which
     only undoes the brushes: push it back with Forward Warp.
+
+### Whitening
+
+As built (`omapix_engine::whiten`, `whites` in
+`crates/omapix/src/face_selection.rs`, `crates/omapix/src/whiten.rs`),
+looked at on Michael's portraits in `~/Pictures/sample` and the photos in
+`~/Pictures/blemish-tests` through the ignored test `whiten_in_photos`,
+which puts the teeth and the eyes before, after and as the mask side by
+side (`AMOUNT` sets the layer's opacity):
+
+```
+OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
+  cargo test --release -p omapix whiten_in_photos -- --ignored
+```
+
+- **The layer.** Hue/Saturation, as it's done by hand: Saturation −70 and
+  Lightness +12 for teeth, −60 and +10 for eyes, masked, at 50 % opacity
+  to start. At 50 % yellowed teeth come out a natural white and eyes a
+  little clearer; at 100 % teeth are bright but not grey. The opacity is
+  the amount, and the numbers are in Properties.
+- **No dialog.** Retouch › Whiten Teeth and Whiten Eyes find the faces in
+  Current & Below of the selected layer on a thread (the status bar says
+  "Finding teeth…"), then add the layer above it and select it, as one
+  undo step.
+- **Where.** The points give the mouth's opening (Select › Teeth's) and
+  each eye's, less its iris: a circle through the four points round it,
+  grown by 15 % to take in the dark ring.
+- **What's white in there** (`whiten::whites`), in the sRGB the models
+  see:
+  - not red: (red − green) / red under 0.2, fading out to 0.32, which
+    keeps teeth, yellowed ones too, and leaves gums, tongue, lips and the
+    corner of the eye;
+  - and light: over 0.6 of the lightest there (nine tenths of the way up
+    what isn't red), fading out to 0.35, which leaves the dark of the
+    mouth, lashes and the lid's shadow.
+  - The edge is softened by 0.008 IOD. On the photos tried the masks
+    follow the teeth and leave gums, a tongue put out, and dark lipstick;
+    a pale tongue gets a few faint specks.
+- **Only on a face.** The opening is kept to what the segmentation takes
+  for face skin, which on the photos tried takes in eyes, eyes behind
+  glasses and open mouths. At 256 px across the image it's a coarse check:
+  it didn't keep a profile's far eye off the background beside it.
+- **Closed, or out of sight.**
+  - A mouth open less than 0.03 IOD has no teeth, as in Select › Teeth.
+  - An eye whose lids are under 0.07 IOD apart has no white: a wink's
+    were 0.06 and closed eyes' 0.04, against 0.09–0.22 for open ones
+    (squinting in a smile at the low end).
+  - On a face turned nearly to profile the far eye's points are guesses:
+    its "whites" were found on the bridge of the nose in one photo and on
+    the grey background in another, where the closed mouth's "teeth" were
+    too. An eye under 0.45 of the other's width (corner to corner) is
+    left out, and the mouth with it: those two faces' were 0.32 and 0.38,
+    and at 0.51 and up both eyes were found right.
+  - IOD here is at least a third of the face's height, as for blemishes,
+    since a turned face's eyes look closer together.
+- **In Auto Retouch**, two more steps with a switch and an amount each,
+  as layers on top of each face's group. A face with its mouth closed has
+  no Whiten Teeth layer, and one in profile neither.
+- **Speed.** 0.04–0.1 s on portraits of a megapixel and 0.3–0.7 s at
+  20–24 MP once the models are loaded, nearly all of it finding the faces.
+- **Left:**
+  - A black and white photo has no red, so lids and lashes inside the
+    opening count as white where they're light.
+  - The same measure can't tell a pale iris from the white, which is why
+    the iris is cut out by its points: if they're off, a sliver of iris
+    loses its colour.
+  - Select › Teeth is still the whole opening, gums and tongue included;
+    it could use the same mask.
+  - Shine and under-eye shadows.
 
 ## Decisions
 
