@@ -17,12 +17,28 @@ use crate::{Pixel, Result};
 pub struct Patch {
     /// Where it is in the image, as `[x, y, width, height]`.
     pub rect: [u32; 4],
-    /// The patch stretched to the model's square, `size` pixels across:
-    /// sRGB from 0 to 1, red, green then blue planes.
+    /// The patch stretched to the model's size, `width` × `height`: sRGB
+    /// from 0 to 1, red, green then blue planes.
     pub image: Vec<f32>,
     /// 1 where to fill, 0 where to keep, at the same size.
     pub mask: Vec<f32>,
-    pub size: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Patch {
+    /// For a model that works in cells `cell` pixels across: 1 for each
+    /// cell with anything to fill in it, cell by cell in rows.
+    pub fn cells(&self, cell: usize) -> Vec<f32> {
+        let (columns, rows) = (self.width / cell, self.height / cell);
+        (0..columns * rows)
+            .map(|i| {
+                let (x, y) = (i % columns * cell, i / columns * cell);
+                let any = (y..y + cell).any(|py| self.mask[py * self.width + x..py * self.width + x + cell].iter().any(|&m| m > 0.0));
+                if any { 1.0 } else { 0.0 }
+            })
+            .collect()
+    }
 }
 
 /// The patch round what `selection` selects in `image` (in `profile`'s
@@ -39,6 +55,50 @@ pub fn patch(image: &Raster, profile: &ColorProfile, selection: &Selection, size
     let (cw, ch) = (side.min(w), side.min(h));
     let x = (bx + bw / 2).saturating_sub(cw / 2).min(w - cw);
     let y = (by + bh / 2).saturating_sub(ch / 2).min(h - ch);
+    cut(image, profile, selection, [x, y, cw, ch], size, size).map(Some)
+}
+
+/// The patch round what `selection` selects for a model that sees any
+/// shape made of cells `cell` pixels across, up to `cells` of them: twice
+/// the selection's width and height (no narrower than a third of its
+/// length), so a tall selection gets a tall patch and keeps more of its
+/// detail than in a square. Small selections get more of their
+/// surroundings rather than being enlarged. `None` with nothing selected.
+pub fn patch_of_cells(
+    image: &Raster,
+    profile: &ColorProfile,
+    selection: &Selection,
+    cell: usize,
+    cells: usize,
+) -> Result<Option<Patch>> {
+    let Some([bx, by, bw, bh]) = selection.bounds() else {
+        return Ok(None);
+    };
+    let (w, h) = (image.width(), image.height());
+    let most = (cells * cell * cell) as f32;
+    let (mut cw, mut ch) = ((bw * 2).max(bh * 2 / 3) as f32, (bh * 2).max(bw * 2 / 3) as f32);
+    let grow = (most / (cw * ch)).sqrt().max(1.0);
+    (cw, ch) = ((cw * grow).min(w as f32), (ch * grow).min(h as f32));
+    // As many cells as fit the patch's shape, each at least a pixel of it.
+    let scale = (most / (cw * ch)).sqrt().min(1.0);
+    let whole = |length: f32| ((length * scale) as usize / cell).max(1) * cell;
+    let (mut width, mut height) = (whole(cw), whole(ch));
+    while width * height > cells * cell * cell {
+        if width > height { width -= cell } else { height -= cell }
+    }
+    // Not shrunk: pixel for pixel, then.
+    if scale > 0.99 {
+        (cw, ch) = ((width as f32).min(cw), (height as f32).min(ch));
+    }
+    let (cw, ch) = ((cw as u32).max(1), (ch as u32).max(1));
+    let x = (bx + bw / 2).saturating_sub(cw / 2).min(w - cw);
+    let y = (by + bh / 2).saturating_sub(ch / 2).min(h - ch);
+    cut(image, profile, selection, [x, y, cw, ch], width, height).map(Some)
+}
+
+/// The part of `image` in `rect`, stretched to `width` × `height`.
+fn cut(image: &Raster, profile: &ColorProfile, selection: &Selection, rect: [u32; 4], width: usize, height: usize) -> Result<Patch> {
+    let [x, y, cw, ch] = rect;
 
     // The patch in sRGB, as planes.
     let crop: Vec<Pixel> = (0..ch).flat_map(|py| (0..cw).map(move |px| (px, py))).map(|(px, py)| image.get(x + px, y + py)).collect();
@@ -47,15 +107,15 @@ pub fn patch(image: &Raster, profile: &ColorProfile, selection: &Selection, size
     let planes: Vec<Vec<f32>> = (0..3)
         .map(|c| srgb.pixels().par_iter().map(|p| f32::from(p[c]) / 65535.0).collect())
         .collect();
-    let image = planes.iter().flat_map(|plane| resample(plane, cw, ch, size, size)).collect();
+    let image = planes.iter().flat_map(|plane| resample(plane, cw, ch, width, height)).collect();
 
     // Anything selected under a model pixel, or next to it, is filled: the
     // model does best with a little of the object's surroundings too.
-    let (kx, ky) = (cw as f32 / size as f32, ch as f32 / size as f32);
-    let mask = (0..size * size)
+    let (kx, ky) = (cw as f32 / width as f32, ch as f32 / height as f32);
+    let mask = (0..width * height)
         .into_par_iter()
         .map(|i| {
-            let (mx, my) = ((i % size) as f32, (i / size) as f32);
+            let (mx, my) = ((i % width) as f32, (i / width) as f32);
             let x0 = ((mx - 1.0) * kx).floor().max(0.0) as usize;
             let y0 = ((my - 1.0) * ky).floor().max(0.0) as usize;
             let x1 = (((mx + 2.0) * kx).ceil() as usize).min(cw);
@@ -64,12 +124,13 @@ pub fn patch(image: &Raster, profile: &ColorProfile, selection: &Selection, size
             if selected { 1.0 } else { 0.0 }
         })
         .collect();
-    Ok(Some(Patch {
-        rect: [x, y, cw as u32, ch as u32],
+    Ok(Patch {
+        rect,
         image,
         mask,
-        size,
-    }))
+        width,
+        height,
+    })
 }
 
 /// A layer `width` × `height` holding the model's answer `filled` (planes
@@ -84,10 +145,9 @@ pub fn layer(
     selection: &Selection,
 ) -> Result<Layer> {
     let [x, y, cw, ch] = patch.rect;
-    let size = patch.size;
     let planes: Vec<Vec<f32>> = filled
-        .chunks(size * size)
-        .map(|plane| resample(plane, size, size, cw as usize, ch as usize))
+        .chunks(patch.width * patch.height)
+        .map(|plane| resample(plane, patch.width, patch.height, cw as usize, ch as usize))
         .collect();
     let srgb: Vec<Pixel> = (0..cw as usize * ch as usize)
         .into_par_iter()
@@ -172,6 +232,40 @@ mod tests {
         let edge = super::patch(&image, &ColorProfile::srgb(), &selection, 256).unwrap().unwrap();
         assert_eq!(edge.rect, [0, 0, 256, 256]);
         assert!(super::patch(&image, &ColorProfile::srgb(), &Selection::from_coverage(Tiled::new(500, 300, 0)), 256).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_patch_of_cells_takes_the_selections_shape() {
+        // A tall selection: a tall patch, twice its height and a third of
+        // that across, in whole cells.
+        let (image, selection) = scene(4000, 3000, [1800, 500, 400, 1600]);
+        let patch = patch_of_cells(&image, &ColorProfile::srgb(), &selection, 16, 1024).unwrap().unwrap();
+        assert_eq!(patch.rect, [1467, 0, 1066, 3000]);
+        assert_eq!((patch.width, patch.height), (19 * 16, 53 * 16));
+        assert_eq!(patch.image.len(), 3 * patch.width * patch.height);
+        // The cells the selection touches are filled, and no others.
+        let cells = patch.cells(16);
+        let at = |column: usize, row: usize| cells[row * 19 + column];
+        assert_eq!(cells.len(), 19 * 53);
+        assert_eq!((at(9, 20), at(0, 20), at(9, 3), at(9, 45)), (1.0, 0.0, 0.0, 0.0));
+
+        // A small selection isn't enlarged: it gets more round it instead.
+        let (image, selection) = scene(4000, 3000, [2000, 1500, 60, 40]);
+        let small = patch_of_cells(&image, &ColorProfile::srgb(), &selection, 16, 1024).unwrap().unwrap();
+        assert_eq!((small.rect[2], small.rect[3]), (small.width as u32, small.height as u32));
+        assert_eq!((small.width, small.height), (39 * 16, 26 * 16));
+
+        // A long thin one keeps some surroundings across it.
+        let (image, selection) = scene(4000, 3000, [500, 1500, 3000, 20]);
+        let wide = patch_of_cells(&image, &ColorProfile::srgb(), &selection, 16, 1024).unwrap().unwrap();
+        assert_eq!(wide.rect[2], 4000);
+        assert!(wide.rect[3] >= 1000 && wide.height >= 8 * 16, "{:?} {}", wide.rect, wide.height);
+
+        // An image smaller than the model could take: all of it that
+        // makes whole cells.
+        let (image, selection) = scene(300, 200, [100, 50, 50, 50]);
+        let whole = patch_of_cells(&image, &ColorProfile::srgb(), &selection, 16, 1024).unwrap().unwrap();
+        assert_eq!((whole.rect, whole.width, whole.height), ([0, 0, 288, 192], 288, 192));
     }
 
     #[test]

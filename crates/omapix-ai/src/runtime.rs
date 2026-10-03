@@ -37,29 +37,54 @@ fn init() -> Result<()> {
 /// otherwise on the CPU.
 pub(crate) fn session(path: &Path) -> Result<Session> {
     init()?;
-    let open = |cuda: bool| -> ort::Result<Session> {
-        let builder = Session::builder()?;
-        let mut builder = if cuda {
-            builder.with_execution_providers([ep::CUDA::default().build().error_on_failure()])?
-        } else {
-            builder
-        };
-        builder.commit_from_file(path)
-    };
-    let (session, gpu) = match open(true) {
-        Ok(session) => {
-            log::info!("{}: on the GPU", path.display());
-            (session, true)
-        }
+    match open(path, Some(ep::CUDA::default()), true) {
+        Ok(session) => Ok(loaded(path, session, true)),
         Err(e) => {
-            log::info!("{}: on the CPU ({e})", path.display());
-            (open(false).map_err(|e| format!("Couldn't load {}: {e}", path.display()))?, false)
+            log::info!("{}: not on the GPU ({e})", path.display());
+            cpu_session(path)
         }
+    }
+}
+
+/// A session for the model in `path` on the GPU, or nothing: for models
+/// that would take minutes on the CPU. These nearly fill the card, so its
+/// memory grows by what's asked for rather than doubling, a run's memory
+/// isn't planned as one block from the run before, and convolutions
+/// aren't each tried every way first.
+pub(crate) fn gpu_session(path: &Path) -> Result<Session> {
+    init()?;
+    let cuda = ep::CUDA::default()
+        .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
+        .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Heuristic);
+    let session = open(path, Some(cuda), false).map_err(|e| format!("Couldn't load {} on the GPU: {e}", path.display()))?;
+    Ok(loaded(path, session, true))
+}
+
+/// A session for the model in `path` on the CPU.
+pub(crate) fn cpu_session(path: &Path) -> Result<Session> {
+    init()?;
+    let session = open(path, None, true).map_err(|e| format!("Couldn't load {}: {e}", path.display()))?;
+    Ok(loaded(path, session, false))
+}
+
+/// With `cuda`, on the GPU or not at all. `planned`: each run's memory
+/// is laid out as one block from the run before, which is quicker and
+/// takes more.
+fn open(path: &Path, cuda: Option<ep::CUDA>, planned: bool) -> ort::Result<Session> {
+    let builder = Session::builder()?.with_memory_pattern(planned)?;
+    let mut builder = match cuda {
+        Some(cuda) => builder.with_execution_providers([cuda.build().error_on_failure()])?,
+        None => builder,
     };
+    builder.commit_from_file(path)
+}
+
+fn loaded(path: &Path, session: Session, gpu: bool) -> Session {
+    log::info!("{}: on the {}", path.display(), if gpu { "GPU" } else { "CPU" });
     if let Ok(mut loaded) = LOADED.lock() {
         loaded.push((path.to_owned(), gpu));
     }
-    Ok(session)
+    session
 }
 
 /// The models loaded so far, and whether each is on the GPU.
