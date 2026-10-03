@@ -441,7 +441,8 @@ Also from the same masks, later:
 
 As built (see "Face-Aware Liquify" below), the mirror is a plane fitted in
 depth to every pair of points, each side of a feature moves as a whole, and
-less is done the more a face is turned from the camera.
+less is done the more a face is turned from the camera. For matching one
+eye or brow to the other by hand, each has its own sliders (milestone 9.5).
 
 ### 8. Reshape (easy Liquify)
 
@@ -698,6 +699,26 @@ Reordered on 2026-09-29 (see Decisions).
    - Left: a Reshape layer that keeps its settings and can be updated (it
      comes with Body Reshape); thumbnails and clicking a face to pick it;
      faces in profile.
+
+9.5. ~~**Each eye and brow on its own**, in Face-Aware Liquify.~~ (done,
+2026-10-03)
+
+- Symmetry works, but it wasn't scoped well: one slider for a feature
+  evens everything about it at once, half way each side, so there was no
+  way to ask for one thing on one side, such as one eye a little larger
+  to match the other. Proportions are scale, angle and position, so each
+  eye and each eyebrow has those as sliders of its own: Left Eye and Right
+  Eye (Size, Height, Width, Tilt, Lift), Left Brow and Right Brow (Lift,
+  Tilt).
+- The panel's groups fold away, since there are thirty sliders now. The
+  new four start folded, and a folded group with a slider set has a dot.
+- Symmetry says when a face is turned and it's being held back, and by
+  how much.
+- Left: both eyes' Height, Width and Tilt, and both brows', as one slider
+  (Photoshop links the two eyes); an eye raised under a brow lowered,
+  both all the way, run into each other, and the brow on the far side of
+  a turned face kinks at its outer end with Lift and Tilt both at 100.
+
 10. **Generative Fill.** After the portrait work, which is used on every
     photo, while Generative Fill is for the occasional big removal or
     extension. By then Arch's ONNX Runtime should have reached 1.30. Starts
@@ -1000,7 +1021,8 @@ Michael's portraits and group shots and the photos in
 `~/Pictures/blemish-tests` (nearly all turned from the camera, which is
 what showed where Symmetry goes wrong) through the ignored test
 `face_liquify_in_photos`, which puts each face before and after side by
-side (`SHAPE` sets the sliders by name: all of Symmetry at 100 if unset):
+side (`SHAPE` sets the sliders by name, with the group's where several
+share one, as `Left Eye Size=60`: all of Symmetry at 100 if unset):
 
 ```
 SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
@@ -1050,6 +1072,19 @@ SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   smooth on the portraits tried, a few at once too. Jawline and Face
   Width both at −100 is about as far as hair beside the face will
   stretch.
+- **Each eye and brow** (milestone 9.5) has sliders of its own, in groups
+  that start folded: Left Eye, Right Eye, Left Brow and Right Brow, left
+  being the left of the picture. At 100: an eye's Size 20 % larger, on
+  top of Eye Size; Height 30 % taller and Width 15 % wider, down and
+  across the face; Tilt its outer corner up, turned 10° about its middle;
+  Lift 0.05 IOD up. A brow's Lift 0.06 IOD up, and Tilt its outer end up,
+  6°: less than an eye's, since at 0.1 IOD and 10° the brow on the far
+  side of a turned face ran into the outline, which is pinned, and
+  kinked. Each alone at either end comes out smooth on the portrait
+  tried, and so does everything for an eye and its brow half way towards
+  each other; an eye with all five at 100 under a brow at −100 runs into
+  it, and that far-side brow still kinks a little at its outer end with
+  both of its own at 100.
 - **Symmetry**, from 0 to 100 for the eyes, brows, nose, mouth and jaw.
   - The mirror is a plane, fitted by least squares to every pair and
     midline point with the landmarks' depth, rather than a line through
@@ -1066,6 +1101,18 @@ SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
     jaws and brows. So it's scaled down from a turn of 6° to nothing at
     24° (the sine of the turn, 0.1 to 0.4), and the sliders say so when
     hovered.
+  - What it can't be asked for (2026-10-03, after Michael tried to make
+    one eye a little larger to match the other): a slider evens the whole
+    feature, its place, size and angle together, and only half way each
+    side, so it's no way to change one proportion on one side; that's
+    what each eye's and brow's own sliders are for. It's also nearly
+    always held back, since few portraits look straight at the camera
+    (86 %, 76 %, 3 % and 0 % on four faces looked at), and the eye further
+    from the camera, which looks smaller in the picture (10 % narrower on
+    the face at 86 %), is taken by the plane's depth for the turn, not
+    for a difference. The group now says "Turned away: held back to
+    86 %" or "Turned too far: nothing is done" for the face
+    (`reshape::facing`).
 - **While a slider's dragged**, the layer isn't warped: the canvas shows
   a pyramid level (half size, a quarter…) when zoomed out, so the layer's
   pixels before, shrunk to that level, are warped where they're on screen
@@ -1095,7 +1142,7 @@ SHAPE="Face Width=-50,Smile=40" OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   moved a lot;
   thumbnails of the faces, and clicking one to pick it; Photoshop's
   handles on the canvas; faces in profile; keeping the sliders in the
-  .ora; telling the user when Symmetry is being held back for a face.
+  .ora.
 
 ## Decisions
 
