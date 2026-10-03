@@ -3,6 +3,7 @@
 # by |, one model or file per line:
 #
 # model|id|name|used by|licence|author|source|task|arch
+# optional|… (as model: only downloaded when the script is given its id)
 # file|id|file name|bytes|SHA-256|URL (none: darktable installs it)
 
 model|mask-object-sam21-small|SAM 2.1 Hiera Small|Object Selection, Quick Selection|Apache-2.0 (trained on SA-V, CC BY 4.0, and SA-1B, Meta's research licence)|Meta|https://github.com/facebookresearch/sam2|mask|sam2
@@ -26,3 +27,12 @@ file|mask-selfie-multiclass|selfie_multiclass_256x256.onnx|16454560|35ec1ecd9ee7
 
 model|denoise-nind|NIND denoiser|Denoise|GPL-3.0 (trained on NIND, CC BY 4.0 and CC0)|Benoit Brummer (UCLouvain)|https://github.com/trougnouf/nind-denoise|denoise|unet
 file|denoise-nind|model.onnx|59138823|5d615c5026a3c579455b9082f72b91e109adb54f4125b5b5cde45983bd6776b2|
+
+optional|fill-flux2-klein-4b|FLUX.2 klein 4B (int4)|Generative Fill|Apache-2.0|Black Forest Labs (FLUX.2 klein), hlhc (ONNX export)|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4|inpaint|flux2-klein
+file|fill-flux2-klein-4b|transformer.onnx|4732855|7a27b7c6512396ac08e06deefa6365c2fb709a5eb5eb3a13be358838b6d5156e|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/transformer.onnx
+file|fill-flux2-klein-4b|transformer.onnx.data|4388007936|2566d2d4f5fd698b7b1af283d320f65a4e4e313a04af8b10edefdee5b12547f5|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/transformer.onnx.data
+file|fill-flux2-klein-4b|text_encoder.onnx|1594206|48577e8f9c3486d99cc8a36a1077abd60cb608fbcc5cf6dc2c4b099c941b2cd9|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/text_encoder.onnx
+file|fill-flux2-klein-4b|text_encoder.onnx.data|3089182720|2e35627881f7ea3ffa7ccfea08aef0e82a2a13473ac31539e62f9ab17ac8e4f7|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/text_encoder.onnx.data
+file|fill-flux2-klein-4b|vae_encoder.onnx|137811547|d64bb37f97bffb9162cd00ab833ca85d4bc23ad7ec62145756a2b58616ae44fe|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/vae_encoder.onnx
+file|fill-flux2-klein-4b|vae_decoder.onnx|198603667|20817bfe5cc1a81043bc3dc320c4d4944d5ac3f10f7573e42e0e8379fcc39c3b|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/vae_decoder.onnx
+file|fill-flux2-klein-4b|tokenizer.json|11422650|be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/tokenizer/tokenizer.json

@@ -13,9 +13,16 @@ use omapix_engine::selection::Selection;
 use crate::canvas::Render;
 use crate::editor::Editor;
 
-/// Loaded on first use and kept until Omapix quits: dropping CUDA sessions
-/// can crash it as it quits (docs/AI.md).
+/// Loaded on first use, and kept until Generative Fill needs the card.
 static MODEL: Mutex<Option<Lama>> = Mutex::new(None);
+
+/// Drop the model, giving its GPU memory back. It loads again when next
+/// used.
+pub fn unload() {
+    if let Ok(mut model) = MODEL.lock() {
+        *model = None;
+    }
+}
 
 #[derive(Default)]
 pub struct ContentFill {

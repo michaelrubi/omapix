@@ -43,7 +43,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         img.save(&args[args.len() - 1])?;
     }
-    // Dropping CUDA sessions can crash the process as it exits (docs/AI.md).
-    std::mem::forget(sam);
     Ok(())
 }

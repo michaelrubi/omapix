@@ -3,7 +3,8 @@
 # ~/.local/share/omapix/models, checking each file's SHA-256 (docs/AI.md,
 # "Models on disk"). Omapix itself never goes online. A file already there,
 # in darktable's models or in a folder listed in ~/.config/omapix/model_folders,
-# is used where it is rather than downloaded again.
+# is used where it is rather than downloaded again. Optional models (the big
+# ones) are only downloaded when named: fetch-models.sh fill-flux2-klein-4b
 set -euo pipefail
 
 manifest="$(dirname "$0")/../crates/omapix-ai/models.txt"
@@ -31,8 +32,17 @@ find_shared() {
   done
 }
 
-declare -A licence author source task arch
+declare -A licence author source task arch skip
 while IFS='|' read -r kind id a b c d e f g; do
+  if [[ $kind == optional ]]; then
+    kind=model
+    if [[ " $* " != *" $id "* ]]; then
+      skip[$id]=1
+      echo "$a, for $b: optional, run $0 $id"
+      continue
+    fi
+  fi
+  [[ -z $id || -z ${skip[$id]:-} ]] || continue
   case $kind in
     model)
       licence[$id]=$c author[$id]=$d source[$id]=$e task[$id]=$f arch[$id]=$g
