@@ -415,6 +415,9 @@ any one can be run alone.
 It's scriptable through `OMAPIX_SCRIPT` (for example
 `AutoRetouch Natural`), which is also how it gets its end-to-end tests.
 
+As built (see "Auto Retouch" below), the strip only shows when there's
+more than one face, and the settings aren't kept on the group yet.
+
 Also from the same masks, later:
 - whiten eyes and teeth (Hue/Saturation layers masked to eyes and teeth)
 - reduce shine (highlights within the skin mask)
@@ -566,7 +569,7 @@ the spike:
 | Denoise (NIND) at 24 MP | (measured: 7 s, 54 squares at 0.12 s each) | minutes |
 | Smooth Skin (blurs at 24 MP) | < 1 s (CPU) (measured: 0.4 s) | same |
 | Even Tone (masks at 24 MP) | < 0.3 s (CPU) (measured: under 0.1 s) | same |
-| Auto Retouch end to end, per face | < 3 s | < 10 s |
+| Auto Retouch end to end, per face | < 3 s (measured: 0.5–2.5 s in all, for one to three faces) | < 10 s |
 | Reshape or Symmetry preview per slider step (shrunk level) | < 50 ms | same |
 | Reshape or Symmetry at 24 MP | < 1 s (CPU, parallel) | same |
 
@@ -660,8 +663,17 @@ Reordered on 2026-09-29 (see Decisions).
      layer with its two masks filled in on the skin, with Amount (the
      group's opacity) and Size, and a preview box of the whole face. See
      "Even Tone" below.
-7. **Auto Retouch**, with the face strip, per-face groups, presets and
-   scripting.
+7. ~~**Auto Retouch**, with the face strip, per-face groups, presets and
+   scripting.~~ (done, 2026-10-03)
+   - Retouch › Auto Retouch…, as a Retouch group above the selected layer
+     with a group for each face: Blemishes, Smooth Skin and Dodge & Burn,
+     each made from what the last shows. A switch and a strength for each
+     step, Natural, Standard and Strong, a strip of faces to give one its
+     own settings or leave it out, and `AutoRetouch Natural` in
+     `OMAPIX_SCRIPT`. See "Auto Retouch" below.
+   - Left: the settings kept on the group, and redoing it from them; a
+     second segmentation pass round each person, and skin split between
+     people with SAM.
 8. ~~**Warps and Liquify**~~ (done): the warp engine, and brush Liquify
    (roadmap section 3), the way to touch up what the sliders do.
 9. **Face-Aware Liquify and Face Symmetry**, in the Liquify dialog. Cheap
@@ -905,6 +917,60 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   skin); each face at its own scale; a preview on the canvas, if the box
   turns out too small to judge by; colour unevenness (redness), which is
   Smooth Skin's and a later step's.
+
+### Auto Retouch
+
+As built (`omapix_engine::retouch`, `crates/omapix/src/auto_retouch.rs`),
+looked at on the acne photos in `~/Pictures/blemish-tests` and Michael's
+group shots through the ignored test `auto_retouch_in_photos`, which puts
+each face before and after side by side (`PRESET` picks the preset):
+
+```
+OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
+  cargo test --release -p omapix auto_retouch_in_photos -- --ignored
+```
+
+- **Faces.** Every face YuNet finds, numbered from left to right, each
+  measured by its own eyes, so a small face at the back of a group is
+  smoothed as finely as it needs. Faces in profile count: they get Smooth
+  Skin and Even Tone but no blemishes, as in Heal Blemishes. A face with
+  no skin found and no spots is left out.
+- **Whose skin.** Blemishes are looked for within each face's own outline.
+  The rest of the skin (necks, arms, hands) goes to the nearest face,
+  measured from the middle of each face's box in distances between its
+  eyes (`retouch::share`), not yet by SAM as designed. One face has it
+  all. In the three-person shots tried, necks and shoulders went to the
+  right people; an arm across someone else would go to them.
+- **Order.** For each face: Blemishes, then Smooth Skin from the image
+  with them healed, then Dodge & Burn from the image smoothed, each from
+  Current & Below of the face's group so far. They're the commands' own
+  functions, with Smoothness, Detail and Size at 50.
+- **Presets.** Sensitivity, Smooth Skin's amount and Even Tone's: Natural
+  35, 40 and 40; Standard 50, 70 and 60 (each command's own default);
+  Strong 65, 90 and 80. The settings last OK'd for All Faces are kept
+  between runs.
+- **The strip.** With more than one face: All Faces, then a thumbnail of
+  each. A face follows All Faces until its own settings are changed. It
+  can be switched off, and clicking it on the canvas selects it. Faces
+  keep their numbers when another is off.
+- **Groups.** Retouch and each face's group are Pass Through, so the
+  curves see the image, and a face's group's opacity fades all of its
+  retouch. A step that's off, or has nothing to do, leaves no layer, and a
+  face with none leaves no group.
+- **Scripts.** `AutoRetouch Natural` (or `Standard`, `Strong`, or nothing
+  for the settings last used) opens the dialog and OKs it once the faces
+  are found. The ignored test
+  `the_auto_retouch_script_step_builds_a_group_for_each_face` runs it on
+  `OMAPIX_FACE_PHOTO` and checks the layers.
+- **Speed.** With CUDA, 0.2–1.4 s to find the faces, their skin and their
+  spots once the models are loaded (the most at 21 MP), and 0.25–0.95 s to
+  build the layers for one to three faces. Each step composites the image
+  so far once, which is most of it.
+- **Left:** the settings kept on the group, and redoing it from them; a
+  second segmentation pass round each person (a face with 69 px between
+  its eyes in a 24 MP group shot had no skin found, so it was left out);
+  skin split between people with SAM; a preview of the smoothing and
+  evening (the circles are all the dialog shows).
 
 ## Decisions
 

@@ -1,4 +1,5 @@
 mod app;
+mod auto_retouch;
 mod blending_options;
 mod canvas;
 mod channels_panel;
