@@ -30,6 +30,12 @@ fn least_score(sensitivity: f32) -> f32 {
     LEAST_SCORE * 5f32.powf((100.0 - sensitivity) / 100.0)
 }
 
+/// Those of `found` (most prominent first) healed at `sensitivity`.
+pub fn at_sensitivity(found: &[Spot], sensitivity: f32) -> &[Spot] {
+    let least = least_score(sensitivity);
+    &found[..found.partition_point(|s| s.score >= least)]
+}
+
 impl HealBlemishes {
     /// Start finding the spots in what `editor` shows.
     pub fn open(ctx: &egui::Context, editor: &Editor, sensitivity: f32) -> Result<Self, String> {
@@ -50,8 +56,7 @@ impl HealBlemishes {
 
     /// The spots that will be healed.
     pub fn spots(&self) -> &[Spot] {
-        let least = least_score(self.sensitivity);
-        &self.found[..self.found.partition_point(|s| s.score >= least)]
+        at_sensitivity(&self.found, self.sensitivity)
     }
 
     /// Show the dialog. Returns `Some(true)` once OK'd, `Some(false)` if

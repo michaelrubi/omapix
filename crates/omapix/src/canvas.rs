@@ -551,6 +551,11 @@ impl Canvas {
         self.zoom_to(next, canvas.center(), canvas);
     }
 
+    /// The image point at screen position `p`, if that's on the canvas.
+    pub fn image_at(&self, p: Pos2) -> Option<Pos2> {
+        self.rect.contains(p).then(|| self.to_image(p))
+    }
+
     /// Screen position (points) to image pixels.
     fn to_image(&self, p: Pos2) -> Pos2 {
         ((p - self.rect.min - self.snapped_origin(self.ppp)) / (self.view.zoom / self.ppp))

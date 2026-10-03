@@ -7,10 +7,11 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
 use egui::{Pos2, pos2};
-use omapix_ai::face::{Analysis, BODY_SKIN, FACE_SKIN, Faces, HAIR, Image, outline};
+use omapix_ai::face::{Analysis, BODY_SKIN, Detection, FACE_SKIN, Faces, HAIR, Image, outline};
+use omapix_engine::blemish::{self, Spot};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, Tiled};
-use omapix_engine::{ColorProfile, DisplayTransform, Raster, refine};
+use omapix_engine::{ColorProfile, DisplayTransform, Raster, refine, retouch};
 use rayon::prelude::*;
 
 use crate::canvas::Render;
@@ -227,12 +228,16 @@ pub fn analyse(image: &Raster, profile: &ColorProfile) -> Result<(Vec<[u8; 4]>, 
 /// its eyes. Faces the landmarker didn't see (in profile) are left out:
 /// without their points, nostrils and lips would be taken for spots.
 pub fn blemish_skin(analysis: &Analysis, image: &Raster) -> Selection {
-    let (w, h) = (image.width(), image.height());
-    let faces = points(analysis);
-    skin(analysis, image, &[FACE_SKIN])
-        .combine(&draw(&faces, &OUTLINE, w, h), Combine::Intersect)
-        .combine(&draw(&faces, &NOSE, w, h), Combine::Subtract)
-        .combine(&draw(&faces, &ROUND_EYES, w, h), Combine::Subtract)
+    blemish_area(&skin(analysis, image, &[FACE_SKIN]), &points(analysis))
+}
+
+/// The part of `face_skin` to look for blemishes on, for `faces`' points.
+fn blemish_area(face_skin: &Selection, faces: &[&[[f32; 3]]]) -> Selection {
+    let (w, h) = (face_skin.width(), face_skin.height());
+    face_skin
+        .combine(&draw(faces, &OUTLINE, w, h), Combine::Intersect)
+        .combine(&draw(faces, &NOSE, w, h), Combine::Subtract)
+        .combine(&draw(faces, &ROUND_EYES, w, h), Combine::Subtract)
 }
 
 /// The distance between the eyes of the largest face the landmarker saw
@@ -244,11 +249,14 @@ pub fn scale(analysis: &Analysis) -> Option<f32> {
         .faces
         .iter()
         .filter(|(_, points)| points.is_some())
-        .map(|(face, _)| {
-            let [l, r] = [face.points[0], face.points[1]];
-            (r[0] - l[0]).hypot(r[1] - l[1]).max((face.bounds[3] - face.bounds[1]) / 3.0)
-        })
+        .map(|(face, _)| face_scale(face))
         .reduce(f32::max)
+}
+
+/// The distance between `face`'s eyes, as it would be facing the camera.
+fn face_scale(face: &Detection) -> f32 {
+    let [l, r] = [face.points[0], face.points[1]];
+    (r[0] - l[0]).hypot(r[1] - l[1]).max((face.bounds[3] - face.bounds[1]) / 3.0)
 }
 
 /// What Smooth Skin and Even Tone work from: what the active layer and
@@ -277,6 +285,48 @@ pub fn find_skin(image: Raster, profile: &ColorProfile) -> Result<FoundSkin, Str
         (pos2((eye[0] + mouth[0]) / 2.0, (eye[1] + mouth[1]) / 2.0), pos2(nose[0], nose[1]))
     });
     Ok(FoundSkin { image, skin, iod, cheek, nose })
+}
+
+/// What Auto Retouch works from, for one face: its box (left, top, right,
+/// bottom), the distance between its eyes, that person's share of the skin,
+/// face and body, and the spots on the face, most prominent first.
+pub struct FoundFace {
+    pub bounds: [f32; 4],
+    pub iod: f32,
+    pub skin: Selection,
+    pub spots: Vec<Spot>,
+}
+
+/// The faces in `image`, from left to right, each measured on its own. A
+/// face the landmarker didn't see (in profile) has skin but no spots, as
+/// in [`blemish_skin`]. One with neither (too small for the segmenter to
+/// see its skin, or not a face at all) is left out.
+pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFace>, String> {
+    let (srgb, analysis) = analyse(image, profile)?;
+    let mut faces: Vec<_> = analysis.faces.iter().collect();
+    if faces.is_empty() {
+        return Err("Found no faces".into());
+    }
+    faces.sort_by(|a, b| a.0.bounds[0].total_cmp(&b.0.bounds[0]));
+    let all_skin = skin(&analysis, image, &[BODY_SKIN, FACE_SKIN]);
+    let face_skin = skin(&analysis, image, &[FACE_SKIN]);
+    let places: Vec<_> = (faces.iter())
+        .map(|(f, _)| ([(f.bounds[0] + f.bounds[2]) / 2.0, (f.bounds[1] + f.bounds[3]) / 2.0], face_scale(f)))
+        .collect();
+    let found = faces.iter().enumerate().map(|(n, (face, points))| {
+        let iod = places[n].1;
+        FoundFace {
+            bounds: face.bounds,
+            iod,
+            skin: retouch::share(&all_skin, &places, n),
+            spots: points.as_deref().map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),
+        }
+    });
+    let found: Vec<_> = found.filter(|f| !f.skin.is_empty() || !f.spots.is_empty()).collect();
+    if found.is_empty() {
+        return Err("Found no skin on the faces".into());
+    }
+    Ok(found)
 }
 
 /// The points of each face the landmarker saw.

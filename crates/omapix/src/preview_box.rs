@@ -51,11 +51,7 @@ impl PreviewBox {
     /// `pixels` (the box's size, in the document's colours) as a texture
     /// to show in it.
     pub fn texture(&self, ctx: &egui::Context, editor: &Editor, name: &str, pixels: &[Pixel]) -> egui::TextureHandle {
-        let mut rgba = vec![[0u8; 4]; pixels.len()];
-        editor.canvas.transform().convert(pixels, &mut rgba);
-        let (w, h) = self.size;
-        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], bytemuck::cast_slice(&rgba));
-        ctx.load_texture(name, image, egui::TextureOptions::NEAREST)
+        texture(ctx, editor, name, self.size, pixels)
     }
 
     /// Show `after`, or `before` while the button is held on the box.
@@ -71,4 +67,13 @@ impl PreviewBox {
         let stroke = egui::Stroke::new(1.0, ui.visuals().window_stroke().color);
         ui.painter().rect_stroke(self.rect, 0.0, stroke, egui::StrokeKind::Outside);
     }
+}
+
+/// `pixels` (`width` × `height`, in the document's colours) as a texture, in
+/// the display's.
+pub fn texture(ctx: &egui::Context, editor: &Editor, name: &str, (width, height): (u32, u32), pixels: &[Pixel]) -> egui::TextureHandle {
+    let mut rgba = vec![[0u8; 4]; pixels.len()];
+    editor.canvas.transform().convert(pixels, &mut rgba);
+    let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], bytemuck::cast_slice(&rgba));
+    ctx.load_texture(name, image, egui::TextureOptions::NEAREST)
 }

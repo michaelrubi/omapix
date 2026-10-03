@@ -127,6 +127,7 @@ enum Dialog {
     },
     BlendingOptions(crate::blending_options::BlendingOptions),
     SelectAndMask(crate::select_and_mask::SelectAndMask),
+    AutoRetouch(crate::auto_retouch::AutoRetouch),
     HealBlemishes(crate::heal_blemishes::HealBlemishes),
     SmoothSkin(crate::smooth_skin::SmoothSkin),
     EvenTone(crate::even_tone::EvenTone),
@@ -177,6 +178,7 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::SelectEyes
         | Command::SelectLips
         | Command::SelectTeeth
+        | Command::AutoRetouch
         | Command::HealBlemishes
         | Command::SmoothSkin
         | Command::EvenTone => &[DETECTOR, LANDMARKER, SEGMENTER],
@@ -266,7 +268,9 @@ struct BatchJob {
 /// - `Tool Move|Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso|Crop`, `Size n`, `Opacity percent`,
 ///   `Color r g b` (sRGB), `Source x y` (clone/heal source, like Alt+click),
 ///   `Look x y` (centre the view on an image point at 100 %),
-///   `View image|mask|overlay|texture r|tone r|blur r` (what the canvas shows).
+///   `View image|mask|overlay|texture r|tone r|blur r` (what the canvas shows);
+/// - `AutoRetouch Natural|Standard|Strong`: Auto Retouch with that preset
+///   (or, with none, as last used), OK'd once the faces are found.
 #[derive(Debug)]
 enum ScriptStep {
     Command(Command),
@@ -284,6 +288,7 @@ enum ScriptStep {
     BlendIf(bool, [f32; 4]),
     /// Magic Wand tolerance (0–255).
     Tolerance(u8),
+    AutoRetouch(Option<crate::auto_retouch::Preset>),
 }
 
 impl ScriptStep {
@@ -300,6 +305,10 @@ impl ScriptStep {
             ("Source", &[x, y]) => ScriptStep::Source(egui::pos2(x, y)),
             ("Look", &[x, y]) => ScriptStep::Look(egui::pos2(x, y)),
             ("History", &[n]) => ScriptStep::History(n as usize),
+            ("AutoRetouch", _) => ScriptStep::AutoRetouch(match words.next() {
+                Some(name) => Some(crate::auto_retouch::Preset::from_name(name)?),
+                None => None,
+            }),
             ("BlendIf", &[a, b, c, d]) => {
                 let under = step.split_whitespace().any(|w| w == "under");
                 ScriptStep::BlendIf(under, [a / 255.0, b / 255.0, c / 255.0, d / 255.0])
@@ -1316,6 +1325,13 @@ impl App {
                     Err(e) => self.message(e, true),
                 }
             }
+            Command::AutoRetouch => {
+                let Some(editor) = &self.editor else { return };
+                match crate::auto_retouch::AutoRetouch::open(ctx, editor, self.filters.auto_retouch) {
+                    Ok(dialog) => self.dialog = Some(Dialog::AutoRetouch(dialog)),
+                    Err(e) => self.message(e, true),
+                }
+            }
             Command::HealBlemishes => {
                 let Some(editor) = &self.editor else { return };
                 match crate::heal_blemishes::HealBlemishes::open(ctx, editor, self.filters.blemish_sensitivity) {
@@ -1951,6 +1967,8 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::HighPass, None);
             });
             ui.menu_button("Retouch", |ui| {
+                self.menu_item(ui, Command::AutoRetouch, None);
+                ui.separator();
                 self.menu_item(ui, Command::HealBlemishes, None);
                 self.menu_item(ui, Command::SmoothSkin, None);
                 self.menu_item(ui, Command::EvenTone, None);
@@ -2141,6 +2159,20 @@ self.filters.remember(&filter);
                     dialog.apply(ctx, &mut self.denoising);
                     self.filters.denoise_luminance = dialog.luminance;
                     self.filters.denoise_color = dialog.color;
+                    self.filters.save();
+                }
+                Ok(Some(false)) => {}
+                Ok(None) => return,
+                Err(e) => self.message(e, true),
+            }
+            self.dialog = None;
+            return;
+        }
+        if let (Some(Dialog::AutoRetouch(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
+            match dialog.show(ctx, editor, &self.theme) {
+                Ok(Some(true)) => {
+                    dialog.apply(ctx, editor);
+                    self.filters.auto_retouch = dialog.all;
                     self.filters.save();
                 }
                 Ok(Some(false)) => {}
@@ -2416,7 +2448,7 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::EvenTone(_) | Dialog::Denoise(_) => {}
+                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::AutoRetouch(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::EvenTone(_) | Dialog::Denoise(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -3634,6 +3666,15 @@ self.filters.remember(&filter);
                     editor.canvas.look_at(p);
                 }
             }
+            ScriptStep::AutoRetouch(preset) => {
+                self.run(Command::AutoRetouch, ctx);
+                if let Some(Dialog::AutoRetouch(dialog)) = &mut self.dialog {
+                    if let Some(preset) = preset {
+                        dialog.all = preset.settings();
+                    }
+                    dialog.accept = true;
+                }
+            }
         }
         ctx.request_repaint();
     }
@@ -4735,6 +4776,7 @@ impl eframe::App for App {
                     crop: crop_box.is_some() && !tools_off,
                     spots: match &self.dialog {
                         Some(Dialog::HealBlemishes(dialog)) => dialog.spots(),
+                        Some(Dialog::AutoRetouch(dialog)) => dialog.spots(),
                         _ => &[],
                     },
                 };
@@ -8505,6 +8547,52 @@ mod tests {
         assert!(error && text.starts_with("Exported 1 file; 1 failed: bad.tif"), "{text}");
         assert!(dir.join("out/good.jpg").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn script_steps_run_auto_retouch_with_a_preset_or_as_last_used() {
+        use crate::auto_retouch::Preset;
+        assert!(matches!(ScriptStep::parse("AutoRetouch Natural"), Some(ScriptStep::AutoRetouch(Some(Preset::Natural)))));
+        assert!(matches!(ScriptStep::parse("AutoRetouch"), Some(ScriptStep::AutoRetouch(None))));
+        assert!(ScriptStep::parse("AutoRetouch Gentle").is_none());
+    }
+
+    /// End to end: `AutoRetouch Natural` as an `OMAPIX_SCRIPT` step on
+    /// `OMAPIX_FACE_PHOTO`, checking the layers it builds. Needs the models
+    /// (scripts/fetch-models.sh).
+    #[test]
+    #[ignore]
+    fn the_auto_retouch_script_step_builds_a_group_for_each_face() {
+        let Ok(photo) = std::env::var("OMAPIX_FACE_PHOTO") else { return };
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let doc = omapix_engine::io::load(std::path::Path::new(&photo)).unwrap();
+        let (render, _) = render_view(&doc, View::Image, [0; 4], None);
+        let mut editor = Editor::new(doc).unwrap();
+        editor.canvas.set_render(Arc::new(render));
+        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
+        app.editor = Some(editor);
+        app.script.push_back(ScriptStep::parse("AutoRetouch Natural").unwrap());
+        let done = |app: &App| app.script.is_empty() && app.dialog.is_none() && app.editor.as_ref().unwrap().busy().is_none();
+        for _ in 0..12000 {
+            app.run_script(&ctx);
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            app.editor.as_mut().unwrap().update(&ctx);
+            if done(&app) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(done(&app), "{:?}", app.status);
+        let editor = app.editor.as_ref().unwrap();
+        let names: Vec<_> = editor.doc.layers.iter().map(|l| l.name.as_str()).collect();
+        eprintln!("{names:?}");
+        assert_eq!(names.last(), Some(&"Retouch"));
+        assert_eq!(names[names.len() - 2], "Face 1");
+        assert!(names.contains(&"Smooth Skin") && names.contains(&"Dodge & Burn"));
+        assert_eq!(editor.undo_label(), Some("Auto Retouch"));
+        assert_eq!(app.filters.auto_retouch, crate::auto_retouch::Preset::Natural.settings());
     }
 
     #[test]
