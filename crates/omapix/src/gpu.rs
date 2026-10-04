@@ -10,7 +10,7 @@ use eframe::wgpu;
 use omapix_engine::{DisplayTransform, Pixel};
 use wgpu::util::DeviceExt;
 
-use crate::live::{LUT_SIZE, LiveFrame, Plane, Settings, Source, Table};
+use crate::live::{Before, LUT_SIZE, LiveFrame, Plane, Settings, Source, Table};
 
 /// The largest texture side the GPU takes, once live compositing is set up
 /// at startup.
@@ -77,6 +77,8 @@ struct Uploaded {
     passes: Vec<Pass>,
     /// Ping-pong targets: pass `i` writes `targets[i % 2]`.
     targets: [(wgpu::Texture, wgpu::TextureView); 2],
+    /// What was below the groups that fade, a slot each while it's needed.
+    kept: Vec<wgpu::Texture>,
     display_uniform: wgpu::Buffer,
     display_group: wgpu::BindGroup,
 }
@@ -85,6 +87,8 @@ struct Pass {
     uniform: wgpu::Buffer,
     group: wgpu::BindGroup,
     params: Params,
+    /// The slots to copy what's below into first.
+    keep: Vec<usize>,
     /// The subject's pass, and its adjustment's table as last uploaded.
     subject: Option<(wgpu::Texture, Option<Table>)>,
 }
@@ -167,6 +171,7 @@ impl LiveGpu {
                 texture(2, uint, d2),
                 texture(3, float, d3),
                 uniform(4),
+                texture(5, float, d2),
             ],
         });
         let display_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -235,7 +240,7 @@ impl LiveGpu {
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draw: &LiveDraw) {
         let stack = &draw.frame.stack;
         let (x0, y0, w, h) = stack.region;
-        let target = || {
+        let target = |usage| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("live target"),
                 size: extent((w, h, 1)),
@@ -243,15 +248,15 @@ impl LiveGpu {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: TARGET,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | usage,
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             (texture, view)
         };
-        let targets = [target(), target()];
+        let drawn = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        let targets = [target(drawn), target(drawn)];
+        let kept: Vec<_> = (0..stack.slots).map(|_| target(wgpu::TextureUsages::COPY_DST)).collect();
         let region_origin = [x0 as i32, y0 as i32];
         let rect = |x0: u32, y0: u32, w: u32, h: u32| ([x0 as i32, y0 as i32], [w as i32, h as i32]);
 
@@ -267,24 +272,25 @@ impl LiveGpu {
             opacity: 1.0,
             mask_fill: 1.0,
         };
-        let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, false)];
+        let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, None, &[][..], false)];
         let table_texture = |data: &[[f32; 3]]| {
             let texture = lut_texture(device, LUT_SIZE);
             write_lut(queue, &texture, data, LUT_SIZE);
             texture
         };
         for layer in &stack.layers {
-            let (pixels, lut, plane, fill, kind) = match &layer.source {
-                Source::Pixels(plane) => (
+            let nothing = ([0; 2], [0; 2]);
+            let (pixels, lut, before, plane, fill, kind) = match &layer.source {
+                Source::Pixels(plane) | Source::Group(Before::Plane(plane)) => (
                     Some(upload_pixels(device, queue, plane)),
+                    None,
                     None,
                     rect(plane.x0, plane.y0, plane.w, plane.h),
                     unit(plane.fill),
-                    0,
+                    if matches!(layer.source, Source::Pixels(_)) { 0 } else { 3 },
                 ),
-                Source::Adjustment(table) => {
-                    (None, Some(table_texture(table)), ([0; 2], [0; 2]), [0.0; 4], 1)
-                }
+                Source::Adjustment(table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
+                Source::Group(Before::Kept(slot)) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 4),
             };
             let mask = layer.mask.as_ref().map(|m| {
                 let texture = upload(device, queue, wgpu::TextureFormat::R16Uint, (m.w, m.h), &m.data);
@@ -301,13 +307,13 @@ impl LiveGpu {
                 opacity: layer.opacity,
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
             };
-            sources.push((params, pixels, mask.map(|m| m.0), lut, layer.subject));
+            sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], layer.subject));
         }
 
         let passes = sources
             .into_iter()
             .enumerate()
-            .map(|(i, (params, pixels, mask, lut, subject))| {
+            .map(|(i, (params, pixels, mask, lut, before, keep, subject))| {
                 let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("live layer"),
                     contents: &params.bytes([0, 0], None),
@@ -332,12 +338,14 @@ impl LiveGpu {
                             binding: 4,
                             resource: uniform.as_entire_binding(),
                         },
+                        entry(5, before.as_ref().unwrap_or(&targets[(i + 1) % 2].1)),
                     ],
                 });
                 Pass {
                     uniform,
                     group,
                     params,
+                    keep: keep.to_vec(),
                     subject: subject.then(|| (lut.unwrap_or_else(|| table_texture(&[])), None)),
                 }
             })
@@ -368,6 +376,7 @@ impl LiveGpu {
             id: stack.id,
             passes,
             targets,
+            kept: kept.into_iter().map(|k| k.0).collect(),
             display_uniform,
             display_group,
         });
@@ -410,6 +419,13 @@ impl CallbackTrait for LiveDraw {
                 }
             }
             queue.write_buffer(&pass.uniform, 0, &params.bytes(moved, through));
+            for &slot in &pass.keep {
+                encoder.copy_texture_to_texture(
+                    uploaded.targets[(i + 1) % 2].0.as_image_copy(),
+                    uploaded.kept[slot].as_image_copy(),
+                    extent((stack.region.2, stack.region.3, 1)),
+                );
+            }
             let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("live layer"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -715,6 +731,89 @@ mod tests {
         doc.group_layers(&[doc.layers[1].id, doc.layers[2].id]);
         let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
         assert!(worst < 4e-3, "in a group: off by {worst}");
+    }
+
+    /// Give group `id` an opacity and a mask that slopes down the image.
+    fn fade(doc: &mut Document, id: u64, opacity: f32) {
+        let (w, h) = (doc.width, doc.height);
+        let slope: Vec<u16> = (0..w * h).map(|i| (i / w * 1500) as u16).collect();
+        let mut mask = Mask::white(w, h);
+        mask.pixels = Tiled::from_slice(w, h, 65535, &slope);
+        let group = doc.layer_mut(id).unwrap();
+        (group.opacity, group.mask) = (opacity, Some(mask));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_groups_that_fade_match_the_cpu() {
+        let (device, queue) = device();
+        let check = |doc: &Document, what: &str| {
+            let worst = worst_difference(&device, &queue, doc, (-7, 4), None);
+            assert!(worst < 4e-3, "{what}: off by {worst}");
+        };
+        let document = || document(BlendMode::Multiply, true);
+        let ids = |doc: &Document| [1, 2, 3].map(|i| doc.layers[i].id);
+
+        // Round the patch moved, with the layer above it.
+        let mut doc = document();
+        let [patch, above, curves] = ids(&doc);
+        let group = doc.group_layers(&[patch, above]).unwrap();
+        fade(&mut doc, group, 0.6);
+        check(&doc, "round it");
+        // And in another, with the Curves.
+        let outer = doc.group_layers(&[group, curves]).unwrap();
+        fade(&mut doc, outer, 0.8);
+        check(&doc, "two round it");
+
+        // Above it: one, then one inside another starting at the same layer,
+        // then two side by side.
+        let mut doc = document();
+        let [_, above, curves] = ids(&doc);
+        let inner = doc.group_layer(2);
+        fade(&mut doc, inner, 0.6);
+        check(&doc, "above it");
+        let outer = doc.group_layers(&[inner, curves]).unwrap();
+        fade(&mut doc, outer, 0.8);
+        check(&doc, "two above it");
+        let mut doc = document();
+        for id in [above, curves] {
+            let group = doc.group_layer(doc.index_of(id).unwrap());
+            fade(&mut doc, group, 0.5);
+        }
+        check(&doc, "side by side");
+
+        // A group's own opacity, edited: the stack is built before the edit.
+        let mut doc = document();
+        let group = doc.group_layers(&[patch, above]).unwrap();
+        doc.layer_mut(group).unwrap().mask = Some(Mask::white(doc.width, doc.height));
+        let (w, h) = (doc.width, doc.height);
+        let stack = Arc::new(live::build(&doc, &doc.layers, group, false, 0, (0, 0, w, h)).unwrap());
+        fade(&mut doc, group, 0.35);
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack,
+                offset: (0, 0),
+                transform: None,
+                settings: Some(Settings {
+                    opacity: 0.35,
+                    mode: BlendMode::PassThrough,
+                    lut: None,
+                }),
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(&device, &queue, draw);
+        doc.layer_mut(group).unwrap().mask = Some(Mask::white(w, h));
+        let cpu = composite::composite(&doc.layers, w, h);
+        let worst = cpu
+            .pixels()
+            .iter()
+            .zip(&gpu)
+            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+            .fold(0.0, f32::max);
+        assert!(worst < 4e-3, "its own opacity: off by {worst}");
     }
 
     #[test]

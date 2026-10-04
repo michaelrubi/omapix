@@ -17,7 +17,9 @@ struct Layer {
     mask_size: vec2<i32>,
     pixel_fill: vec4<f32>,
     mode: u32,
-    // 0: pixels, 1: an adjustment, 2: the first (nothing below it).
+    // 0: pixels, 1: an adjustment, 2: the first (nothing below it), 3: the
+    // end of a group that fades, with what was below its layers in `pixels`,
+    // 4: the same, with it in `kept`.
     kind: u32,
     has_mask: u32,
     lut_size: u32,
@@ -38,6 +40,7 @@ struct Layer {
 @group(0) @binding(2) var mask: texture_2d<u32>;
 @group(0) @binding(3) var lut: texture_3d<f32>;
 @group(0) @binding(4) var<uniform> p: Layer;
+@group(0) @binding(5) var kept: texture_2d<f32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -281,6 +284,26 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let cb = dst.rgb;
     let a_b = dst.a;
+
+    // A Pass Through group's opacity and mask fade what its layers made
+    // back towards what was below them, premultiplied (composite.rs `mix`).
+    if p.kind >= 3u {
+        var before = textureLoad(kept, r, 0);
+        if p.kind == 3u {
+            before = pixel_at(q);
+        }
+        if coverage <= 0.0 {
+            return before;
+        }
+        if coverage >= 1.0 {
+            return dst;
+        }
+        let alpha = mix(before.a, a_b, coverage);
+        if alpha <= 0.0 {
+            return vec4<f32>(0.0);
+        }
+        return vec4<f32>(mix(before.rgb * before.a, cb * a_b, coverage) / alpha, alpha);
+    }
 
     // An adjustment blends the adjusted colour onto the original, leaving
     // transparency as it is (composite.rs `blend_tile`).

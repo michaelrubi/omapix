@@ -89,7 +89,10 @@ unit tests, and leaves room to replace the UI toolkit later.
   blended each frame by a shader, a render pass per layer, into a 32-bit
   float texture drawn through the display transform as a 3D lookup table
   (adjustments go through lookup tables too). The move is made on the CPU
-  once, when the drag ends.
+  once, when the drag ends. Pass Through groups cost nothing, their layers
+  being blended as if ungrouped; one with an opacity or a mask gets a pass
+  after its layers, fading the result back towards what was below them
+  (composited beforehand, or copied aside at the group's start).
 - Blend modes follow Photoshop's formulas (Soft Light included), plus
   GIMP/Krita's Grain Extract/Merge for frequency separation.
 - Layer groups keep the stack one flat list, as PSD files do: a group's
