@@ -61,6 +61,8 @@ enum Then {
     Open,
     OpenFile(PathBuf),
     Close,
+    /// Show a new image in place of the open one.
+    New(Box<Document>),
 }
 
 struct PendingClip {
@@ -140,6 +142,11 @@ enum Dialog {
     /// Ask before deleting a preset.
     DeletePreset {
         name: String,
+    },
+    /// File › New: the new image's size in pixels.
+    NewImage {
+        width: u32,
+        height: u32,
     },
     /// Image › Image Size, in pixels; `constrain` keeps the proportions,
     /// and `ai` enlarges with the model (`crate::upscale`).
@@ -453,6 +460,8 @@ pub struct App {
     clipboard: Clipboard,
     /// An image being read from the system clipboard or dropped to paste or place.
     pasting: Option<Receiver<Result<PendingClip, String>>>,
+    /// A new image being made from the clipboard.
+    from_clipboard: Option<Receiver<Result<Document, String>>>,
     /// Dropped files queued to place once opening finishes.
     pending_drops: Vec<PathBuf>,
     /// Whether V is held, for spotting Ctrl+V (see [`Command::pressed`]).
@@ -540,6 +549,7 @@ impl App {
                 .collect(),
             clipboard: Clipboard::new(std::env::var_os("WAYLAND_DISPLAY").is_some()),
             pasting: None,
+            from_clipboard: None,
             pending_drops: Vec::new(),
             v_down: false,
             tablet: Tablet::connect(cc),
@@ -742,7 +752,27 @@ impl App {
             Then::Open => self.pick(Purpose::Open, ctx),
             Then::OpenFile(path) => self.open(path, ctx),
             Then::Close => self.close_document(),
+            Then::New(doc) => match Editor::new(*doc) {
+                Ok(editor) => {
+                    self.close_document();
+                    self.editor = Some(editor);
+                }
+                Err(err) => self.message(format!("Couldn't make a new image: {err}"), true),
+            },
         }
+    }
+
+    /// Make a new image of what's on the clipboard, read in the background.
+    fn new_from_clipboard(&mut self, ctx: &egui::Context) {
+        let ours = self.clipboard.current();
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let clip = ours.map_or_else(|| crate::clipboard::read_system().map(Arc::new), Ok);
+            let _ = tx.send(clip.and_then(|clip| clip.document().map_err(|e| e.to_string())));
+            ctx.request_repaint();
+        });
+        self.from_clipboard = Some(rx);
     }
 
     fn close_document(&mut self) {
@@ -869,6 +899,15 @@ impl App {
                 self.message(text, failed);
             }
         }
+        if let Some(rx) = &self.from_clipboard
+            && let Ok(result) = rx.try_recv()
+        {
+            self.from_clipboard = None;
+            match result {
+                Ok(doc) => self.guard(Then::New(Box::new(doc)), ctx),
+                Err(err) => self.message(err, true),
+            }
+        }
         if let Some(rx) = &self.pasting
             && self.editor.as_ref().is_some_and(|e| e.busy().is_none())
         {
@@ -941,7 +980,16 @@ impl App {
 
     fn enabled(&self, cmd: Command) -> bool {
         let Some(editor) = &self.editor else {
-            return matches!(cmd, Command::Open | Command::Quit | Command::BatchExport | Command::AiModels)
+            return matches!(
+                cmd,
+                Command::New
+                    | Command::NewFromClipboard
+                    | Command::Paste
+                    | Command::Open
+                    | Command::Quit
+                    | Command::BatchExport
+                    | Command::AiModels
+            )
                 || (cmd == Command::ReopenLast && self.recent.last().is_some());
         };
         let view = matches!(
@@ -1062,6 +1110,8 @@ impl App {
         // Delete with several layers selected deletes them, as in Photoshop.
         let cmd = match (cmd, &self.editor) {
             (Command::Clear, Some(e)) if e.several_selected() => Command::DeleteLayer,
+            // With nothing open, pasting makes a new image.
+            (Command::Paste, None) => Command::NewFromClipboard,
             _ => cmd,
         };
         if !self.enabled(cmd) {
@@ -1069,6 +1119,8 @@ impl App {
         }
         // A Free Transform is applied before the document is saved or closed.
         let finishing = [
+            Command::New,
+            Command::NewFromClipboard,
             Command::Open,
             Command::Close,
             Command::ReopenLast,
@@ -1101,6 +1153,11 @@ impl App {
             }
         }
         match cmd {
+            Command::New => {
+                let size = self.editor.as_ref().map_or(NEW_IMAGE_SIZE, |e| (e.doc.width, e.doc.height));
+                self.dialog = Some(Dialog::NewImage { width: size.0, height: size.1 });
+            }
+            Command::NewFromClipboard => self.new_from_clipboard(ctx),
             Command::Open => self.guard(Then::Open, ctx),
             Command::Close => self.guard(Then::Close, ctx),
             Command::ReopenLast => {
@@ -1831,6 +1888,8 @@ self.filters.remember(&filter);
     fn menu_bar(&mut self, ui: &mut Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                self.menu_item(ui, Command::New, None);
+                self.menu_item(ui, Command::NewFromClipboard, None);
                 self.menu_item(ui, Command::Open, None);
                 ui.menu_button("Open Recent", |ui| {
                     if self.recent.files().is_empty() {
@@ -2594,6 +2653,29 @@ self.filters.remember(&filter);
                         }
                         if ok {
                             action = Some(Box::new(move |app, _| app.save_preset(&name)));
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::NewImage { width, height } => {
+                    ui.heading("New");
+                    ui.add_space(8.0);
+                    for (label, value) in [("Width", &mut *width), ("Height", &mut *height)] {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            ui.add(egui::DragValue::new(value).range(1..=MAX_SIDE).suffix(" px"));
+                        });
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let doc = Box::new(Document::blank(*width, *height));
+                            action = Some(Box::new(move |app, ctx| app.guard(Then::New(doc), ctx)));
                             close = true;
                         }
                     });
@@ -4085,6 +4167,8 @@ fn crop(editor: &mut Editor, x: i32, y: i32, w: u32, h: u32) {
 
 /// The largest width or height Image Size and Canvas Size allow.
 const MAX_SIDE: u32 = 30_000;
+/// File › New's size with nothing open.
+const NEW_IMAGE_SIZE: (u32, u32) = (1920, 1080);
 
 /// A width or height in pixels, with the percentage of `now` it is.
 fn size_field(ui: &mut Ui, label: &str, value: &mut u32, now: u32) {
@@ -5398,6 +5482,7 @@ mod tests {
             script: VecDeque::new(),
             clipboard: Clipboard::new(false),
             pasting: None,
+            from_clipboard: None,
             pending_drops: Vec::new(),
             v_down: false,
             tablet: None,
@@ -8051,6 +8136,82 @@ mod tests {
         app.proceed(Then::Close, &ctx);
         assert!(app.editor.is_none());
         assert!(!app.enabled(Command::Close));
+    }
+
+    #[test]
+    fn new_makes_a_blank_image_once_unsaved_changes_are_dealt_with() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().modified = true;
+
+        app.run(Command::New, &ctx);
+        // It starts at the open image's size.
+        let Some(Dialog::NewImage { width, height }) = &mut app.dialog else {
+            panic!("no New dialog");
+        };
+        assert_eq!((*width, *height), (600, 400));
+        (*width, *height) = (320, 200);
+        let enter = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(enter, |ctx| app.dialogs(ctx));
+        output.textures_delta.clear();
+
+        let Some(Dialog::UnsavedChanges { then }) = app.dialog.take() else {
+            panic!("didn't ask about the unsaved changes");
+        };
+        assert_eq!(app.editor.as_ref().unwrap().doc.width, 600);
+        app.editor.as_mut().unwrap().modified = false;
+        app.proceed(then, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!((editor.doc.width, editor.doc.height), (320, 200));
+        assert_eq!(editor.doc.file_name(), "Untitled");
+        assert_eq!(editor.doc.composite().get(319, 199), [u16::MAX; 4]);
+        assert_eq!(editor.history_labels(), ["New"]);
+        assert!(!app.modified());
+    }
+
+    #[test]
+    fn new_from_clipboard_makes_an_image_of_the_copy() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let wait = |app: &mut App| {
+            let started = Instant::now();
+            while app.from_clipboard.is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+                let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| app.poll(ctx));
+                out.textures_delta.clear();
+                assert!(started.elapsed() < Duration::from_secs(5), "timed out reading the clipboard");
+            }
+        };
+        // The selection, 100 px square.
+        let clip = copy(app.editor.as_ref().unwrap(), false).unwrap();
+        app.clipboard.set(clip);
+
+        // With nothing open, Paste does the same.
+        for cmd in [Command::NewFromClipboard, Command::Paste] {
+            app.editor = None;
+            assert!(app.enabled(cmd));
+            app.run(cmd, &ctx);
+            wait(&mut app);
+            let doc = &app.editor.as_ref().unwrap().doc;
+            assert_eq!((doc.width, doc.height, doc.layers.len()), (100, 100, 1));
+            assert_eq!(doc.composite().get(50, 50), [30000, 30000, 30000, 65535]);
+            assert_eq!(doc.file_name(), "Untitled");
+        }
+
+        // Unsaved changes to the open image are asked about first.
+        app.editor.as_mut().unwrap().modified = true;
+        app.run(Command::NewFromClipboard, &ctx);
+        wait(&mut app);
+        assert!(matches!(&app.dialog, Some(Dialog::UnsavedChanges { then: Then::New(_) })));
     }
 
     fn write_test_png(path: &Path, w: u32, h: u32) {

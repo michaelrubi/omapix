@@ -736,7 +736,7 @@ impl Editor {
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Open".into());
+            .unwrap_or_else(|| "New".into());
         let mut labels = Vec::with_capacity(1 + self.undo.len() + self.redo.len());
         labels.push(initial);
         for s in &self.undo {
