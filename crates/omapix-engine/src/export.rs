@@ -4,6 +4,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use image::ImageEncoder;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use rayon::prelude::*;
 use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
 use tiff::tags::Tag;
@@ -11,7 +13,7 @@ use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, Exif, PixelLayout, Unst
 use zenjpeg::encoder::Error as JpegError;
 
 use crate::color::LinearSrgbTransform;
-use crate::{Document, Error, Pixel, Result};
+use crate::{DisplayTransform, Document, Error, Pixel, Result};
 
 fn create(path: &Path) -> Result<BufWriter<File>> {
     File::create(path)
@@ -234,6 +236,32 @@ pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
     })
 }
 
+/// Flattened 8-bit sRGB PNG with the sRGB profile and EXIF metadata, for the
+/// web and other apps. Keeps transparency, which a JPEG can't, if the image
+/// has any.
+pub fn png(doc: &Document, path: &Path) -> Result<()> {
+    let image = doc.composite();
+    let transform = DisplayTransform::to_srgb(&doc.profile)?;
+    let mut rgba = vec![[0u8; 4]; image.pixels().len()];
+    rgba.par_chunks_mut(65536)
+        .zip(image.pixels().par_chunks(65536))
+        .for_each(|(out, src)| transform.convert(src, out));
+    let srgb = lcms2::Profile::new_srgb().icc().map_err(Error::Color)?;
+    let mut encoder = PngEncoder::new_with_quality(create(path)?, CompressionType::Default, FilterType::Adaptive);
+    encoder.set_icc_profile(srgb).map_err(image::ImageError::Unsupported)?;
+    if let Some(exif) = &doc.exif {
+        encoder.set_exif_metadata(exif.clone()).map_err(image::ImageError::Unsupported)?;
+    }
+    let (w, h) = (image.width(), image.height());
+    if rgba.iter().all(|p| p[3] == u8::MAX) {
+        let rgb: Vec<u8> = rgba.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+        encoder.write_image(&rgb, w, h, image::ExtendedColorType::Rgb8)?;
+    } else {
+        encoder.write_image(rgba.as_flattened(), w, h, image::ExtendedColorType::Rgba8)?;
+    }
+    Ok(())
+}
+
 /// File › Batch Export for one file: `source` opened, shrunk so its long
 /// edge is at most `long_edge`, finished ([`crate::ops::finish`]), and
 /// written to `dir` named after it, as a JPEG at `jpeg_quality` or else a
@@ -349,6 +377,57 @@ mod tests {
         // Half black over white, mixed in the document's linear light.
         near(24, [188, 188, 188]);
         near(40, [255, 255, 255]);
+    }
+
+    #[test]
+    fn png_converts_to_srgb_and_keeps_transparency() {
+        // As for the JPEG, but half-transparent red in the middle.
+        let profile = ColorProfile::srgb().with_gamma(1.0).unwrap();
+        let skin = profile.from_srgb8([200, 150, 120]).unwrap();
+        let (w, h) = (48, 16);
+        let px: Vec<crate::Pixel> = (0..w * h)
+            .map(|i| match (i % w) / 16 {
+                0 => skin,
+                1 => [65535, 0, 0, 32768],
+                _ => [0; 4],
+            })
+            .collect();
+        let mut doc = Document::from_image("x.tif".into(), &Raster::new(w, h, px), profile, 16);
+        let dir = std::env::temp_dir().join(format!("omapix-png-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.png");
+        png(&doc, &path).unwrap();
+        let back = image::open(&path).unwrap();
+        assert_eq!(back.color(), image::ColorType::Rgba8);
+        let back = back.to_rgba8();
+        let near = |x: u32, want: [u8; 4]| {
+            let got = back.get_pixel(x, 8).0;
+            assert!(got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 1), "at {x}: {got:?}, want {want:?}");
+        };
+        near(8, [200, 150, 120, 255]);
+        near(24, [255, 0, 0, 128]);
+        assert_eq!(back.get_pixel(40, 8).0[3], 0);
+        // It opens as sRGB, with the metadata it was given.
+        let date = exif::Field {
+            tag: exif::Tag::DateTimeOriginal,
+            ifd_num: exif::In::PRIMARY,
+            value: exif::Value::Ascii(vec![b"2024:02:13 15:58:41".to_vec()]),
+        };
+        let mut writer = exif::experimental::Writer::new();
+        writer.push_field(&date);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        writer.write(&mut buf, true).unwrap();
+        doc.exif = Some(buf.into_inner());
+        png(&doc, &path).unwrap();
+        let opened = crate::io::load(&path).unwrap();
+        assert!(!opened.profile.is_linear());
+        assert_eq!(opened.exif, doc.exif);
+
+        // An opaque image has no alpha channel.
+        let opaque = Document::from_image("x.tif".into(), &Raster::new(4, 4, vec![skin; 16]), doc.profile.clone(), 16);
+        png(&opaque, &path).unwrap();
+        assert_eq!(image::open(&path).unwrap().color(), image::ColorType::Rgb8);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Walk a JPEG's segments up to the scan: a wrapped length lands off a
