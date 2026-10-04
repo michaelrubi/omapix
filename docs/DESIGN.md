@@ -178,7 +178,7 @@ All follow Photoshop.
 
 | Action | Keys |
 |---|---|
-| Open / Save / Save As | Ctrl+O / Ctrl+S / Ctrl+Shift+S |
+| New / Open / Save / Save As | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
 | Undo / Redo | Ctrl+Z / Ctrl+Shift+Z |
 | New layer / Duplicate | Ctrl+Shift+N / Ctrl+J |
 | Merge down (Merge Group on a group) / Stamp visible | Ctrl+E / Ctrl+Alt+Shift+E |
