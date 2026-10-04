@@ -2084,6 +2084,7 @@ dependencies = [
  "rayon",
  "rfd",
  "serde",
+ "serde_json",
  "smithay-clipboard",
  "toml",
  "wayland-backend",

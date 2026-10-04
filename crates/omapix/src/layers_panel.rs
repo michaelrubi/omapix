@@ -141,6 +141,11 @@ pub struct LayersPanel {
 }
 
 impl LayersPanel {
+    /// Make the thumbnails again (they're in another display's colours).
+    pub fn forget_thumbnails(&mut self) {
+        self.thumbs.clear();
+    }
+
     /// The rows shown, top of the stack first as in Photoshop, leaving out
     /// what's in closed groups. The groups the active layer is in count as
     /// open, as the panel opens them to show it.
