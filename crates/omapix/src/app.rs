@@ -51,6 +51,7 @@ enum Purpose {
     SaveAs,
     ExportTiff,
     ExportJpeg,
+    ExportPng,
     ExportLut,
 }
 
@@ -658,6 +659,10 @@ impl App {
                 .set_title("Export as JPEG")
                 .add_filter("JPEG", &["jpg", "jpeg"])
                 .set_file_name(format!("{stem}.jpg")),
+            Purpose::ExportPng => dialog
+                .set_title("Export as PNG")
+                .add_filter("PNG", &["png"])
+                .set_file_name(format!("{stem}.png")),
             Purpose::ExportLut => dialog
                 .set_title("Export Adjustments as LUT")
                 .add_filter("Cube LUT", &["cube"])
@@ -689,7 +694,7 @@ impl App {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         let label = match purpose {
-            Purpose::ExportTiff | Purpose::ExportJpeg => "Exporting",
+            Purpose::ExportTiff | Purpose::ExportJpeg | Purpose::ExportPng => "Exporting",
             _ => "Saving",
         };
         std::thread::spawn(move || {
@@ -697,6 +702,7 @@ impl App {
             let result = match purpose {
                 Purpose::ExportTiff => export::tiff(&doc, &path).map(|_| false),
                 Purpose::ExportJpeg => export::jpeg(&doc, &path, JPEG_QUALITY).map(|_| false),
+                Purpose::ExportPng => export::png(&doc, &path).map(|_| false),
                 // A round trip from darktable also updates its TIFF.
                 _ => ora::save(&doc, &path)
                     .and_then(|_| doc.round_trip.as_ref().map_or(Ok(()), |tiff| export::tiff(&doc, tiff)))
@@ -1077,6 +1083,7 @@ impl App {
             Command::SaveAs,
             Command::ExportTiff,
             Command::ExportJpeg,
+            Command::ExportPng,
             Command::Rotate180,
             Command::Rotate90Cw,
             Command::Rotate90Ccw,
@@ -1118,6 +1125,7 @@ impl App {
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
             Command::ExportTiff => self.pick(Purpose::ExportTiff, ctx),
             Command::ExportJpeg => self.pick(Purpose::ExportJpeg, ctx),
+            Command::ExportPng => self.pick(Purpose::ExportPng, ctx),
             Command::ExportAdjustmentLut => self.pick(Purpose::ExportLut, ctx),
             Command::BatchExport => {
                 self.dialog = Some(Dialog::BatchExport {
@@ -1870,6 +1878,7 @@ self.filters.remember(&filter);
                 ui.separator();
                 self.menu_item(ui, Command::ExportTiff, None);
                 self.menu_item(ui, Command::ExportJpeg, None);
+                self.menu_item(ui, Command::ExportPng, None);
                 self.menu_item(ui, Command::BatchExport, None);
                 ui.separator();
                 self.menu_item(ui, Command::Quit, None);
@@ -7990,6 +7999,29 @@ mod tests {
         assert_eq!((flat.width, flat.height, flat.layers.len()), (600, 400, 1));
         assert_eq!(app.status.as_ref().unwrap().0, "Saved IMG.ora, and IMG.tif for darktable");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn exporting_a_png_keeps_the_document_unsaved_and_says_so() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        assert!(app.enabled(Command::ExportPng));
+        let dir = std::env::temp_dir().join(format!("omapix-app-png-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.png");
+
+        app.write(Purpose::ExportPng, path.clone(), &ctx);
+        while app.file_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        let flat = omapix_engine::io::load(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!((flat.width, flat.height, flat.layers.len()), (600, 400, 1));
+        assert_eq!(app.status.as_ref().unwrap().0, "Exported out.png");
+        // An export isn't a save.
+        assert!(app.modified());
+        assert!(app.editor.as_ref().unwrap().doc.saved_path.is_none());
     }
 
     #[test]
