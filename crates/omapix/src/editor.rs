@@ -19,7 +19,7 @@ use omapix_engine::reshape::{self, Face, Shape};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
 use omapix_engine::{
-    DisplayTransform, Document, NoiseOptions, Pixel, Raster, composite, filters, ops,
+    ColorProfile, DisplayTransform, Document, NoiseOptions, Pixel, Raster, composite, filters, ops,
 };
 
 use crate::canvas::{Canvas, Render};
@@ -432,6 +432,15 @@ struct SampleCache {
 }
 
 impl Editor {
+    /// Show the image in a monitor's colours (`None`: as sRGB).
+    pub fn set_display(&mut self, display: Option<&ColorProfile>) {
+        let display = display.cloned().unwrap_or_else(ColorProfile::srgb);
+        match DisplayTransform::new(&self.doc.profile, &display) {
+            Ok(transform) => self.canvas.set_transform(transform),
+            Err(e) => log::warn!("can't show {} as {}: {e}", self.doc.file_name(), display.description()),
+        }
+    }
+
     pub fn new(doc: Document) -> Result<Self, String> {
         let transform = DisplayTransform::to_srgb(&doc.profile).map_err(|e| e.to_string())?;
         let canvas = Canvas::new(doc.width, doc.height, transform);
@@ -3944,6 +3953,30 @@ mod live_tests {
         assert!(e.canvas.live.is_none());
         assert_eq!(e.doc.layer(patch).unwrap().pixels.get(10, 5), [65535, 0, 0, 65535]);
         e.end_move();
+    }
+
+    #[test]
+    fn an_image_is_shown_in_the_monitors_colours() {
+        let mut e = editor();
+        let red = [[65535, 0, 0, 65535]];
+        let shown = |e: &Editor| {
+            let mut out = [[0u8; 4]];
+            e.canvas.transform().convert(&red, &mut out);
+            out[0]
+        };
+        assert_eq!(shown(&e), [255, 0, 0, 255]);
+        // A wide-gamut monitor (red, green, blue and white from its EDID)
+        // is sent less than all its red for sRGB's.
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        edid[23] = 120;
+        edid[27..35].copy_from_slice(&[174, 82, 61, 185, 36, 13, 80, 84]);
+        let monitor = ColorProfile::from_edid(&edid, "eDP-2").unwrap();
+        e.set_display(Some(&monitor));
+        let [r, g, b, _] = shown(&e);
+        assert!(r < 245 && g > 40 && b > 10, "{:?}", shown(&e));
+        e.set_display(None);
+        assert_eq!(shown(&e), [255, 0, 0, 255]);
     }
 
     #[test]

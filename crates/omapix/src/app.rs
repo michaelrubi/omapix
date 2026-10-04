@@ -482,6 +482,8 @@ pub struct App {
     v_down: bool,
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
+    /// The monitor Omapix is on, for showing images in its colours.
+    monitor: Option<crate::monitor::Watch>,
     content_fill: ContentFill,
     denoising: crate::denoise::Denoising,
     upscaling: crate::upscale::Upscaling,
@@ -569,6 +571,7 @@ impl App {
             pending_drops: Vec::new(),
             v_down: false,
             tablet: Tablet::connect(cc),
+            monitor: Some(crate::monitor::Watch::new()),
             content_fill: ContentFill::default(),
             denoising: Default::default(),
             upscaling: Default::default(),
@@ -669,7 +672,10 @@ impl App {
 
     /// Show `editor` in a new tab at the end, or leave it there behind an
     /// image that can't be left.
-    fn add_tab(&mut self, editor: Editor) {
+    fn add_tab(&mut self, mut editor: Editor) {
+        if let Some(display) = self.monitor.as_ref().and_then(|m| m.profile()) {
+            editor.set_display(Some(display));
+        }
         if self.held().is_some() {
             let (layers, properties) = Default::default();
             self.parked.push(Parked { editor, layers, properties });
@@ -933,6 +939,18 @@ impl App {
         if let Some(theme) = self.theme_rx.try_iter().last() {
             ctx.set_visuals(theme.visuals());
             self.theme = theme;
+        }
+        // On another monitor, every image is shown in its colours.
+        if let Some(monitor) = &mut self.monitor
+            && monitor.check(ctx)
+        {
+            let display = monitor.profile();
+            for editor in self.editor.iter_mut().chain(self.parked.iter_mut().map(|p| &mut p.editor)) {
+                editor.set_display(display);
+            }
+            self.layers.forget_thumbnails();
+            self.parked.iter_mut().for_each(|p| p.layers.forget_thumbnails());
+            self.navigator.forget_thumbnail();
         }
         if let Some(editor) = &mut self.editor {
             // The threshold slider cuts the last AI selection again.
@@ -2410,7 +2428,9 @@ self.filters.remember(&filter);
                 ui.separator();
                 ui.label(RichText::new(format!("{} × {} px", doc.width, doc.height)).color(dim));
                 ui.label(RichText::new(format!("{}-bit", doc.source_bits)).color(dim));
-                ui.label(RichText::new(doc.profile.description()).color(dim));
+                let shown = self.monitor.as_ref().and_then(|m| m.profile()).map_or("sRGB", |p| p.description());
+                ui.label(RichText::new(doc.profile.description()).color(dim))
+                    .on_hover_text(format!("Shown on this monitor as {shown}"));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let busy = self
@@ -5678,6 +5698,7 @@ mod tests {
             pending_drops: Vec::new(),
             v_down: false,
             tablet: None,
+            monitor: None,
             content_fill: ContentFill::default(),
             denoising: Default::default(),
             upscaling: Default::default(),

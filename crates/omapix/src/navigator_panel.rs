@@ -27,6 +27,11 @@ impl Default for NavigatorPanel {
 }
 
 impl NavigatorPanel {
+    /// Make the thumbnail again (it's in another display's colours).
+    pub fn forget_thumbnail(&mut self) {
+        self.texture = None;
+    }
+
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) {
         // Update thumbnail from the smallest pyramid level if document changed (throttled).
         let rev = editor.revision();

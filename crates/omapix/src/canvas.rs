@@ -378,6 +378,15 @@ impl Canvas {
         &self.transform
     }
 
+    /// Show the image through another display transform (it's on another
+    /// monitor): every tile is made again, the old ones showing meanwhile.
+    pub fn set_transform(&mut self, transform: DisplayTransform) {
+        self.transform = Arc::new(transform);
+        self.display_lut = std::sync::OnceLock::new();
+        self.generation += 1;
+        self.stale_before = self.generation;
+    }
+
     /// Laid out and showing a render, so view commands and strokes work.
     pub fn ready(&self) -> bool {
         self.rect.is_positive() && self.render.is_some()
