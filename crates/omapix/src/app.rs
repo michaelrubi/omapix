@@ -190,6 +190,7 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::HealBlemishes
         | Command::SmoothSkin
         | Command::EvenTone
+        | Command::ReduceShine
         | Command::LightenUnderEyes
         | Command::WhitenTeeth
         | Command::WhitenEyes => FACE_MODELS,
@@ -1018,7 +1019,9 @@ impl App {
             | Command::SelectEyes
             | Command::SelectLips
             | Command::SelectTeeth => self.face_selection.busy().is_none(),
-            Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes => self.whitening.busy().is_none(),
+            Command::ReduceShine | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes => {
+                self.whitening.busy().is_none()
+            }
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
@@ -1392,10 +1395,11 @@ impl App {
                     Err(e) => self.message(e, true),
                 }
             }
-            Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes => {
+            Command::ReduceShine | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes => {
                 use crate::whiten::Part;
                 use omapix_engine::whiten::Whiten;
                 let part = match cmd {
+                    Command::ReduceShine => Part::Shine,
                     Command::LightenUnderEyes => Part::UnderEyes,
                     Command::WhitenTeeth => Part::Whites(Whiten::Teeth),
                     _ => Part::Whites(Whiten::Eyes),
@@ -2037,6 +2041,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::HealBlemishes, None);
                 self.menu_item(ui, Command::SmoothSkin, None);
                 self.menu_item(ui, Command::EvenTone, None);
+                self.menu_item(ui, Command::ReduceShine, None);
                 self.menu_item(ui, Command::LightenUnderEyes, None);
                 self.menu_item(ui, Command::WhitenTeeth, None);
                 self.menu_item(ui, Command::WhitenEyes, None);

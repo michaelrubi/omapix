@@ -415,6 +415,7 @@ Retouch
   │    ├─ Under Eyes         (Curves, masked to the shadows under the eyes)
   │    ├─ Dodge & Burn       (group: Brighten, Darken curves, with masks)
   │    ├─ Smooth Skin        (pixel layer, this face's skin mask)
+  │    ├─ Reduce Shine       (pixel layer, masked to this face's hot spots)
   │    └─ Blemishes          (heal patches on an empty layer)
   └─ Face 2
        └─ …
@@ -427,8 +428,9 @@ Retouch
   and can redo the group from the current image.
 
 Every step is also its own command (Select › Skin, Filter › Retouch ›
-Smooth Skin…, Heal Blemishes…, Even Tone…, Lighten Under Eyes, Whiten
-Teeth, Whiten Eyes, Face Symmetry…, Reshape…), so any one can be run alone.
+Smooth Skin…, Heal Blemishes…, Even Tone…, Reduce Shine, Lighten Under
+Eyes, Whiten Teeth, Whiten Eyes, Face Symmetry…, Reshape…), so any one can
+be run alone.
 It's scriptable through `OMAPIX_SCRIPT` (for example
 `AutoRetouch Natural`), which is also how it gets its end-to-end tests.
 
@@ -438,7 +440,8 @@ more than one face, and the settings aren't kept on the group yet.
 Also from the same masks:
 - whiten eyes and teeth (Hue/Saturation layers masked to eyes and teeth):
   done, see "Whitening" below
-- reduce shine (highlights within the skin mask)
+- reduce shine (highlights within the skin mask): done, see "Reduce
+  Shine" below
 - lift under-eye shadows (landmarks mark the area): done, see "Under
   Eyes" below
 
@@ -814,7 +817,10 @@ Reordered on 2026-09-29 (see Decisions).
       brightening Curves layer masked to where the skin under each eye is
       darker than the cheek below it, and a step in Auto Retouch. See
       "Under Eyes" below.
-    - shine
+    - ~~shine~~ (done, 2026-10-03): Retouch › Reduce Shine, a pixel layer
+      masked to the hot spots on the skin, with their lightness and
+      paleness taken down to the lit skin round them, and a step in Auto
+      Retouch. See "Reduce Shine" below.
     - checking whether an opt-in face parser beats the landmark polygons
 
 ### Face analysis spike
@@ -1068,15 +1074,16 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   eyes (`retouch::share`), not yet by SAM as designed. One face has it
   all. In the three-person shots tried, necks and shoulders went to the
   right people; an arm across someone else would go to them.
-- **Order.** For each face: Blemishes, then Smooth Skin from the image
-  with them healed, then Dodge & Burn from the image smoothed, each from
+- **Order.** For each face: Blemishes, then Reduce Shine (milestone 13)
+  and Smooth Skin from the image with them healed, each from what the last
+  shows, then Dodge & Burn from the image smoothed, each from
   Current & Below of the face's group so far. They're the commands' own
   functions, with Smoothness, Detail and Size at 50. Then Under Eyes
   (milestone 13), from the image evened, so it lifts what Even Tone left.
   Whiten Eyes and Whiten Teeth go on top: their masks are found with the
   faces, and the steps under them don't touch eyes or teeth.
 - **Presets.** Sensitivity, Smooth Skin's amount, Even Tone's, and the
-  under-eyes' and whitening's: Natural 35, 40, 40 and 30; Standard 50, 70,
+  shine's, under-eyes' and whitening's: Natural 35, 40, 40 and 30; Standard 50, 70,
   60 and 50 (each command's own default); Strong 65, 90, 80 and 70. The settings last OK'd
   for All Faces are kept between runs.
 - **The strip.** With more than one face: All Faces, then a thumbnail of
@@ -1651,7 +1658,67 @@ looked at on the same photos through `whiten_in_photos`, which writes
     darker patch, are only half dealt with.
   - Working on a small copy, as Even Tone does, would make close-ups as
     quick as the rest.
-  - Shine.
+
+### Reduce Shine
+
+As built (`omapix_engine::shine`, `crates/omapix/src/whiten.rs`), looked at
+on the same photos through the ignored test `reduce_shine_in_photos`,
+which puts the largest face before, after and as the mask side by side
+(`AMOUNT` sets the layer's opacity):
+
+```
+OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
+  cargo test --release -p omapix reduce_shine_in_photos -- --ignored
+```
+
+- **The layer.** A pixel layer, "Reduce Shine", masked, at 50 % opacity to
+  start: no dialog, as with the whitening. It's the image with its skin
+  blurred 0.02 IOD (Smooth Skin's fine blur) replaced by the lit skin round
+  it, so the texture stays, and a hot spot's paleness goes with its
+  lightness. Retouch › Reduce Shine finds the skin in Current & Below of
+  the selected layer on a thread, adds the layer above it and selects it.
+  Being pixels, it's made from the image as it was, as Smooth Skin's is.
+- **Where**: face and body skin, as Smooth Skin has it, so not eyes (their
+  catchlights), lips (their gloss) or teeth.
+- **What shine is here**: skin lighter than the lit skin round it by more
+  than a knee, 3 % of the range. Three other ways were tried first:
+  - *How white the highlight is.* Light reflected off the skin's surface
+    is the light's colour and light from the skin is skin-coloured, so
+    the white part of a highlight should be the shine. Measured against
+    the skin round it, the whole lit side of every face counted (skin in
+    light is paler than skin in shade, shine or not), and at 100 % faces
+    came out flat with hard-edged patches.
+  - *The same, against the middle of all the skin's colour*, in linear
+    light, with a threshold on how much of a pixel's light is white. That
+    found a little on foreheads and rims and missed the hot spots anyone
+    would point at: a nose tip in warm light is peach, not white.
+  - *Lighter than all the skin round it* by more than a knee. That was the
+    lit side of the face again, measured against the shaded side, and
+    100 % flattened the light.
+- **Against the lit skin round it.** So the skin round a pixel (blurred
+  0.3 IOD) leaves out what's more than 3 % darker than the plain blur
+  there says: a hot spot is measured against the lit skin it sits on, and
+  the lit side of a face isn't shine for having a shaded side. That finds
+  nose tips and bridges, the tops of cheeks under the eyes, chins and the
+  dip under the lower lip, and bits of foreheads, on the photos tried.
+- **Only what's over the knee.** The mask is the share of the excess
+  that's over the knee, so at full opacity a hot spot is as light as the
+  knee allows, still a highlight, and never darker than its own edge
+  (in an earlier try, with a mask that opened fully on a hot spot, a nose's
+  bridge came out as a dull patch darker than the skin beside it). At 50 %
+  it's half way there, and reads as less oily rather than as retouched.
+- **In Auto Retouch**, a step after Heal Blemishes and before Smooth Skin,
+  for each face's share of the skin, at that face's scale.
+- **Speed.** 0.01–0.1 s on portraits of a megapixel, and 0.2–0.8 s on
+  the largest tried (20 MP, with skin over most of the frame), all at
+  full size (three blurs over the skin's part of the image), after the
+  skin's found.
+- **Left:**
+  - A broad sheen (a whole forehead in the sun) is the lit skin round
+    itself, and mostly stays: only its lightest parts are found.
+  - It can't tell shine from a highlight that's meant to be there
+    (highlighter on a cheekbone): paint it out of the mask.
+  - Every face tried had some, so there's nearly always a layer.
 
 ## Decisions
 
