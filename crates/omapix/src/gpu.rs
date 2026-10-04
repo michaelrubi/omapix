@@ -710,6 +710,11 @@ mod tests {
         // Adjustments go through a lookup table, so are a little less exact.
         let worst = worst_difference(&device, &queue, &document(BlendMode::SoftLight, true), (-7, 4), None);
         assert!(worst < 4e-3, "Curves: off by {worst}");
+        // In a Pass Through group with the layer above it, it's the same.
+        let mut doc = document(BlendMode::SoftLight, true);
+        doc.group_layers(&[doc.layers[1].id, doc.layers[2].id]);
+        let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
+        assert!(worst < 4e-3, "in a group: off by {worst}");
     }
 
     #[test]

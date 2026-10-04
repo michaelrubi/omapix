@@ -3919,6 +3919,23 @@ mod live_tests {
         assert_eq!(e.doc.layer(patch).unwrap().pixels.get(10, 5), [65535, 0, 0, 65535]);
         e.end_move();
     }
+
+    #[test]
+    fn a_layer_in_a_pass_through_group_moves_live() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        e.doc.group_layer(e.doc.index_of(patch).unwrap());
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(10, 5);
+        settle(&mut e, &ctx);
+        e.update(&ctx);
+        let LiveFrame { offset, .. } = e.canvas.live.clone().expect("shown live");
+        assert_eq!(offset, (10, 5));
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0), [65535, 0, 0, 65535]);
+        e.end_move();
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(10, 5), [65535, 0, 0, 65535]);
+    }
 }
 
 #[cfg(test)]

@@ -10,11 +10,12 @@
 //! moved, or with its opacity, blend mode and adjustment as they are now.
 //! When the drag ends the exact CPU render replaces the live one.
 //!
-//! Only stacks the shader handles are shown live: the subject is at the
-//! top level (a pixel layer, or for edits also an adjustment layer), and
-//! the layers above it are pixel or adjustment layers, at the top level or
-//! in Pass Through groups with default settings. Anything else (clipping,
-//! Blend If, other groups) stays on the CPU as before.
+//! Only stacks the shader handles are shown live: the subject is a pixel
+//! layer (or for edits also an adjustment layer), and the layers above it
+//! are pixel or adjustment layers. They can be in Pass Through groups with
+//! default settings, which blend as if their layers weren't grouped.
+//! Anything else (clipping, Blend If, other groups) stays on the CPU as
+//! before.
 
 use std::sync::Arc;
 
@@ -115,14 +116,22 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<Vec<usize>> {
         !l.clipped && !doc.is_clip_base(l.id) && l.blend_if.is_none_or(|b| b.is_neutral())
     };
     let kind = subject.has_pixels() || !moving && subject.adjustment.is_some();
-    if subject.parent.is_some() || !kind || !plain(subject) {
+    let groups_shown = |l: &Layer| {
+        std::iter::successors(l.parent, |&g| doc.layer(g)?.parent)
+            .all(|g| doc.layer(g).is_some_and(|g| g.visible))
+    };
+    // What's below the subject is composited without the groups it's in
+    // (the loop below checks they're default ones). That's wrong if one is
+    // hidden, or if a clipped layer in one has nothing there to clip to: it
+    // shows unclipped, but would clip to what's below the group.
+    let stray = |l: &Layer| l.clipped && l.parent.is_some() && doc.clip_base(l.id).is_none();
+    if !kind || !plain(subject) || !groups_shown(subject) {
         return None;
     }
-    let shown = |l: &Layer| {
-        l.visible
-            && std::iter::successors(l.parent, |&g| doc.layer(g)?.parent)
-                .all(|g| doc.layer(g).is_some_and(|g| g.visible))
-    };
+    if subject.parent.is_some() && doc.layers[..index].iter().any(stray) {
+        return None;
+    }
+    let shown = |l: &Layer| l.visible && groups_shown(l);
     let mut out = Vec::new();
     for (i, layer) in doc.layers.iter().enumerate().skip(index) {
         if !plain(layer) {
@@ -277,10 +286,53 @@ mod tests {
         doc.layer_mut(group).unwrap().opacity = 0.5;
         assert!(!can_show(&doc, patch, true));
         doc.layer_mut(group).unwrap().opacity = 1.0;
-        // Inside a group, the moving layer stays on the CPU.
-        let inner = doc.group_layer(doc.index_of(patch).unwrap());
-        assert!(!can_show(&doc, patch, true));
-        assert!(doc.layer(inner).is_some());
+    }
+
+    #[test]
+    fn a_layer_in_default_pass_through_groups_moves_live() {
+        let mut doc = doc();
+        let (patch, soft, curves) = (doc.layers[1].id, doc.layers[2].id, doc.layers[3].id);
+        // A layer below the patch in its group, to be part of what's below.
+        let id = doc.next_layer_id();
+        let red = Raster::new(300, 200, vec![[60000, 0, 0, 65535]; 300 * 200]);
+        let mut under = Layer::from_raster(id, "Under", &red);
+        under.opacity = 0.5;
+        doc.layers.insert(1, under);
+        let inner = doc.group_layers(&[id, patch, soft]).unwrap();
+        let outer = doc.group_layer(doc.index_of(inner).unwrap());
+        assert!(can_show(&doc, patch, true));
+        assert!(can_show(&doc, soft, false), "an edit too");
+        let index = doc.index_of(patch).unwrap();
+        let live = build(&doc, &doc.layers, patch, true, 0, (0, 0, 300, 200)).unwrap();
+        // The patch, the layer above it in the group, and the Curves on top.
+        assert_eq!(live.layers.len(), 3);
+        assert!(live.layers[0].subject);
+        assert!(matches!(live.layers[2].source, Source::Adjustment(_)));
+        // Below it: the background and the layer under it in the group.
+        let mut hidden = doc.clone();
+        hidden.layers[index..].iter_mut().filter(|l| !l.is_group).for_each(|l| l.visible = false);
+        assert_eq!(live.below.data, composite::composite(&hidden.layers, 300, 200).pixels());
+        assert_eq!(live.below.data[0], [45000, 15000, 15000, 65535]);
+
+        // Any group round it that isn't a default one, on the CPU.
+        for group in [inner, outer] {
+            let set = |doc: &mut Document, f: &dyn Fn(&mut Layer)| f(doc.layer_mut(group).unwrap());
+            set(&mut doc, &|g| g.opacity = 0.5);
+            assert!(!can_show(&doc, patch, true), "a group's opacity");
+            set(&mut doc, &|g| g.opacity = 1.0);
+            set(&mut doc, &|g| g.blend = BlendMode::Normal);
+            assert!(!can_show(&doc, patch, true), "an isolated group");
+            set(&mut doc, &|g| g.blend = BlendMode::PassThrough);
+            set(&mut doc, &|g| g.visible = false);
+            assert!(!can_show(&doc, patch, true), "a hidden group");
+            set(&mut doc, &|g| g.visible = true);
+            assert!(can_show(&doc, patch, true));
+        }
+        // A clipped layer with nothing in the group to clip to shows
+        // unclipped there, which what's below wouldn't.
+        doc.layer_mut(id).unwrap().clipped = true;
+        assert!(!can_show(&doc, patch, true), "a stray clipped layer below");
+        assert!(can_show(&doc, curves, false), "but not below a layer outside the group");
     }
 
     #[test]
