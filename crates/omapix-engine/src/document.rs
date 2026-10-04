@@ -89,6 +89,14 @@ impl Document {
         )
     }
 
+    /// A new image with no file yet: one white layer in sRGB, like File › New
+    /// in Photoshop.
+    pub fn blank(width: u32, height: u32) -> Self {
+        let white = vec![[u16::MAX; 4]; width as usize * height as usize];
+        let white = Raster::new(width, height, white);
+        Self::from_image(PathBuf::new(), &white, ColorProfile::srgb(), 16)
+    }
+
     pub fn file_name(&self) -> String {
         let path = self.saved_path.as_ref().unwrap_or(&self.path);
         path.file_name()
@@ -290,6 +298,14 @@ mod tests {
         assert_eq!(doc.sample_below(2, 10, 5), None);
         // Non-existent layer returns None
         assert_eq!(doc.sample_below(999, 5, 5), None);
+    }
+
+    #[test]
+    fn a_blank_image_is_one_white_untitled_layer() {
+        let doc = Document::blank(700, 300);
+        assert_eq!((doc.width, doc.height, doc.layers.len()), (700, 300, 1));
+        assert_eq!(doc.file_name(), "Untitled");
+        assert_eq!(doc.composite().get(699, 299), [u16::MAX; 4]);
     }
 
     #[test]

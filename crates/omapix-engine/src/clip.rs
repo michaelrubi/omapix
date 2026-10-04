@@ -181,6 +181,22 @@ impl Clip {
             crate::color::convert(&placed, &self.profile, profile)
         }
     }
+
+    /// A new image with no file yet, the size of the copied area and in its
+    /// colour space, with it as the only layer.
+    pub fn document(&self) -> Result<Document> {
+        let [_, _, w, h] = self.bounds;
+        let centre = (i64::from(w) / 2, i64::from(h) / 2);
+        let pixels = self.place(w, h, &self.profile, Some(centre))?;
+        Ok(Document::new(
+            std::path::PathBuf::new(),
+            self.profile.clone(),
+            16,
+            w,
+            h,
+            vec![Layer::from_pixels(1, "Background", pixels)],
+        ))
+    }
 }
 
 /// What kind of paste to perform.
@@ -268,6 +284,23 @@ mod tests {
         // Pasting back into a document this size shares them too.
         let placed = clip.place(600, 400, &d.profile, None).unwrap();
         assert!(placed.same_tiles(&d.layers[0].pixels));
+    }
+
+    #[test]
+    fn a_clip_becomes_a_new_image_its_size() {
+        let d = doc(600, 400);
+        let sel = Selection::rectangle(600, 400, (300.0, 100.0), (400.0, 200.0));
+        let clip = Clip::copy(&d.layers[0].pixels, Some(&sel), &d.profile).unwrap();
+        let new = clip.document().unwrap();
+        assert_eq!((new.width, new.height, new.layers.len()), (100, 100, 1));
+        assert_eq!(new.file_name(), "Untitled");
+        let pixels = &new.layers[0].pixels;
+        assert_eq!((pixels.width(), pixels.height()), (100, 100));
+        assert_eq!(pixels.get(0, 0), d.layers[0].pixels.get(300, 100));
+        assert_eq!(pixels.get(99, 99), d.layers[0].pixels.get(399, 199));
+        // A whole image shares its tiles.
+        let clip = Clip::copy(&d.layers[0].pixels, None, &d.profile).unwrap();
+        assert!(clip.document().unwrap().layers[0].pixels.same_tiles(&d.layers[0].pixels));
     }
 
     #[test]

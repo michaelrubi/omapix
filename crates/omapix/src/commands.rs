@@ -5,6 +5,8 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
+    New,
+    NewFromClipboard,
     Open,
     Close,
     Save,
@@ -154,6 +156,8 @@ const CMD_ALT_SHIFT: Modifiers = Modifiers {
 impl Command {
     /// Every command.
     pub const ALL: &[Command] = &[
+        Command::New,
+        Command::NewFromClipboard,
         Command::Open,
         Command::Close,
         Command::Save,
@@ -316,6 +320,7 @@ impl Command {
         Command::BringToFront,
         Command::SendToBack,
         Command::ReopenLast,
+        Command::New,
         Command::Open,
         Command::Close,
         Command::Save,
@@ -364,6 +369,8 @@ impl Command {
 
     pub fn label(self) -> &'static str {
         match self {
+            Command::New => "New…",
+            Command::NewFromClipboard => "New from Clipboard",
             Command::Open => "Open…",
             Command::Close => "Close",
             Command::ReopenLast => "Reopen Last Document",
@@ -499,6 +506,7 @@ impl Command {
     pub fn default_shortcut(self) -> Option<KeyboardShortcut> {
         let s = |m, k| Some(KeyboardShortcut::new(m, k));
         match self {
+            Command::New => s(CMD, Key::N),
             Command::Open => s(CMD, Key::O),
             Command::Close => s(CMD, Key::W),
             Command::ReopenLast => s(CMD_SHIFT, Key::O),
@@ -786,6 +794,7 @@ mod tests {
         assert!(pos(Command::Redo) < pos(Command::Undo));
         assert!(pos(Command::SaveAs) < pos(Command::Save));
         assert!(pos(Command::ReopenLast) < pos(Command::Open));
+        assert!(pos(Command::NewLayer) < pos(Command::New));
         assert!(pos(Command::StampVisible) < pos(Command::MergeDown));
         assert!(pos(Command::InvertSelection) < pos(Command::Invert));
         assert!(pos(Command::CopyMerged) < pos(Command::Copy));
