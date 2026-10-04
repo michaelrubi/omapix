@@ -34,6 +34,7 @@ pub mod tiled;
 pub mod tiles;
 pub mod tone;
 pub mod transform;
+pub mod under_eyes;
 pub mod upscale;
 pub mod warp;
 pub mod whiten;

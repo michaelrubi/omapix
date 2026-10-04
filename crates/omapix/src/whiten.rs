@@ -1,64 +1,99 @@
-//! Retouch › Whiten Teeth and Whiten Eyes (docs/AI.md, milestone 13): the
-//! teeth, or the whites of the eyes, of the faces the face models find in
-//! what the active layer and those below it show, found on a thread of
-//! their own, and a Hue/Saturation layer masked to them above
-//! (`omapix_engine::whiten`). There's no dialog: the layer's opacity is the
-//! amount, and its mask can be painted on.
+//! Retouch › Whiten Teeth, Whiten Eyes and Lighten Under Eyes (docs/AI.md,
+//! milestone 13): the teeth, the whites of the eyes, or the shadows under
+//! them, of the faces the face models find in what the active layer and
+//! those below it show, found on a thread of their own, and an adjustment
+//! layer masked to them above (`omapix_engine::whiten` and `under_eyes`).
+//! There's no dialog: the layer's opacity is the amount, and its mask can
+//! be painted on.
 
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
-use omapix_engine::Selection;
 use omapix_engine::whiten::{self, Whiten};
+use omapix_engine::{Selection, under_eyes};
 
 use crate::editor::{Editor, Target};
-use crate::face_selection::find_whites;
+use crate::face_selection::{find_under_eyes, find_whites};
 
 /// The layer's opacity to start with, and Auto Retouch's Standard.
 pub const AMOUNT: f32 = 50.0;
 
-/// Where the teeth or whites arrive once they're found.
+/// What's found and lightened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Whites(Whiten),
+    UnderEyes,
+}
+
+impl Part {
+    /// Its command's name, and its undo step's.
+    fn label(self) -> &'static str {
+        match self {
+            Part::Whites(what) => what.name(),
+            Part::UnderEyes => "Lighten Under Eyes",
+        }
+    }
+
+    /// What the status bar says while it's found.
+    pub fn finding(self) -> &'static str {
+        match self {
+            Part::Whites(Whiten::Teeth) => "Finding teeth…",
+            Part::Whites(Whiten::Eyes) => "Finding eyes…",
+            Part::UnderEyes => "Finding shadows under the eyes…",
+        }
+    }
+}
+
+/// Where the mask arrives once it's found.
 type Found = Receiver<Result<Selection, String>>;
 
 #[derive(Default)]
 pub struct Whitening {
     /// What's being found, and the layer it goes above.
-    running: Option<(Whiten, u64, Found)>,
+    running: Option<(Part, u64, Found)>,
 }
 
 impl Whitening {
-    /// Find `what` in what the active layer and those below it show.
-    pub fn start(&mut self, ctx: &egui::Context, editor: &Editor, what: Whiten) -> Result<(), String> {
+    /// Find `part` in what the active layer and those below it show.
+    pub fn start(&mut self, ctx: &egui::Context, editor: &Editor, part: Part) -> Result<(), String> {
         let index = editor.active_index().ok_or("Select a layer first")?;
         let doc = editor.doc.clone();
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(find_whites(&doc.composite_current_and_below(index), &doc.profile, what));
+            let image = doc.composite_current_and_below(index);
+            let _ = tx.send(match part {
+                Part::Whites(what) => find_whites(&image, &doc.profile, what),
+                Part::UnderEyes => find_under_eyes(&image, &doc.profile),
+            });
             ctx.request_repaint();
         });
-        self.running = Some((what, editor.active, rx));
+        self.running = Some((part, editor.active, rx));
         Ok(())
     }
 
-    /// Add the layer once they're found, above the layer it was started on
+    /// Add the layer once it's found, above the layer it was started on
     /// (or the active one, if that's gone), as one undo step, and select it.
     /// Returns what went wrong, if anything.
     pub fn poll(&mut self, editor: &mut Editor) -> Option<String> {
-        let (what, layer, rx) = self.running.as_ref()?;
-        let (what, layer) = (*what, *layer);
+        let (part, layer, rx) = self.running.as_ref()?;
+        let (part, layer) = (*part, *layer);
         let result = match rx.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => Err(format!("{} stopped unexpectedly", what.name())),
+            Err(TryRecvError::Disconnected) => Err(format!("{} stopped unexpectedly", part.label())),
         };
         self.running = None;
-        let whites = match result {
-            Ok(whites) => whites,
+        let mask = match result {
+            Ok(mask) => mask,
             Err(e) => return Some(e),
         };
         let index = editor.doc.index_of(layer).or(editor.active_index())?;
-        let added = editor.edit(what.name(), |doc, active| {
-            if let Some(id) = whiten::add_layer(doc, index, what, &whites, AMOUNT) {
+        let added = editor.edit(part.label(), |doc, active| {
+            let id = match part {
+                Part::Whites(what) => whiten::add_layer(doc, index, what, &mask, AMOUNT),
+                Part::UnderEyes => under_eyes::add_layer(doc, index, &mask, AMOUNT),
+            };
+            if let Some(id) = id {
                 *active = id;
             }
         });
@@ -70,16 +105,8 @@ impl Whitening {
     }
 
     /// What's being found, if anything.
-    pub fn busy(&self) -> Option<Whiten> {
-        self.running.as_ref().map(|(what, ..)| *what)
-    }
-}
-
-/// What the status bar says while `what` is found.
-pub fn finding(what: Whiten) -> &'static str {
-    match what {
-        Whiten::Teeth => "Finding teeth…",
-        Whiten::Eyes => "Finding eyes…",
+    pub fn busy(&self) -> Option<Part> {
+        self.running.as_ref().map(|(part, ..)| *part)
     }
 }
 
@@ -98,10 +125,10 @@ mod tests {
 
         let (tx, rx) = channel();
         let mut whitening = Whitening {
-            running: Some((Whiten::Teeth, editor.active, rx)),
+            running: Some((Part::Whites(Whiten::Teeth), editor.active, rx)),
         };
         assert_eq!(whitening.poll(&mut editor), None);
-        assert_eq!(whitening.busy(), Some(Whiten::Teeth));
+        assert_eq!(whitening.busy(), Some(Part::Whites(Whiten::Teeth)));
         tx.send(Ok(Selection::rectangle(600, 400, (300.0, 200.0), (400.0, 240.0)))).unwrap();
         assert_eq!(whitening.poll(&mut editor), None);
         assert_eq!(whitening.busy(), None);
@@ -121,17 +148,29 @@ mod tests {
 
         // Failures come back as messages, and nothing's added.
         let (tx, rx) = channel();
-        whitening.running = Some((Whiten::Eyes, editor.active, rx));
+        whitening.running = Some((Part::Whites(Whiten::Eyes), editor.active, rx));
         tx.send(Err("Found no eyes".into())).unwrap();
         assert_eq!(whitening.poll(&mut editor), Some("Found no eyes".into()));
         assert_eq!(editor.doc.layers.len(), 1);
+
+        // Shadows under the eyes become a brightening Curves layer.
+        let (tx, rx) = channel();
+        whitening.running = Some((Part::UnderEyes, editor.active, rx));
+        tx.send(Ok(Selection::rectangle(600, 400, (300.0, 200.0), (400.0, 240.0)))).unwrap();
+        assert_eq!(whitening.poll(&mut editor), None);
+        let layer = editor.doc.layer(editor.active).unwrap();
+        assert_eq!((layer.name.as_str(), layer.opacity), ("Under Eyes", AMOUNT / 100.0));
+        assert!(matches!(layer.adjustment, Some(omapix_engine::adjust::Adjustment::Curves(_))));
+        assert!(editor.doc.composite().get(350, 220)[0] > before.get(350, 220)[0] + 1000);
+        assert_eq!(editor.undo_label(), Some("Lighten Under Eyes"));
     }
 
     /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder
-    /// of them), the teeth and the eyes of its faces before, after and as
-    /// the mask, side by side as `<photo>-teeth.png` and `<photo>-eyes.png`
-    /// in `OMAPIX_FACE_OUT`. `AMOUNT` sets the layer's opacity. Needs the
-    /// models (scripts/fetch-models.sh) and ImageMagick.
+    /// of them), the teeth, the eyes and under the eyes of its faces before,
+    /// after and as the mask, side by side as `<photo>-teeth.png`,
+    /// `<photo>-eyes.png` and `<photo>-under-eyes.png` in `OMAPIX_FACE_OUT`.
+    /// `AMOUNT` sets the layer's opacity. Needs the models
+    /// (scripts/fetch-models.sh) and ImageMagick.
     #[test]
     #[ignore]
     fn whiten_in_photos() {
@@ -149,9 +188,13 @@ mod tests {
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
             let Ok(doc) = omapix_engine::io::load(&path) else { continue };
             let before = doc.composite();
-            for (what, part) in [(Whiten::Teeth, "teeth"), (Whiten::Eyes, "eyes")] {
+            for (what, part) in [(Some(Whiten::Teeth), "teeth"), (Some(Whiten::Eyes), "eyes"), (None, "under-eyes")] {
                 let t = std::time::Instant::now();
-                let whites = match find_whites(&before, &doc.profile, what) {
+                let found = match what {
+                    Some(what) => find_whites(&before, &doc.profile, what),
+                    None => find_under_eyes(&before, &doc.profile),
+                };
+                let whites = match found {
                     Ok(whites) => whites,
                     Err(e) => {
                         eprintln!("{name}: {e}");
@@ -161,7 +204,10 @@ mod tests {
                 let [bx, by, bw, bh] = whites.bounds().unwrap();
                 eprintln!("{name}: {part} in {:?}, {bw} × {bh} at ({bx}, {by})", t.elapsed());
                 let mut doc = doc.clone();
-                whiten::add_layer(&mut doc, 0, what, &whites, amount);
+                match what {
+                    Some(what) => whiten::add_layer(&mut doc, 0, what, &whites, amount),
+                    None => under_eyes::add_layer(&mut doc, 0, &whites, amount),
+                };
                 let after = doc.composite();
                 let pad = bh.max(bw / 4);
                 let (x0, y0) = (bx.saturating_sub(pad), by.saturating_sub(pad));

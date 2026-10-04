@@ -12,7 +12,7 @@ use omapix_engine::blemish::{self, Spot};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, Tiled};
 use omapix_engine::whiten::{self, Whiten};
-use omapix_engine::{ColorProfile, DisplayTransform, Raster, refine, retouch};
+use omapix_engine::{ColorProfile, DisplayTransform, Raster, refine, retouch, under_eyes};
 use rayon::prelude::*;
 
 use crate::canvas::Render;
@@ -104,6 +104,12 @@ const ROUND_EYES: Shapes = Shapes {
     grow: 0.1,
     feather: 0.02,
 };
+/// What the skin under the eyes leaves out: the lower lashes and eyeliner.
+const LASHES: Shapes = Shapes {
+    outlines: &[(&outline::LEFT_EYE, Combine::Add), (&outline::RIGHT_EYE, Combine::Add)],
+    grow: 0.06,
+    feather: 0.03,
+};
 /// Round each face, grown to take in the jaw's edge.
 const OUTLINE: Shapes = Shapes {
     outlines: &[(&outline::FACE, Combine::Add)],
@@ -131,13 +137,16 @@ const TEETH: Shapes = Shapes {
 const MOUTH_GAP: [usize; 2] = [13, 14];
 const OPEN: f32 = 0.03;
 
-/// An eye on its own: its opening, its iris, its corners, and the middle
-/// of its upper and lower lids.
+/// An eye on its own: its opening, its iris, its corners, the middle of
+/// its upper and lower lids, and along its lower lid and the top of the
+/// cheek below it, from the outer corner in.
 struct Eye {
     shape: Shapes,
     iris: [usize; 5],
     corners: [usize; 2],
     lids: [usize; 2],
+    lower_lid: [usize; 9],
+    cheek: [usize; 9],
 }
 
 const EACH_EYE: [Eye; 2] = [
@@ -150,6 +159,8 @@ const EACH_EYE: [Eye; 2] = [
         iris: outline::LEFT_IRIS,
         corners: [33, 133],
         lids: [159, 145],
+        lower_lid: [33, 7, 163, 144, 145, 153, 154, 155, 133],
+        cheek: [143, 111, 117, 118, 119, 120, 121, 128, 245],
     },
     Eye {
         shape: Shapes {
@@ -160,6 +171,8 @@ const EACH_EYE: [Eye; 2] = [
         iris: outline::RIGHT_IRIS,
         corners: [362, 263],
         lids: [386, 374],
+        lower_lid: [263, 249, 390, 373, 374, 380, 381, 382, 362],
+        cheek: [372, 340, 346, 347, 348, 349, 350, 357, 465],
     },
 ];
 /// An eye whose lids are closer than this shows no white: a wink's were
@@ -177,6 +190,8 @@ const IRIS: f32 = 1.15;
 /// How far the edges of teeth and whites are softened, in distances between
 /// the irises.
 const SOFTEN: f32 = 0.008;
+/// And the edge of the skin under an eye.
+const UNDER_EYE_FEATHER: f32 = 0.03;
 
 /// Where the selection arrives once it's found.
 type Found = Receiver<Result<Selection, String>>;
@@ -347,8 +362,9 @@ pub fn find_skin(image: Raster, profile: &ColorProfile) -> Result<FoundSkin, Str
 
 /// What Auto Retouch works from, for one face: its box (left, top, right,
 /// bottom), the distance between its eyes, that person's share of the skin,
-/// face and body, the spots on the face, most prominent first, and its
-/// teeth and the whites of its eyes.
+/// face and body, the spots on the face, most prominent first, its teeth
+/// and the whites of its eyes, and the skin under its eyes with the cheek
+/// below it.
 pub struct FoundFace {
     pub bounds: [f32; 4],
     pub iod: f32,
@@ -356,11 +372,12 @@ pub struct FoundFace {
     pub spots: Vec<Spot>,
     pub teeth: Selection,
     pub eyes: Selection,
+    pub under_eyes: (Selection, Selection),
 }
 
 /// The faces in `image`, from left to right, each measured on its own. A
-/// face the landmarker didn't see (in profile) has skin but no spots, teeth
-/// or whites, as in [`blemish_skin`]. One with neither skin nor spots (too
+/// face the landmarker didn't see (in profile) has skin but no spots, teeth,
+/// whites or under-eyes, as in [`blemish_skin`]. One with neither skin nor spots (too
 /// small for the segmenter to see its skin, or not a face at all) is left
 /// out.
 pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFace>, String> {
@@ -378,10 +395,8 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
         .collect();
     let found = faces.iter().enumerate().map(|(n, (face, points))| {
         let iod = places[n].1;
-        let whites = |what| match points.as_deref() {
-            Some(p) => whites(&srgb, p, what, &on_faces),
-            None => Selection::from_coverage(Tiled::new(image.width(), image.height(), 0)),
-        };
+        let none = || Selection::from_coverage(Tiled::new(image.width(), image.height(), 0));
+        let whites = |what| points.as_deref().map_or_else(none, |p| whites(&srgb, p, what, &on_faces));
         FoundFace {
             bounds: face.bounds,
             iod,
@@ -389,6 +404,7 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
             spots: points.as_deref().map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),
             teeth: whites(Whiten::Teeth),
             eyes: whites(Whiten::Eyes),
+            under_eyes: points.as_deref().map_or_else(|| (none(), none()), |p| under_eyes(p, &face_skin)),
         }
     });
     let found: Vec<_> = found.filter(|f| !f.skin.is_empty() || !f.spots.is_empty()).collect();
@@ -423,10 +439,8 @@ pub fn find_whites(image: &Raster, profile: &ColorProfile, what: Whiten) -> Resu
 /// out on the background), so only the nearer eye is looked in.
 fn whites(srgb: &[[u8; 4]], points: &[[f32; 3]], what: Whiten, face: &Selection) -> Selection {
     let (width, height) = (face.width(), face.height());
-    // A turned face's eyes look closer together: as `face_scale`.
-    let scale = iod(points).max(apart(points, FACE_HEIGHT) / 3.0);
-    let widths = EACH_EYE.each_ref().map(|eye| apart(points, eye.corners));
-    let seen = |n: usize| widths[n] >= HIDDEN * widths[1 - n];
+    let (scale, seen) = sight(points);
+    let seen = |n: usize| seen[n];
     let mut within = Selection::from_coverage(Tiled::new(width, height, 0));
     match what {
         Whiten::Teeth => {
@@ -448,6 +462,67 @@ fn whites(srgb: &[[u8; 4]], points: &[[f32; 3]], what: Whiten, face: &Selection)
         }
     }
     whiten::whites(srgb, &within.combine(face, Combine::Intersect), SOFTEN * scale)
+}
+
+/// The distance between a face's eyes as it would be facing the camera (a
+/// turned face's look closer together: as `face_scale`), and which of its
+/// eyes are in sight.
+fn sight(points: &[[f32; 3]]) -> (f32, [bool; 2]) {
+    let widths = EACH_EYE.each_ref().map(|eye| apart(points, eye.corners));
+    (iod(points).max(apart(points, FACE_HEIGHT) / 3.0), [0, 1].map(|n| widths[n] >= HIDDEN * widths[1 - n]))
+}
+
+/// The skin under the eyes of every face in `image` the landmarker saw,
+/// where it's darker than the cheek below it: how far a Dodge curve is
+/// opened to bring it level.
+pub fn find_under_eyes(image: &Raster, profile: &ColorProfile) -> Result<Selection, String> {
+    let (_, analysis) = analyse(image, profile)?;
+    let skin = skin(&analysis, image, &[FACE_SKIN]);
+    let found = (points(&analysis).into_iter())
+        .map(|p| {
+            let (under, cheek) = under_eyes(p, &skin);
+            under_eyes::shadows(image, &under, &cheek, sight(p).0)
+        })
+        .reduce(|all, face| all.combine(&face, Combine::Add))
+        .filter(|found| !found.is_empty());
+    found.ok_or_else(|| "Found no shadows under the eyes".into())
+}
+
+/// The skin under a face's eyes (those in sight), from below each lower
+/// lid's lashes down to the top of the cheek, and as much of the cheek
+/// below that again, to measure it against. Both only where there's `skin`.
+fn under_eyes(points: &[[f32; 3]], skin: &Selection) -> (Selection, Selection) {
+    let (width, height) = (skin.width(), skin.height());
+    let (scale, seen) = sight(points);
+    let (mut under, mut cheek) = (Vec::new(), Vec::new());
+    for eye in EACH_EYE.iter().zip(seen).filter_map(|(eye, seen)| seen.then_some(eye)) {
+        let at = |i: usize| (points[i][0], points[i][1]);
+        let (lid, top) = (eye.lower_lid.map(at), eye.cheek.map(at));
+        let below: Vec<_> = lid.iter().zip(&top).map(|(l, t)| (2.0 * t.0 - l.0, 2.0 * t.1 - l.1)).collect();
+        let ring = |a: &[(f32, f32)], b: &[(f32, f32)]| a.iter().chain(b.iter().rev()).copied().collect::<Vec<_>>();
+        under.extend(drawn(&ring(&lid, &top), UNDER_EYE_FEATHER * scale, width, height));
+        cheek.extend(drawn(&ring(&top, &below), 0.0, width, height));
+    }
+    let on_skin = |boxes: &[([u32; 4], Selection)]| place(boxes, width, height).combine(skin, Combine::Intersect);
+    (on_skin(&under).combine(&draw(&[points], &LASHES, width, height), Combine::Subtract), on_skin(&cheek))
+}
+
+/// `polygon` filled and feathered, in a box round it: its corners in an
+/// image `width` × `height`, and the selection within them.
+fn drawn(polygon: &[(f32, f32)], feather: f32, width: u32, height: u32) -> Option<([u32; 4], Selection)> {
+    let pad = 3.0 * feather + 1.0;
+    let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+    for &(x, y) in polygon {
+        lo = (lo.0.min(x - pad), lo.1.min(y - pad));
+        hi = (hi.0.max(x + pad), hi.1.max(y + pad));
+    }
+    let (x0, y0) = (lo.0.max(0.0) as u32, lo.1.max(0.0) as u32);
+    let (x1, y1) = ((hi.0.ceil().max(0.0) as u32).min(width), (hi.1.ceil().max(0.0) as u32).min(height));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let shape: Vec<_> = polygon.iter().map(|&(x, y)| (x - x0 as f32, y - y0 as f32)).collect();
+    Some(([x0, y0, x1, y1], Selection::polygon(x1 - x0, y1 - y0, &shape).feather(feather)))
 }
 
 /// The points of each face the landmarker saw.
@@ -528,6 +603,12 @@ fn draw(faces: &[&[[f32; 3]]], shapes: &Shapes, width: u32, height: u32) -> Sele
             Some(([x0, y0, x1, y1], drawn))
         })
         .collect();
+    place(&boxes, width, height)
+}
+
+/// Selections drawn in `boxes` (left, top, right, bottom), placed in an
+/// image `width` × `height`.
+fn place(boxes: &[([u32; 4], Selection)], width: u32, height: u32) -> Selection {
     Selection::from_coverage(Tiled::from_tiles(width, height, 0, |col, row| {
         let (tx, ty) = (col * TILE, row * TILE);
         let (tx1, ty1) = ((tx + TILE).min(width), (ty + TILE).min(height));
@@ -678,6 +759,35 @@ mod tests {
         assert!(eyes.at(236, 280) > 0.9 && eyes.bounds().unwrap()[2] < 60, "{:?}", eyes.bounds());
         // Its mouth is a guess too.
         assert!(whites(&srgb, &points, Whiten::Teeth, &all).is_empty());
+    }
+
+    #[test]
+    fn under_each_eye_in_sight_is_the_skin_below_its_lashes_and_the_cheek_below_that() {
+        // Each lower lid along y = 290, and the top of the cheek 20 px
+        // below it.
+        let (_, mut points) = face_with_eyes();
+        for (eye, x0) in EACH_EYE.iter().zip([230.0, 330.0]) {
+            for (k, (&lid, &cheek)) in eye.lower_lid.iter().zip(&eye.cheek).enumerate() {
+                let x = x0 + 5.0 * k as f32;
+                (points[lid], points[cheek]) = ([x, 290.0, 0.0], [x, 310.0, 0.0]);
+            }
+        }
+        let skin = Selection::all(600, 500);
+        let (under, cheek) = under_eyes(&points, &skin);
+        assert!(under.at(250, 303) > 0.9 && under.at(350, 303) > 0.9, "{} {}", under.at(250, 303), under.at(350, 303));
+        // Not the lashes (6 px below the lid, fading in from there), nor
+        // the cheek.
+        assert!(under.at(250, 289) < 0.05 && under.at(250, 295) < 0.6 && under.at(250, 320) < 0.05, "{} {}", under.at(250, 289), under.at(250, 295));
+        assert!(cheek.at(250, 320) > 0.99 && cheek.at(350, 320) > 0.99 && cheek.at(250, 300) < 0.01 && cheek.at(250, 335) < 0.01);
+        // Only where there's skin.
+        let left = Selection::rectangle(600, 500, (0.0, 0.0), (300.0, 500.0));
+        let (under, cheek) = under_eyes(&points, &left);
+        assert!(under.at(250, 303) > 0.9 && under.at(350, 303) < 0.01 && cheek.at(350, 320) < 0.01);
+        // An eye out of sight has none.
+        let [inner, outer] = EACH_EYE[1].corners;
+        (points[inner], points[outer]) = ([346.0, 280.0, 0.0], [354.0, 281.0, 0.0]);
+        let (under, cheek) = under_eyes(&points, &skin);
+        assert!(under.at(250, 303) > 0.9 && under.at(350, 303) < 0.01 && cheek.at(350, 320) < 0.01);
     }
 
     /// A look at a real photo: each part found in `OMAPIX_FACE_PHOTO`,
