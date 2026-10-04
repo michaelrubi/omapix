@@ -158,7 +158,6 @@ The UI has been tested through the same code paths with scripts
 - [ ] Live GPU slider drags on a 24 MP retouch: opacity, Curves and Levels, Hue/Saturation, and opacity or blend mode in Blending Options, at fit and at 100 %: smooth, no flash when released
 - [ ] Channels panel: view Red, Green and Blue (click and Ctrl+2…5), Ctrl+click with Shift/Alt to load them and RGB's luminosity, Save Selection as Alpha 1 and 2, view, load and delete them, and reopen the .ora with them kept
 - [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
-- [ ] Export as PNG: a cut-out with transparency and an opaque portrait, opened in a browser and in GIMP (transparency, colours, EXIF), and how long a 24 MP one takes
 - [ ] PSD import: a flattened 16-bit .psd and a layered one (layers, groups, masks and colours as in Photoshop), and Ctrl+S asking where to save rather than overwriting the .psd
 - [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
 - [ ] Free Transform live on the GPU: dragging handles on a whole 24 MP layer at fit and at 100 %, zooming mid-transform, Enter with no flash, and Esc
@@ -198,6 +197,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Image Size, Enlarge with AI: a retouched portrait (with a Blemishes layer, a mask and a selection) to 200 % and to 150 %, the status bar count, the Upscale layer at 100 % against it hidden (hair, lashes, skin, any seams or tone change), its opacity, undo as one step, a ProPhoto TIFF, the checkbox greyed out for a smaller size and without darktable's model, and a crop made while it runs
 - [ ] Crop tool with a selection: the box starts on the selection's bounds, Enter crops to it, Esc goes back to the tool before; without one it starts round the image
 - [ ] jpegli JPEG export: File › Export as JPEG and Batch Export of a 24 MP portrait, the file size, a look at skin, hair and a smooth backdrop at 100 %, and the colours and EXIF in a browser and in darktable
+- [ ] Export as PNG: a cut-out with transparency and an opaque portrait, opened in a browser and in GIMP (transparency, colours, EXIF), and how long a 24 MP one takes
 - [ ] Liquify on a 24 MP portrait: each brush and its key, Size with [ and ], Pressure, Alt with Pucker, Bloat and Push Left, holding still with Bloat, big brushes dragged fast, Enter, Esc, Ctrl+Z, and reopening Liquify to Reconstruct an earlier move; then Ctrl+Z and Ctrl+Shift+Z on single strokes while it's open, dragging Restore All, Alt+right-drag to size the brush, and light and heavy pen strokes
 - [ ] Retouch › Finish: stamps visible image onto "Sharpen" layer with saved Unsharp Mask settings, adds "Grain" layer in Overlay with saved Add Noise settings, and single undo step reverts both
 - [ ] File › Batch Export…: dialog with source file picker, output folder, checkboxes for resize long edge, sharpen and grain, format choice (JPEG with quality slider, 16-bit TIFF), status bar progress, summary message, and settings remembered between runs
