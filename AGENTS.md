@@ -16,6 +16,9 @@ crates/
   omapix-engine/   16-bit RGBA copy-on-write tiled raster (256×256 tiles),
                    Little CMS 2 colour management, OpenRaster (.ora) IO,
                    TIFF/JPEG export, filters, adjustments, blend modes.
+  omapix-ai/       ONNX Runtime (opened from the system at run time), the
+                   model registry (models.txt) and the models' inputs and
+                   outputs. No UI. See docs/AI.md.
   omapix/          Application layer: egui UI on wgpu canvas, input handling,
                    tool system, commands, panels, and Omarchy theme integration.
 ```

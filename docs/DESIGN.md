@@ -28,6 +28,7 @@ It is an independent project, not part of Omarchy.
 crates/
   omapix-engine   image data, colour management, file IO, processing
                   (no UI or GPU dependencies — testable headless)
+  omapix-ai       ONNX Runtime and the AI models (no UI; see AI.md)
   omapix          the app: egui UI on wgpu, canvas, input, theme
 ```
 
@@ -129,7 +130,7 @@ unit tests, and leaves room to replace the UI toolkit later.
   and masks (as extra PNGs), Blend If and clipping under `omapix:`
   attributes other apps ignore.
 - Exports: flattened 16-bit TIFF with ICC (back to darktable or to print)
-  and 8-bit sRGB JPEG (web and clients).
+  and 8-bit sRGB JPEG or PNG (web and clients).
 
 ## Milestones
 
@@ -155,7 +156,7 @@ down, stamp visible, drag-to-reorder, Blend If (Blending Options, saved in
 OpenRaster), mask view, layer groups (Pass Through or isolated, nested,
 with their own opacity, mask and Blend If), clipping masks.
 
-### 3. Retouch tools (mostly done)
+### 3. Retouch tools (done)
 
 Done: brush and eraser with Photoshop's size, hardness, opacity and flow;
 painting on masks; eyedropper; Clone Stamp and Healing Brush with aligned
@@ -163,20 +164,21 @@ sources, sampling the current layer or all layers; selections (rectangular
 marquee, lasso, add/subtract/intersect, inverse, feather) that limit
 brushes, fills and filters; Spot Healing Brush that picks its own source;
 Move tool for layers and selected pixels.
-Next: elliptical marquee, pen pressure (winit has no tablet support on
-Linux yet).
+Since then: elliptical marquee, Magic Wand, Quick and Object Selection,
+Gradient, Paint Bucket, Crop, Free Transform and pen pressure.
 
-### 4. Adjustments (mostly done)
+### 4. Adjustments (done)
 
 Done: Curves, Levels, Hue/Saturation, Color Balance, Selective Color,
 Channel Mixer and Color Lookup (LUT) as adjustment layers with a live
-Properties panel, saved in OpenRaster. Next: histogram in Curves,
-eyedroppers in Curves and Levels.
+Properties panel, saved in OpenRaster, with a histogram and eyedroppers in
+Curves and Levels.
 
-### 5. Beyond
+### 5. Beyond (done)
 
-Liquify, AI-assisted retouching (local models via ONNX Runtime on the GPU),
-PSD import.
+Liquify, AI-assisted retouching (local models via ONNX Runtime on the GPU,
+see [AI.md](AI.md)), PSD import. The [roadmap](ROADMAP.md) has everything
+built since, and what's next.
 
 ## Shortcuts
 

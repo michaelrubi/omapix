@@ -1,0 +1,56 @@
+# Maintainer: Michael Rubi <michael@rubiconetic.com>
+
+# Builds Omapix from the newest commit on main. From this folder:
+#   makepkg -si
+
+pkgname=omapix-git
+pkgver=0.1.0.r304.g9ea1e06
+pkgrel=1
+pkgdesc="Keyboard-first raster photo editor for portrait retouching, with Photoshop's shortcuts"
+arch=('x86_64')
+url="https://github.com/michaelrubi/omapix"
+# Omapix is GPL-3.0-or-later; its JPEG encoder (zenjpeg) is AGPL-3.0-only.
+license=('GPL-3.0-or-later AND AGPL-3.0-only')
+depends=('gcc-libs' 'glibc' 'lcms2' 'vulkan-icd-loader' 'wayland' 'libxkbcommon'
+         'xdg-desktop-portal' 'hicolor-icon-theme')
+makedepends=('cargo' 'git')
+optdepends=('onnxruntime: the AI features (onnxruntime-cuda for an NVIDIA GPU)'
+            'cudnn: the AI features on an NVIDIA GPU'
+            'curl: downloading the AI models with omapix-fetch-models'
+            'darktable: "edit in Omapix" from the export module')
+provides=('omapix')
+conflicts=('omapix')
+source=("git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd omapix
+  printf '%s.r%s.g%s' "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)" \
+    "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd omapix
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd omapix
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+package() {
+  cd omapix
+  install -Dm755 target/release/omapix "$pkgdir/usr/bin/omapix"
+  install -Dm644 assets/omapix.desktop "$pkgdir/usr/share/applications/omapix.desktop"
+  install -Dm644 assets/omapix.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/omapix.svg"
+  # darktable finds it here; `require "omapix"` in ~/.config/darktable/luarc loads it.
+  install -Dm644 assets/darktable/omapix.lua "$pkgdir/usr/share/darktable/lua/omapix.lua"
+  # scripts/fetch-models.sh, reading its list of models from where it's installed.
+  install -Dm644 crates/omapix-ai/models.txt "$pkgdir/usr/share/omapix/models.txt"
+  install -Dm755 scripts/fetch-models.sh "$pkgdir/usr/bin/omapix-fetch-models"
+  sed -i 's|^manifest=.*|manifest=/usr/share/omapix/models.txt|' "$pkgdir/usr/bin/omapix-fetch-models"
+}

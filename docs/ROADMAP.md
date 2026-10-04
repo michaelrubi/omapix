@@ -1,9 +1,10 @@
 # Omapix roadmap
 
 What's still needed, in the order we plan to do it. [DESIGN.md](DESIGN.md)
-covers the architecture and what's already built.
+covers the architecture and what's already built. To help with any of it, see
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
-Status: milestones 1–4 are largely done. Omapix can open a darktable TIFF, retouch it with layers, masks, healing and frequency separation, grade it with adjustment layers, and save or export it.
+Status: sections 1 to 7 are largely done. Omapix can open a darktable TIFF, retouch it by hand or with Auto Retouch, grade it with adjustment layers, and save or export it. What's open in those sections is the items not struck through and the "Later:" lines under the finished ones. Section 8 is what's needed for other people to install Omapix and help with it.
 
 ## 1. Everyday UI and layers panel UX (next)
 
@@ -397,6 +398,28 @@ The goal is Evoto-style one-click cleanup, running locally on the GPU with no su
 - Models run through ONNX Runtime on the GPU (already set up on this machine for darktable), shared with darktable's model folder.
 - ~~**Content-Aware Fill**~~ (done): Edit › Content-Aware Fill fills the selection from its surroundings with LaMa (Apache-2.0, 208 MB, installed by `scripts/fetch-models.sh`, which checks its SHA-256), for props, backdrop marks and stray objects. It looks at the visible image in a square twice the selection's size (at least 512 px), scaled to the model's 512 px, and puts the answer on a new "Content-Aware Fill" layer above the selected one, masked to the selection, so it can be painted back or deleted. 0.2–0.3 s on the GPU once the model's loaded, about 4 s the first time. Select a little beyond the object: anything of it left outside the selection gets smeared into the fill. Big fills come out soft, since the model works at 512 px; the healing tools stay better for skin.
   - For bigger removals, or putting something else there: Generative Fill, above.
+
+## 8. Releases, packaging and contributors
+
+What Omapix needs before people other than Michael can install it, rely on it and help with it.
+
+- ~~**A README that says what Omapix does**, and **CONTRIBUTING.md**~~ (done): the README lists what's built, what it needs, how to install it and how the AI models get there. CONTRIBUTING.md covers reporting bugs, what Omapix says no to, building and testing, how the code is laid out, pull requests and licences.
+- ~~**An Arch package**~~ (done): `packaging/arch/PKGBUILD` builds `omapix-git` from the newest commit on GitHub, with the launcher entry and icon, darktable's "edit in Omapix" script (in `/usr/share/darktable/lua`, loaded by a `require "omapix"` line the user adds to their `luarc`), and `scripts/fetch-models.sh` as `omapix-fetch-models`, reading its list from `/usr/share/omapix/models.txt`. Built with `makepkg` and its contents checked; not yet installed with `pacman` and run.
+  - Next: put it on the AUR, so `yay -S omapix-git` works.
+  - Later: other distributions, if someone will look after them.
+- **A first release:** tag `v0.1.0` once the items here that affect users are done, with a short list of what's in it, and an `omapix` package built from the tag beside `omapix-git`. Until then the version in `Cargo.toml` means nothing.
+- **Tests that don't depend on how busy the machine is.** Three wait a fixed time for background work and fail when the CPU is busy (seen with a release build running beside them): `batch_export_runs_in_the_background_and_says_what_failed`, `select_and_mask_previews_in_red_then_applies_cancels_or_makes_a_mask` and `a_layer_in_a_pass_through_group_moves_live`. They need fixing before CI, which runs on slower machines.
+- **CI:** `cargo test` and `cargo clippy` on every pull request. Neither needs a display, a GPU or the models, only `lcms2`.
+- **Formatting:** the code isn't formatted as rustfmt would (it differs from rustfmt's defaults in about 1,600 places, and still in 1,000 at a line width of 160), so a contributor with format-on-save rewrites every file they touch. Either add a `rustfmt.toml` and format everything once, in a commit of its own, or keep saying not to in CONTRIBUTING.md.
+- **AI models without darktable.** SAM 2.1, NIND and RealPLKSR have no download URL, so Object Selection, Denoise and upscaling need darktable installed and its models fetched from its preferences. They need URLs in `models.txt`.
+- **AI features for packaged installs:**
+  - Messages that say "run scripts/fetch-models.sh" should name `omapix-fetch-models` when that's what's installed.
+  - ONNX Runtime is only looked for at `/usr/lib/libonnxruntime.so` (or `OMAPIX_ORT_LIBRARY`), which is right for Arch and not for most other distributions.
+  - Only CUDA is asked for, so AMD and Intel GPUs run the models on the CPU. ONNX Runtime's ROCm, MIGraphX and OpenVINO providers could be tried by someone with the hardware.
+- **Other hardware and desktops.** Omapix has only run on Hyprland with an NVIDIA GPU. To try, and write down what happens: AMD and Intel GPUs, GNOME, KDE, Sway and niri, X11 (the tablet and clipboard code is Wayland's), and a desktop with no Omarchy theme (it falls back to Catppuccin Mocha).
+- **Screenshots** in the README: the window with a portrait open, and Auto Retouch's layers.
+- **Issue templates** for bug reports, asking for what CONTRIBUTING.md lists.
+- **A user guide.** DESIGN.md's shortcut table covers the basics, and the rest is only in the roadmap's descriptions of finished items. One page for each of the main workflows (darktable round trip, frequency separation, Auto Retouch) would do.
 
 ## Out of scope for now
 - Vector and layout tools (Omapix is raster only).
