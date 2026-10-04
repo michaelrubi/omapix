@@ -53,7 +53,7 @@ fn main() -> eframe::Result {
     if round_trip {
         args.remove(0);
     }
-    let path = args.into_iter().next().map(PathBuf::from);
+    let paths: Vec<PathBuf> = args.into_iter().map(PathBuf::from).collect();
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -73,6 +73,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "omapix",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, path, round_trip)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, paths, round_trip)))),
     )
 }

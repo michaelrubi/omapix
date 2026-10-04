@@ -2,7 +2,7 @@
 //! background work that keeps the canvas up to date.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 
@@ -420,6 +420,11 @@ pub struct Editor {
     sample_cache: Mutex<SampleCache>,
 }
 
+/// Where the next document's revisions start. Each open document counts
+/// from its own, so what a panel keeps for a revision of one (a histogram,
+/// the Navigator's thumbnail) is never taken for another's.
+static FIRST_REVISION: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Default)]
 struct SampleCache {
     all: Option<(u64, Arc<Tiled<Pixel>>)>,
@@ -444,7 +449,7 @@ impl Editor {
             redo: Vec::new(),
             live: None,
             group: None,
-            revision: 1,
+            revision: FIRST_REVISION.fetch_add(1 << 32, Ordering::Relaxed),
             view: View::Image,
             view_generation: 0,
             rendering: None,
@@ -2216,6 +2221,11 @@ impl Editor {
     /// Identifies the current state of the document; changes on every edit.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Whether `revision` was one of this document's (see [`FIRST_REVISION`]).
+    pub fn owns(&self, revision: u64) -> bool {
+        revision >> 32 == self.revision >> 32
     }
 
     /// Mark the document saved, unless it changed since `revision` (the
