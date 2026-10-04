@@ -19,7 +19,8 @@ use omapix_engine::reshape::{self, Face, Shape};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
 use omapix_engine::{
-    ColorProfile, DisplayTransform, Document, NoiseOptions, Pixel, Raster, composite, filters, ops,
+    ColorProfile, DisplayTransform, Document, NoiseOptions, Pixel, Proof, Raster, composite, filters,
+    ops,
 };
 
 use crate::canvas::{Canvas, Render};
@@ -432,13 +433,13 @@ struct SampleCache {
 }
 
 impl Editor {
-    /// Show the image in a monitor's colours (`None`: as sRGB).
-    pub fn set_display(&mut self, display: Option<&ColorProfile>) {
+    /// Show the image in a monitor's colours (`None`: as sRGB), proofed
+    /// for another colour space or not.
+    pub fn set_display(&mut self, display: Option<&ColorProfile>, proof: Option<Proof>) -> Result<(), String> {
         let display = display.cloned().unwrap_or_else(ColorProfile::srgb);
-        match DisplayTransform::new(&self.doc.profile, &display) {
-            Ok(transform) => self.canvas.set_transform(transform),
-            Err(e) => log::warn!("can't show {} as {}: {e}", self.doc.file_name(), display.description()),
-        }
+        let transform = DisplayTransform::new(&self.doc.profile, &display, proof).map_err(|e| e.to_string())?;
+        self.canvas.set_transform(transform);
+        Ok(())
     }
 
     pub fn new(doc: Document) -> Result<Self, String> {
@@ -3972,10 +3973,10 @@ mod live_tests {
         edid[23] = 120;
         edid[27..35].copy_from_slice(&[174, 82, 61, 185, 36, 13, 80, 84]);
         let monitor = ColorProfile::from_edid(&edid, "eDP-2").unwrap();
-        e.set_display(Some(&monitor));
+        e.set_display(Some(&monitor), None).unwrap();
         let [r, g, b, _] = shown(&e);
         assert!(r < 245 && g > 40 && b > 10, "{:?}", shown(&e));
-        e.set_display(None);
+        e.set_display(None, None).unwrap();
         assert_eq!(shown(&e), [255, 0, 0, 255]);
     }
 

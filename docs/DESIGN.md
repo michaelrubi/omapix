@@ -54,6 +54,8 @@ unit tests, and leaves room to replace the UI toolkit later.
 - The display colour is the monitor's (`monitor.rs`): an ICC profile named
   in `monitors.toml`, or the colours its EDID reports, where Hyprland takes
   the monitor for sRGB and so converts nothing itself; otherwise sRGB.
+- Soft proofing (`DisplayTransform` with a `Proof`) goes by way of the
+  proof's colour space, and marks what it hasn't got in grey.
 - Editing maths stays in the document's space; only the display cache is
   converted.
 
@@ -65,8 +67,8 @@ unit tests, and leaves room to replace the UI toolkit later.
    when zoomed out.
 2. Split each level into 512 px display tiles with a 1 px border, so linear
    filtering never shows seams between tiles.
-3. Tiles are converted to 8 bits in the display's colours and uploaded to the GPU lazily, the
-   first time they are visible.
+3. Tiles are converted to 8 bits in the display's colours and uploaded to
+   the GPU lazily, the first time they are visible.
 4. At each zoom, draw the smallest level that is still at least as large as
    the screen area. Above 100 %, pixels are drawn nearest-neighbour so they
    stay crisp, like Photoshop.

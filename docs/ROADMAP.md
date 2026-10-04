@@ -134,6 +134,7 @@ The UI has been tested through the same code paths with scripts
 - [x] Eyedroppers in Curves and Levels: set black, gray and white points with crosshair cursor, one undo step per click, and Esc to disarm
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Switching the Omarchy theme while Omapix is open
+- [ ] Soft proofing: a ProPhoto TIFF from darktable with vivid colours (a red dress, a saturated backdrop): Ctrl+Y for the web against the exported JPEG in a browser, Shift+Ctrl+Y greying what sRGB hasn't got, both at once, the status bar, a second tab following; View › Proof Setup › Custom Profile… with a printer's profile (Krita's `cmyk.icm` in /usr/share/color/icc/krita will do), kept after a restart, back to Web (sRGB), a file that isn't a profile; and how fast the canvas follows a slider with the proof on
 - [ ] Monitor colours: a saturated portrait on the laptop's screen against the same file in a browser (less saturated in Omapix, greys the same), skin tones against the external monitor, dragging the window from one monitor to the other (canvas, thumbnails and Navigator follow), the status bar's hover on the profile, `"srgb"` and `"edid"` for a monitor in monitors.toml, and an export looking the same as before
 - [x] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
@@ -271,7 +272,10 @@ The UI has been tested through the same code paths with scripts
   - Where Hyprland manages a monitor's colours itself (a `cm` setting other than `srgb`), Omapix draws sRGB and leaves it to Hyprland. It can't tell when Hyprland has been given an `icc` profile, so such a monitor needs `"srgb"` in `monitors.toml`.
   - An EDID's colours are the maker's nominal ones, not a measurement: for critical work, a colorimeter's profile in `monitors.toml`.
   - Later: the foreground and background swatches and the colour picker (still drawn as sRGB, so more saturated than the paint on a wide-gamut screen); the same profile for darktable, which shows sRGB (saving the EDID profile as an .icc for it); telling Hyprland the canvas's colour space (`wp-color-management`) instead, where it manages the monitor, to keep colours outside sRGB.
-- **Soft proofing** for print and web.
+- ~~**Soft proofing**~~ (done): Photoshop's View › Proof Colors (Ctrl+Y) shows the image as it will come out in another colour space, and View › Gamut Warning (Shift+Ctrl+Y) shows the colours that space hasn't got in mid grey; they work together or apart, on every open image, and the status bar says what's on. View › Proof Setup chooses the space: Web (sRGB), what the JPEG and PNG exports are converted to, so a ProPhoto image from darktable can be checked for what the web will lose; or Custom Profile…, an ICC profile for a printer and paper (RGB or CMYK), which is remembered and turns Proof Colors on. Colours are converted relative colorimetric with black point compensation, as the exports are.
+  - The proof is two conversions, to the proof's space in 16 bits and from there to the monitor's, since Little CMS's own soft proofing doesn't clip to a matrix profile such as sRGB. The gamut warning is Little CMS's.
+  - While it's on, tiles take two or three conversions rather than one, and thumbnails are proofed too.
+  - Later: the rendering intent (Perceptual, for printer profiles made for it) and Simulate Paper Color in Proof Setup; the profiles installed, listed in the menu; the warning's colour; proofing one image and not the others.
 
 ### Denoise, sharpen and add noise
 
