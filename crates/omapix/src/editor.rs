@@ -616,9 +616,11 @@ impl Editor {
 
     /// A continuous edit changed the document from `before`. If it only
     /// changed the active layer's opacity, blend mode or adjustment, show
-    /// it live on the GPU until it ends; otherwise render it on the CPU.
+    /// it live on the GPU until it ends; otherwise render it on the CPU
+    /// (as when a group is given a blend mode of its own).
     fn show_edit_live(&mut self, before: &[Layer]) {
-        let fits = live::only_settings_changed(before, &self.doc.layers, self.active);
+        let fits = live::only_settings_changed(before, &self.doc.layers, self.active)
+            && live::can_show(&self.doc, self.active, false);
         let showing = self.live_view.as_ref().is_some_and(|v| {
             v.edit.is_some() && v.subject == self.active && v.until.is_none()
         });
@@ -3867,6 +3869,30 @@ mod live_tests {
         assert_eq!(e.undo_label(), Some("Opacity"));
         e.undo();
         assert_eq!(e.doc.layer(patch).unwrap().opacity, 1.0);
+    }
+
+    #[test]
+    fn a_groups_opacity_shows_live_until_it_gets_a_blend_mode() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let group = e.doc.group_layer(1);
+        e.active = group;
+        e.update(&ctx);
+        let edit = |e: &mut Editor, f: &dyn Fn(&mut Layer)| e.edit_live("Group", |doc| f(doc.layer_mut(group).unwrap()));
+        edit(&mut e, &|g| g.opacity = 0.8);
+        settle(&mut e, &ctx);
+        edit(&mut e, &|g| g.opacity = 0.5);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.settings.expect("an edit").opacity, 0.5);
+        // The patch in it is part of what's below; the group's end fades it.
+        assert_eq!(frame.stack.layers.len(), 1);
+        assert!(frame.stack.layers[0].subject && matches!(frame.stack.layers[0].source, live::Source::Group(_)));
+        // Composited on its own, it's not for the GPU.
+        edit(&mut e, &|g| g.blend = BlendMode::Normal);
+        e.update(&ctx);
+        assert!(e.canvas.live.is_none());
+        e.end_live();
     }
 
     #[test]
