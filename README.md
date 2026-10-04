@@ -13,7 +13,7 @@ undo; move tool; brush, eraser, clone stamp and healing brush; marquee and lasso
 selections with feathering; Curves, Levels, Hue/Saturation, Color
 Balance, Selective Color, Channel Mixer and Color Lookup (LUT) adjustment layers;
 one-click frequency separation and dodge & burn
-layers; and OpenRaster save with TIFF/JPEG export. See [docs/DESIGN.md](docs/DESIGN.md) for the design and shortcuts, and
+layers; and OpenRaster save with TIFF/JPEG/PNG export. See [docs/DESIGN.md](docs/DESIGN.md) for the design and shortcuts, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for what's next.
 
 ## Build and run
