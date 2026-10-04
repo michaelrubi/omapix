@@ -21,6 +21,7 @@
 //! as finely as it needs.
 
 use crate::blemish::{self, Spot};
+use crate::body::{Joint, Joints};
 use crate::document::Document;
 use crate::layer::Layer;
 use crate::selection::Selection;
@@ -57,28 +58,119 @@ pub struct Face<'a> {
     pub teeth: Option<(&'a Selection, f32)>,
 }
 
-/// The part of `skin` that's the person's whose face is `faces[which]`:
-/// what's nearer their face than any other, measured from each face's
-/// middle in distances between its eyes (so a small face has a small share).
-pub fn share(skin: &Selection, faces: &[([f32; 2], f32)], which: usize) -> Selection {
-    if faces.len() < 2 {
+/// A person, for telling whose skin is whose: the middle of their face,
+/// the distance between its eyes, and their joints if the pose model saw
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Person {
+    pub face: [f32; 2],
+    pub iod: f32,
+    pub joints: Option<Joints>,
+}
+
+/// Part of a body, as the line from one joint to another and how far the
+/// body reaches from it, in pixels.
+struct Bone {
+    from: [f32; 2],
+    to: [f32; 2],
+    reach: f32,
+}
+
+impl Bone {
+    /// How far (x, y) is from it, in reaches: under 1 is on the body.
+    fn away(&self, x: f32, y: f32) -> f32 {
+        let (dx, dy) = (self.to[0] - self.from[0], self.to[1] - self.from[1]);
+        let along = ((x - self.from[0]) * dx + (y - self.from[1]) * dy) / (dx * dx + dy * dy).max(1e-6);
+        let t = along.clamp(0.0, 1.0);
+        (x - self.from[0] - t * dx).hypot(y - self.from[1] - t * dy) / self.reach
+    }
+}
+
+/// A joint counts if the pose model thinks it more likely in view than not.
+const SEEN: f32 = 0.5;
+
+impl Person {
+    /// Their face, and each part of their body between joints the pose
+    /// model saw. How far each reaches is in distances between the eyes
+    /// (about 6 cm), from an adult's proportions.
+    fn bones(&self) -> Vec<Bone> {
+        let mut bones = vec![Bone {
+            from: self.face,
+            to: self.face,
+            reach: 1.4 * self.iod,
+        }];
+        let Some(j) = &self.joints else {
+            return bones;
+        };
+        let at = |joint: Joint| [joint[0], joint[1]];
+        let between = |a: Joint, b: Joint| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, a[2].min(b[2])];
+        // On from `to`, as far again as `by` times the way there from `from`.
+        let beyond = |from: Joint, to: Joint, by: f32| [to[0] + (to[0] - from[0]) * by, to[1] + (to[1] - from[1]) * by, from[2].min(to[2])];
+        let mut bone = |from: Joint, to: Joint, reach: f32| {
+            if from[2] > SEEN && to[2] > SEEN {
+                bones.push(Bone {
+                    from: at(from),
+                    to: at(to),
+                    reach: reach * self.iod,
+                });
+            }
+        };
+        let (shoulders, hips) = (between(j.shoulders[0], j.shoulders[1]), between(j.hips[0], j.hips[1]));
+        bone([self.face[0], self.face[1], 1.0], shoulders, 1.0);
+        bone(j.shoulders[0], j.shoulders[1], 1.0);
+        bone(shoulders, hips, 1.6);
+        for side in 0..2 {
+            let (shoulder, elbow, wrist) = (j.shoulders[side], j.elbows[side], j.wrists[side]);
+            let (hip, knee, ankle) = (j.hips[side], j.knees[side], j.ankles[side]);
+            bone(shoulder, hip, 1.2);
+            bone(shoulder, elbow, 0.8);
+            bone(elbow, wrist, 0.7);
+            // The hand and the foot, which have no joints of their own here.
+            bone(wrist, beyond(elbow, wrist, 0.45), 0.7);
+            bone(hip, knee, 1.2);
+            bone(knee, ankle, 0.9);
+            bone(ankle, beyond(knee, ankle, 0.2), 0.8);
+        }
+        bones
+    }
+}
+
+/// Skin is shared out in squares of this many pixels: whose it is changes
+/// over far more than that.
+const CELL: u32 = 4;
+
+/// The part of `skin` that's `people[which]`'s: what's nearer their face
+/// or body than anyone else's, measured in how far each part reaches (so a
+/// small figure has a small share, and an arm across someone else is still
+/// its owner's). Someone the pose model didn't see has only their face to
+/// go by.
+pub fn share(skin: &Selection, people: &[Person], which: usize) -> Selection {
+    if people.len() < 2 {
         return skin.clone();
     }
     let c = &skin.coverage;
-    let away = |&([fx, fy], iod): &([f32; 2], f32), x: f32, y: f32| (x - fx).hypot(y - fy) / iod;
+    let bones: Vec<Vec<Bone>> = people.iter().map(Person::bones).collect();
+    let away = |n: usize, x: f32, y: f32| bones[n].iter().map(|b| b.away(x, y)).fold(f32::INFINITY, f32::min);
     Selection::from_coverage(Tiled::from_tiles(c.width(), c.height(), 0, |col, row| {
         let (tx, ty) = (col * TILE, row * TILE);
         let mut tile = vec![0; (TILE * TILE) as usize];
+        let cells = TILE / CELL;
+        let mut mine: Vec<Option<bool>> = vec![None; (cells * cells) as usize];
         let mut any = false;
         for (i, v) in tile.iter_mut().enumerate() {
-            let (x, y) = (tx + i as u32 % TILE, ty + i as u32 / TILE);
+            let (ix, iy) = (i as u32 % TILE, i as u32 / TILE);
             let covered = c.tile(col, row).map_or(c.fill(), |t| t[i]);
-            if covered == 0 || x >= c.width() || y >= c.height() {
+            if covered == 0 || tx + ix >= c.width() || ty + iy >= c.height() {
                 continue;
             }
-            let (x, y) = (x as f32, y as f32);
-            let mine = away(&faces[which], x, y);
-            if faces.iter().enumerate().all(|(n, f)| n == which || mine <= away(f, x, y)) {
+            let cell = &mut mine[(ix / CELL + iy / CELL * cells) as usize];
+            let mine = *cell.get_or_insert_with(|| {
+                let middle = |t: u32, i: u32| (t + i / CELL * CELL) as f32 + CELL as f32 / 2.0;
+                let (x, y) = (middle(tx, ix), middle(ty, iy));
+                let own = away(which, x, y);
+                (0..people.len()).all(|n| n == which || own <= away(n, x, y))
+            });
+            if mine {
                 *v = covered;
                 any = true;
             }
@@ -403,14 +495,56 @@ mod tests {
         let skin = Selection::rectangle(W, H, (0.0, 100.0), (W as f32, 200.0));
         // A face on the left twice the size of the one on the right: its
         // share reaches two thirds of the way across.
-        let faces = [([0.0, 150.0], 80.0), ([600.0, 150.0], 40.0)];
-        let [left, right] = [0, 1].map(|n| share(&skin, &faces, n));
+        let person = |x: f32, iod: f32| Person {
+            face: [x, 150.0],
+            iod,
+            joints: None,
+        };
+        let people = [person(0.0, 80.0), person(600.0, 40.0)];
+        let [left, right] = [0, 1].map(|n| share(&skin, &people, n));
         assert!(left.at(100, 150) > 0.99 && left.at(390, 150) > 0.99 && left.at(410, 150) < 0.01);
         assert!(right.at(410, 150) > 0.99 && right.at(390, 150) < 0.01);
         // Only skin, and all of it between them.
         assert!(left.at(100, 50) < 0.01 && right.at(500, 250) < 0.01);
         assert_eq!(left.combine(&right, crate::Combine::Add).bounds(), skin.bounds());
         // One face has it all.
-        assert_eq!(share(&skin, &faces[..1], 0).bounds(), skin.bounds());
+        assert_eq!(share(&skin, &people[..1], 0).bounds(), skin.bounds());
+    }
+
+    #[test]
+    fn an_arm_across_someone_else_is_still_its_owners() {
+        // Two people side by side, the one on the left with an arm out
+        // across the other's chest, and skin everywhere.
+        let skin = Selection::rectangle(W, H, (0.0, 0.0), (W as f32, H as f32));
+        let seen = |x: f32, y: f32| [x, y, 1.0];
+        let standing = |x: f32| Joints {
+            ears: [seen(x + 20.0, 60.0), seen(x - 20.0, 60.0)],
+            shoulders: [seen(x + 60.0, 130.0), seen(x - 60.0, 130.0)],
+            elbows: [seen(x + 70.0, 200.0), seen(x - 70.0, 200.0)],
+            wrists: [seen(x + 70.0, 270.0), seen(x - 70.0, 270.0)],
+            hips: [seen(x + 40.0, 280.0), seen(x - 40.0, 280.0)],
+            ..Default::default()
+        };
+        let mut reaching = standing(150.0);
+        (reaching.elbows[0], reaching.wrists[0]) = (seen(300.0, 170.0), seen(400.0, 180.0));
+        let person = |x: f32, joints| Person {
+            face: [x, 60.0],
+            iod: 20.0,
+            joints,
+        };
+        let people = [person(150.0, Some(reaching)), person(450.0, Some(standing(450.0)))];
+        let [left, right] = [0, 1].map(|n| share(&skin, &people, n));
+        // The forearm and hand over the other's chest are the left one's,
+        // and the chest round them the right one's.
+        assert!(left.at(390, 180) > 0.99 && left.at(420, 182) > 0.99 && right.at(390, 180) < 0.01);
+        assert!(right.at(450, 230) > 0.99 && right.at(450, 130) > 0.99 && right.at(450, 60) > 0.99);
+        assert!(left.at(150, 200) > 0.99 && left.at(230, 150) > 0.99);
+        // By their faces alone, the arm would be the right one's.
+        let faces = people.map(|p| Person { joints: None, ..p });
+        assert!(share(&skin, &faces, 1).at(390, 180) > 0.99);
+        // Joints the pose model didn't see (the legs here) are left out,
+        // and someone it didn't see at all still has their face.
+        let half = [people[0], faces[1]];
+        assert!(share(&skin, &half, 1).at(450, 60) > 0.99 && share(&skin, &half, 0).at(390, 180) > 0.99);
     }
 }

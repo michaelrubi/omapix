@@ -40,6 +40,7 @@ pub mod point {
     pub const RIGHT_ANKLE: usize = 28;
     /// How many there are: the model's other six are its own.
     pub const COUNT: usize = 33;
+    pub const NOSE: usize = 0;
 }
 
 /// A person the landmarker saw.
@@ -55,11 +56,10 @@ pub struct Pose {
 }
 
 impl Pose {
-    /// The person, for Body Reshape: `None` if their shoulders are out of
-    /// view.
-    pub fn body(&self) -> Option<Body> {
+    /// Where the person's joints are, each with how likely it's in view.
+    pub fn joints(&self) -> Joints {
         let pair = |left: usize, right: usize| [left, right].map(|i| [self.points[i][0], self.points[i][1], self.points[i][3]]);
-        let joints = Joints {
+        Joints {
             ears: pair(point::LEFT_EAR, point::RIGHT_EAR),
             shoulders: pair(point::LEFT_SHOULDER, point::RIGHT_SHOULDER),
             elbows: pair(point::LEFT_ELBOW, point::RIGHT_ELBOW),
@@ -67,9 +67,14 @@ impl Pose {
             hips: pair(point::LEFT_HIP, point::RIGHT_HIP),
             knees: pair(point::LEFT_KNEE, point::RIGHT_KNEE),
             ankles: pair(point::LEFT_ANKLE, point::RIGHT_ANKLE),
-        };
+        }
+    }
+
+    /// The person, for Body Reshape: `None` if their shoulders are out of
+    /// view.
+    pub fn body(&self) -> Option<Body> {
         let Crop { centre, side, angle } = self.crop;
-        Body::new(&joints, &Matte { centre, side, angle, size: SIZE, cover: &self.matte })
+        Body::new(&self.joints(), &Matte { centre, side, angle, size: SIZE, cover: &self.matte })
     }
 }
 

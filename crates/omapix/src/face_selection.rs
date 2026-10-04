@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use egui::{Pos2, pos2};
 use omapix_ai::face::{Analysis, BODY_SKIN, Detection, FACE_SKIN, Faces, HAIR, Image, outline};
+use omapix_ai::pose::point;
 use omapix_engine::blemish::{self, Spot};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, Tiled};
@@ -360,6 +361,40 @@ pub fn find_skin(image: Raster, profile: &ColorProfile) -> Result<FoundSkin, Str
     Ok(FoundSkin { image, skin, iod, cheek, nose })
 }
 
+/// Each of `faces` as a person, for sharing the skin out: the middle of
+/// the face and the distance between its eyes, and with more than one
+/// (one has all the skin), the joints of whoever the pose model sees with
+/// their nose on it. Without the pose model there are just the faces.
+fn people(faces: &[&Detection], srgb: &[[u8; 4]], image: &Raster) -> Vec<retouch::Person> {
+    let mut poses = Vec::new();
+    if faces.len() > 1 {
+        let image = Image {
+            pixels: srgb,
+            width: image.width() as usize,
+            height: image.height() as usize,
+        };
+        match crate::body_liquify::poses(&image) {
+            Ok(found) => poses = found.iter().map(|p| (p.points[point::NOSE], p.joints())).collect(),
+            Err(e) => log::debug!("sharing skin out by faces alone: {e}"),
+        }
+    }
+    (faces.iter())
+        .map(|f| {
+            let [left, top, right, bottom] = f.bounds;
+            let face = [(left + right) / 2.0, (top + bottom) / 2.0];
+            let away = |nose: &[f32; 4]| (nose[0] - face[0]).hypot(nose[1] - face[1]);
+            let on = |nose: &[f32; 4]| (left..right).contains(&nose[0]) && (top..bottom).contains(&nose[1]);
+            let nearest = (0..poses.len()).filter(|&i| on(&poses[i].0)).min_by(|&a, &b| away(&poses[a].0).total_cmp(&away(&poses[b].0)));
+            retouch::Person {
+                face,
+                iod: face_scale(f),
+                // Nobody else's now.
+                joints: nearest.map(|i| poses.swap_remove(i).1),
+            }
+        })
+        .collect()
+}
+
 /// What Auto Retouch works from, for one face: its box (left, top, right,
 /// bottom), the distance between its eyes, that person's share of the skin,
 /// face and body, the spots on the face, most prominent first, its teeth
@@ -390,17 +425,16 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
     let all_skin = skin(&analysis, image, &[BODY_SKIN, FACE_SKIN]);
     let on_faces = segmented(&analysis, image, &[FACE_SKIN]);
     let face_skin = on_faces.combine(&features(&analysis, image), Combine::Subtract);
-    let places: Vec<_> = (faces.iter())
-        .map(|(f, _)| ([(f.bounds[0] + f.bounds[2]) / 2.0, (f.bounds[1] + f.bounds[3]) / 2.0], face_scale(f)))
-        .collect();
+    let boxes: Vec<_> = faces.iter().map(|(f, _)| f).collect();
+    let people = people(&boxes, &srgb, image);
     let found = faces.iter().enumerate().map(|(n, (face, points))| {
-        let iod = places[n].1;
+        let iod = people[n].iod;
         let none = || Selection::from_coverage(Tiled::new(image.width(), image.height(), 0));
         let whites = |what| points.as_deref().map_or_else(none, |p| whites(&srgb, p, what, &on_faces));
         FoundFace {
             bounds: face.bounds,
             iod,
-            skin: retouch::share(&all_skin, &places, n),
+            skin: retouch::share(&all_skin, &people, n),
             spots: points.as_deref().map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),
             teeth: whites(Whiten::Teeth),
             eyes: whites(Whiten::Eyes),

@@ -68,14 +68,19 @@ impl Sliders for Body {
     fn find(doc: &Document) -> Result<Vec<Body>, String> {
         let image = doc.composite();
         let srgb = srgb(&image, &doc.profile)?;
-        let mut models = MODELS.lock().map_err(|e| e.to_string())?;
-        let poses = match &mut *models {
-            Some(poses) => poses,
-            None => models.insert(Poses::load()?),
-        };
         let image = Image { pixels: &srgb, width: image.width() as usize, height: image.height() as usize };
-        Ok(poses.find(&image)?.iter().filter_map(Pose::body).collect())
+        Ok(poses(&image)?.iter().filter_map(Pose::body).collect())
     }
+}
+
+/// Everyone the pose model sees in `image`, from left to right.
+pub fn poses(image: &Image) -> Result<Vec<Pose>, String> {
+    let mut models = MODELS.lock().map_err(|e| e.to_string())?;
+    let poses = match &mut *models {
+        Some(poses) => poses,
+        None => models.insert(Poses::load()?),
+    };
+    poses.find(image)
 }
 
 pub type BodyLiquify = Panel<Body>;
