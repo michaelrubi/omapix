@@ -1,5 +1,5 @@
 //! Retouch › Auto Retouch… (docs/AI.md, feature 6): Heal Blemishes, Smooth
-//! Skin, Even Tone and Whiten Eyes and Teeth in one go, for each face found
+//! Skin, Even Tone, Lighten Under Eyes and Whiten Eyes and Teeth in one go, for each face found
 //! in what the active layer and those below it show, as a Retouch group
 //! above with a group for each face (`omapix_engine::retouch`). The dialog has a switch and a
 //! strength for each step, three presets, and with several faces a strip of
@@ -29,14 +29,16 @@ pub struct Step {
 }
 
 /// Auto Retouch's settings for a face: Heal Blemishes' Sensitivity, Smooth
-/// Skin's and Even Tone's Amounts, and how much its eyes and teeth are
-/// whitened. Their other settings are their defaults.
+/// Skin's and Even Tone's Amounts, and how much the shadows under its eyes
+/// are lifted and its eyes and teeth whitened. Their other settings are
+/// their defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Retouch {
     pub blemishes: Step,
     pub smooth_skin: Step,
     pub even_tone: Step,
+    pub under_eyes: Step,
     pub whiten_eyes: Step,
     pub whiten_teeth: Step,
 }
@@ -72,7 +74,7 @@ impl Preset {
 
     /// Every step on: Standard is each step's own default.
     pub fn settings(self) -> Retouch {
-        let [blemishes, smooth_skin, even_tone, whiten] = match self {
+        let [blemishes, smooth_skin, even_tone, lighten] = match self {
             Preset::Natural => [35.0, 40.0, 40.0, 30.0],
             Preset::Standard => [50.0, 70.0, 60.0, 50.0],
             Preset::Strong => [65.0, 90.0, 80.0, 70.0],
@@ -82,8 +84,9 @@ impl Preset {
             blemishes,
             smooth_skin,
             even_tone,
-            whiten_eyes: whiten,
-            whiten_teeth: whiten,
+            under_eyes: lighten,
+            whiten_eyes: lighten,
+            whiten_teeth: lighten,
         }
     }
 }
@@ -276,6 +279,7 @@ impl AutoRetouch {
                     ("Heal Blemishes", "Sensitivity: how many of the spots found are healed", &mut settings.blemishes),
                     ("Smooth Skin", "Amount: the Smooth Skin layer's opacity", &mut settings.smooth_skin),
                     ("Even Tone", "Amount: the Dodge & Burn group's opacity", &mut settings.even_tone),
+                    ("Lighten Under Eyes", "Amount: the Under Eyes layer's opacity", &mut settings.under_eyes),
                     ("Whiten Eyes", "Amount: the Whiten Eyes layer's opacity", &mut settings.whiten_eyes),
                     ("Whiten Teeth", "Amount: the Whiten Teeth layer's opacity", &mut settings.whiten_teeth),
                 ] {
@@ -302,8 +306,8 @@ impl AutoRetouch {
             return;
         };
         // Each face that's on: its number, how many of its spots are
-        // healed, the other steps' settings, and how much its eyes and
-        // teeth are whitened, if there are any to whiten.
+        // healed, the other steps' settings, and how much under its eyes
+        // is lightened and its eyes and teeth whitened, if it has any.
         let faces: Vec<_> = (0..self.faces.len())
             .filter(|&n| self.faces[n].on)
             .map(|n| {
@@ -311,12 +315,16 @@ impl AutoRetouch {
                 let amount = |step: Step| step.on.then_some(step.amount);
                 let smoothing = amount(settings.smooth_skin).map(|amount| Smoothing { amount, ..Default::default() });
                 let evening = amount(settings.even_tone).map(|amount| Evening { amount, ..Default::default() });
-                let whiten = |step: Step, whites: &Selection| amount(step).filter(|_| !whites.is_empty());
-                let whiten = [whiten(settings.whiten_eyes, &found.eyes), whiten(settings.whiten_teeth, &found.teeth)];
-                (n + 1, Arc::clone(found), self.healed(n).len(), smoothing, evening, whiten)
+                let lighten = |step: Step, part: &Selection| amount(step).filter(|_| !part.is_empty());
+                let lighten = [
+                    lighten(settings.under_eyes, &found.under_eyes.0),
+                    lighten(settings.whiten_eyes, &found.eyes),
+                    lighten(settings.whiten_teeth, &found.teeth),
+                ];
+                (n + 1, Arc::clone(found), self.healed(n).len(), smoothing, evening, lighten)
             })
-            .filter(|(_, _, healed, smoothing, evening, whiten)| {
-                *healed > 0 || smoothing.is_some() || evening.is_some() || whiten.iter().any(Option::is_some)
+            .filter(|(_, _, healed, smoothing, evening, lighten)| {
+                *healed > 0 || smoothing.is_some() || evening.is_some() || lighten.iter().any(Option::is_some)
             })
             .collect();
         if faces.is_empty() {
@@ -327,13 +335,14 @@ impl AutoRetouch {
             "Auto Retouch",
             move |doc, active| {
                 let faces: Vec<_> = (faces.iter())
-                    .map(|(number, found, healed, smoothing, evening, [eyes, teeth])| retouch::Face {
+                    .map(|(number, found, healed, smoothing, evening, [under, eyes, teeth])| retouch::Face {
                         number: *number,
                         skin: &found.skin,
                         iod: found.iod,
                         spots: &found.spots[..*healed],
                         smoothing: *smoothing,
                         evening: *evening,
+                        under_eyes: under.map(|amount| (&found.under_eyes.0, &found.under_eyes.1, amount)),
                         eyes: eyes.map(|amount| (&found.eyes, amount)),
                         teeth: teeth.map(|amount| (&found.teeth, amount)),
                     })
@@ -407,10 +416,13 @@ mod tests {
     }
 
     /// The dialog open on [`image`] with its faces found: each has half
-    /// the image as skin, a clear spot and a faint one, an eye's white and
-    /// teeth.
+    /// the image as skin, a clear spot and a faint one, an eye's white,
+    /// the skin under it (no darker than the cheek) and teeth.
     fn dialog() -> (Editor, AutoRetouch) {
-        let image = image();
+        dialog_on(image())
+    }
+
+    fn dialog_on(image: Raster) -> (Editor, AutoRetouch) {
         let doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
         let mut editor = Editor::new(doc).unwrap();
         // Image pixels are screen points.
@@ -427,6 +439,10 @@ mod tests {
                     spots: vec![spot(400.0, 25.0), spot(600.0, 6.0)],
                     teeth: Selection::rectangle(W, H, (x - 30.0, 450.0), (x + 30.0, 470.0)),
                     eyes: Selection::rectangle(W, H, (x - 50.0, 340.0), (x - 30.0, 350.0)),
+                    under_eyes: (
+                        Selection::rectangle(W, H, (x - 60.0, 355.0), (x - 20.0, 375.0)),
+                        Selection::rectangle(W, H, (x - 60.0, 380.0), (x - 20.0, 395.0)),
+                    ),
                 }),
                 texture: None,
                 own: None,
@@ -475,7 +491,9 @@ mod tests {
         assert_eq!(standard.smooth_skin.amount, Smoothing::default().amount);
         assert_eq!(standard.even_tone.amount, Evening::default().amount);
         assert_eq!(standard.blemishes.amount, crate::settings::FilterSettings::default().blemish_sensitivity);
-        assert_eq!((standard.whiten_eyes.amount, standard.whiten_teeth.amount), (crate::whiten::AMOUNT, crate::whiten::AMOUNT));
+        for step in [standard.under_eyes, standard.whiten_eyes, standard.whiten_teeth] {
+            assert_eq!(step.amount, crate::whiten::AMOUNT);
+        }
         assert_eq!(Preset::from_name("Natural"), Some(Preset::Natural));
         assert_eq!(Preset::from_name("Gentle"), None);
         let (natural, strong) = (Preset::Natural.settings(), Preset::Strong.settings());
@@ -526,7 +544,7 @@ mod tests {
         // The second face on its own: only blemishes, and fewer.
         let mut own = Preset::Natural.settings();
         (own.smooth_skin.on, own.even_tone.on) = (false, false);
-        (own.whiten_eyes.on, own.whiten_teeth.on) = (false, false);
+        (own.under_eyes.on, own.whiten_eyes.on, own.whiten_teeth.on) = (false, false, false);
         dialog.faces[1].own = Some(own);
         frame(&ctx, &editor, &mut dialog, vec![]).unwrap();
         assert_eq!(dialog.spots().len(), 3);
@@ -554,7 +572,7 @@ mod tests {
         let (mut editor, mut dialog) = dialog();
         // Only whitening, and the second face's mouth is closed.
         let mut only = Preset::Strong.settings();
-        (only.blemishes.on, only.smooth_skin.on, only.even_tone.on) = (false, false, false);
+        (only.blemishes.on, only.smooth_skin.on, only.even_tone.on, only.under_eyes.on) = (false, false, false, false);
         only.whiten_eyes.amount = 20.0;
         dialog.all = only;
         let face = Arc::get_mut(&mut dialog.faces[1].found).unwrap();
@@ -577,6 +595,32 @@ mod tests {
         dialog.apply(&egui::Context::default(), &mut editor);
         assert!(editor.busy().is_none());
         assert_eq!(editor.doc.layers.len(), 1);
+    }
+
+    #[test]
+    fn shadows_under_the_eyes_are_lifted_where_a_face_has_any() {
+        // The first face's skin under its eye is darker than its cheek.
+        let image = image();
+        let pixels: Vec<_> = (image.pixels().iter().enumerate())
+            .map(|(i, &p)| {
+                let (x, y) = (i as u32 % W, i as u32 / W);
+                if (90..130).contains(&x) && (355..375).contains(&y) { [p[0] - 5000, p[1] - 4000, p[2] - 3500, p[3]] } else { p }
+            })
+            .collect();
+        let (mut editor, mut dialog) = dialog_on(Raster::new(W, H, pixels));
+        let mut only = Preset::Standard.settings();
+        (only.blemishes.on, only.smooth_skin.on, only.even_tone.on) = (false, false, false);
+        (only.whiten_eyes.on, only.whiten_teeth.on) = (false, false);
+        dialog.all = only;
+        let before = editor.doc.composite();
+
+        // The second face has no shadows, so no layer and no group.
+        let names = apply(&mut editor, &dialog);
+        assert_eq!(names[1..], ["Under Eyes", "Face 1", "Retouch"]);
+        assert_eq!(editor.doc.layers[1].opacity, 0.5);
+        let after = editor.doc.composite();
+        assert!(after.get(110, 365)[0] > before.get(110, 365)[0] + 500, "{} {}", after.get(110, 365)[0], before.get(110, 365)[0]);
+        assert_eq!(after.get(110, 388), before.get(110, 388));
     }
 
     #[test]

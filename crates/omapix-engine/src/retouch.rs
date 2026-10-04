@@ -1,13 +1,14 @@
 //! Auto Retouch (docs/AI.md, feature 6): Heal Blemishes, Smooth Skin and
-//! Even Tone done for each face in turn, each step made from what the last
-//! one shows, and its teeth and eyes whitened, as a "Retouch" group holding
-//! a group for each face:
+//! Even Tone done for each face in turn, then the shadows under its eyes
+//! lifted, each step made from what the last one shows, and its teeth and
+//! eyes whitened, as a "Retouch" group holding a group for each face:
 //!
 //! ```text
 //! Retouch
 //!   ├─ Face 1
 //!   │    ├─ Whiten Teeth
 //!   │    ├─ Whiten Eyes
+//!   │    ├─ Under Eyes
 //!   │    ├─ Dodge & Burn
 //!   │    ├─ Smooth Skin
 //!   │    └─ Blemishes
@@ -25,6 +26,7 @@ use crate::selection::Selection;
 use crate::skin::{self, Smoothing};
 use crate::tiled::{TILE, Tiled};
 use crate::tone::{self, Evening, Tone};
+use crate::under_eyes;
 use crate::whiten::{self, Whiten};
 
 /// A face to retouch, and how.
@@ -39,6 +41,10 @@ pub struct Face<'a> {
     /// Without these, there's no Smooth Skin layer or Dodge & Burn group.
     pub smoothing: Option<Smoothing>,
     pub evening: Option<Evening>,
+    /// The skin under its eyes, the cheek below it, and how much of the
+    /// shadows there is lifted (0–100): without, or with none, there's no
+    /// Under Eyes layer.
+    pub under_eyes: Option<(&'a Selection, &'a Selection, f32)>,
     /// The whites of its eyes, and its teeth, each with how much it's
     /// whitened (0–100): without, there's no Whiten Eyes or Whiten Teeth
     /// layer.
@@ -80,8 +86,9 @@ pub fn share(skin: &Selection, faces: &[([f32; 2], f32)], which: usize) -> Selec
 /// `faces` (the first on top), each holding that face's steps: a Blemishes
 /// layer ([`blemish::heal`]), a Smooth Skin layer ([`skin::add_layer`]) made
 /// from the image with the blemishes healed, a Dodge & Burn group
-/// ([`tone::add_layers`]) made from the image smoothed, and Whiten Eyes and
-/// Whiten Teeth layers ([`whiten::add_layer`]). Returns the Retouch group's
+/// ([`tone::add_layers`]) made from the image smoothed, an Under Eyes layer
+/// ([`under_eyes::add_layer`]) made from the image evened, and Whiten Eyes
+/// and Whiten Teeth layers ([`whiten::add_layer`]). Returns the Retouch group's
 /// id, or `None` if there was nothing to do.
 pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u64> {
     let group = |doc: &mut Document, above: usize, name: String| {
@@ -108,6 +115,11 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
             if let Some(tone) = Tone::new(&image, face.skin, face.iod, evening.radii(face.iod)) {
                 tone::add_layers(doc, at, &tone, face.skin, evening.amount);
             }
+        }
+        if let Some((under, cheek, amount)) = face.under_eyes {
+            let at = index(doc, id);
+            let image = doc.composite_current_and_below(at);
+            under_eyes::add_layer(doc, at, &under_eyes::shadows(&image, under, cheek, face.iod), amount);
         }
         for (what, whites) in [(Whiten::Eyes, face.eyes), (Whiten::Teeth, face.teeth)] {
             if let Some((whites, amount)) = whites {
@@ -177,6 +189,7 @@ mod tests {
             spots,
             smoothing: Some(Smoothing::default()),
             evening: Some(Evening::default()),
+            under_eyes: None,
             eyes: None,
             teeth: None,
         }
@@ -302,6 +315,44 @@ mod tests {
         assert!(after.get(150, 245)[2] > before.get(150, 245)[2] + 1000);
         assert!(after.get(110, 45)[2] > before.get(110, 45)[2] + 1000);
         assert_eq!(after.get(450, 45), before.get(450, 45));
+    }
+
+    #[test]
+    fn shadows_under_the_eyes_are_lifted_from_the_image_evened() {
+        let mut doc = document();
+        let [left, _] = skins();
+        let before = doc.composite();
+        // The soft dark patch at (150, 200) is under an eye, with cheek
+        // below it.
+        let under = Selection::rectangle(W, H, (120.0, 185.0), (180.0, 215.0));
+        let cheek = Selection::rectangle(W, H, (120.0, 230.0), (180.0, 260.0));
+        let shadowed = Face {
+            smoothing: None,
+            under_eyes: Some((&under, &cheek, 50.0)),
+            ..face(1, &left, &[])
+        };
+        add_layers(&mut doc, 0, &[shadowed]).unwrap();
+        let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names[1..], ["Burn", "Dodge", "Dodge & Burn", "Under Eyes", "Face 1", "Retouch"]);
+        let layer = |name: &str| doc.layers.iter().rfind(|l| l.name == name).unwrap();
+        assert_eq!((layer("Under Eyes").opacity, layer("Under Eyes").parent), (0.5, Some(layer("Face 1").id)));
+        // Lighter there than Even Tone alone leaves it.
+        let both = doc.composite().get(150, 200)[0];
+        let id = layer("Under Eyes").id;
+        doc.layer_mut(id).unwrap().visible = false;
+        let evened = doc.composite().get(150, 200)[0];
+        assert!(evened > before.get(150, 200)[0] && both > evened + 200, "{both} {evened}");
+
+        // With no shadow there, there's no layer.
+        let mut doc = document();
+        let light = Selection::rectangle(W, H, (20.0, 20.0), (60.0, 40.0));
+        let none = Face {
+            smoothing: None,
+            evening: None,
+            under_eyes: Some((&light, &cheek, 50.0)),
+            ..face(1, &left, &[])
+        };
+        assert_eq!(add_layers(&mut doc, 0, &[none]), None);
     }
 
     #[test]

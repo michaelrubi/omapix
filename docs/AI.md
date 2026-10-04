@@ -412,6 +412,7 @@ Retouch
   ├─ Face 1
   │    ├─ Whiten Teeth       (Hue/Saturation, masked to the teeth)
   │    ├─ Whiten Eyes        (Hue/Saturation, masked to the whites)
+  │    ├─ Under Eyes         (Curves, masked to the shadows under the eyes)
   │    ├─ Dodge & Burn       (group: Brighten, Darken curves, with masks)
   │    ├─ Smooth Skin        (pixel layer, this face's skin mask)
   │    └─ Blemishes          (heal patches on an empty layer)
@@ -426,8 +427,8 @@ Retouch
   and can redo the group from the current image.
 
 Every step is also its own command (Select › Skin, Filter › Retouch ›
-Smooth Skin…, Heal Blemishes…, Even Tone…, Whiten Teeth, Whiten Eyes, Face
-Symmetry…, Reshape…), so any one can be run alone.
+Smooth Skin…, Heal Blemishes…, Even Tone…, Lighten Under Eyes, Whiten
+Teeth, Whiten Eyes, Face Symmetry…, Reshape…), so any one can be run alone.
 It's scriptable through `OMAPIX_SCRIPT` (for example
 `AutoRetouch Natural`), which is also how it gets its end-to-end tests.
 
@@ -438,7 +439,8 @@ Also from the same masks:
 - whiten eyes and teeth (Hue/Saturation layers masked to eyes and teeth):
   done, see "Whitening" below
 - reduce shine (highlights within the skin mask)
-- lift under-eye shadows (landmarks mark the area)
+- lift under-eye shadows (landmarks mark the area): done, see "Under
+  Eyes" below
 
 ### 7. Face symmetry
 
@@ -808,7 +810,11 @@ Reordered on 2026-09-29 (see Decisions).
       Teeth and Whiten Eyes, each a Hue/Saturation layer masked to the
       teeth or the whites of every face, and two more steps in Auto
       Retouch. See "Whitening" below.
-    - shine, under-eye
+    - ~~under-eye~~ (done, 2026-10-03): Retouch › Lighten Under Eyes, a
+      brightening Curves layer masked to where the skin under each eye is
+      darker than the cheek below it, and a step in Auto Retouch. See
+      "Under Eyes" below.
+    - shine
     - checking whether an opt-in face parser beats the landmark polygons
 
 ### Face analysis spike
@@ -1065,12 +1071,13 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
 - **Order.** For each face: Blemishes, then Smooth Skin from the image
   with them healed, then Dodge & Burn from the image smoothed, each from
   Current & Below of the face's group so far. They're the commands' own
-  functions, with Smoothness, Detail and Size at 50. Whiten Eyes and
-  Whiten Teeth go on top (milestone 13): their masks are found with the
+  functions, with Smoothness, Detail and Size at 50. Then Under Eyes
+  (milestone 13), from the image evened, so it lifts what Even Tone left.
+  Whiten Eyes and Whiten Teeth go on top: their masks are found with the
   faces, and the steps under them don't touch eyes or teeth.
-- **Presets.** Sensitivity, Smooth Skin's amount, Even Tone's and the
-  whitening's: Natural 35, 40, 40 and 30; Standard 50, 70, 60 and 50 (each
-  command's own default); Strong 65, 90, 80 and 70. The settings last OK'd
+- **Presets.** Sensitivity, Smooth Skin's amount, Even Tone's, and the
+  under-eyes' and whitening's: Natural 35, 40, 40 and 30; Standard 50, 70,
+  60 and 50 (each command's own default); Strong 65, 90, 80 and 70. The settings last OK'd
   for All Faces are kept between runs.
 - **The strip.** With more than one face: All Faces, then a thumbnail of
   each. A face follows All Faces until its own settings are changed. It
@@ -1591,7 +1598,60 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
     loses its colour.
   - Select › Teeth is still the whole opening, gums and tongue included;
     it could use the same mask.
-  - Shine and under-eye shadows.
+
+### Under Eyes
+
+As built (`omapix_engine::under_eyes`, `under_eyes` in
+`crates/omapix/src/face_selection.rs`, `crates/omapix/src/whiten.rs`),
+looked at on the same photos through `whiten_in_photos`, which writes
+`<photo>-under-eyes.png` too.
+
+- **The layer.** The Dodge & Burn setup's Dodge curve (midtones from 50 %
+  to 65 %) as a Curves layer, "Under Eyes", masked, at 50 % opacity to
+  start: no dialog, as with the whitening. Retouch › Lighten Under Eyes
+  finds the faces in Current & Below of the selected layer on a thread,
+  adds the layer above it and selects it.
+- **Where.** For each eye, from its lower lid's points down to the ring
+  of points along the top of the cheek (MediaPipe's fourth ring under the
+  eye), feathered 0.03 IOD, on face skin, less the eye's outline grown
+  0.06 IOD: the lower lashes and eyeliner.
+- **Against the cheek.** The same shape again below that is the cheek to
+  measure against. Its luminance, blurred only over itself (σ 0.2 IOD), is
+  the level the skin under the eye is brought to; that skin is seen
+  through a blur of 0.04 IOD, Even Tone's small one, so fine lines stay.
+  The mask is how far the curve has to be let through to bring it level,
+  as Even Tone's masks are: nothing where the skin's as light already, and
+  the layer's opacity is how much of the shadow goes. At 100 % a dark
+  circle is as light as the cheek, which looks flat; at 50 % it's softer
+  and still there.
+- **Too dark for a shadow.** Skin in shadow under 0.6 of the cheek's level
+  counts less, and under 0.45 not at all: lashes, eyeliner and the frames
+  of glasses, which showed as lines left out of the masks. Measured as a
+  difference instead (0.2–0.3 of the range), the deepest part of dark
+  circles on darker skin was left out too, and stayed as a dark band
+  under the lashes.
+- **Out of sight.** An eye under 0.45 of the other's width has none, as
+  with the whites. Closed eyes have theirs lifted.
+- **In Auto Retouch**, a step after Even Tone, made from the image evened:
+  Even Tone lifts a shadow under the eye by 8 % of the range at most, and
+  this takes up what's left. On a portrait with clear dark circles
+  (pexels-9253768) Standard softened them without flattening the eyes'
+  sockets.
+- **Every face has some.** On the photos tried every face the landmarker
+  saw had a mask: the skin under an eye is nearly always a little darker
+  than the top of the cheek. On made-up faces it's a thin crescent and
+  hard to see at 50 %.
+- **Speed.** 0.07–0.2 s on portraits of a megapixel, 0.35 s for a
+  half-length at 24 MP, and 0.5–1.1 s for close-ups at 20 MP, where the
+  blurs cover a couple of megapixels; the rest is finding the faces.
+- **Left:**
+  - Only lightness: the blue or purple of a dark circle stays, a little
+    lighter.
+  - Eye bags, which are shape (a highlight over a shadow) rather than a
+    darker patch, are only half dealt with.
+  - Working on a small copy, as Even Tone does, would make close-ups as
+    quick as the rest.
+  - Shine.
 
 ## Decisions
 
