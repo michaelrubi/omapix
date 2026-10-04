@@ -42,7 +42,7 @@ pub mod whiten;
 
 pub use blend::BlendMode;
 pub use clip::PasteKind;
-pub use color::{ColorProfile, DisplayTransform};
+pub use color::{ColorProfile, DisplayTransform, Proof};
 pub use document::{AlphaChannel, Document};
 pub use filters::{
     generate_grain, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,

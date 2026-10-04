@@ -221,35 +221,113 @@ pub fn convert(
     Ok(out)
 }
 
+/// Soft proofing: showing on screen how an image will come out in another
+/// colour space, such as a printer's for a paper, or sRGB for the web.
+#[derive(Clone, Copy)]
+pub struct Proof<'a> {
+    pub profile: &'a ColorProfile,
+    /// Show the colours as they'd come out there (Photoshop's Proof
+    /// Colors): converted to it, relative colorimetric with black point
+    /// compensation, and from there to the display.
+    pub colors: bool,
+    /// Show the colours it can't reproduce as mid grey (Gamut Warning).
+    pub gamut_warning: bool,
+}
+
 /// Converts document pixels to 8 bits in a display's colours (sRGB, or a
 /// monitor's profile). Safe to share between threads, so display tiles can
 /// be converted in parallel.
 pub struct DisplayTransform {
-    transform: Transform<Pixel, [u8; 4], GlobalContext, DisallowCache>,
+    transform: Shown,
+    /// Proofing colours: to the proof's colour space in 16 bits (which is
+    /// what leaves out the colours it hasn't got), and from there to the
+    /// display. Little CMS's own soft proofing doesn't clip to a matrix
+    /// profile such as sRGB.
+    proof: Option<(Transform<Pixel, Pixel, GlobalContext, DisallowCache>, Shown)>,
+    /// The gamut warning: a transform that gives the colours the proof
+    /// hasn't got as Little CMS's [`ALARM`] colour. (What it gives the
+    /// others isn't used: it proofs them its own way.)
+    warning: Option<Shown>,
 }
+
+type Shown = Transform<Pixel, [u8; 4], GlobalContext, DisallowCache>;
+
+/// Little CMS's alarm colour as it's set to begin with (0x7F00 a channel),
+/// in 8 bits: Photoshop's gamut warning is a mid grey too.
+const ALARM: [u8; 3] = [127; 3];
 
 impl DisplayTransform {
     pub fn to_srgb(source: &ColorProfile) -> Result<Self> {
-        Self::new(source, &ColorProfile::srgb())
+        Self::new(source, &ColorProfile::srgb(), None)
     }
 
-    pub fn new(source: &ColorProfile, display: &ColorProfile) -> Result<Self> {
-        let transform = Transform::new_flags_context(
-            GlobalContext::new(),
-            &source.lcms_profile()?,
-            PixelFormat::RGBA_16,
-            &display.lcms_profile()?,
-            PixelFormat::RGBA_8,
-            Intent::RelativeColorimetric,
-            Flags::NO_CACHE | Flags::BLACKPOINT_COMPENSATION,
-        )?;
-        Ok(Self { transform })
+    pub fn new(source: &ColorProfile, display: &ColorProfile, proof: Option<Proof>) -> Result<Self> {
+        let (source, display) = (source.lcms_profile()?, display.lcms_profile()?);
+        let (from, to) = (PixelFormat::RGBA_16, PixelFormat::RGBA_8);
+        let intent = Intent::RelativeColorimetric;
+        let flags = Flags::NO_CACHE | Flags::BLACKPOINT_COMPENSATION;
+        let context = GlobalContext::new;
+        let transform = Transform::new_flags_context(context(), &source, from, &display, to, intent, flags)?;
+        let (mut proofed, mut warning) = (None, None);
+        if let Some(proof) = proof {
+            let profile = proof.profile.lcms_profile()?;
+            // Four 16-bit values either way.
+            let between = match profile.color_space() {
+                lcms2::ColorSpaceSignature::RgbData => PixelFormat::RGBA_16,
+                lcms2::ColorSpaceSignature::CmykData => PixelFormat::CMYK_16,
+                _ => {
+                    let name = proof.profile.description();
+                    return Err(Error::Unsupported(format!("{name} is neither an RGB nor a CMYK profile")));
+                }
+            };
+            if proof.colors {
+                proofed = Some((
+                    Transform::new_flags_context(context(), &source, from, &profile, between, intent, flags)?,
+                    Transform::new_flags_context(context(), &profile, between, &display, to, intent, flags)?,
+                ));
+            }
+            if proof.gamut_warning {
+                let flags = flags | Flags::GAMUT_CHECK;
+                warning = Some(Transform::new_proofing_context(
+                    context(),
+                    &source,
+                    from,
+                    &display,
+                    to,
+                    &profile,
+                    intent,
+                    intent,
+                    flags,
+                )?);
+            }
+        }
+        Ok(Self {
+            transform,
+            proof: proofed,
+            warning,
+        })
     }
 
     /// Convert `src` into `dst`. Alpha is narrowed to 8 bits rather than
     /// colour managed.
     pub fn convert(&self, src: &[Pixel], dst: &mut [[u8; 4]]) {
-        self.transform.transform_pixels(src, dst);
+        match &self.proof {
+            None => self.transform.transform_pixels(src, dst),
+            Some((to_proof, shown)) => {
+                let mut between = vec![[0u16; 4]; src.len()];
+                to_proof.transform_pixels(src, &mut between);
+                shown.transform_pixels(&between, dst);
+            }
+        }
+        if let Some(warning) = &self.warning {
+            let mut warned = vec![[0u8; 4]; src.len()];
+            warning.transform_pixels(src, &mut warned);
+            for (out, warned) in dst.iter_mut().zip(&warned) {
+                if warned[..3] == ALARM {
+                    out[..3].copy_from_slice(&ALARM);
+                }
+            }
+        }
         for (out, px) in dst.iter_mut().zip(src) {
             out[3] = (px[3] >> 8) as u8;
         }
@@ -373,7 +451,7 @@ pub(crate) mod tests {
     fn a_monitors_edid_colours_make_its_profile() {
         let monitor = ColorProfile::from_edid(&edid(OLED, 120), "eDP-2").unwrap();
         assert_eq!(monitor.description(), "eDP-2 (EDID)");
-        let t = DisplayTransform::new(&ColorProfile::srgb(), &monitor).unwrap();
+        let t = DisplayTransform::new(&ColorProfile::srgb(), &monitor, None).unwrap();
         let src = [
             [65535, 0, 0, 65535],
             [65535, 65535, 65535, 65535],
@@ -394,9 +472,87 @@ pub(crate) mod tests {
         // Another gamma is taken at its word: 1.8 shows mid grey lighter, so
         // it's sent darker.
         let mac = ColorProfile::from_edid(&edid(OLED, 80), "old").unwrap();
-        let t = DisplayTransform::new(&ColorProfile::srgb(), &mac).unwrap();
+        let t = DisplayTransform::new(&ColorProfile::srgb(), &mac, None).unwrap();
         t.convert(&src, &mut dst);
         assert!(dst[2][0] < 120, "{:?}", dst[2]);
+    }
+
+    #[test]
+    fn proofing_shows_what_another_colour_space_makes_of_the_colours() {
+        // A ProPhoto image proofed for the web, on a wide-gamut monitor: a
+        // green outside sRGB, one inside it, and a grey.
+        let source = linear_prophoto().with_gamma(1.8).unwrap();
+        let monitor = ColorProfile::from_edid(&edid(OLED, 120), "eDP-2").unwrap();
+        let srgb = ColorProfile::srgb();
+        let src = [[10000, 60000, 10000, 65535], [30000, 36000, 30000, 65535], [32000, 32000, 32000, 40000]];
+        let shown = |colors, gamut_warning| {
+            let proof = Proof {
+                profile: &srgb,
+                colors,
+                gamut_warning,
+            };
+            let mut dst = [[0u8; 4]; 3];
+            DisplayTransform::new(&source, &monitor, Some(proof)).unwrap().convert(&src, &mut dst);
+            dst
+        };
+        let plain = shown(false, false);
+        let mut unproofed = [[0u8; 4]; 3];
+        DisplayTransform::new(&source, &monitor, None).unwrap().convert(&src, &mut unproofed);
+        assert_eq!(plain, unproofed);
+
+        // Proofed, the vivid green is pulled in to sRGB's (less of the
+        // monitor's green, more of its red); the others hardly move.
+        let proofed = shown(true, false);
+        assert!(proofed[0][1] < plain[0][1] || proofed[0][0] > plain[0][0] + 10, "{proofed:?} vs {plain:?}");
+        for i in [1, 2] {
+            for c in 0..3 {
+                assert!(proofed[i][c].abs_diff(plain[i][c]) <= 2, "{proofed:?} vs {plain:?}");
+            }
+        }
+        // The gamut warning greys it, with or without the proof, and
+        // leaves the others and every alpha alone.
+        for warned in [shown(false, true), shown(true, true)] {
+            let [r, g, b, a] = warned[0];
+            assert_eq!([r, g, b], ALARM, "{warned:?}");
+            assert_eq!((a, warned[2][3]), (255, 40000u16.to_be_bytes()[0]));
+            for c in 0..3 {
+                assert!(warned[1][c].abs_diff(plain[1][c]) <= 2, "{warned:?} vs {plain:?}");
+            }
+        }
+    }
+
+    /// `cargo test -p omapix-engine printer -- --ignored`, with Krita's and
+    /// Ghostscript's profiles installed.
+    #[test]
+    #[ignore]
+    fn proofing_for_a_printer_profile() {
+        let read = |path: &str| ColorProfile::from_icc(std::fs::read(path).unwrap()).unwrap();
+        let (srgb, cmyk) = (ColorProfile::srgb(), read("/usr/share/color/icc/krita/cmyk.icm"));
+        // sRGB's blue is far outside what the inks print; a soft brown isn't.
+        let src = [[0, 0, 65535, 65535], [40000, 30000, 25000, 65535]];
+        let shown = |colors, gamut_warning| {
+            let proof = Proof {
+                profile: &cmyk,
+                colors,
+                gamut_warning,
+            };
+            let mut dst = [[0u8; 4]; 2];
+            DisplayTransform::new(&srgb, &srgb, Some(proof)).unwrap().convert(&src, &mut dst);
+            dst
+        };
+        let (plain, proofed, warned) = (shown(false, false), shown(true, false), shown(true, true));
+        assert_eq!(plain[0], [0, 0, 255, 255]);
+        assert!(proofed[0][0] > 20 && proofed[0][2] < 235, "{proofed:?}");
+        assert!((0..3).all(|c| proofed[1][c].abs_diff(plain[1][c]) < 12), "{proofed:?} vs {plain:?}");
+        assert_eq!(warned[0][..3], ALARM, "{warned:?}");
+        assert_eq!(warned[1], proofed[1]);
+        let grey = read("/usr/share/ghostscript/iccprofiles/sgray.icc");
+        let proof = Proof {
+            profile: &grey,
+            colors: true,
+            gamut_warning: false,
+        };
+        assert!(DisplayTransform::new(&srgb, &srgb, Some(proof)).is_err());
     }
 
     #[test]

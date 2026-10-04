@@ -59,6 +59,8 @@ pub struct FilterSettings {
     pub mask_density: f32,
     pub select_and_mask: omapix_engine::refine::EdgeOptions,
     pub select_and_mask_output: crate::select_and_mask::Output,
+    /// View › Proof Setup's ICC profile; unset, it's sRGB (the web).
+    pub proof_profile: Option<PathBuf>,
     /// Frequency Separation's radius; unset, it's worked out from the
     /// image's size.
     pub separation_radius: Option<f32>,
@@ -102,6 +104,7 @@ impl Default for FilterSettings {
             mask_density: 100.0,
             select_and_mask: Default::default(),
             select_and_mask_output: Default::default(),
+            proof_profile: None,
             separation_radius: None,
             separation3_fine: None,
             separation3_coarse: None,
@@ -192,6 +195,7 @@ impl FilterSettings {
     fn template() -> String {
         let text = toml::to_string(&Self::default()).unwrap_or_default();
         let mut out = TEMPLATE_HEADER.to_owned();
+        out.push_str("# proof_profile = \"/path/to/printer-and-paper.icc\"  (unset: sRGB)\n");
         out.push_str("# separation_radius = 8.6  (unset: from the image's size)\n");
         out.push_str("# separation3_fine = 4.3  (unset: from the image's size)\n");
         out.push_str("# separation3_coarse = 25.8  (unset: from the image's size)\n");

@@ -13,8 +13,9 @@ use omapix_engine::layer::{Layer, Locks, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{Orientation, Tiled};
 use omapix_engine::{
-    Document, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
-    SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions, export, ops, ora,
+    ColorProfile, DisplayTransform, Document, NoiseDistribution, NoiseOptions, Proof,
+    ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions, SmartBlurQuality,
+    SmartSharpenOptions, export, ops, ora,
 };
 
 use crate::canvas::ToolInput;
@@ -53,6 +54,7 @@ enum Purpose {
     ExportJpeg,
     ExportPng,
     ExportLut,
+    ProofProfile,
 }
 
 /// Something to do once unsaved changes are dealt with.
@@ -63,6 +65,60 @@ enum Then {
 }
 
 /// An open image that isn't the one showing, with its panels as they were.
+/// Soft proofing, as the View menu has it.
+struct ProofView {
+    /// Proof Colors.
+    colors: bool,
+    gamut_warning: bool,
+    /// Proof Setup's profile: sRGB (the web), or the ICC profile named in
+    /// the settings.
+    profile: ColorProfile,
+}
+
+impl Default for ProofView {
+    fn default() -> Self {
+        Self {
+            colors: false,
+            gamut_warning: false,
+            profile: ColorProfile::srgb(),
+        }
+    }
+}
+
+impl ProofView {
+    /// What to show, if anything's on.
+    fn proof(&self) -> Option<Proof<'_>> {
+        (self.colors || self.gamut_warning).then_some(Proof {
+            profile: &self.profile,
+            colors: self.colors,
+            gamut_warning: self.gamut_warning,
+        })
+    }
+
+    /// The profile's name: "sRGB", not what a file with no profile is
+    /// said to be.
+    fn name(&self) -> &str {
+        match self.profile.icc() {
+            Some(_) => self.profile.description(),
+            None => "sRGB",
+        }
+    }
+
+    /// An ICC profile to proof for, if it's one that can be.
+    fn read(path: &Path) -> Result<ColorProfile, String> {
+        let icc = std::fs::read(path).map_err(|e| e.to_string())?;
+        let profile = ColorProfile::from_icc(icc).map_err(|e| e.to_string())?;
+        let proof = Proof {
+            profile: &profile,
+            colors: true,
+            gamut_warning: true,
+        };
+        let srgb = ColorProfile::srgb();
+        DisplayTransform::new(&srgb, &srgb, Some(proof)).map_err(|e| e.to_string())?;
+        Ok(profile)
+    }
+}
+
 struct Parked {
     editor: Editor,
     layers: LayersPanel,
@@ -484,6 +540,7 @@ pub struct App {
     tablet: Option<Tablet>,
     /// The monitor Omapix is on, for showing images in its colours.
     monitor: Option<crate::monitor::Watch>,
+    proof: ProofView,
     content_fill: ContentFill,
     denoising: crate::denoise::Denoising,
     upscaling: crate::upscale::Upscaling,
@@ -518,6 +575,13 @@ impl App {
             .as_deref()
             .map_or_else(Tools::default, |path| crate::settings::load_from(path, &Tools::default()));
         let saved_tools = toml::to_string(&tools).unwrap_or_default();
+        let (mut filters, mut proof) = (filters, ProofView::default());
+        if let Some(path) = filters.proof_profile.take() {
+            match ProofView::read(&path) {
+                Ok(profile) => (proof.profile, filters.proof_profile) = (profile, Some(path)),
+                Err(e) => log::warn!("can't proof for {}: {e}", path.display()),
+            }
+        }
         let mut app = Self {
             theme,
             theme_rx: theme::watch(ctx.clone()),
@@ -572,6 +636,7 @@ impl App {
             v_down: false,
             tablet: Tablet::connect(cc),
             monitor: Some(crate::monitor::Watch::new()),
+            proof,
             content_fill: ContentFill::default(),
             denoising: Default::default(),
             upscaling: Default::default(),
@@ -673,8 +738,11 @@ impl App {
     /// Show `editor` in a new tab at the end, or leave it there behind an
     /// image that can't be left.
     fn add_tab(&mut self, mut editor: Editor) {
-        if let Some(display) = self.monitor.as_ref().and_then(|m| m.profile()) {
-            editor.set_display(Some(display));
+        let display = self.monitor.as_ref().and_then(|m| m.profile());
+        if (display.is_some() || self.proof.proof().is_some())
+            && let Err(e) = editor.set_display(display, self.proof.proof())
+        {
+            log::warn!("can't show {} in the display's colours: {e}", editor.doc.file_name());
         }
         if self.held().is_some() {
             let (layers, properties) = Default::default();
@@ -684,6 +752,39 @@ impl App {
         self.park();
         self.tab = self.parked.len();
         self.editor = Some(editor);
+    }
+
+    /// Show every open image in the display's colours as they are now: the
+    /// monitor's profile, and the proof if one's on.
+    fn redisplay(&mut self) {
+        let display = self.monitor.as_ref().and_then(|m| m.profile());
+        let proof = self.proof.proof();
+        let mut failed = None;
+        for editor in self.editor.iter_mut().chain(self.parked.iter_mut().map(|p| &mut p.editor)) {
+            failed = editor.set_display(display, proof).err().or(failed);
+        }
+        self.layers.forget_thumbnails();
+        self.parked.iter_mut().for_each(|p| p.layers.forget_thumbnails());
+        self.navigator.forget_thumbnail();
+        if let Some(e) = failed {
+            self.message(format!("Couldn't show it in the display's colours: {e}"), true);
+        }
+    }
+
+    /// Proof Setup › Custom Profile: proof for the ICC profile at `path`
+    /// from now on, and turn Proof Colors on, as Photoshop does.
+    fn set_proof_profile(&mut self, path: PathBuf) {
+        match ProofView::read(&path) {
+            Ok(profile) => {
+                self.proof.profile = profile;
+                self.message(format!("Proofing for {}", self.proof.name()), false);
+                self.proof.colors = true;
+                self.filters.proof_profile = Some(path);
+                self.filters.save();
+                self.redisplay();
+            }
+            Err(e) => self.message(format!("Can't proof for {}: {e}", path.display()), true),
+        }
     }
 
     /// Close the image in tab `index`, asking about unsaved changes first.
@@ -805,12 +906,22 @@ impl App {
                 .set_title("Export Adjustments as LUT")
                 .add_filter("Cube LUT", &["cube"])
                 .set_file_name(format!("{}.cube", self.preset_name())),
+            Purpose::ProofProfile => {
+                // Where the last one was, or where profiles are installed.
+                let last = self.filters.proof_profile.as_deref().and_then(Path::parent);
+                let installed = Path::new("/usr/share/color/icc");
+                let dialog = dialog.set_title("Proof Profile").add_filter("ICC profile", &["icc", "icm"]);
+                match last.or(installed.is_dir().then_some(installed)) {
+                    Some(dir) => dialog.set_directory(dir),
+                    None => dialog,
+                }
+            }
         };
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let file = match purpose {
-                Purpose::Open => dialog.pick_file(),
+                Purpose::Open | Purpose::ProofProfile => dialog.pick_file(),
                 _ => dialog.save_file(),
             };
             let _ = tx.send(file);
@@ -941,16 +1052,8 @@ impl App {
             self.theme = theme;
         }
         // On another monitor, every image is shown in its colours.
-        if let Some(monitor) = &mut self.monitor
-            && monitor.check(ctx)
-        {
-            let display = monitor.profile();
-            for editor in self.editor.iter_mut().chain(self.parked.iter_mut().map(|p| &mut p.editor)) {
-                editor.set_display(display);
-            }
-            self.layers.forget_thumbnails();
-            self.parked.iter_mut().for_each(|p| p.layers.forget_thumbnails());
-            self.navigator.forget_thumbnail();
+        if self.monitor.as_mut().is_some_and(|m| m.check(ctx)) {
+            self.redisplay();
         }
         if let Some(editor) = &mut self.editor {
             // The threshold slider cuts the last AI selection again.
@@ -980,6 +1083,7 @@ impl App {
                     Purpose::Open => self.open(path, ctx),
                     Purpose::SaveAs => self.write(purpose, path.with_extension("ora"), ctx),
                     Purpose::ExportLut => self.export_lut(&path.with_extension("cube")),
+                    Purpose::ProofProfile => self.set_proof_profile(path),
                     _ => self.write(purpose, path, ctx),
                 }
             }
@@ -1684,6 +1788,21 @@ impl App {
                     editor.hide_selection_edges = !editor.hide_selection_edges;
                 }
             }
+            Command::ProofColors => {
+                self.proof.colors = !self.proof.colors;
+                self.redisplay();
+            }
+            Command::GamutWarning => {
+                self.proof.gamut_warning = !self.proof.gamut_warning;
+                self.redisplay();
+            }
+            Command::ProofSetupWeb => {
+                self.proof.profile = ColorProfile::srgb();
+                self.filters.proof_profile = None;
+                self.filters.save();
+                self.redisplay();
+            }
+            Command::ProofSetupCustom => self.pick(Purpose::ProofProfile, ctx),
             _ => {
                 if let Some(editor) = &mut self.editor {
                     run_on_editor(editor, cmd, ctx);
@@ -2286,6 +2405,21 @@ self.filters.remember(&filter);
                 };
                 self.menu_item(ui, Command::SelectionEdges, Some(edges_label.to_string()));
                 self.menu_item(ui, Command::MaskOverlay, None);
+                ui.separator();
+                let tick = |on: bool, label: &str| Some(format!("{} {label}", if on { "✓" } else { "  " }));
+                let custom = self.filters.proof_profile.is_some();
+                ui.menu_button("Proof Setup", |ui| {
+                    self.menu_item(ui, Command::ProofSetupWeb, tick(!custom, Command::ProofSetupWeb.label()));
+                    let label = if custom {
+                        tick(true, &format!("{}…", self.proof.name()))
+                    } else {
+                        tick(false, Command::ProofSetupCustom.label())
+                    };
+                    self.menu_item(ui, Command::ProofSetupCustom, label);
+                });
+                self.menu_item(ui, Command::ProofColors, tick(self.proof.colors, Command::ProofColors.label()));
+                let warning = self.proof.gamut_warning;
+                self.menu_item(ui, Command::GamutWarning, tick(warning, Command::GamutWarning.label()));
             });
             ui.menu_button("Window", |ui| {
                 for (tab, command) in TopTab::ALL {
@@ -2372,6 +2506,16 @@ self.filters.remember(&filter);
                     _ => None,
                 };
                 if let Some(text) = showing {
+                    ui.label(RichText::new(text).color(self.theme.accent));
+                    ui.separator();
+                }
+                if let Some(proof) = self.proof.proof() {
+                    let what = match (proof.colors, proof.gamut_warning) {
+                        (true, true) => "Proof and gamut warning",
+                        (true, false) => "Proof",
+                        _ => "Gamut warning",
+                    };
+                    let text = format!("{what}: {}", self.proof.name());
                     ui.label(RichText::new(text).color(self.theme.accent));
                     ui.separator();
                 }
@@ -5289,6 +5433,59 @@ mod tests {
     use super::*;
     use crate::editor::render_view;
 
+    #[test]
+    fn proof_colors_and_the_gamut_warning_show_through_proof_setups_profile() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let shown = |app: &App| {
+            let mut out = [[0u8; 4]];
+            app.editor.as_ref().unwrap().canvas.transform().convert(&[[65535, 0, 0, 65535]], &mut out);
+            out[0]
+        };
+        // Proofed for the web, an sRGB image is as it was.
+        app.run(Command::ProofColors, &ctx);
+        assert!(app.proof.colors);
+        assert_eq!(shown(&app), [255, 0, 0, 255]);
+        app.run(Command::ProofColors, &ctx);
+        assert!(app.proof.proof().is_none());
+
+        // A profile with duller colours than sRGB's (as a monitor's EDID
+        // would give them), from a file: choosing it turns the proof on.
+        let dir = std::env::temp_dir().join(format!("omapix-proof-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        edid[23] = 120;
+        edid[27..35].copy_from_slice(&[153, 89, 76, 140, 41, 25, 80, 84]);
+        let dull = ColorProfile::from_edid(&edid, "Dull").unwrap();
+        let path = dir.join("dull.icc");
+        std::fs::write(&path, dull.icc().unwrap()).unwrap();
+        app.set_proof_profile(path.clone());
+        assert!(app.proof.colors && app.filters.proof_profile == Some(path));
+        assert_eq!(app.proof.name(), "Dull (EDID)");
+        let [r, g, b, _] = shown(&app);
+        assert!(r > 200 && g > 30 && b > 15, "{:?}", shown(&app));
+        // Red is a colour it hasn't got: grey, with or without the proof.
+        app.run(Command::GamutWarning, &ctx);
+        assert_eq!(shown(&app)[..3], [127; 3]);
+        app.run(Command::ProofColors, &ctx);
+        assert_eq!(shown(&app)[..3], [127; 3]);
+        // An image opened meanwhile is shown the same way.
+        app.add_tab(editor_with_selection());
+        assert_eq!(shown(&app)[..3], [127; 3]);
+
+        // What isn't a profile is refused, and the web's sRGB has it all.
+        let bad = dir.join("bad.icc");
+        std::fs::write(&bad, b"not a profile").unwrap();
+        app.set_proof_profile(bad);
+        assert!(app.status.as_ref().is_some_and(|s| s.1));
+        assert_eq!(app.proof.name(), "Dull (EDID)");
+        app.run(Command::ProofSetupWeb, &ctx);
+        assert_eq!((app.proof.name(), app.filters.proof_profile.as_ref()), ("sRGB", None));
+        assert_eq!(shown(&app), [255, 0, 0, 255]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn editor_with_selection() -> Editor {
         let (w, h) = (600, 400);
         let image =
@@ -5699,6 +5896,7 @@ mod tests {
             v_down: false,
             tablet: None,
             monitor: None,
+            proof: Default::default(),
             content_fill: ContentFill::default(),
             denoising: Default::default(),
             upscaling: Default::default(),
