@@ -59,11 +59,19 @@ enum Purpose {
 #[derive(Clone)]
 enum Then {
     Quit,
-    Open,
-    OpenFile(PathBuf),
     Close,
-    /// Show a new image in place of the open one.
-    New(Box<Document>),
+}
+
+/// An open image that isn't the one showing, with its panels as they were.
+struct Parked {
+    editor: Editor,
+    layers: LayersPanel,
+    properties: PropertiesPanel,
+}
+
+/// An image's name on its tab and in the window's title.
+fn tab_name(editor: &Editor) -> String {
+    format!("{}{}", editor.doc.file_name(), if editor.modified { " •" } else { "" })
 }
 
 struct PendingClip {
@@ -410,7 +418,12 @@ type DialogAction = Box<dyn FnOnce(&mut App, &egui::Context)>;
 pub struct App {
     theme: Theme,
     theme_rx: Receiver<Theme>,
+    /// The image showing.
     editor: Option<Editor>,
+    /// The other open images, in the order of their tabs.
+    parked: Vec<Parked>,
+    /// Where the image showing goes among them.
+    tab: usize,
     layers: LayersPanel,
     properties: PropertiesPanel,
     history: HistoryPanel,
@@ -423,8 +436,8 @@ pub struct App {
     /// Where the tool options are kept, and what was last written there.
     tools_path: Option<PathBuf>,
     saved_tools: String,
-    /// A file being opened in the background.
-    opening: Option<(PathBuf, Receiver<Opened>)>,
+    /// Files being opened in the background, shown in the order asked for.
+    opening: VecDeque<(PathBuf, Receiver<Opened>)>,
     /// A file dialog open in the background.
     picking: Option<(Purpose, Receiver<Option<PathBuf>>)>,
     file_job: Option<FileJob>,
@@ -485,7 +498,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, round_trip: bool) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>, round_trip: bool) -> Self {
         let ctx = &cc.egui_ctx;
         // Ctrl+= / Ctrl+- zoom the image, not the interface.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -507,6 +520,8 @@ impl App {
             theme,
             theme_rx: theme::watch(ctx.clone()),
             editor: None,
+            parked: Vec::new(),
+            tab: 0,
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
             history: HistoryPanel,
@@ -525,7 +540,7 @@ impl App {
             tools,
             tools_path,
             saved_tools,
-            opening: None,
+            opening: VecDeque::new(),
             picking: None,
             file_job: None,
             batch_export: None,
@@ -573,10 +588,12 @@ impl App {
             app.message(warnings.join("; "), true);
         }
 
-        match path {
-            Some(path) if round_trip => app.open_with(path, omapix_engine::io::load_round_trip, ctx),
-            Some(path) => app.open(path, ctx),
-            None => {}
+        for path in paths {
+            if round_trip {
+                app.open_with(path, omapix_engine::io::load_round_trip, ctx);
+            } else {
+                app.open(path, ctx);
+            }
         }
         app
     }
@@ -589,17 +606,122 @@ impl App {
         self.editor.as_ref().is_some_and(|e| e.modified)
     }
 
+    /// The open images in the order of their tabs.
+    fn tabs(&self) -> impl Iterator<Item = &Editor> {
+        let (before, after) = self.parked.split_at(self.tab.min(self.parked.len()));
+        let before = before.iter().map(|p| &p.editor);
+        before.chain(&self.editor).chain(after.iter().map(|p| &p.editor))
+    }
+
+    /// Why the image showing can't be left for another just now: work on
+    /// it that would end up on the other one.
+    fn held(&self) -> Option<&'static str> {
+        let editor = self.editor.as_ref()?;
+        let busy = self.dialog.is_some()
+            || self.pasting.is_some()
+            || self.picking.as_ref().is_some_and(|(purpose, _)| !matches!(purpose, Purpose::Open))
+            || editor.busy().is_some()
+            || editor.liquifying()
+            || self.objects.busy()
+            || self.content_fill.busy()
+            || self.denoising.busy().is_some()
+            || self.upscaling.busy().is_some()
+            || self.select_subject.busy()
+            || self.face_selection.busy().is_some()
+            || self.whitening.busy().is_some();
+        busy.then_some("This image is still busy — try again when it's done")
+    }
+
+    /// Put the image showing among the others, with its panels as they are.
+    fn park(&mut self) {
+        let Some(editor) = self.editor.take() else { return };
+        let (layers, properties) = (std::mem::take(&mut self.layers), std::mem::take(&mut self.properties));
+        self.parked.insert(self.tab, Parked { editor, layers, properties });
+        // Drags and the Crop tool's box were that image's.
+        self.drawing = None;
+        self.move_from = None;
+        self.transform_drag = None;
+        self.crop = None;
+        self.crop_drag = None;
+    }
+
+    /// Show the image at `index` of the others, which is where its tab is.
+    fn unpark(&mut self, index: usize) {
+        let Parked { editor, layers, properties } = self.parked.remove(index);
+        (self.editor, self.layers, self.properties) = (Some(editor), layers, properties);
+        self.tab = index;
+    }
+
+    /// Show the image in tab `index`. Says why not, when the image showing
+    /// can't be left.
+    fn show_tab(&mut self, index: usize) -> bool {
+        if index == self.tab {
+            return true;
+        }
+        if let Some(why) = self.held() {
+            self.message(why, true);
+            return false;
+        }
+        self.park();
+        self.unpark(index);
+        true
+    }
+
+    /// Show `editor` in a new tab at the end, or leave it there behind an
+    /// image that can't be left.
+    fn add_tab(&mut self, editor: Editor) {
+        if self.held().is_some() {
+            let (layers, properties) = Default::default();
+            self.parked.push(Parked { editor, layers, properties });
+            return;
+        }
+        self.park();
+        self.tab = self.parked.len();
+        self.editor = Some(editor);
+    }
+
+    /// Close the image in tab `index`, asking about unsaved changes first.
+    fn close_tab(&mut self, index: usize, ctx: &egui::Context) {
+        if index != self.tab && self.tabs().nth(index).is_some_and(|e| !e.modified) {
+            self.parked.remove(index - usize::from(index > self.tab));
+            self.tab -= usize::from(index < self.tab);
+        } else if self.show_tab(index) {
+            match self.held() {
+                Some(why) => self.message(why, true),
+                None => self.guard(Then::Close, ctx),
+            }
+        }
+    }
+
+    /// Show a new image in a tab of its own.
+    fn new_image(&mut self, doc: Document) {
+        match Editor::new(doc) {
+            Ok(editor) => self.add_tab(editor),
+            Err(err) => self.message(format!("Couldn't make a new image: {err}"), true),
+        }
+    }
+
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.open_with(path, omapix_engine::io::load, ctx);
     }
 
-    /// Open `path` with `load` in the background.
+    /// Open `path` with `load` in the background, in a new tab. An image
+    /// that's already open is shown instead.
     fn open_with(
         &mut self,
         path: PathBuf,
         load: fn(&Path) -> omapix_engine::Result<Document>,
         ctx: &egui::Context,
     ) {
+        let open = |e: &Editor| [Some(&e.doc.path), e.doc.saved_path.as_ref(), e.doc.round_trip.as_ref()].contains(&Some(&path));
+        let open = self.tabs().position(open);
+        if let Some(index) = open {
+            self.show_tab(index);
+            return;
+        }
+        if self.opening.iter().any(|(opening, _)| *opening == path) {
+            return;
+        }
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         let target = path.clone();
@@ -615,7 +737,7 @@ impl App {
             let _ = tx.send(result);
             ctx.request_repaint();
         });
-        self.opening = Some((path, rx));
+        self.opening.push_back((path, rx));
     }
 
     fn place_files(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
@@ -742,6 +864,16 @@ impl App {
 
     /// Run `then` now, or ask about unsaved changes first.
     fn guard(&mut self, then: Then, ctx: &egui::Context) {
+        // Quitting closes every image: each with unsaved changes is shown
+        // and asked about in turn.
+        let unsaved = self.tabs().position(|e| e.modified);
+        if matches!(then, Then::Quit)
+            && !self.modified()
+            && let Some(index) = unsaved
+            && !self.show_tab(index)
+        {
+            return;
+        }
         if self.modified() {
             self.dialog = Some(Dialog::UnsavedChanges { then });
         } else {
@@ -755,16 +887,7 @@ impl App {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            Then::Open => self.pick(Purpose::Open, ctx),
-            Then::OpenFile(path) => self.open(path, ctx),
             Then::Close => self.close_document(),
-            Then::New(doc) => match Editor::new(*doc) {
-                Ok(editor) => {
-                    self.close_document();
-                    self.editor = Some(editor);
-                }
-                Err(err) => self.message(format!("Couldn't make a new image: {err}"), true),
-            },
         }
     }
 
@@ -793,6 +916,10 @@ impl App {
         self.pasting = None;
         self.dialog = None;
         self.pending_drops.clear();
+        // The tab after it takes its place, or the one before.
+        if !self.parked.is_empty() {
+            self.unpark(self.tab.min(self.parked.len() - 1));
+        }
     }
 
     /// Pick up results from background work.
@@ -839,11 +966,8 @@ impl App {
                 }
             }
         }
-        if let Some((path, rx)) = &self.opening
-            && let Ok(result) = rx.try_recv()
-        {
-            let path = path.clone();
-            self.opening = None;
+        while let Some(result) = self.opening.front().and_then(|(_, rx)| rx.try_recv().ok()) {
+            let Some((path, _)) = self.opening.pop_front() else { break };
             match result.and_then(|(doc, converted)| Ok((Editor::new(doc)?, converted))) {
                 Ok((editor, converted)) => {
                     self.recent.add(&path);
@@ -851,7 +975,7 @@ impl App {
                         let now = editor.doc.profile.description().to_owned();
                         self.message(format!("Converted {original} to {now} for editing"), false);
                     }
-                    self.editor = Some(editor);
+                    self.add_tab(editor);
                     if !self.pending_drops.is_empty() {
                         let paths = std::mem::take(&mut self.pending_drops);
                         self.place_files(paths, ctx);
@@ -871,17 +995,19 @@ impl App {
             self.file_job = None;
             match result {
                 Ok((revision, path, native)) => {
-                    if native && let Some(editor) = &mut self.editor {
-                        editor.doc.saved_path = Some(path.clone());
-                        editor.mark_saved(revision);
-                        self.recent.add(&path);
-                    }
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     let verb = if native { "Saved" } else { "Exported" };
                     let mut text = format!("{verb} {name}");
-                    let round_trip = self.editor.as_ref().and_then(|e| e.doc.round_trip.as_ref());
-                    if native && let Some(tiff) = round_trip.and_then(|t| t.file_name()) {
-                        text += &format!(", and {} for darktable", tiff.to_string_lossy());
+                    // The image saved may be in another tab by now, or closed.
+                    let parked = self.parked.iter_mut().map(|p| &mut p.editor);
+                    let saved = self.editor.iter_mut().chain(parked).find(|e| native && e.owns(revision));
+                    if let Some(editor) = saved {
+                        editor.doc.saved_path = Some(path.clone());
+                        editor.mark_saved(revision);
+                        self.recent.add(&path);
+                        if let Some(tiff) = editor.doc.round_trip.as_ref().and_then(|t| t.file_name()) {
+                            text += &format!(", and {} for darktable", tiff.to_string_lossy());
+                        }
                     }
                     self.message(text, false);
                 }
@@ -910,7 +1036,7 @@ impl App {
         {
             self.from_clipboard = None;
             match result {
-                Ok(doc) => self.guard(Then::New(Box::new(doc)), ctx),
+                Ok(doc) => self.new_image(doc),
                 Err(err) => self.message(err, true),
             }
         }
@@ -966,8 +1092,9 @@ impl App {
             }
             if !image_files.is_empty() {
                 if shift {
-                    let first = image_files.remove(0);
-                    self.guard(Then::OpenFile(first), ctx);
+                    for path in image_files {
+                        self.open(path, ctx);
+                    }
                 } else if self.editor.is_some() {
                     self.place_files(image_files, ctx);
                 } else {
@@ -978,9 +1105,9 @@ impl App {
             }
         }
         // Closing the window with unsaved changes asks first.
-        if ctx.input(|i| i.viewport().close_requested()) && self.modified() && !self.allow_close {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.tabs().any(|e| e.modified) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(Dialog::UnsavedChanges { then: Then::Quit });
+            self.guard(Then::Quit, ctx);
         }
     }
 
@@ -1017,6 +1144,8 @@ impl App {
         let no_pixels = layer.is_some_and(|l| !l.has_pixels());
         match cmd {
             Command::ReopenLast => self.recent.last().is_some(),
+            Command::Close => self.held().is_none(),
+            Command::NextImage | Command::PreviousImage => !self.parked.is_empty(),
             Command::ShowLayers
             | Command::ShowChannels
             | Command::ShowHistory
@@ -1125,11 +1254,7 @@ impl App {
         }
         // A Free Transform is applied before the document is saved or closed.
         let finishing = [
-            Command::New,
-            Command::NewFromClipboard,
-            Command::Open,
             Command::Close,
-            Command::ReopenLast,
             Command::Quit,
             Command::Save,
             Command::SaveAs,
@@ -1165,11 +1290,19 @@ impl App {
                 self.dialog = Some(Dialog::NewImage { width: size.0, height: size.1 });
             }
             Command::NewFromClipboard => self.new_from_clipboard(ctx),
-            Command::Open => self.guard(Then::Open, ctx),
+            Command::Open => self.pick(Purpose::Open, ctx),
             Command::Close => self.guard(Then::Close, ctx),
             Command::ReopenLast => {
                 if let Some(path) = self.recent.last().cloned() {
-                    self.guard(Then::OpenFile(path), ctx);
+                    self.open(path, ctx);
+                }
+            }
+            Command::NextImage | Command::PreviousImage => {
+                let tabs = self.parked.len() + 1;
+                let step = if cmd == Command::NextImage { 1 } else { tabs - 1 };
+                // Not in the middle of a stroke or a drag.
+                if !ctx.input(|i| i.pointer.any_down()) {
+                    self.show_tab((self.tab + step) % tabs);
                 }
             }
             Command::ShowLayers => self.right_tab = RightTab::Layers,
@@ -1925,7 +2058,7 @@ self.filters.remember(&filter);
                         }
                         if let Some(path) = to_open {
                             let ctx = ui.ctx().clone();
-                            self.guard(Then::OpenFile(path), &ctx);
+                            self.open(path, &ctx);
                         }
                     }
                 });
@@ -2146,11 +2279,59 @@ self.filters.remember(&filter);
                     let tick = if self.right_tab == tab { "✓" } else { "  " };
                     self.menu_item(ui, command, Some(format!("{tick} {}", command.label())));
                 }
+                ui.separator();
+                self.menu_item(ui, Command::NextImage, None);
+                self.menu_item(ui, Command::PreviousImage, None);
+                // The open images, as at the bottom of Photoshop's Window menu.
+                let names: Vec<String> = self.tabs().map(tab_name).collect();
+                for (index, name) in names.into_iter().enumerate() {
+                    let tick = if index == self.tab { "✓" } else { "  " };
+                    if ui.button(format!("{tick} {name}")).clicked() {
+                        self.show_tab(index);
+                        ui.close();
+                    }
+                }
             });
             ui.menu_button("Help", |ui| {
                 self.menu_item(ui, Command::AiModels, None);
             });
         });
+    }
+
+    /// The open images' tabs, above the canvas when there's more than one.
+    /// Clicking a tab shows its image; its ✕, or a middle click, closes it.
+    fn tab_bar(&mut self, ui: &mut Ui) {
+        let tabs: Vec<(String, String)> = self
+            .tabs()
+            .map(|e| (tab_name(e), e.doc.saved_path.as_ref().unwrap_or(&e.doc.path).to_string_lossy().into_owned()))
+            .collect();
+        let (mut show, mut close) = (None, None);
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (index, (name, path)) in tabs.into_iter().enumerate() {
+                    let text = if index == self.tab {
+                        RichText::new(name).color(self.theme.foreground).strong()
+                    } else {
+                        RichText::new(name).color(self.theme.dark_foreground)
+                    };
+                    let tab = ui.add(Button::new(text).frame(false));
+                    let tab = if path.is_empty() { tab } else { tab.on_hover_text(path) };
+                    if tab.clicked() {
+                        show = Some(index);
+                    }
+                    if tab.middle_clicked() || ui.small_button("✕").on_hover_text("Close").clicked() {
+                        close = Some(index);
+                    }
+                    ui.add_space(8.0);
+                }
+            });
+        });
+        let ctx = ui.ctx().clone();
+        if let Some(index) = close {
+            self.close_tab(index, &ctx);
+        } else if let Some(index) = show {
+            self.show_tab(index);
+        }
     }
 
     fn status_bar(&self, ui: &mut Ui) {
@@ -2234,7 +2415,7 @@ self.filters.remember(&filter);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let busy = self
                     .opening
-                    .as_ref()
+                    .front()
                     .map(|(p, _)| {
                         let name = p.file_name().unwrap_or_default().to_string_lossy();
                         format!("Opening {name}…")
@@ -2621,7 +2802,8 @@ self.filters.remember(&filter);
                                 if let Some(e) = &mut app.editor {
                                      e.modified = false;
                                 }
-                                app.proceed(then, ctx);
+                                // Quitting asks about the next image.
+                                app.guard(then, ctx);
                             }));
                             close = true;
                         }
@@ -2683,8 +2865,8 @@ self.filters.remember(&filter);
                             close = true;
                         }
                         if ok {
-                            let doc = Box::new(Document::blank(*width, *height));
-                            action = Some(Box::new(move |app, ctx| app.guard(Then::New(doc), ctx)));
+                            let doc = Document::blank(*width, *height);
+                            action = Some(Box::new(move |app, _| app.new_image(doc)));
                             close = true;
                         }
                     });
@@ -3062,7 +3244,7 @@ self.filters.remember(&filter);
                             }
                         });
                     if let Some(path) = to_open {
-                        self.guard(Then::OpenFile(path), &ctx);
+                        self.open(path, &ctx);
                     }
                 }
             });
@@ -3782,7 +3964,7 @@ self.filters.remember(&filter);
 
     /// Run the next scripted command once the app is idle.
     fn run_script(&mut self, ctx: &egui::Context) {
-        let idle = self.opening.is_none()
+        let idle = self.opening.is_empty()
             && self.file_job.is_none()
             && self.dialog.is_none()
             && self.face_selection.busy().is_none()
@@ -3907,11 +4089,7 @@ self.filters.remember(&filter);
 
     fn update_title(&mut self, ctx: &egui::Context) {
         let title = match &self.editor {
-            Some(e) => format!(
-                "{}{} — Omapix",
-                e.doc.file_name(),
-                if e.modified { " •" } else { "" }
-            ),
+            Some(e) => format!("{} — Omapix", tab_name(e)),
             None => "Omapix".into(),
         };
         if title != self.title {
@@ -4892,6 +5070,9 @@ impl eframe::App for App {
                 self.run(cmd, &ctx);
             }
         }
+        if !self.parked.is_empty() {
+            egui::Panel::top("tabs").frame(bar).show(ui, |ui| self.tab_bar(ui));
+        }
         let pasteboard = self.theme.pasteboard();
         let brush = self.tools.settings();
         let source = self.tools.source_marker();
@@ -5459,6 +5640,8 @@ mod tests {
             theme: Theme::default(),
             theme_rx: rx,
             editor: Some(editor_with_selection()),
+            parked: Vec::new(),
+            tab: 0,
             layers: LayersPanel::default(),
             properties: PropertiesPanel::default(),
             history: HistoryPanel,
@@ -5470,7 +5653,7 @@ mod tests {
             tools: Tools::default(),
             tools_path: None,
             saved_tools: String::new(),
-            opening: None,
+            opening: VecDeque::new(),
             picking: None,
             file_job: None,
             batch_export: None,
@@ -6562,7 +6745,7 @@ mod tests {
         // Run ReopenLast: triggers opening.
         app.editor.as_mut().unwrap().modified = false;
         app.run(Command::ReopenLast, &ctx);
-        assert!(app.opening.is_some());
+        assert!(!app.opening.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -8171,7 +8354,7 @@ mod tests {
     }
 
     #[test]
-    fn new_makes_a_blank_image_once_unsaved_changes_are_dealt_with() {
+    fn new_makes_a_blank_image_in_a_tab_of_its_own() {
         let ctx = egui::Context::default();
         let mut app = test_app();
         app.editor.as_mut().unwrap().modified = true;
@@ -8196,18 +8379,231 @@ mod tests {
         let mut output = ctx.run_ui(enter, |ctx| app.dialogs(ctx));
         output.textures_delta.clear();
 
-        let Some(Dialog::UnsavedChanges { then }) = app.dialog.take() else {
-            panic!("didn't ask about the unsaved changes");
-        };
-        assert_eq!(app.editor.as_ref().unwrap().doc.width, 600);
-        app.editor.as_mut().unwrap().modified = false;
-        app.proceed(then, &ctx);
+        assert!(app.dialog.is_none());
         let editor = app.editor.as_ref().unwrap();
         assert_eq!((editor.doc.width, editor.doc.height), (320, 200));
         assert_eq!(editor.doc.file_name(), "Untitled");
         assert_eq!(editor.doc.composite().get(319, 199), [u16::MAX; 4]);
         assert_eq!(editor.history_labels(), ["New"]);
         assert!(!app.modified());
+        // The image that was open is in the tab before, as it was.
+        assert_eq!(tab_names(&app), ["t.tif •", "Untitled"]);
+        assert_eq!(app.tab, 1);
+    }
+
+    fn tab_names(app: &App) -> Vec<String> {
+        app.tabs().map(tab_name).collect()
+    }
+
+    /// An app with three images open, "a.tif", "b.tif" and "c.tif" (300,
+    /// 400 and 500 px wide), the first showing.
+    fn app_with_three_tabs() -> App {
+        let mut app = test_app();
+        app.editor = None;
+        for (name, w) in [("a.tif", 300), ("b.tif", 400), ("c.tif", 500)] {
+            let image = omapix_engine::Raster::new(w, 100, vec![[30000, 30000, 30000, 65535]; (w * 100) as usize]);
+            let doc = Document::from_image(name.into(), &image, omapix_engine::ColorProfile::srgb(), 16);
+            app.add_tab(Editor::new(doc).unwrap());
+        }
+        assert!(app.show_tab(0));
+        app
+    }
+
+    fn width(app: &App) -> u32 {
+        app.editor.as_ref().unwrap().doc.width
+    }
+
+    #[test]
+    fn tabs_switch_between_the_open_images_and_keep_their_panels() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_three_tabs();
+        assert_eq!(tab_names(&app), ["a.tif", "b.tif", "c.tif"]);
+        assert_eq!((app.tab, width(&app)), (0, 300));
+        // Each image has its own revisions, so nothing kept for one's is
+        // taken for another's.
+        let revisions: Vec<u64> = app.tabs().map(Editor::revision).collect();
+        assert!(!app.tabs().nth(1).unwrap().owns(revisions[0]));
+
+        // An edit and a panel's state stay with their image.
+        app.run(Command::NewLayer, &ctx);
+        app.properties.eyedropper = Some(Eyedropper::White);
+        app.crop = Some([0.0, 0.0, 10.0, 10.0]);
+        app.run(Command::NextImage, &ctx);
+        assert_eq!((app.tab, width(&app)), (1, 400));
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers.len(), 1);
+        assert!(app.properties.eyedropper.is_none() && app.crop.is_none());
+        assert_eq!(tab_names(&app), ["a.tif •", "b.tif", "c.tif"]);
+
+        // Ctrl+Tab and Ctrl+Shift+Tab go round.
+        app.run(Command::NextImage, &ctx);
+        app.run(Command::NextImage, &ctx);
+        assert_eq!((app.tab, width(&app)), (0, 300));
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers.len(), 2);
+        assert_eq!(app.properties.eyedropper, Some(Eyedropper::White));
+        app.run(Command::PreviousImage, &ctx);
+        assert_eq!((app.tab, width(&app)), (2, 500));
+        assert_eq!(tab_names(&app), ["a.tif •", "b.tif", "c.tif"]);
+
+        // A copy from one image pastes into another, which is busy and
+        // can't be left until it's in.
+        app.run(Command::SelectAll, &ctx);
+        app.run(Command::Copy, &ctx);
+        app.run(Command::PreviousImage, &ctx);
+        app.run(Command::Paste, &ctx);
+        while app.editor.as_ref().unwrap().busy().is_some() {
+            assert!(!app.show_tab(0));
+            std::thread::sleep(Duration::from_millis(1));
+            app.editor.as_mut().unwrap().update(&ctx);
+        }
+        let doc = &app.editor.as_ref().unwrap().doc;
+        assert_eq!((app.tab, doc.width, doc.layers.len()), (1, 400, 2));
+        assert_eq!(doc.layers[1].pixels.get(200, 50), [30000, 30000, 30000, 65535]);
+
+        // With one image there's nowhere to go.
+        app.parked.clear();
+        app.tab = 0;
+        assert!(!app.enabled(Command::NextImage) && !app.enabled(Command::PreviousImage));
+    }
+
+    #[test]
+    fn a_busy_image_is_not_left_and_new_images_wait_behind_it() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_three_tabs();
+        app.dialog = Some(Dialog::NewImage { width: 10, height: 10 });
+        assert!(!app.show_tab(1));
+        assert_eq!((app.tab, width(&app)), (0, 300));
+        assert!(app.status.as_ref().is_some_and(|(_, error, _)| *error));
+        assert!(!app.enabled(Command::Close));
+
+        app.new_image(Document::blank(20, 20));
+        assert_eq!((app.tab, width(&app)), (0, 300));
+        assert_eq!(tab_names(&app), ["a.tif", "b.tif", "c.tif", "Untitled"]);
+
+        app.dialog = None;
+        app.run(Command::PreviousImage, &ctx);
+        assert_eq!((app.tab, width(&app)), (3, 20));
+    }
+
+    #[test]
+    fn closing_a_tab_shows_the_next_and_asks_about_unsaved_changes() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_three_tabs();
+        // The image showing: the one after takes its place.
+        app.run(Command::Close, &ctx);
+        assert_eq!(tab_names(&app), ["b.tif", "c.tif"]);
+        assert_eq!((app.tab, width(&app)), (0, 400));
+
+        // A tab behind closes without being shown.
+        app.close_tab(1, &ctx);
+        assert_eq!(tab_names(&app), ["b.tif"]);
+        assert_eq!((app.tab, width(&app)), (0, 400));
+
+        // One with unsaved changes is shown and asked about.
+        let mut app = app_with_three_tabs();
+        app.show_tab(2);
+        app.run(Command::NewLayer, &ctx);
+        app.show_tab(1);
+        app.close_tab(0, &ctx);
+        assert_eq!(tab_names(&app), ["b.tif", "c.tif •"]);
+        assert_eq!(app.tab, 0);
+        app.close_tab(1, &ctx);
+        assert_eq!((app.tab, width(&app)), (1, 500));
+        assert!(matches!(app.dialog.take(), Some(Dialog::UnsavedChanges { then: Then::Close })));
+        // Closing the last tab shows the one before.
+        app.proceed(Then::Close, &ctx);
+        assert_eq!(tab_names(&app), ["b.tif"]);
+        assert_eq!((app.tab, width(&app)), (0, 400));
+        app.run(Command::Close, &ctx);
+        assert!(app.editor.is_none() && app.parked.is_empty());
+    }
+
+    #[test]
+    fn quitting_asks_about_each_image_with_unsaved_changes() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_three_tabs();
+        for index in [1, 2] {
+            app.show_tab(index);
+            app.run(Command::NewLayer, &ctx);
+        }
+        app.show_tab(0);
+
+        app.run(Command::Quit, &ctx);
+        assert_eq!(app.tab, 1);
+        assert!(matches!(app.dialog.take(), Some(Dialog::UnsavedChanges { then: Then::Quit })));
+        assert!(!app.allow_close);
+        // Don't Save: on to the next.
+        app.editor.as_mut().unwrap().modified = false;
+        app.guard(Then::Quit, &ctx);
+        assert_eq!(app.tab, 2);
+        assert!(matches!(app.dialog.take(), Some(Dialog::UnsavedChanges { then: Then::Quit })));
+        assert!(!app.allow_close);
+        app.editor.as_mut().unwrap().modified = false;
+        app.guard(Then::Quit, &ctx);
+        assert!(app.dialog.is_none() && app.allow_close);
+    }
+
+    #[test]
+    fn the_tab_bar_shows_and_closes_images_and_a_save_finds_its_own() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_three_tabs();
+        let mut time = 0.0;
+        // A frame of the tab bar, and where each piece of text was drawn.
+        let mut frame = |app: &mut App, events: Vec<egui::Event>| {
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 40.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.tab_bar(ui));
+            output.textures_delta.clear();
+            fn texts(shape: &egui::Shape, found: &mut Vec<(String, Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => found.push((t.galley.text().to_owned(), t.visual_bounding_rect().center())),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, found)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            output.shapes.iter().for_each(|clipped| texts(&clipped.shape, &mut found));
+            found
+        };
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let press = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() };
+            [vec![egui::Event::PointerMoved(pos)], vec![press(true)], vec![press(false)]]
+        };
+        let find = |drawn: &[(String, Pos2)], text: &str, nth: usize| {
+            drawn.iter().filter(|(t, _)| t == text).nth(nth).unwrap_or_else(|| panic!("no {text} in {drawn:?}")).1
+        };
+        let drawn = frame(&mut app, vec![]);
+
+        // A save of the first image is under way when the third is shown.
+        let revision = app.editor.as_ref().unwrap().revision();
+        for events in click(find(&drawn, "c.tif", 0), egui::PointerButton::Primary) {
+            frame(&mut app, events);
+        }
+        assert_eq!((app.tab, width(&app)), (2, 500));
+        let (tx, rx) = channel();
+        tx.send(Ok((revision, PathBuf::from("/tmp/a.ora"), true))).unwrap();
+        app.file_job = Some(FileJob { label: "Saving".into(), rx });
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.poll(ui.ctx()));
+        output.textures_delta.clear();
+        assert_eq!(tab_names(&app), ["a.ora", "b.tif", "c.tif"]);
+
+        // The second tab's ✕, then a middle click on the first.
+        let drawn = frame(&mut app, vec![]);
+        for events in click(find(&drawn, "✕", 1), egui::PointerButton::Primary) {
+            frame(&mut app, events);
+        }
+        assert_eq!(tab_names(&app), ["a.ora", "c.tif"]);
+        assert_eq!((app.tab, width(&app)), (1, 500));
+        let drawn = frame(&mut app, vec![]);
+        for events in click(find(&drawn, "a.ora", 0), egui::PointerButton::Middle) {
+            frame(&mut app, events);
+        }
+        assert_eq!(tab_names(&app), ["c.tif"]);
+        assert_eq!((app.tab, width(&app)), (0, 500));
     }
 
     #[test]
@@ -8239,11 +8635,13 @@ mod tests {
             assert_eq!(doc.file_name(), "Untitled");
         }
 
-        // Unsaved changes to the open image are asked about first.
+        // With an image open, it goes in a new tab beside it.
         app.editor.as_mut().unwrap().modified = true;
         app.run(Command::NewFromClipboard, &ctx);
         wait(&mut app);
-        assert!(matches!(&app.dialog, Some(Dialog::UnsavedChanges { then: Then::New(_) })));
+        assert!(app.dialog.is_none());
+        assert_eq!(tab_names(&app), ["Untitled •", "Untitled"]);
+        assert_eq!(app.tab, 1);
     }
 
     fn write_test_png(path: &Path, w: u32, h: u32) {
@@ -8326,7 +8724,7 @@ mod tests {
         output.textures_delta.clear();
 
         let started = Instant::now();
-        while app.opening.is_some() {
+        while !app.opening.is_empty() {
             std::thread::sleep(Duration::from_millis(10));
             let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| app.poll(ctx));
             out.textures_delta.clear();
@@ -8368,7 +8766,7 @@ mod tests {
         output.textures_delta.clear();
 
         let started = Instant::now();
-        while app.opening.is_some() {
+        while !app.opening.is_empty() {
             std::thread::sleep(Duration::from_millis(10));
             let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| app.poll(ctx));
             out.textures_delta.clear();
@@ -8381,6 +8779,12 @@ mod tests {
         let editor = app.editor.as_ref().unwrap();
         assert_eq!(editor.doc.width, 40);
         assert_eq!(editor.doc.height, 30);
+        // In a new tab, and dropping it again shows that tab.
+        assert_eq!(tab_names(&app), ["t.tif", "shift_open.png"]);
+        app.show_tab(0);
+        app.open(path.clone(), &ctx);
+        assert!(app.opening.is_empty());
+        assert_eq!(app.tab, 1);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);

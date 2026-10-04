@@ -2,14 +2,14 @@
   omapix.lua: darktable → Omapix → darktable.
 
   Export module › target storage › "edit in Omapix": the selected images are
-  exported as 16-bit TIFFs beside their raws and opened in Omapix one at a
-  time. Retouch, save (Ctrl+S saves the layers to a .ora beside the TIFF and
-  the flattened image to the TIFF itself) and quit Omapix: the TIFF is
-  imported, grouped with its raw.
+  exported as 16-bit TIFFs beside their raws and opened in one Omapix
+  window, a tab each. Retouch, save each (Ctrl+S saves the layers to a .ora
+  beside the TIFF and the flattened image to the TIFF itself) and quit
+  Omapix: the TIFFs are imported, each grouped with its raw.
 
-  To retouch one again, select its TIFF and press "edit in Omapix" in the
-  selected image[s] module. Omapix opens the layers from the .ora, and
-  darktable redraws the TIFF when Omapix quits.
+  To retouch some again, select their TIFFs and press "edit in Omapix" in
+  the selected image[s] module. Omapix opens the layers from the .ora files,
+  and darktable redraws the TIFFs when Omapix quits.
 
   `make install` puts this in ~/.config/darktable/lua/ and loads it from
   ~/.config/darktable/luarc.
@@ -35,10 +35,15 @@ local function omapix()
   return exists(installed) and quote(installed) or "omapix"
 end
 
--- Open `tiff` in Omapix and wait for it to quit.
-local function edit(tiff)
-  dt.print("editing " .. tiff:match("[^/]+$") .. " in Omapix")
-  return dt.control.execute(omapix() .. " --round-trip " .. quote(tiff)) == 0
+-- Open `tiffs` in one Omapix window, a tab each, and wait for it to quit.
+local function edit(tiffs)
+  local quoted = {}
+  for i, tiff in ipairs(tiffs) do
+    quoted[i] = quote(tiff)
+  end
+  local what = #tiffs == 1 and tiffs[1]:match("[^/]+$") or #tiffs .. " images"
+  dt.print("editing " .. what .. " in Omapix")
+  return dt.control.execute(omapix() .. " --round-trip " .. table.concat(quoted, " ")) == 0
 end
 
 -- IMG.tif, or IMG_01.tif… if that's taken.
@@ -58,20 +63,34 @@ local function move(from, to)
 end
 
 local function export_and_edit(storage, image_table, extra_data)
+  -- Each export goes beside its raw.
+  local tiffs, images = {}, {}
   for image, exported in pairs(image_table) do
     local tiff = unique(image.path .. "/" .. exported:match("[^/]+$"))
-    if not move(exported, tiff) then
-      dt.print("couldn't move the export to " .. tiff)
-    elseif edit(tiff) then
-      local edited = dt.database.import(tiff)
-      edited:group_with(image.group_leader)
-      for _, tag in ipairs(dt.tags.get_tags(image)) do
-        if tag.name:sub(1, 9) ~= "darktable" then
-          dt.tags.attach(tag, edited)
-        end
-      end
+    if move(exported, tiff) then
+      tiffs[#tiffs + 1] = tiff
+      images[tiff] = image
     else
-      dt.print("couldn't start Omapix")
+      dt.print("couldn't move the export to " .. tiff)
+    end
+  end
+  if #tiffs == 0 then
+    return
+  end
+  -- `pairs` has no order: the tabs go by file name.
+  table.sort(tiffs)
+  if not edit(tiffs) then
+    dt.print("couldn't start Omapix")
+    return
+  end
+  for _, tiff in ipairs(tiffs) do
+    local image = images[tiff]
+    local edited = dt.database.import(tiff)
+    edited:group_with(image.group_leader)
+    for _, tag in ipairs(dt.tags.get_tags(image)) do
+      if tag.name:sub(1, 9) ~= "darktable" then
+        dt.tags.attach(tag, edited)
+      end
     end
   end
 end
@@ -88,12 +107,19 @@ dt.register_storage(
 dt.gui.libs.image.register_action(
   "omapix", "edit in Omapix",
   function(event, images)
+    local tiffs, edited = {}, {}
     for _, image in ipairs(images) do
       local path = image.path .. "/" .. image.filename
-      if not path:lower():match("%.tiff?$") then
+      if path:lower():match("%.tiff?$") then
+        tiffs[#tiffs + 1] = path
+        edited[#edited + 1] = image
+      else
         dt.print("export " .. image.filename .. " with the \"edit in Omapix\" target first")
-      elseif edit(path) then
-        -- Redraw the thumbnail from the TIFF Omapix saved.
+      end
+    end
+    if #tiffs > 0 and edit(tiffs) then
+      -- Redraw the thumbnails from the TIFFs Omapix saved.
+      for _, image in ipairs(edited) do
         image:drop_cache()
       end
     end

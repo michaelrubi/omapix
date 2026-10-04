@@ -125,6 +125,8 @@ pub enum Command {
     ShowHistory,
     ShowNavigator,
     ShowHistogram,
+    NextImage,
+    PreviousImage,
     Rotate180,
     Rotate90Cw,
     Rotate90Ccw,
@@ -277,6 +279,8 @@ impl Command {
         Command::ShowHistory,
         Command::ShowNavigator,
         Command::ShowHistogram,
+        Command::NextImage,
+        Command::PreviousImage,
         Command::Rotate180,
         Command::Rotate90Cw,
         Command::Rotate90Ccw,
@@ -322,6 +326,8 @@ impl Command {
         Command::BringToFront,
         Command::SendToBack,
         Command::ReopenLast,
+        Command::PreviousImage,
+        Command::NextImage,
         Command::New,
         Command::Open,
         Command::Close,
@@ -490,6 +496,8 @@ impl Command {
             Command::ShowChannels => "Channels",
             Command::ShowHistory => "History",
             Command::ShowNavigator => "Navigator",
+            Command::NextImage => "Next Image",
+            Command::PreviousImage => "Previous Image",
             Command::ShowHistogram => "Histogram",
             Command::Rotate180 => "180°",
             Command::Rotate90Cw => "90° Clockwise",
@@ -516,6 +524,8 @@ impl Command {
             Command::Save => s(CMD, Key::S),
             Command::SaveAs => s(CMD_SHIFT, Key::S),
             Command::Quit => s(CMD, Key::Q),
+            Command::NextImage => s(CMD, Key::Tab),
+            Command::PreviousImage => s(CMD_SHIFT, Key::Tab),
             Command::Undo => s(CMD, Key::Z),
             Command::Redo => s(CMD_SHIFT, Key::Z),
             Command::Cut => s(CMD, Key::X),
@@ -797,6 +807,7 @@ mod tests {
         assert!(pos(Command::Redo) < pos(Command::Undo));
         assert!(pos(Command::SaveAs) < pos(Command::Save));
         assert!(pos(Command::ReopenLast) < pos(Command::Open));
+        assert!(pos(Command::PreviousImage) < pos(Command::NextImage));
         assert!(pos(Command::NewLayer) < pos(Command::New));
         assert!(pos(Command::StampVisible) < pos(Command::MergeDown));
         assert!(pos(Command::InvertSelection) < pos(Command::Invert));
