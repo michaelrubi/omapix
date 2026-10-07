@@ -570,35 +570,45 @@ the empty canvas the Crop tool leaves when it's dragged outwards
 
 ### 10. Auto Makeup
 
-*Subtle, non-destructive portrait makeup without diffusion.*
+*Subtle makeup, painted on layers, without diffusion.*
 
-Retouch › **Makeup…** adds subtle cosmetic enhancements per face, running
-off the existing MediaPipe 478 face landmarks and selfie segmentation.
-Rather than running an expensive generative model (which is slow, risks
-hallucinations, and bakes changes into pixels), it builds parametric,
-fully editable adjustment layers and solid colour fills with feathered masks
-in a "Makeup" group:
+Retouch › **Makeup** paints makeup on every face the landmarker sees,
+from the face models' 478 points and the segmentation's face. A generative
+model would be slow, could change the face and would bake the result into
+the pixels; this is what a retoucher does by hand, done for them
+(`omapix_engine::makeup`, placed by `face_selection::makeup`). It adds a
+"Makeup" group above the selected layer with a layer for each product, its
+colour painted where it goes, in a blend mode that lets the skin's own
+light and texture through:
 
-- **Lipstick**: Solid Color or Hue/Saturation layer masked to the lips
-  outline (`outline::LIPS` minus `outline::MOUTH`), feathered 1–2 px,
-  blended in Soft Light or Multiply. Uses Blend If on the underlying layer
-  so specular highlights and glossy reflections remain visible. Sliders for
-  Hue, Saturation, Opacity, and Gloss.
-- **Eyeliner**: darkening stroke along the upper eyelid margin landmarks
-  (`outline::LEFT_EYE` upper arc: points 33, 160, 158, 133, etc.),
-  feathered 0.5–1 px in Multiply or Normal mode, with an optional subtle
-  outer corner wing.
-- **Mascara**: subtle lash-line darkening and density boost along upper and
-  lower lash contours.
-- **Rouge / Blush**: radial feathered wash centered on malar/cheekbone
-  landmarks (points 116, 123, 147 and 345, 352, 376), blended in Soft Light
-  with warm rosy/peach swatches and an opacity slider.
-- **Eye Shadow**: soft wash between the upper lash line and the eyelid
-  crease in Soft Light or Multiply with tone palette selection.
-- **Eyebrow tint**: subtle tinting and fill masked to brow outlines.
-- **Presets**: Natural Everyday, Warm Glow, Clean Girl, and Evening Glam.
-  Each face gets its own "Makeup" group, and every layer remains an ordinary
-  Omapix layer with its mask editable by hand with the brush.
+| Layer | Where | Colour, mode and opacity |
+|---|---|---|
+| Lipstick | the lips (`outline::LIPS` less `outline::MOUTH`) | berry red, Soft Light, 40 % |
+| Eyeliner | along the upper lashes, corner to corner, 30 % of the way to the crease | near black, Multiply, 60 % |
+| Eye Shadow | from the lashes 75 % of the way to under the brow, less the eye | brown, Multiply, 35 % |
+| Brows | each brow's outline | dark brown, Multiply, 30 % |
+| Blush | an ellipse a third of the way from the apple of the cheek (points 205, 425) to the cheekbone (123, 352), feathered wide, less the eyes, brows and lips | rose, Soft Light, 30 % |
+
+There's no dialog. A layer's opacity is how much of that product there is,
+and the group's opacity fades all of it. The layers are painted, not masked
+(so they cost under 1 MB in the .ora of a 24 MP image): the brush adds to
+one, the eraser takes away, and with Lock Transparent Pixels (`/`) on, a
+fill gives it another colour.
+
+Everything's kept on what the segmentation takes for a face, so nothing
+lands on the background beside a face turned away, and an eye out of sight
+(as for whitening) gets no eyeliner, shadow, brow or blush on its side.
+Sizes and feathers are in distances between the irises, so a small face in
+a group gets the same makeup as a headshot.
+
+Tuned on the blemish test photos and a folder of portraits, some bare-faced
+and some already made up: the starting opacities are there to see, not to
+notice. Known gaps: a tongue out over the lower lip is taken for the lip;
+the same colours go on every skin tone.
+
+Later: a dialog with a colour for each product and presets (Natural
+Everyday, Warm Glow, Clean Girl, Evening Glam); a group for each face;
+mascara and a winged liner; lip gloss; a step in Auto Retouch.
 
 ## Models
 
@@ -863,12 +873,13 @@ Reordered on 2026-09-29 (see Decisions).
     - Skin redness neutralization (Selective Color / Hue-Sat on flush).
     - Iris enhancement and catchlight boosting.
 15. **Auto Makeup.**
-    - Retouch › Makeup… dialog and presets (Natural Everyday, Warm Glow,
-      Clean Girl, Evening Glam).
-    - Non-destructive adjustment, solid colour, and Curves layers gathered in
-      a "Makeup" group per face.
-    - Lipstick (with Blend If shine preservation), eyeliner, mascara, blush,
-      eyeshadow, and brow tint.
+    - ~~Retouch › Makeup~~ (done, 2026-10-07): a "Makeup" group of painted
+      layers, Lipstick, Eyeliner, Eye Shadow, Brows and Blush, on every
+      face. No dialog: each layer's opacity is the amount. See "Auto
+      Makeup" above.
+    - A dialog with colours and presets (Natural Everyday, Warm Glow, Clean
+      Girl, Evening Glam), and a group for each face.
+    - Mascara, a winged liner and lip gloss.
 16. **Smarter Auto Liquify.**
     - Auto Harmonize subtle proportion & symmetry baseline slider.
     - Posture & silhouette alignment from pose landmarks.

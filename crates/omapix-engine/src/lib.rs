@@ -20,6 +20,7 @@ pub mod groups;
 pub mod histogram;
 pub mod io;
 pub mod layer;
+pub mod makeup;
 pub mod moving;
 pub mod ops;
 pub mod ora;

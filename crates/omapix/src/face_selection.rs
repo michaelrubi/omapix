@@ -10,6 +10,7 @@ use egui::{Pos2, pos2};
 use omapix_ai::face::{Analysis, BODY_SKIN, Detection, FACE_SKIN, Faces, HAIR, Image, outline};
 use omapix_ai::pose::point;
 use omapix_engine::blemish::{self, Spot};
+use omapix_engine::makeup::Product;
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::tiled::{TILE, Tiled};
 use omapix_engine::whiten::{self, Whiten};
@@ -193,6 +194,46 @@ const IRIS: f32 = 1.15;
 const SOFTEN: f32 = 0.008;
 /// And the edge of the skin under an eye.
 const UNDER_EYE_FEATHER: f32 = 0.03;
+
+/// Where makeup goes round an eye: along its upper lid between the
+/// corners, the crease above that, and under the brow above that again,
+/// each from the outer corner in; and round its brow.
+struct Lid {
+    lashes: [usize; 7],
+    crease: [usize; 7],
+    under_brow: [usize; 7],
+    brow: [usize; 10],
+}
+
+const EACH_LID: [Lid; 2] = [
+    Lid {
+        lashes: [246, 161, 160, 159, 158, 157, 173],
+        crease: [247, 30, 29, 27, 28, 56, 190],
+        under_brow: [113, 225, 224, 223, 222, 221, 189],
+        brow: outline::LEFT_BROW,
+    },
+    Lid {
+        lashes: [466, 388, 387, 386, 385, 384, 398],
+        crease: [467, 260, 259, 257, 258, 286, 414],
+        under_brow: [342, 445, 444, 443, 442, 441, 413],
+        brow: outline::RIGHT_BROW,
+    },
+];
+/// How far up from the lashes eyeliner goes, towards the crease, and eye
+/// shadow, towards the brow.
+const LINER: f32 = 0.3;
+const SHADOW: f32 = 0.75;
+/// Their edges' feathers, in distances between the irises, with lipstick's,
+/// the brows' and blush's.
+const LINER_FEATHER: f32 = 0.008;
+const SHADOW_FEATHER: f32 = 0.04;
+const BROW_FEATHER: f32 = 0.02;
+const BLUSH_FEATHER: f32 = 0.16;
+/// Blush is centred a third of the way from the apple of each cheek to its
+/// cheekbone, and reaches this far across and down, in distances between
+/// the irises.
+const CHEEKS: [[usize; 2]; 2] = [[205, 123], [425, 352]];
+const BLUSH: [f32; 2] = [0.3, 0.2];
 
 /// Where the selection arrives once it's found.
 type Found = Receiver<Result<Selection, String>>;
@@ -522,6 +563,66 @@ pub fn find_under_eyes(image: &Raster, profile: &ColorProfile) -> Result<Selecti
     found.ok_or_else(|| "Found no shadows under the eyes".into())
 }
 
+/// Where each product of makeup goes on every face in `image` the
+/// landmarker saw.
+pub fn find_makeup(image: &Raster, profile: &ColorProfile) -> Result<Vec<(Product, Selection)>, String> {
+    let (_, analysis) = analyse(image, profile)?;
+    let faces = points(&analysis);
+    if faces.is_empty() {
+        return Err("Found no faces facing the camera".into());
+    }
+    let products = makeup(&faces, &segmented(&analysis, image, &[FACE_SKIN]));
+    if products.iter().all(|(_, on)| on.is_empty()) {
+        return Err("Found nowhere for makeup".into());
+    }
+    Ok(products)
+}
+
+/// Where each product of makeup goes on `faces` (their points), in the
+/// order their layers stack, bottom first. Only on `on_faces`, what the
+/// segmentation takes for a face, so nothing lands on the background
+/// beside a face turned away, and only round the eyes in sight.
+fn makeup(faces: &[&[[f32; 3]]], on_faces: &Selection) -> Vec<(Product, Selection)> {
+    let (width, height) = (on_faces.width(), on_faces.height());
+    let (mut blush, mut brows, mut shadow, mut liner) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for face in faces {
+        let (scale, seen) = sight(face);
+        let at = |i: usize| (face[i][0], face[i][1]);
+        for n in (0..2).filter(|&n| seen[n]) {
+            let (eye, lid) = (&EACH_EYE[n], &EACH_LID[n]);
+            // From the lashes, corner to corner, up to part of the way to
+            // `to`, and back.
+            let band = |to: &[usize; 7], part: f32| {
+                let up = |(&from, &to): (&usize, &usize)| {
+                    let (a, b) = (at(from), at(to));
+                    (a.0 + (b.0 - a.0) * part, a.1 + (b.1 - a.1) * part)
+                };
+                let lashes = [eye.corners[0]].into_iter().chain(lid.lashes).chain([eye.corners[1]]).map(at);
+                lashes.chain(lid.lashes.iter().zip(to).rev().map(up)).collect::<Vec<_>>()
+            };
+            liner.extend(drawn(&band(&lid.crease, LINER), LINER_FEATHER * scale, width, height));
+            shadow.extend(drawn(&band(&lid.under_brow, SHADOW), SHADOW_FEATHER * scale, width, height));
+            brows.extend(drawn(&lid.brow.map(at), BROW_FEATHER * scale, width, height));
+            let [apple, bone] = CHEEKS[n].map(at);
+            let (cx, cy) = (apple.0 + (bone.0 - apple.0) / 3.0, apple.1 + (bone.1 - apple.1) / 3.0);
+            let [rx, ry] = BLUSH.map(|r| r * scale);
+            let ellipse: Vec<_> = (0..32).map(|i| (i as f32 * std::f32::consts::TAU / 32.0).sin_cos()).map(|(s, c)| (cx + rx * c, cy + ry * s)).collect();
+            blush.extend(drawn(&ellipse, BLUSH_FEATHER * scale, width, height));
+        }
+    }
+    let on_face = |on: Selection| on.combine(on_faces, Combine::Intersect);
+    let placed = |boxes: &[([u32; 4], Selection)]| on_face(place(boxes, width, height));
+    let features = draw(faces, &FEATURES, width, height);
+    let eyes = draw(faces, &EYES, width, height);
+    vec![
+        (Product::Blush, placed(&blush).combine(&features, Combine::Subtract)),
+        (Product::Brows, placed(&brows)),
+        (Product::EyeShadow, placed(&shadow).combine(&eyes, Combine::Subtract)),
+        (Product::Eyeliner, placed(&liner).combine(&eyes, Combine::Subtract)),
+        (Product::Lipstick, on_face(draw(faces, &LIPS, width, height))),
+    ]
+}
+
 /// The skin under a face's eyes (those in sight), from below each lower
 /// lid's lashes down to the top of the cheek, and as much of the cheek
 /// below that again, to measure it against. Both only where there's `skin`.
@@ -755,6 +856,71 @@ mod tests {
             }
         }
         (vec![[230, 228, 224, 255]; 600 * 500], points)
+    }
+
+    /// [`face_with_eyes`]' points with each eye's lid, brow and cheek: lashes
+    /// along the top of the eye, the crease 8 px above them and under the
+    /// brow 20, a brow 50 × 10 above that, and a cheek 60 px below the eye.
+    fn face_with_lids() -> Vec<[f32; 3]> {
+        let (_, mut points) = face_with_eyes();
+        for (n, cx) in [250.0f32, 350.0].into_iter().enumerate() {
+            let (eye, lid) = (&EACH_EYE[n], &EACH_LID[n]);
+            // From the outer corner in: leftwards on the right of the face.
+            let inward = if n == 0 { 1.0 } else { -1.0 };
+            for (ring, y) in [(&lid.lashes, 270.0), (&lid.crease, 262.0), (&lid.under_brow, 250.0)] {
+                for (k, &i) in ring.iter().enumerate() {
+                    points[i] = [cx + inward * (k as f32 - 3.0) * 5.0, y, 0.0];
+                }
+            }
+            points[eye.corners[0]] = [cx - inward * 20.0, 275.0, 0.0];
+            points[eye.corners[1]] = [cx + inward * 20.0, 275.0, 0.0];
+            outline_box(&mut points, &lid.brow, [cx - 25.0, 235.0, cx + 25.0, 245.0]);
+            points[CHEEKS[n][0]] = [cx, 340.0, 0.0];
+            points[CHEEKS[n][1]] = [cx - inward * 30.0, 330.0, 0.0];
+        }
+        points
+    }
+
+    #[test]
+    fn makeup_goes_on_the_lids_brows_cheeks_and_lips_of_the_eyes_in_sight() {
+        let points = face_with_lids();
+        let products = makeup(&[&points], &Selection::all(600, 500));
+        let order: Vec<_> = products.iter().map(|(product, _)| *product).collect();
+        assert_eq!(order, [Product::Blush, Product::Brows, Product::EyeShadow, Product::Eyeliner, Product::Lipstick]);
+        let [blush, brows, shadow, liner, lipstick] = &products[..] else { unreachable!() };
+        // Both sides alike.
+        for cx in [250, 350] {
+            // Eyeliner just above the lashes (a thin line, soft where it
+            // meets the eye), eye shadow up to under the brow, and neither
+            // in the eye.
+            assert!(liner.1.at(cx, 269) > 0.3 && liner.1.at(cx, 262) < 0.05, "{} {}", liner.1.at(cx, 269), liner.1.at(cx, 262));
+            assert!(shadow.1.at(cx, 262) > 0.8 && shadow.1.at(cx, 240) < 0.1, "{} {}", shadow.1.at(cx, 262), shadow.1.at(cx, 240));
+            assert!(liner.1.at(cx, 281) < 0.01 && shadow.1.at(cx, 281) < 0.01);
+            assert!(brows.1.at(cx, 240) > 0.9 && brows.1.at(cx, 262) < 0.05);
+            // Blush between the apple of the cheek and the cheekbone,
+            // fading out.
+            let out = if cx == 250 { cx - 10 } else { cx + 10 };
+            assert!(blush.1.at(out, 337) > 0.4 && blush.1.at(out, 420) < 0.01, "{} {}", blush.1.at(out, 337), blush.1.at(out, 420));
+        }
+        // Lipstick on the lips, not the mouth between them.
+        assert!(lipstick.1.at(300, 378) > 0.9 && lipstick.1.at(300, 400) < 0.01);
+
+        // Only on what the segmentation takes for a face.
+        let left = Selection::rectangle(600, 500, (0.0, 0.0), (300.0, 500.0));
+        let products = makeup(&[&points], &left);
+        assert!(products.iter().all(|(_, on)| on.bounds().is_none_or(|[x, _, w, _]| x + w <= 300)));
+        assert!(products[1].1.at(250, 240) > 0.9);
+
+        // An eye out of sight, on a face turned away, has none round it,
+        // nor the cheek below it.
+        let mut turned = points.clone();
+        let [outer, inner] = EACH_EYE[1].corners;
+        turned[outer] = [turned[inner][0] + 10.0, 275.0, 0.0];
+        let products = makeup(&[&turned], &Selection::all(600, 500));
+        for (product, on) in &products[..4] {
+            assert!(on.at(350, 240) < 0.01 && on.at(350, 262) < 0.01 && on.at(360, 337) < 0.01, "{product:?}");
+        }
+        assert!(products[1].1.at(250, 240) > 0.9 && products[4].1.at(300, 378) > 0.9);
     }
 
     #[test]
