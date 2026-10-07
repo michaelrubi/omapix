@@ -165,7 +165,8 @@ marquee, lasso, add/subtract/intersect, inverse, feather) that limit
 brushes, fills and filters; Spot Healing Brush that picks its own source;
 Move tool for layers and selected pixels.
 Since then: elliptical marquee, Magic Wand, Quick and Object Selection,
-Gradient, Paint Bucket, Crop, Free Transform and pen pressure.
+Gradient, Paint Bucket, Crop, Free Transform, Auto-Align Layers and pen
+pressure.
 
 ### 4. Adjustments (done)
 

@@ -2,6 +2,7 @@
 //! processing. Has no UI or GPU dependencies so it can be tested headless.
 
 pub mod adjust;
+pub mod align;
 pub mod blemish;
 pub mod blend;
 pub mod body;
