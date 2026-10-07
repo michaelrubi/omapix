@@ -15,7 +15,7 @@ use omapix_engine::tiled::{Orientation, Tiled};
 use omapix_engine::{
     ColorProfile, DisplayTransform, Document, NoiseDistribution, NoiseOptions, Proof,
     ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions, SmartBlurQuality,
-    SmartSharpenOptions, align, export, ops, ora,
+    SmartSharpenOptions, align, export, fusion, ops, ora,
 };
 
 use crate::canvas::ToolInput;
@@ -60,7 +60,8 @@ enum Purpose {
     ExportPng,
     ExportLut,
     ProofProfile,
-    Photomerge,
+    /// The photos for Photomerge or Merge to HDR.
+    Merge(Command),
 }
 
 /// Something to do once unsaved changes are dealt with.
@@ -878,11 +879,12 @@ impl App {
         self.pasting = Some(rx);
     }
 
-    /// Photomerge: `paths` lined up as the layers of a new image, in a tab
-    /// of its own, put together in the background.
-    fn photomerge(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+    /// Photomerge or Merge to HDR: `paths` lined up as the layers of a new
+    /// image, in a tab of its own, put together in the background.
+    fn merge(&mut self, cmd: Command, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        let name = cmd.label().trim_end_matches('…');
         if paths.len() < 2 {
-            self.message("Photomerge needs two or more photos", true);
+            self.message(format!("{name} needs two or more photos"), true);
             return;
         }
         let (tx, rx) = channel();
@@ -890,16 +892,19 @@ impl App {
         std::thread::spawn(move || {
             let started = Instant::now();
             let merged = load_frames(&paths).and_then(|(frames, profile)| {
-                let (mut doc, left) = align::photomerge(&frames, profile)?;
+                let (mut doc, left) = match cmd {
+                    Command::MergeToHdr => fusion::merge_to_hdr(&frames, profile)?,
+                    _ => align::photomerge(&frames, profile)?,
+                };
                 // Saved beside the photos, unless somewhere else is chosen.
-                doc.path = paths[0].with_file_name("Panorama");
+                doc.path = paths[0].with_file_name(if cmd == Command::MergeToHdr { "HDR" } else { "Panorama" });
                 Ok((doc, left))
             });
             log::info!("merged {} photos in {:?}", paths.len(), started.elapsed());
             let _ = tx.send(merged);
             ctx.request_repaint();
         });
-        self.merging = Some((Command::Photomerge, rx));
+        self.merging = Some((cmd, rx));
     }
 
     fn pick(&mut self, purpose: Purpose, ctx: &egui::Context) {
@@ -944,7 +949,9 @@ impl App {
                 .set_title("Export Adjustments as LUT")
                 .add_filter("Cube LUT", &["cube"])
                 .set_file_name(format!("{}.cube", self.preset_name())),
-            Purpose::Photomerge => dialog.set_title("Photomerge").add_filter("Images", &OPEN_EXTENSIONS),
+            Purpose::Merge(cmd) => {
+                dialog.set_title(cmd.label().trim_end_matches('…')).add_filter("Images", &OPEN_EXTENSIONS)
+            }
             Purpose::ProofProfile => {
                 // Where the last one was, or where profiles are installed.
                 let last = self.filters.proof_profile.as_deref().and_then(Path::parent);
@@ -960,7 +967,7 @@ impl App {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let files = match purpose {
-                Purpose::Photomerge => dialog.pick_files(),
+                Purpose::Merge(_) => dialog.pick_files(),
                 Purpose::Open | Purpose::ProofProfile => dialog.pick_file().map(|f| vec![f]),
                 _ => dialog.save_file().map(|f| vec![f]),
             };
@@ -1129,8 +1136,8 @@ impl App {
             let purpose = *purpose;
             self.picking = None;
             let result = match (purpose, result) {
-                (Purpose::Photomerge, Some(paths)) => {
-                    self.photomerge(paths, ctx);
+                (Purpose::Merge(cmd), Some(paths)) => {
+                    self.merge(cmd, paths, ctx);
                     None
                 }
                 (_, result) => result.and_then(|paths| paths.into_iter().next()),
@@ -1316,6 +1323,7 @@ impl App {
                     | Command::Quit
                     | Command::BatchExport
                     | Command::Photomerge
+                    | Command::MergeToHdr
                     | Command::AiModels
             )
                 || (cmd == Command::ReopenLast && self.recent.last().is_some());
@@ -1490,7 +1498,7 @@ impl App {
             }
             Command::NewFromClipboard => self.new_from_clipboard(ctx),
             Command::Open => self.pick(Purpose::Open, ctx),
-            Command::Photomerge => self.pick(Purpose::Photomerge, ctx),
+            Command::Photomerge | Command::MergeToHdr => self.pick(Purpose::Merge(cmd), ctx),
             Command::Close => self.guard(Then::Close, ctx),
             Command::ReopenLast => {
                 if let Some(path) = self.recent.last().cloned() {
@@ -2303,6 +2311,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::BatchExport, None);
                 ui.menu_button("Automate", |ui| {
                     self.menu_item(ui, Command::Photomerge, None);
+                    self.menu_item(ui, Command::MergeToHdr, None);
                 });
                 ui.separator();
                 self.menu_item(ui, Command::Quit, None);
@@ -7554,7 +7563,7 @@ mod tests {
     }
 
     #[test]
-    fn photomerge_opens_the_photos_chosen_as_one_image_in_a_new_tab() {
+    fn photomerge_and_merge_to_hdr_open_the_photos_chosen_as_one_image_in_a_new_tab() {
         let ctx = egui::Context::default();
         let mut app = test_app();
         let dir = std::env::temp_dir().join(format!("omapix-app-photomerge-{}", std::process::id()));
@@ -7578,9 +7587,9 @@ mod tests {
             }
         };
 
-        app.photomerge(paths[..1].to_vec(), &ctx);
+        app.merge(Command::Photomerge, paths[..1].to_vec(), &ctx);
         assert_eq!(app.status.take().map(|s| s.0), Some("Photomerge needs two or more photos".into()));
-        app.photomerge(paths.clone(), &ctx);
+        app.merge(Command::Photomerge, paths.clone(), &ctx);
         finish(&mut app);
         assert!(app.status.is_none(), "{:?}", app.status.as_ref().map(|s| &s.0));
         assert_eq!(app.tabs().count(), 2);
@@ -7591,14 +7600,24 @@ mod tests {
         assert!(doc.layers.iter().all(|l| l.mask.is_some()));
         assert_eq!(doc.composite().pixels()[200 * 900 + 450][3], 65535);
 
+        // Merge to HDR takes the same photos: lined up on one of them,
+        // hidden under what they merge into.
+        app.merge(Command::MergeToHdr, paths.clone(), &ctx);
+        finish(&mut app);
+        assert_eq!(app.tabs().count(), 3);
+        let doc = &app.editor.as_ref().unwrap().doc;
+        assert_eq!((doc.width, doc.height, doc.file_name()), (600, 400, "HDR".to_owned()));
+        let layers: Vec<(&str, bool)> = doc.layers.iter().map(|l| (l.name.as_str(), l.visible)).collect();
+        assert_eq!(layers, [("left", false), ("right", false), ("Merged", true)]);
+
         // What doesn't line up is said, and nothing opens.
         let other = omapix_engine::Raster::new(600, 400, vec![[30000, 30000, 30000, 65535]; 600 * 400]);
         export::png(&Document::from_image("t.tif".into(), &other, ColorProfile::srgb(), 16), &paths[1]).unwrap();
-        app.photomerge(paths, &ctx);
+        app.merge(Command::Photomerge, paths, &ctx);
         finish(&mut app);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("Photomerge: the photos don't line up with each other"));
-        assert_eq!(app.tabs().count(), 2);
+        assert_eq!(app.tabs().count(), 3);
     }
 
     #[test]
