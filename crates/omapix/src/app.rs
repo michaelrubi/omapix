@@ -19,7 +19,7 @@ use omapix_engine::{
 };
 
 use crate::canvas::ToolInput;
-use crate::settings::FilterSettings;
+use crate::settings::{FilterSettings, WebExport};
 use crate::tablet::Tablet;
 use crate::content_fill::ContentFill;
 use crate::select_subject::SelectSubject;
@@ -40,6 +40,24 @@ use crate::tools::{Sample, Tools};
 
 const OPEN_EXTENSIONS: [&str; 7] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd"];
 const JPEG_QUALITY: u8 = 92;
+
+/// The file dialog's filter for Export for Web's format: its name and
+/// extensions, the usual one first.
+fn web_format(settings: &WebExport) -> (&'static str, &'static [&'static str]) {
+    if settings.jpeg { ("JPEG", &["jpg", "jpeg"]) } else { ("PNG", &["png"]) }
+}
+
+/// Export for Web's file for `doc`, with these settings.
+fn web_export(doc: &Document, settings: &WebExport) -> omapix_engine::Result<Vec<u8>> {
+    let long_edge = settings.resize.then_some(settings.long_edge);
+    export::web(doc, long_edge, settings.metadata, settings.jpeg.then_some(settings.quality))
+}
+
+/// A file's size as it's shown: "412 KB", "3.5 MB".
+fn file_size(bytes: usize) -> String {
+    let kb = bytes as f64 / 1024.0;
+    if kb < 1000.0 { format!("{kb:.0} KB") } else { format!("{:.1} MB", kb / 1024.0) }
+}
 /// Points a side of an exported LUT (33 is the usual size).
 const LUT_SIZE: usize = 33;
 /// How near Free Transform's handles the pointer grabs them, in points.
@@ -58,6 +76,7 @@ enum Purpose {
     ExportTiff,
     ExportJpeg,
     ExportPng,
+    ExportWeb,
     ExportLut,
     ProofProfile,
     /// The photos for Photomerge or Merge to HDR.
@@ -242,6 +261,13 @@ enum Dialog {
         files: Vec<PathBuf>,
         settings: crate::settings::BatchExport,
         picking: Option<(bool, Receiver<Option<Vec<PathBuf>>>)>,
+    },
+    /// File › Export for Web: the settings, the file's size with the
+    /// settings it was last worked out for, and one being worked out.
+    ExportWeb {
+        settings: WebExport,
+        size: Option<(WebExport, Result<usize, String>)>,
+        sizing: Option<(WebExport, Receiver<Result<usize, String>>)>,
     },
     /// Help › AI Models: where each of `omapix_ai::models::models()` was
     /// found on disk, if it was, when the dialog opened.
@@ -945,6 +971,13 @@ impl App {
                 .set_title("Export as PNG")
                 .add_filter("PNG", &["png"])
                 .set_file_name(format!("{stem}.png")),
+            Purpose::ExportWeb => {
+                let (name, extensions) = web_format(&self.filters.web_export);
+                dialog
+                    .set_title("Export for Web")
+                    .add_filter(name, extensions)
+                    .set_file_name(format!("{stem}.{}", extensions[0]))
+            }
             Purpose::ExportLut => dialog
                 .set_title("Export Adjustments as LUT")
                 .add_filter("Cube LUT", &["cube"])
@@ -990,15 +1023,19 @@ impl App {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         let label = match purpose {
-            Purpose::ExportTiff | Purpose::ExportJpeg | Purpose::ExportPng => "Exporting",
+            Purpose::ExportTiff | Purpose::ExportJpeg | Purpose::ExportPng | Purpose::ExportWeb => "Exporting",
             _ => "Saving",
         };
+        let web = self.filters.web_export.clone();
         std::thread::spawn(move || {
             let started = Instant::now();
             let result = match purpose {
                 Purpose::ExportTiff => export::tiff(&doc, &path).map(|_| false),
                 Purpose::ExportJpeg => export::jpeg(&doc, &path, JPEG_QUALITY).map(|_| false),
                 Purpose::ExportPng => export::png(&doc, &path).map(|_| false),
+                Purpose::ExportWeb => {
+                    web_export(&doc, &web).and_then(|bytes| export::write(&path, &bytes)).map(|_| false)
+                }
                 // A round trip from darktable also updates its TIFF.
                 _ => ora::save(&doc, &path)
                     .and_then(|_| doc.round_trip.as_ref().map_or(Ok(()), |tiff| export::tiff(&doc, tiff)))
@@ -1148,6 +1185,10 @@ impl App {
                     Purpose::SaveAs => self.write(purpose, path.with_extension("ora"), ctx),
                     Purpose::ExportLut => self.export_lut(&path.with_extension("cube")),
                     Purpose::ProofProfile => self.set_proof_profile(path),
+                    Purpose::ExportWeb => {
+                        let extension = web_format(&self.filters.web_export).1[0];
+                        self.write(purpose, path.with_extension(extension), ctx);
+                    }
                     _ => self.write(purpose, path, ctx),
                 }
             }
@@ -1468,6 +1509,7 @@ impl App {
             Command::ExportTiff,
             Command::ExportJpeg,
             Command::ExportPng,
+            Command::ExportForWeb,
             Command::Rotate180,
             Command::Rotate90Cw,
             Command::Rotate90Ccw,
@@ -1525,6 +1567,13 @@ impl App {
             Command::ExportJpeg => self.pick(Purpose::ExportJpeg, ctx),
             Command::ExportPng => self.pick(Purpose::ExportPng, ctx),
             Command::ExportAdjustmentLut => self.pick(Purpose::ExportLut, ctx),
+            Command::ExportForWeb => {
+                self.dialog = Some(Dialog::ExportWeb {
+                    settings: self.filters.web_export.clone(),
+                    size: None,
+                    sizing: None,
+                });
+            }
             Command::BatchExport => {
                 self.dialog = Some(Dialog::BatchExport {
                     files: Vec::new(),
@@ -2316,6 +2365,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::ExportTiff, None);
                 self.menu_item(ui, Command::ExportJpeg, None);
                 self.menu_item(ui, Command::ExportPng, None);
+                self.menu_item(ui, Command::ExportForWeb, None);
                 self.menu_item(ui, Command::BatchExport, None);
                 ui.menu_button("Automate", |ui| {
                     self.menu_item(ui, Command::Photomerge, None);
@@ -3308,6 +3358,66 @@ self.filters.remember(&filter);
                             close = true;
                         }
                         if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::ExportWeb { settings, size, sizing } => {
+                    let Some(editor) = editor else { return };
+                    if let Some((for_settings, rx)) = sizing
+                        && let Ok(result) = rx.try_recv()
+                    {
+                        *size = Some((for_settings.clone(), result));
+                        *sizing = None;
+                    }
+                    ui.heading("Export for Web");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut settings.jpeg, true, "JPEG");
+                        ui.add_enabled(settings.jpeg, egui::Slider::new(&mut settings.quality, 1..=100).text("quality"));
+                        ui.radio_value(&mut settings.jpeg, false, "PNG");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut settings.resize, "Resize the long edge to");
+                        ui.add_enabled(settings.resize, egui::DragValue::new(&mut settings.long_edge).range(1..=MAX_SIDE).suffix(" px"));
+                    });
+                    ui.checkbox(&mut settings.metadata, "Include metadata (camera, lens, date)");
+                    ui.add_space(8.0);
+                    // The size is worked out again, one at a time, whenever
+                    // the settings aren't those it was last worked out for.
+                    let current = size.as_ref().filter(|(for_settings, _)| for_settings == settings);
+                    if current.is_none() && sizing.is_none() {
+                        let (tx, rx) = channel();
+                        let (doc, web, ctx) = (editor.doc.clone(), settings.clone(), ui.ctx().clone());
+                        std::thread::spawn(move || {
+                            let _ = tx.send(web_export(&doc, &web).map(|bytes| bytes.len()).map_err(|e| e.to_string()));
+                            ctx.request_repaint();
+                        });
+                        *sizing = Some((settings.clone(), rx));
+                    }
+                    let (w, h) = export::fitted(editor.doc.width, editor.doc.height, settings.resize.then_some(settings.long_edge));
+                    let file = match current {
+                        Some((_, Ok(bytes))) => file_size(*bytes),
+                        Some((_, Err(e))) => e.clone(),
+                        None => "…".to_owned(),
+                    };
+                    ui.label(RichText::new(format!("{w} × {h} px, sRGB    {file}")).color(hint));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("Export…").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ui.button("Defaults").clicked() {
+                            *settings = defaults.web_export.clone();
+                        }
+                        if ok {
+                            let settings = settings.clone();
+                            action = Some(Box::new(move |app, ctx| {
+                                app.filters.web_export = settings;
+                                app.filters.save();
+                                app.pick(Purpose::ExportWeb, ctx);
+                            }));
                             close = true;
                         }
                     });
@@ -8832,6 +8942,68 @@ mod tests {
         // An export isn't a save.
         assert!(app.modified());
         assert!(app.editor.as_ref().unwrap().doc.saved_path.is_none());
+    }
+
+    #[test]
+    fn export_for_web_shows_the_size_and_writes_what_its_settings_say() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        assert!(app.enabled(Command::ExportForWeb));
+        // Some detail, for the quality to matter.
+        app.editor.as_mut().unwrap().edit("Noise", |doc, _| {
+            let noise: Vec<_> = (0..600 * 400u32).map(|i| [(i.wrapping_mul(2654435761) >> 16) as u16; 4]).collect();
+            doc.layers[0].pixels = Tiled::from_slice(600, 400, [0; 4], &noise).map(|p| [p[0], p[1], p[2], 65535]);
+        });
+        app.filters.web_export = WebExport { long_edge: 300, ..Default::default() };
+        app.run(Command::ExportForWeb, &ctx);
+        // Frames of the dialog until it has the file's size for its
+        // settings, worked out in the background.
+        let sized = |app: &mut App| loop {
+            dialog_frame(app, &ctx, None, "");
+            match &app.dialog {
+                Some(Dialog::ExportWeb { settings, size: Some((for_settings, size)), .. }) if for_settings == settings => {
+                    break *size.as_ref().unwrap();
+                }
+                Some(Dialog::ExportWeb { .. }) => std::thread::sleep(Duration::from_millis(2)),
+                _ => panic!("no Export for Web dialog"),
+            }
+        };
+        let jpeg = sized(&mut app);
+        // A lower quality is worked out again, and is smaller; a PNG isn't.
+        let Some(Dialog::ExportWeb { settings, .. }) = &mut app.dialog else { unreachable!() };
+        settings.quality = 20;
+        assert!(sized(&mut app) < jpeg);
+        let Some(Dialog::ExportWeb { settings, .. }) = &mut app.dialog else { unreachable!() };
+        (settings.jpeg, settings.metadata) = (false, false);
+        let png = sized(&mut app);
+
+        // Export… remembers the settings and asks where (answered here),
+        // then writes that file, with the format's extension.
+        let (tx, rx) = channel();
+        app.picking = Some((Purpose::ExportWeb, rx));
+        let button = dialog_frame(&mut app, &ctx, None, "Export…").expect("an Export button");
+        dialog_frame(&mut app, &ctx, Some(button), "");
+        assert!(app.dialog.is_none());
+        assert_eq!(app.filters.web_export, WebExport { jpeg: false, quality: 20, resize: true, long_edge: 300, metadata: false });
+        let dir = std::env::temp_dir().join(format!("omapix-app-web-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        tx.send(Some(vec![dir.join("out")])).unwrap();
+        app.poll(&ctx);
+        while app.file_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        let path = dir.join("out.png");
+        let written = std::fs::metadata(&path).unwrap().len();
+        let flat = omapix_engine::io::load(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        // The size the dialog showed, give or take the time in the sRGB
+        // profile, which Little CMS stamps as it's made.
+        assert!(written.abs_diff(png as u64) < 64, "wrote {written}, showed {png}");
+        assert_eq!((flat.width, flat.height), (300, 200));
+        assert_eq!(app.status.as_ref().unwrap().0, "Exported out.png");
+        assert_eq!(file_size(420_000), "410 KB");
+        assert_eq!(file_size(3_670_016), "3.5 MB");
     }
 
     #[test]

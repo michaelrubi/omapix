@@ -41,7 +41,8 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   (see [AI features](#ai-features)).
 - **Files:** opens TIFF, PNG, JPEG, PSD and OpenRaster. Saves layers as
   OpenRaster (`.ora`, which Krita opens too). Exports 16-bit TIFF, JPEG
-  and PNG, one at a time or in batches. darktable gets an "edit in Omapix"
+  and PNG, one at a time or in batches, and Export for Web sizes one for
+  posting and says how big the file will be. darktable gets an "edit in Omapix"
   export target that brings the result back beside the raw.
 
 Shortcuts follow Photoshop, and can be changed in

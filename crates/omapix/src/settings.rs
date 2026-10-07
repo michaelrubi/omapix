@@ -44,6 +44,26 @@ impl Default for BatchExport {
     }
 }
 
+/// File › Export for Web's settings.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct WebExport {
+    /// JPEG at `quality`, or else a PNG.
+    pub jpeg: bool,
+    pub quality: u8,
+    /// Shrink the image so its long edge is at most `long_edge` px.
+    pub resize: bool,
+    pub long_edge: u32,
+    /// Keep the EXIF metadata (camera, lens, capture date).
+    pub metadata: bool,
+}
+
+impl Default for WebExport {
+    fn default() -> Self {
+        Self { jpeg: true, quality: 85, resize: true, long_edge: 2048, metadata: true }
+    }
+}
+
 /// Each filter's and retouching setup's settings.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -87,6 +107,7 @@ pub struct FilterSettings {
     pub smart_blur: SmartBlurOptions,
     pub noise: NoiseOptions,
     pub batch_export: BatchExport,
+    pub web_export: WebExport,
     /// Where they're kept; `None` (the defaults, and in tests) isn't saved.
     #[serde(skip)]
     path: Option<PathBuf>,
@@ -146,6 +167,7 @@ impl Default for FilterSettings {
             },
             noise: NoiseOptions::default(),
             batch_export: BatchExport::default(),
+            web_export: WebExport::default(),
             path: None,
         }
     }
