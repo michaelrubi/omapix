@@ -15,7 +15,7 @@ use omapix_engine::tiled::{Orientation, Tiled};
 use omapix_engine::{
     ColorProfile, DisplayTransform, Document, NoiseDistribution, NoiseOptions, Proof,
     ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions, SmartBlurQuality,
-    SmartSharpenOptions, export, ops, ora,
+    SmartSharpenOptions, align, export, ops, ora,
 };
 
 use crate::canvas::ToolInput;
@@ -544,6 +544,9 @@ pub struct App {
     content_fill: ContentFill,
     denoising: crate::denoise::Denoising,
     upscaling: crate::upscale::Upscaling,
+    /// Auto-Align Layers under way: the names of the layers nothing lined
+    /// up with, once it's done (`None` if there weren't two to line up).
+    aligning: Option<Receiver<Option<Vec<String>>>>,
     select_subject: SelectSubject,
     face_selection: FaceSelection,
     whitening: crate::whiten::Whitening,
@@ -640,6 +643,7 @@ impl App {
             content_fill: ContentFill::default(),
             denoising: Default::default(),
             upscaling: Default::default(),
+            aligning: None,
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             whitening: Default::default(),
@@ -1072,6 +1076,16 @@ impl App {
             for e in errors.into_iter().flatten() {
                 self.message(e, true);
             }
+            if let Some(left) = self.aligning.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                self.aligning = None;
+                match left {
+                    None => self.message("Auto-Align Layers needs two layers that aren't locked", true),
+                    Some(left) if !left.is_empty() => {
+                        self.message(format!("Nothing lines up with {}", left.join(", ")), true);
+                    }
+                    Some(_) => {}
+                }
+            }
         }
         if let Some((purpose, rx)) = &self.picking
             && let Ok(result) = rx.try_recv()
@@ -1280,6 +1294,10 @@ impl App {
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
             Command::FreeTransform => layer.is_some() && editor.transform().is_none(),
+            Command::AutoAlignLayers => {
+                let pixels = |id: &u64| doc.layer(*id).is_some_and(|l| l.has_pixels());
+                editor.selected().iter().filter(|id| pixels(id)).count() > 1
+            }
             Command::Redo => editor.redo_label().is_some(),
             // Something must be left, and layer must be deletable.
             Command::DeleteLayer => {
@@ -1776,6 +1794,20 @@ impl App {
                     self.message(why, true);
                 }
             }
+            Command::AutoAlignLayers => {
+                if let Some(editor) = &mut self.editor {
+                    let selected = editor.selected();
+                    let (tx, rx) = channel();
+                    editor.edit_in_background(
+                        cmd.label(),
+                        move |doc, _| {
+                            let _ = tx.send(align::auto_align(doc, &selected));
+                        },
+                        ctx,
+                    );
+                    self.aligning = Some(rx);
+                }
+            }
             // Undo while transforming cancels it, as in Photoshop.
             Command::Undo if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) => {
                 self.transform_drag = None;
@@ -2233,6 +2265,7 @@ self.filters.remember(&filter);
                 });
                 ui.separator();
                 self.menu_item(ui, Command::FreeTransform, None);
+                self.menu_item(ui, Command::AutoAlignLayers, None);
                 ui.separator();
                 self.menu_item(ui, Command::FillForeground, None);
                 self.menu_item(ui, Command::FillBackground, None);
@@ -5900,6 +5933,7 @@ mod tests {
             content_fill: ContentFill::default(),
             denoising: Default::default(),
             upscaling: Default::default(),
+            aligning: None,
             select_subject: SelectSubject::default(),
             face_selection: FaceSelection::default(),
             whitening: Default::default(),
@@ -7420,6 +7454,72 @@ mod tests {
         assert_eq!((editor.doc.width, editor.doc.height, editor.undo_label()), (500, 350, Some("Crop")));
         assert!(editor.doc.selection.is_none());
         assert_eq!(app.crop_box(), [0.0, 0.0, 500.0, 350.0]);
+    }
+
+    #[test]
+    fn auto_align_layers_lines_up_the_selected_layers_and_says_which_it_couldnt() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        // A scene of grey rectangles, and the same one from a little to
+        // the side, as a second frame of it would be.
+        let (w, h) = (600usize, 400usize);
+        let mut px = vec![[30000u16, 30000, 30000, 65535]; w * h];
+        let mut seed = 7u64;
+        let mut random = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for _ in 0..400 {
+            let (x, y, v) = (random(w), random(h), 5000 + random(55000) as u16);
+            let (rw, rh) = (8 + random(50), 8 + random(50));
+            for j in y..(y + rh).min(h) {
+                px[j * w + x..j * w + (x + rw).min(w)].fill([v, v, v, 65535]);
+            }
+        }
+        let scene = Tiled::from_slice(w as u32, h as u32, [0; 4], &px);
+        let editor = app.editor.as_mut().unwrap();
+        let bottom = editor.active;
+        let mut top = 0;
+        editor.edit("Scene", |doc, _| {
+            doc.selection = None;
+            doc.layers[0].pixels = scene.clone();
+            top = doc.next_layer_id();
+            doc.layers.push(Layer::from_pixels(top, "Second frame", scene.translated(20, 10, [0; 4])));
+        });
+        let finish = |app: &mut App| {
+            while app.aligning.is_some() {
+                std::thread::sleep(Duration::from_millis(5));
+                app.editor.as_mut().unwrap().update(&ctx);
+                app.poll(&ctx);
+            }
+        };
+
+        // One layer has nothing to line up with.
+        assert!(!app.enabled(Command::AutoAlignLayers));
+        app.editor.as_mut().unwrap().select_layers(top, vec![bottom]);
+        assert!(app.enabled(Command::AutoAlignLayers));
+        app.run(Command::AutoAlignLayers, &ctx);
+        assert!(!app.enabled(Command::AutoAlignLayers), "while it's at it");
+        finish(&mut app);
+        let editor = app.editor.as_mut().unwrap();
+        assert_eq!(editor.undo_label(), Some("Auto-Align Layers"));
+        assert!(app.status.is_none());
+        let layer = |id| &editor.doc.layer(id).unwrap().pixels;
+        assert!(layer(bottom).same_tiles(&scene), "the bottom one stays");
+        let (was, now) = (scene.get(300, 200), layer(top).get(300, 200));
+        assert!(was[0].abs_diff(now[0]) < 700, "{was:?} {now:?}");
+        assert_eq!(layer(top).get(595, 395)[3], 0, "it moved up and left");
+
+        // A layer of something else is left where it is, and named.
+        let mut flat = 0;
+        editor.edit("New Layer", |doc, _| {
+            flat = doc.next_layer_id();
+            doc.layers.push(Layer::empty(flat, "Notes", w as u32, h as u32));
+        });
+        editor.select_layers(top, vec![bottom, flat]);
+        app.run(Command::AutoAlignLayers, &ctx);
+        finish(&mut app);
+        assert_eq!(app.status.as_ref().map(|s| (s.0.as_str(), s.1)), Some(("Nothing lines up with Notes", true)));
     }
 
     #[test]

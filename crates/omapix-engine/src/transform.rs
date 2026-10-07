@@ -87,6 +87,61 @@ impl Affine {
     }
 }
 
+/// A perspective transform, as lines up two photos of one scene (see
+/// align.rs): (x, y) goes to ((a·x + b·y + c) / w, (d·x + e·y + f) / w),
+/// where w = g·x + h·y + i.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projective([f64; 9]);
+
+impl Projective {
+    pub const IDENTITY: Projective = Projective([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+
+    /// From (a, b, c, d, e, f, g, h, i), as above.
+    pub fn new(m: [f64; 9]) -> Self {
+        Projective(m)
+    }
+
+    /// This, then `next`.
+    pub fn then(&self, next: &Projective) -> Projective {
+        let (m, n) = (&self.0, &next.0);
+        Projective(std::array::from_fn(|i| (0..3).map(|k| n[i / 3 * 3 + k] * m[k * 3 + i % 3]).sum()))
+    }
+
+    /// Where a point goes, or `None` from behind the camera.
+    pub fn apply(&self, (x, y): (f64, f64)) -> Option<(f64, f64)> {
+        let m = &self.0;
+        let w = m[6] * x + m[7] * y + m[8];
+        (w > 1e-9).then(|| ((m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w))
+    }
+
+    pub fn inverse(&self) -> Option<Projective> {
+        let [a, b, c, d, e, f, g, h, i] = self.0;
+        let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let m = [
+            e * i - f * h,
+            c * h - b * i,
+            b * f - c * e,
+            f * g - d * i,
+            a * i - c * g,
+            c * d - a * f,
+            d * h - e * g,
+            b * g - a * h,
+            a * e - b * d,
+        ];
+        Some(Projective(m.map(|v| v / det)))
+    }
+}
+
+impl From<Affine> for Projective {
+    fn from(t: Affine) -> Self {
+        let [a, b, c, d, e, f] = t.0;
+        Projective([a, b, c, d, e, f, 0.0, 0.0, 1.0])
+    }
+}
+
 /// Bilinear is fast, for previews while dragging; bicubic is sharper, for
 /// the result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,18 +208,52 @@ impl Resample for u16 {
 /// A whole-pixel move is exact. Only the tiles that can change are worked
 /// out: where `image` isn't `outside` (all of it if its fill isn't).
 pub fn transformed<T: Resample>(image: &Tiled<T>, t: &Affine, outside: T, resampling: Resampling) -> Tiled<T> {
-    let (w, h) = (image.width(), image.height());
     if let Some((dx, dy)) = t.whole_pixel_move() {
         return image.translated(dx, dy, outside);
     }
-    let (Some(inverse), Some((x0, y0, x1, y1))) = (t.inverse(), content_bounds(image, outside)) else {
+    let Some(inverse) = t.inverse() else {
+        return Tiled::new(image.width(), image.height(), outside);
+    };
+    let (sx, sy, _) = inverse.decompose();
+    resampled(image, outside, resampling, |p| Some(t.apply(p)), |p| Some(inverse.apply(p)), sx.max(sy.abs()))
+}
+
+/// As [`transformed`], by a perspective transform.
+pub fn projected<T: Resample>(image: &Tiled<T>, t: &Projective, outside: T, resampling: Resampling) -> Tiled<T> {
+    let (w, h) = (f64::from(image.width()), f64::from(image.height()));
+    let Some(inverse) = t.inverse() else {
+        return Tiled::new(image.width(), image.height(), outside);
+    };
+    // How much it shrinks the image where it shrinks it most, from a
+    // pixel's step each way at the corners and the middle.
+    let shrink = |p: (f64, f64)| {
+        let at = |q| t.apply(q).unwrap_or(p);
+        let (o, x, y) = (at(p), at((p.0 + 1.0, p.1)), at((p.0, p.1 + 1.0)));
+        1.0 / (x.0 - o.0).hypot(x.1 - o.1).min((y.0 - o.0).hypot(y.1 - o.1)).max(1e-6)
+    };
+    let stretch = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h), (w / 2.0, h / 2.0)].map(shrink);
+    let stretch = stretch.into_iter().fold(1.0, f64::max);
+    resampled(image, outside, resampling, |p| t.apply(p), |p| inverse.apply(p), stretch)
+}
+
+/// `image` with its points moved by `to`, whose inverse is `from`, the
+/// kernel `stretch` times wider where that shrinks it.
+fn resampled<T: Resample>(
+    image: &Tiled<T>,
+    outside: T,
+    resampling: Resampling,
+    to: impl Fn((f64, f64)) -> Option<(f64, f64)>,
+    from: impl Fn((f64, f64)) -> Option<(f64, f64)> + Sync,
+    stretch: f64,
+) -> Tiled<T> {
+    let (w, h) = (image.width(), image.height());
+    let Some((x0, y0, x1, y1)) = content_bounds(image, outside) else {
         return Tiled::new(w, h, outside);
     };
     // The content, with a margin of `outside` for the kernel to read.
     let reach = resampling.reach();
-    let (sx, sy, _) = inverse.decompose();
     // Shrinking, the kernel widens to cover the pixels that merge.
-    let stretch = (sx.max(sy.abs())).max(1.0);
+    let stretch = stretch.max(1.0);
     let margin = (reach * stretch).ceil() as i64 + 1;
     let (bx, by) = (x0 as i64 - margin, y0 as i64 - margin);
     let (bw, bh) = ((x1 - x0) as i64 + 2 * margin, (y1 - y0) as i64 + 2 * margin);
@@ -188,7 +277,10 @@ pub fn transformed<T: Resample>(image: &Tiled<T>, t: &Affine, outside: T, resamp
     };
 
     // Where the content lands.
-    let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| t.apply((f64::from(x), f64::from(y))));
+    let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| to((f64::from(x), f64::from(y))));
+    let Some(corners) = corners.into_iter().collect::<Option<Vec<_>>>() else {
+        return Tiled::new(w, h, outside);
+    };
     let lo = |i: usize| corners.iter().map(|c| if i == 0 { c.0 } else { c.1 }).fold(f64::MAX, f64::min);
     let hi = |i: usize| corners.iter().map(|c| if i == 0 { c.0 } else { c.1 }).fold(f64::MIN, f64::max);
     let (dx0, dy0) = ((lo(0) - 1.0).floor(), (lo(1) - 1.0).floor());
@@ -204,7 +296,9 @@ pub fn transformed<T: Resample>(image: &Tiled<T>, t: &Affine, outside: T, resamp
         let mut tile = vec![outside; (TILE * TILE) as usize];
         for j in 0..th as u32 {
             for i in 0..tw as u32 {
-                let (u, v) = inverse.apply((tx + f64::from(i) + 0.5, ty + f64::from(j) + 0.5));
+                let Some((u, v)) = from((tx + f64::from(i) + 0.5, ty + f64::from(j) + 0.5)) else {
+                    continue;
+                };
                 let (u, v) = (u - 0.5, v - 0.5);
                 let mut sum = [0.0f32; 4];
                 let mut total = 0.0;
@@ -344,6 +438,32 @@ mod tests {
             .then(&Affine::rotate_about(0.5, (0.0, 0.0)))
             .decompose();
         assert!((sx - 2.0).abs() < 1e-9 && (sy - 3.0).abs() < 1e-9 && (angle - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn perspective_composes_inverts_and_resamples_as_the_affine_it_is() {
+        let tilt = Projective::new([1.1, 0.05, 12.0, -0.03, 0.95, -7.0, 2e-4, -1e-4, 1.0]);
+        let t = Projective::from(Affine::rotate_about(0.3, (50.0, 80.0))).then(&tilt);
+        let p = t.apply((33.0, -4.0)).unwrap();
+        let back = t.inverse().unwrap().apply(p).unwrap();
+        assert!((back.0 - 33.0).abs() < 1e-9 && (back.1 + 4.0).abs() < 1e-9);
+        // Parallel lines meet: twice as far along isn't twice as far.
+        let (near, far) = (tilt.apply((100.0, 0.0)).unwrap(), tilt.apply((200.0, 0.0)).unwrap());
+        assert!(far.0 - near.0 < near.0 - 12.0);
+        // Nothing comes from behind the camera.
+        assert_eq!(tilt.apply((-6000.0, 0.0)), None);
+
+        let turn = Affine::scale_about(1.5, 1.5, (100.0, 100.0)).then(&Affine::rotate_about(0.4, (150.0, 150.0)));
+        let (a, b) = (
+            transformed(&square(), &turn, [0; 4], Resampling::Bicubic),
+            projected(&square(), &turn.into(), [0; 4], Resampling::Bicubic),
+        );
+        assert_eq!(a.to_vec(), b.to_vec());
+        // Tilted, the square's far side is the shorter one.
+        let lean = Projective::new([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2e-3, 0.0, 1.0]);
+        let out = projected(&square(), &lean, [0; 4], Resampling::Bicubic);
+        let tall = |x: u32| (0..400).filter(|&y| out.get(x, y)[3] > 32768).count();
+        assert!(tall(90) > tall(140) + 5 && tall(140) > 60, "{} {}", tall(90), tall(140));
     }
 
     #[test]
