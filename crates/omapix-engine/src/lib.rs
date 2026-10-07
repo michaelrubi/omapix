@@ -15,6 +15,7 @@ pub mod document;
 pub mod export;
 pub mod filters;
 pub mod fill;
+pub mod fusion;
 pub mod groups;
 pub mod histogram;
 pub mod io;

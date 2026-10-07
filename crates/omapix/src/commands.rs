@@ -143,6 +143,7 @@ pub enum Command {
     Liquify,
     BatchExport,
     Photomerge,
+    MergeToHdr,
     AiModels,
     Finish,
 }
@@ -303,6 +304,7 @@ impl Command {
         Command::Liquify,
         Command::BatchExport,
         Command::Photomerge,
+        Command::MergeToHdr,
         Command::AiModels,
         Command::Finish,
     ];
@@ -529,6 +531,7 @@ impl Command {
             Command::Liquify => "Liquify…",
             Command::BatchExport => "Batch Export…",
             Command::Photomerge => "Photomerge…",
+            Command::MergeToHdr => "Merge to HDR…",
             Command::AiModels => "AI Models…",
             Command::Finish => "Finish",
         }
