@@ -881,7 +881,11 @@ Reordered on 2026-09-29 (see Decisions).
       Girl, Evening Glam), and a group for each face.
     - Mascara, a winged liner and lip gloss.
 16. **Smarter Auto Liquify.**
-    - Auto Harmonize subtle proportion & symmetry baseline slider.
+    - ~~Auto for a face's symmetry~~ (done, 2026-10-07): an Auto button in
+      Face-Aware Liquify sets the Symmetry sliders from how uneven each of
+      the face's features is, evening it only as far as faces usually are
+      (`reshape::harmony`). No model of its own.
+    - One Harmonize slider for how much, and a small smile lift.
     - Posture & silhouette alignment from pose landmarks.
     - Background line protection (straight edge dampening).
 
