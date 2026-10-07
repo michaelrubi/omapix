@@ -200,6 +200,10 @@ fn write_tiff_metadata<W: std::io::Write + std::io::Seek, K: tiff::encoder::Tiff
 /// quarter smaller than a plain baseline encoder for the same quality, and
 /// smooth backdrops don't band.
 pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
+    write(path, &jpeg_bytes(doc, quality)?)
+}
+
+fn jpeg_bytes(doc: &Document, quality: u8) -> Result<Vec<u8>> {
     let image = doc.composite();
     let transform = LinearSrgbTransform::new(&doc.profile)?;
     let mut rgb = vec![[0u16; 3]; image.pixels().len()];
@@ -229,8 +233,12 @@ pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
         .encode_from_bytes(image.width(), image.height(), PixelLayout::Rgb16Linear)
         .map_err(jpeg_error)?;
     encoder.push_packed(bytemuck::cast_slice(&rgb), Unstoppable).map_err(jpeg_error)?;
-    let bytes = encoder.finish().map_err(jpeg_error)?;
-    create(path)?.write_all(&bytes).map_err(|source| Error::Read {
+    encoder.finish().map_err(jpeg_error)
+}
+
+/// Write an export's `bytes` (as [`web`] makes) to `path`.
+pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
+    create(path)?.write_all(bytes).map_err(|source| Error::Read {
         path: path.display().to_string(),
         source,
     })
@@ -240,6 +248,10 @@ pub fn jpeg(doc: &Document, path: &Path, quality: u8) -> Result<()> {
 /// web and other apps. Keeps transparency, which a JPEG can't, if the image
 /// has any.
 pub fn png(doc: &Document, path: &Path) -> Result<()> {
+    write(path, &png_bytes(doc)?)
+}
+
+fn png_bytes(doc: &Document) -> Result<Vec<u8>> {
     let image = doc.composite();
     let transform = DisplayTransform::to_srgb(&doc.profile)?;
     let mut rgba = vec![[0u8; 4]; image.pixels().len()];
@@ -247,7 +259,8 @@ pub fn png(doc: &Document, path: &Path) -> Result<()> {
         .zip(image.pixels().par_chunks(65536))
         .for_each(|(out, src)| transform.convert(src, out));
     let srgb = lcms2::Profile::new_srgb().icc().map_err(Error::Color)?;
-    let mut encoder = PngEncoder::new_with_quality(create(path)?, CompressionType::Default, FilterType::Adaptive);
+    let mut bytes = Vec::new();
+    let mut encoder = PngEncoder::new_with_quality(&mut bytes, CompressionType::Default, FilterType::Adaptive);
     encoder.set_icc_profile(srgb).map_err(image::ImageError::Unsupported)?;
     if let Some(exif) = &doc.exif {
         encoder.set_exif_metadata(exif.clone()).map_err(image::ImageError::Unsupported)?;
@@ -259,7 +272,40 @@ pub fn png(doc: &Document, path: &Path) -> Result<()> {
     } else {
         encoder.write_image(rgba.as_flattened(), w, h, image::ExtendedColorType::Rgba8)?;
     }
-    Ok(())
+    Ok(bytes)
+}
+
+/// The size `width` × `height` shrinks to for its long edge to be at most
+/// `long_edge`; it's never enlarged.
+pub fn fitted(width: u32, height: u32, long_edge: Option<u32>) -> (u32, u32) {
+    let long = width.max(height);
+    match long_edge.filter(|&e| e < long) {
+        Some(edge) => {
+            let side = |v: u32| ((f64::from(v) * f64::from(edge) / f64::from(long)).round() as u32).max(1);
+            (side(width), side(height))
+        }
+        None => (width, height),
+    }
+}
+
+/// File › Export for Web: the flattened image as an sRGB file's bytes, a
+/// JPEG at `jpeg_quality` or else a PNG, shrunk so its long edge is at most
+/// `long_edge`, with the EXIF metadata or without it.
+pub fn web(doc: &Document, long_edge: Option<u32>, metadata: bool, jpeg_quality: Option<u8>) -> Result<Vec<u8>> {
+    let (w, h) = fitted(doc.width, doc.height, long_edge);
+    let mut out = if (w, h) == (doc.width, doc.height) {
+        doc.clone()
+    } else {
+        // Flattened first, so there's one layer to resize.
+        let mut flat = Document::from_image(doc.path.clone(), &doc.composite(), doc.profile.clone(), doc.source_bits);
+        flat.resize_image(w, h);
+        flat
+    };
+    out.exif = doc.exif.clone().filter(|_| metadata);
+    match jpeg_quality {
+        Some(quality) => jpeg_bytes(&out, quality),
+        None => png_bytes(&out),
+    }
 }
 
 /// File › Batch Export for one file: `source` opened, shrunk so its long
@@ -275,10 +321,9 @@ pub fn batch_file(
     jpeg_quality: Option<u8>,
 ) -> Result<PathBuf> {
     let mut doc = crate::io::load(source)?;
-    let long = doc.width.max(doc.height);
-    if let Some(edge) = long_edge.filter(|&e| e < long) {
-        let side = |v: u32| ((f64::from(v) * f64::from(edge) / f64::from(long)).round() as u32).max(1);
-        doc.resize_image(side(doc.width), side(doc.height));
+    let (w, h) = fitted(doc.width, doc.height, long_edge);
+    if (w, h) != (doc.width, doc.height) {
+        doc.resize_image(w, h);
     }
     crate::ops::finish(&mut doc, sharpen, grain);
     let name = source.file_stem().unwrap_or_default();
@@ -509,5 +554,49 @@ mod tests {
         crate::ops::finish(&mut finished, Some(&sharpen), Some(&grain));
         assert_eq!(crate::io::load(&path).unwrap().composite().pixels(), finished.composite().pixels());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn web_export_shrinks_flattens_and_drops_metadata_when_asked() {
+        // A red layer over half of a grey one, with a capture date.
+        let (w, h) = (400, 200);
+        let grey = Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
+        let mut doc = Document::from_image("wide.tif".into(), &grey, ColorProfile::srgb(), 16);
+        let red: Vec<crate::Pixel> = (0..w * h).map(|i| if i % w < 200 { [65535, 0, 0, 65535] } else { [0; 4] }).collect();
+        doc.layers.push(crate::layer::Layer::from_raster(2, "Red", &Raster::new(w, h, red)));
+        let date = exif::Field {
+            tag: exif::Tag::DateTimeOriginal,
+            ifd_num: exif::In::PRIMARY,
+            value: exif::Value::Ascii(vec![b"2024:02:13 15:58:41".to_vec()]),
+        };
+        let mut writer = exif::experimental::Writer::new();
+        writer.push_field(&date);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        writer.write(&mut buf, true).unwrap();
+        doc.exif = Some(buf.into_inner());
+        let has = |bytes: &[u8], marker: &[u8]| bytes.windows(marker.len()).any(|w| w == marker);
+
+        // A JPEG with its long edge at 100, both layers in it, and the date.
+        let jpeg = web(&doc, Some(100), true, Some(90)).unwrap();
+        let back = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(back.dimensions(), (100, 50));
+        let (left, right) = (back.get_pixel(20, 25).0, back.get_pixel(80, 25).0);
+        assert!(left[0] > 240 && left[1] < 20, "red on the left: {left:?}");
+        assert!(right[0].abs_diff(right[1]) < 4 && right[0] < 200, "grey on the right: {right:?}");
+        assert!(has(&jpeg, b"Exif\0\0") && has(&jpeg, b"2024:02:13"));
+        // Lower quality is smaller, and without metadata there's none.
+        let small = web(&doc, Some(100), false, Some(30)).unwrap();
+        assert!(small.len() < jpeg.len());
+        assert!(!has(&small, b"Exif\0\0"));
+
+        // A PNG, never enlarged, with and without the date. The document's
+        // own metadata is left alone.
+        let png = web(&doc, Some(1000), true, None).unwrap();
+        assert_eq!(image::load_from_memory(&png).unwrap().to_rgb8().dimensions(), (400, 200));
+        assert!(has(&png, b"eXIf"));
+        assert!(!has(&web(&doc, None, false, None).unwrap(), b"eXIf"));
+        assert!(doc.exif.is_some());
+        assert_eq!(fitted(6000, 4000, Some(2048)), (2048, 1365));
+        assert_eq!(fitted(4000, 6000, Some(2048)), (1365, 2048));
     }
 }

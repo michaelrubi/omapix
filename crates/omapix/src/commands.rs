@@ -14,6 +14,7 @@ pub enum Command {
     ExportTiff,
     ExportJpeg,
     ExportPng,
+    ExportForWeb,
     Quit,
     Undo,
     Redo,
@@ -175,6 +176,7 @@ impl Command {
         Command::ExportTiff,
         Command::ExportJpeg,
         Command::ExportPng,
+        Command::ExportForWeb,
         Command::Quit,
         Command::Undo,
         Command::Redo,
@@ -324,6 +326,7 @@ impl Command {
     /// Ctrl+Z even when Shift is also held, so Ctrl+Shift+Z has to be
     /// checked before it.
     pub const KEYBOARD_ORDER: &[Command] = &[
+        Command::ExportForWeb,
         Command::StampVisible,
         Command::GamutWarning,
         Command::PasteInto,
@@ -403,6 +406,7 @@ impl Command {
             Command::ExportTiff => "Export as TIFF (16-bit)…",
             Command::ExportJpeg => "Export as JPEG (sRGB)…",
             Command::ExportPng => "Export as PNG (sRGB)…",
+            Command::ExportForWeb => "Export for Web…",
             Command::Quit => "Quit",
             Command::Undo => "Undo",
             Command::Redo => "Redo",
@@ -546,6 +550,7 @@ impl Command {
             Command::ReopenLast => s(CMD_SHIFT, Key::O),
             Command::Save => s(CMD, Key::S),
             Command::SaveAs => s(CMD_SHIFT, Key::S),
+            Command::ExportForWeb => s(CMD_ALT_SHIFT, Key::S),
             Command::Quit => s(CMD, Key::Q),
             Command::NextImage => s(CMD, Key::Tab),
             Command::PreviousImage => s(CMD_SHIFT, Key::Tab),
@@ -831,6 +836,7 @@ mod tests {
         let pos = |c| order.iter().position(|&x| x == c).unwrap();
         assert!(pos(Command::Redo) < pos(Command::Undo));
         assert!(pos(Command::SaveAs) < pos(Command::Save));
+        assert!(pos(Command::ExportForWeb) < pos(Command::SaveAs));
         assert!(pos(Command::ReopenLast) < pos(Command::Open));
         assert!(pos(Command::PreviousImage) < pos(Command::NextImage));
         assert!(pos(Command::NewLayer) < pos(Command::New));
