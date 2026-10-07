@@ -142,6 +142,7 @@ pub enum Command {
     Crop,
     Liquify,
     BatchExport,
+    Photomerge,
     AiModels,
     Finish,
 }
@@ -301,6 +302,7 @@ impl Command {
         Command::Crop,
         Command::Liquify,
         Command::BatchExport,
+        Command::Photomerge,
         Command::AiModels,
         Command::Finish,
     ];
@@ -526,6 +528,7 @@ impl Command {
             Command::Crop => "Crop",
             Command::Liquify => "Liquify…",
             Command::BatchExport => "Batch Export…",
+            Command::Photomerge => "Photomerge…",
             Command::AiModels => "AI Models…",
             Command::Finish => "Finish",
         }
