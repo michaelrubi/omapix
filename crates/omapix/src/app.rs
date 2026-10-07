@@ -2090,12 +2090,16 @@ self.filters.remember(&filter);
             Command::FrequencySeparation => {
                 self.filters.separation_radius = Some(radius);
                 self.filters.save();
+                let edit_layers = self.filters.separation_edit_layers;
                 editor.target = Target::Pixels;
                 editor.edit_in_background(
                     "Frequency Separation",
                     move |doc, active| {
-                        let (_, high) = ops::frequency_separation(doc, index, radius);
+                        let (low, high) = ops::frequency_separation(doc, index, radius);
                         *active = high;
+                        if edit_layers {
+                            *active = ops::separation_edit_layers(doc, &[low, high])[1];
+                        }
                     },
                     ctx,
                 );
@@ -2105,12 +2109,16 @@ self.filters.remember(&filter);
                 self.filters.separation3_fine = Some(radius);
                 self.filters.separation3_coarse = Some(coarse);
                 self.filters.save();
+                let edit_layers = self.filters.separation_edit_layers;
                 editor.target = Target::Pixels;
                 editor.edit_in_background(
                     "Frequency Separation (3 Bands)",
                     move |doc, active| {
-                        let (_, mid, _) = ops::frequency_separation_3(doc, index, radius, coarse);
+                        let (low, mid, high) = ops::frequency_separation_3(doc, index, radius, coarse);
                         *active = mid;
+                        if edit_layers {
+                            *active = ops::separation_edit_layers(doc, &[low, mid, high])[1];
+                        }
                     },
                     ctx,
                 );
@@ -2831,6 +2839,7 @@ self.filters.remember(&filter);
             return;
         }
         let defaults = &self.defaults;
+        let edit_layers = &mut self.filters.separation_edit_layers;
         let auto_separation = self.editor.as_ref().map(separation_radius);
         let editor = self.editor.as_ref();
         let preview_cache = &mut self.filter_preview;
@@ -2917,6 +2926,13 @@ self.filters.remember(&filter);
                         };
                         radius_field(ui, radius, label, range);
                     }
+                    if matches!(command, Command::FrequencySeparation | Command::FrequencySeparation3) {
+                        ui.add_space(4.0);
+                        ui.checkbox(edit_layers, "Add edit layers").on_hover_text(
+                            "A copy above each layer to retouch on. Erasing or\n\
+                             hiding it brings the layer back as it was.",
+                        );
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let ok = ui.button("OK").clicked()
@@ -2925,6 +2941,9 @@ self.filters.remember(&filter);
                             close = true;
                         }
                         if ui.button("Defaults").clicked() {
+                            if matches!(command, Command::FrequencySeparation | Command::FrequencySeparation3) {
+                                *edit_layers = defaults.separation_edit_layers;
+                            }
                             *radius = match command {
                                 Command::Feather => defaults.feather_radius,
                                 Command::BorderSelection => defaults.border_width,
@@ -7739,38 +7758,40 @@ mod tests {
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Rectangular Marquee"));
     }
 
+    /// A frame of the dialog, clicking at `at` if given; where `text` is.
+    fn dialog_frame(app: &mut App, ctx: &egui::Context, at: Option<egui::Pos2>, text: &str) -> Option<egui::Pos2> {
+        let events = at.map_or_else(Vec::new, |pos| {
+            [true, false]
+                .map(|pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .into_iter()
+                .chain([egui::Event::PointerMoved(pos)])
+                .collect()
+        });
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+        out.textures_delta.clear();
+        fn find(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.visual_bounding_rect()),
+                egui::Shape::Vec(v) => v.iter().find_map(|s| find(s, text)),
+                _ => None,
+            }
+        }
+        out.shapes.iter().find_map(|s| find(&s.shape, text)).map(|r| r.center())
+    }
+
     #[test]
     fn dialogs_go_back_to_the_defaults_and_frequency_separation_remembers() {
         let ctx = egui::Context::default();
         let mut app = test_app();
         app.defaults.blur_radius = 6.0;
         app.filters.blur_radius = 1.0;
-        // A frame of the dialog, clicking at `at` if given; where "Defaults" is.
-        let frame = |app: &mut App, at: Option<egui::Pos2>| {
-            let events = at.map_or_else(Vec::new, |pos| {
-                [true, false]
-                    .map(|pressed| egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    })
-                    .into_iter()
-                    .chain([egui::Event::PointerMoved(pos)])
-                    .collect()
-            });
-            let input = egui::RawInput { events, ..Default::default() };
-            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
-            out.textures_delta.clear();
-            fn find(shape: &egui::Shape) -> Option<egui::Rect> {
-                match shape {
-                    egui::Shape::Text(t) if t.galley.text() == "Defaults" => Some(t.visual_bounding_rect()),
-                    egui::Shape::Vec(v) => v.iter().find_map(find),
-                    _ => None,
-                }
-            }
-            out.shapes.iter().find_map(|s| find(&s.shape)).map(|r| r.center())
-        };
+        let frame = |app: &mut App, at: Option<egui::Pos2>| dialog_frame(app, &ctx, at, "Defaults");
 
         app.run(Command::GaussianBlur, &ctx);
         // A modal is laid out, unseen, on its first frame.
@@ -7845,16 +7866,16 @@ mod tests {
             editor.update(&ctx);
         }
 
-        // 4. Check layers made and that Mid layer is selected.
+        // 4. Check layers made, each with its edit layer, and that Mid's is selected.
         let doc = &editor.doc;
-        assert_eq!(doc.layers.len(), 5);
+        assert_eq!(doc.layers.len(), 8);
         let group = doc.layers.last().unwrap();
         assert!(group.is_group && group.blend == omapix_engine::blend::BlendMode::PassThrough);
         assert_eq!(group.name, "Frequency Separation (3 Bands)");
 
         let low = &doc.layers[1];
-        let mid = &doc.layers[2];
-        let high = &doc.layers[3];
+        let mid = &doc.layers[3];
+        let high = &doc.layers[5];
         assert_eq!(low.name, "Low - color/tone");
         assert_eq!(low.blend, omapix_engine::blend::BlendMode::Normal);
         assert_eq!(mid.name, "Mid - blotches");
@@ -7862,7 +7883,9 @@ mod tests {
         assert_eq!(high.name, "High - texture");
         assert_eq!(high.blend, omapix_engine::blend::BlendMode::GrainMerge);
 
-        assert_eq!(editor.active, mid.id);
+        let mid_edit = &doc.layers[4];
+        assert_eq!((mid_edit.name.as_str(), mid_edit.clipped), ("Mid Edit", true));
+        assert_eq!(editor.active, mid_edit.id);
 
         // 5. Check radii remembered.
         assert_eq!(app.filters.separation3_fine, Some(1.5));
@@ -7879,6 +7902,55 @@ mod tests {
                 ..
             }) if radius == 1.5 && coarse == 6.0
         ));
+    }
+
+    #[test]
+    fn frequency_separation_adds_edit_layers_unless_unticked() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let frame = |app: &mut App, at: Option<egui::Pos2>| dialog_frame(app, &ctx, at, "Add edit layers");
+        // The names above the bottom layer, and the active layer's.
+        let made = |app: &mut App| {
+            let editor = app.editor.as_mut().unwrap();
+            while editor.busy().is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+                editor.update(&ctx);
+            }
+            let names: Vec<_> = editor.doc.layers[1..].iter().map(|l| l.name.clone()).collect();
+            (names, editor.doc.layer(editor.active).unwrap().name.clone())
+        };
+
+        // Ticked to begin with: a copy above each layer, High's clipped
+        // to it and selected to retouch on, all one undo step.
+        app.apply_radius(Command::FrequencySeparation, 3.5, None, &ctx);
+        let (names, active) = made(&mut app);
+        assert_eq!(names, ["Low - color/tone", "Low Edit", "High - texture", "High Edit", "Frequency Separation"]);
+        assert_eq!(active, "High Edit");
+        let editor = app.editor.as_mut().unwrap();
+        assert!(editor.doc.layers[4].clipped && !editor.doc.layers[2].clipped);
+        editor.undo();
+        assert_eq!(editor.doc.layers.len(), 1);
+
+        // Unticked in the dialog, there are only the two layers, and it
+        // stays unticked.
+        app.run(Command::FrequencySeparation, &ctx);
+        frame(&mut app, None);
+        let checkbox = frame(&mut app, None).expect("the checkbox");
+        frame(&mut app, Some(checkbox));
+        assert!(!app.filters.separation_edit_layers);
+        app.dialog = None;
+        app.apply_radius(Command::FrequencySeparation, 3.5, None, &ctx);
+        let (names, active) = made(&mut app);
+        assert_eq!(names, ["Low - color/tone", "High - texture", "Frequency Separation"]);
+        assert_eq!(active, "High - texture");
+
+        // Defaults ticks it again.
+        app.run(Command::FrequencySeparation, &ctx);
+        frame(&mut app, None);
+        let button = dialog_frame(&mut app, &ctx, None, "Defaults").expect("a Defaults button");
+        dialog_frame(&mut app, &ctx, Some(button), "Defaults");
+        dialog_frame(&mut app, &ctx, Some(button), "Defaults");
+        assert!(app.filters.separation_edit_layers);
     }
 
     #[test]

@@ -407,6 +407,29 @@ pub fn frequency_separation_3(
     (low_id, mid_id, high_id)
 }
 
+/// A copy of each of a frequency separation's layers `bands` just above
+/// it, to retouch in its place ("High Edit" above "High - texture"):
+/// erasing or hiding the copy brings the band back as it was. A Grain Merge
+/// band's copy is Normal and clipped to it, so it stands in for the band's
+/// pixels and blends as the band does. Returns the copies' ids, in `bands`'
+/// order.
+pub fn separation_edit_layers(doc: &mut Document, bands: &[u64]) -> Vec<u64> {
+    bands
+        .iter()
+        .filter_map(|&band| {
+            let index = doc.index_of(band)?;
+            let id = doc.next_layer_id();
+            let band = &doc.layers[index];
+            let name = format!("{} Edit", band.name.split(" - ").next().unwrap_or_default());
+            let clipped = band.blend != BlendMode::Normal;
+            let edit = Layer::from_pixels(id, name, band.pixels.clone());
+            let at = doc.insert_above(index, edit);
+            doc.layers[at].clipped = clipped;
+            Some(id)
+        })
+        .collect()
+}
+
 /// Layer `id`'s pixels after `filter`, within the selection if there is
 /// one. `None` if there's no such layer.
 pub fn filtered(doc: &Document, id: u64, filter: &crate::filters::LayerFilter) -> Option<Tiled<crate::Pixel>> {
@@ -751,6 +774,55 @@ mod tests {
             .max()
             .unwrap();
         assert!(worst <= 3, "worst channel difference {worst}");
+    }
+
+    #[test]
+    fn separation_edit_layers_stand_in_for_the_bands_until_erased() {
+        let (w, h) = (300, 280);
+        let px = (0..w * h)
+            .map(|i| {
+                let grain = ((i % w * 7 + i / w * 3) % 11) * 300;
+                [(15000 + i % w * 60 + grain) as u16, (20000 + grain) as u16, (30000 + grain) as u16, 65535]
+            })
+            .collect();
+        let mut doc = doc_with(px, w, h);
+        let (low, mid, high) = frequency_separation_3(&mut doc, 0, 3.0, 9.0);
+        let split = doc.composite();
+        let edits = separation_edit_layers(&mut doc, &[low, mid, high]);
+
+        // Each copy is just above its band, in the group; Mid's and High's
+        // are clipped to them.
+        let names: Vec<_> = doc.layers[1..].iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Low - color/tone",
+                "Low Edit",
+                "Mid - blotches",
+                "Mid Edit",
+                "High - texture",
+                "High Edit",
+                "Frequency Separation (3 Bands)"
+            ]
+        );
+        let group = doc.layers.last().unwrap().id;
+        for (&edit, (band, clipped)) in edits.iter().zip([(low, false), (mid, true), (high, true)]) {
+            let layer = doc.layer(edit).unwrap();
+            assert_eq!((layer.blend, layer.clipped, layer.parent), (BlendMode::Normal, clipped, Some(group)));
+            assert_eq!(doc.clip_base(edit), clipped.then_some(band));
+            assert!(layer.pixels.same_tiles(&doc.layer(band).unwrap().pixels), "shares the band's tiles");
+        }
+        assert!(!doc.layer(mid).unwrap().clipped && !doc.layer(high).unwrap().clipped);
+        assert!(doc.composite().pixels() == split.pixels(), "the image is as it was split");
+
+        // Flattening the texture on the copy takes it out of the image;
+        // erasing the copy brings the band's back.
+        let grey = vec![[32768, 32768, 32768, 65535]; (w * h) as usize];
+        doc.layer_mut(edits[2]).unwrap().pixels = Tiled::from_slice(w, h, [0; 4], &grey);
+        assert!(doc.composite().pixels() != split.pixels());
+        assert_eq!(doc.layer(high).unwrap().blend, BlendMode::GrainMerge);
+        doc.layer_mut(edits[2]).unwrap().pixels = Tiled::new(w, h, [0; 4]);
+        assert!(doc.composite().pixels() == split.pixels(), "erased, the band shows again");
     }
 
     #[test]

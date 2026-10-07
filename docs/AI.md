@@ -568,6 +568,38 @@ rather than the command being greyed out. With nothing selected it fills
 the empty canvas the Crop tool leaves when it's dragged outwards
 (milestone 10.5).
 
+### 10. Auto Makeup
+
+*Subtle, non-destructive portrait makeup without diffusion.*
+
+Retouch › **Makeup…** adds subtle cosmetic enhancements per face, running
+off the existing MediaPipe 478 face landmarks and selfie segmentation.
+Rather than running an expensive generative model (which is slow, risks
+hallucinations, and bakes changes into pixels), it builds parametric,
+fully editable adjustment layers and solid colour fills with feathered masks
+in a "Makeup" group:
+
+- **Lipstick**: Solid Color or Hue/Saturation layer masked to the lips
+  outline (`outline::LIPS` minus `outline::MOUTH`), feathered 1–2 px,
+  blended in Soft Light or Multiply. Uses Blend If on the underlying layer
+  so specular highlights and glossy reflections remain visible. Sliders for
+  Hue, Saturation, Opacity, and Gloss.
+- **Eyeliner**: darkening stroke along the upper eyelid margin landmarks
+  (`outline::LEFT_EYE` upper arc: points 33, 160, 158, 133, etc.),
+  feathered 0.5–1 px in Multiply or Normal mode, with an optional subtle
+  outer corner wing.
+- **Mascara**: subtle lash-line darkening and density boost along upper and
+  lower lash contours.
+- **Rouge / Blush**: radial feathered wash centered on malar/cheekbone
+  landmarks (points 116, 123, 147 and 345, 352, 376), blended in Soft Light
+  with warm rosy/peach swatches and an opacity slider.
+- **Eye Shadow**: soft wash between the upper lash line and the eyelid
+  crease in Soft Light or Multiply with tone palette selection.
+- **Eyebrow tint**: subtle tinting and fill masked to brow outlines.
+- **Presets**: Natural Everyday, Warm Glow, Clean Girl, and Evening Glam.
+  Each face gets its own "Makeup" group, and every layer remains an ordinary
+  Omapix layer with its mask editable by hand with the brush.
+
 ## Models
 
 Default set, all usable for commercial work:
@@ -822,6 +854,25 @@ Reordered on 2026-09-29 (see Decisions).
       paleness taken down to the lit skin round them, and a step in Auto
       Retouch. See "Reduce Shine" below.
     - checking whether an opt-in face parser beats the landmark polygons
+14. **Smarter Auto Retouch & Pro Layer Stack.**
+    - Benchmark against Michael's retouches kept in layers, from his next
+      photoshoot (the finished ones so far are flattened). Not started
+      until then.
+    - Beauty mark vs blemish classification (moles, freckles preserved).
+    - Two-tier Dodge & Burn (Micro local evening vs Macro volume contouring).
+    - Skin redness neutralization (Selective Color / Hue-Sat on flush).
+    - Iris enhancement and catchlight boosting.
+15. **Auto Makeup.**
+    - Retouch › Makeup… dialog and presets (Natural Everyday, Warm Glow,
+      Clean Girl, Evening Glam).
+    - Non-destructive adjustment, solid colour, and Curves layers gathered in
+      a "Makeup" group per face.
+    - Lipstick (with Blend If shine preservation), eyeliner, mascara, blush,
+      eyeshadow, and brow tint.
+16. **Smarter Auto Liquify.**
+    - Auto Harmonize subtle proportion & symmetry baseline slider.
+    - Posture & silhouette alignment from pose landmarks.
+    - Background line protection (straight edge dampening).
 
 ### Face analysis spike
 
