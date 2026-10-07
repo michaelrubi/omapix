@@ -12,9 +12,10 @@
 use rayon::prelude::*;
 
 use crate::denoise::blur;
-use crate::tiled::Tiled;
+use crate::layer::{Layer, Mask};
+use crate::tiled::{TILE, Tiled};
 use crate::transform::{Projective, Resampling, projected};
-use crate::{Document, Pixel};
+use crate::{ColorProfile, Document, Pixel};
 
 /// The longer side of the working image, at most.
 const WORK: u32 = 2048;
@@ -401,16 +402,13 @@ fn plausible(t: &Projective, width: f64, height: f64) -> bool {
     (0..4).all(|i| turn(i) > 0.0) && (1.0 / 16.0..16.0).contains(&(area / (width * height)))
 }
 
-/// How each of `images` (all one size) moves to line up with `reference`,
-/// or with the one that has most in common with the others. That one
-/// stays where it is; `None` is for those nothing lines up with.
+/// How each of `images` moves to line up with `reference`, or with the
+/// one that has most in common with the others. That one stays where it
+/// is; `None` is for those nothing lines up with.
 pub fn align(images: &[&Tiled<Pixel>], reference: Option<usize>) -> Vec<Option<Projective>> {
     let n = images.len();
-    let Some(first) = images.first() else {
-        return Vec::new();
-    };
-    let (width, height) = (f64::from(first.width()), f64::from(first.height()));
-    let tolerance = TOLERANCE * f64::from(first.width().max(first.height()).div_ceil(WORK).max(1));
+    let longest = images.iter().map(|i| i.width().max(i.height())).max().unwrap_or(0);
+    let tolerance = TOLERANCE * f64::from(longest.div_ceil(WORK).max(1));
     let features: Vec<Vec<Feature>> = images.iter().map(|image| features(image)).collect();
     // What takes each to each other, and how many corners say so.
     let mut links: Vec<Vec<Option<(Projective, usize)>>> = vec![vec![None; n]; n];
@@ -418,6 +416,7 @@ pub fn align(images: &[&Tiled<Pixel>], reference: Option<usize>) -> Vec<Option<P
         for j in i + 1..n {
             let (a, b) = (&features[i], &features[j]);
             let pairs: Vec<_> = pairs(a, b).into_iter().map(|(i, j)| (a[i].at, b[j].at)).collect();
+            let (width, height) = (f64::from(images[i].width()), f64::from(images[i].height()));
             let found = consensus(&pairs, tolerance).filter(|(t, _)| plausible(t, width, height));
             if let Some((t, count)) = found
                 && let Some(back) = t.inverse()
@@ -481,11 +480,104 @@ pub fn auto_align(doc: &mut Document, ids: &[u64]) -> Option<Vec<String>> {
     Some(left)
 }
 
+/// Neither side of a panorama may be longer than this.
+const WIDEST: f64 = 30_000.0;
+/// How far in from a resampled frame's edge its pixels may be part clear.
+const EDGE: f64 = 2.0;
+
+/// Photoshop's File › Automate › Photomerge: `frames` of one scene (each
+/// a name and its pixels, in `profile`) as the layers of a new image,
+/// lined up with the one that has most in common with the others, on a
+/// canvas that fits them all, with masks that join them along seams.
+/// Returns the image and the names of the frames nothing lined up with,
+/// which are left out.
+pub fn photomerge(frames: &[(String, Tiled<Pixel>)], profile: ColorProfile) -> Result<(Document, Vec<String>), String> {
+    let images: Vec<&Tiled<Pixel>> = frames.iter().map(|f| &f.1).collect();
+    let moves = align(&images, None);
+    let placed: Vec<(usize, Projective)> = moves.iter().enumerate().filter_map(|(i, t)| Some((i, (*t)?))).collect();
+    let left: Vec<String> = (0..frames.len()).filter(|&i| moves[i].is_none()).map(|i| frames[i].0.clone()).collect();
+    if placed.len() < 2 {
+        return Err("the photos don't line up with each other".into());
+    }
+    // Where their corners land.
+    let size = |i: usize| (f64::from(images[i].width()), f64::from(images[i].height()));
+    let corners = |&(i, t): &(usize, Projective)| {
+        let (w, h) = size(i);
+        [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|p| t.apply(p).unwrap_or(p))
+    };
+    let bounds = |corners: &[Point]| {
+        let none = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        corners.iter().fold(none, |b, p| (b.0.min(p.0), b.1.min(p.1), b.2.max(p.0), b.3.max(p.1)))
+    };
+    let (x0, y0, x1, y1) = bounds(&placed.iter().flat_map(corners).collect::<Vec<_>>());
+    // To the nearest pixel: a frame that's a hair off doesn't add a row.
+    let (x0, y0) = (x0.round(), y0.round());
+    let (width, height) = ((x1 - x0).round(), (y1 - y0).round());
+    if width > WIDEST || height > WIDEST {
+        return Err("too wide a view to lay flat, try fewer photos".into());
+    }
+    let (width, height) = (width as u32, height as u32);
+    let onto = Projective::new([1.0, 0.0, -x0, 0.0, 1.0, -y0, 0.0, 0.0, 1.0]);
+    let placed: Vec<(usize, Projective)> = placed.into_iter().map(|(i, t)| (i, t.then(&onto))).collect();
+
+    // How far inside each frame a point of the canvas is: the frame it's
+    // furthest inside shows there.
+    let back: Vec<(Projective, Point)> =
+        placed.iter().map(|&(i, t)| (t.inverse().unwrap_or(Projective::IDENTITY), size(i))).collect();
+    let inside = |k: usize, p: Point| {
+        let (from, (w, h)) = &back[k];
+        from.apply(p).map_or(0.0, |(x, y)| x.min(w - x).min(y).min(h - y).max(0.0))
+    };
+    let boxes: Vec<_> = placed.iter().map(|frame| bounds(&corners(frame))).collect();
+    // Frames fade into each other over this far each side of a seam.
+    let shortest = back.iter().map(|(_, (w, h))| w.min(*h)).fold(f64::MAX, f64::min);
+    let fade = (shortest * 0.03).max(1.0);
+    let layers = placed
+        .iter()
+        .enumerate()
+        .map(|(k, &(i, t))| {
+            let framed = images[i].reframed(width, height, 0, 0, [0; 4]);
+            let pixels = projected(&framed, &t, [0; 4], Resampling::Bicubic);
+            let mut layer = Layer::from_pixels(k as u64 + 1, frames[i].0.clone(), pixels);
+            // Each layer hides what's below it by its mask, so its mask is
+            // its share of what it and those below it show.
+            let mask = Tiled::from_tiles(width, height, 0, |col, row| {
+                let (tx, ty) = (f64::from(col * TILE), f64::from(row * TILE));
+                let reaches = |j: &usize| {
+                    let (x0, y0, x1, y1) = boxes[*j];
+                    x0 < tx + f64::from(TILE) && x1 > tx && y0 < ty + f64::from(TILE) && y1 > ty
+                };
+                let here: Vec<usize> = (0..back.len()).filter(reaches).collect();
+                let at = here.iter().position(|&j| j == k)?;
+                let mut depths = vec![0.0; here.len()];
+                let mut tile = vec![0; (TILE * TILE) as usize];
+                for (n, v) in tile.iter_mut().enumerate() {
+                    let p = (tx + f64::from(n as u32 % TILE) + 0.5, ty + f64::from(n as u32 / TILE) + 0.5);
+                    for (depth, &j) in depths.iter_mut().zip(&here) {
+                        *depth = inside(j, p);
+                    }
+                    // A frame's last pixels are part clear, from being
+                    // resampled: they show only where nothing else can.
+                    if depths.iter().any(|&d| d > EDGE) {
+                        depths.iter_mut().for_each(|d| *d = (*d - EDGE).max(0.0));
+                    }
+                    let deepest = depths.iter().copied().fold(0.0, f64::max);
+                    let share = |d: f64| if d > 0.0 { (d - deepest + fade).max(0.0) } else { 0.0 };
+                    let below: f64 = depths[..=at].iter().map(|&d| share(d)).sum();
+                    *v = if below > 0.0 { (share(depths[at]) / below * 65535.0).round() as u16 } else { 0 };
+                }
+                tile.iter().any(|&v| v != 0).then_some(tile)
+            });
+            layer.mask = Some(Mask { pixels: mask, enabled: true });
+            layer
+        })
+        .collect();
+    Ok((Document::new(Default::default(), profile, 16, width, height, layers), left))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layer::{Layer, Mask};
-    use crate::ColorProfile;
 
     const W: u32 = 640;
     const H: u32 = 480;
@@ -617,5 +709,38 @@ mod tests {
         let mask = &layer.mask.as_ref().unwrap().pixels;
         assert_eq!((mask.get(300, 200), mask.get(5, 5)), (u16::MAX, u16::MAX));
         assert_eq!(doc.layer(unrelated).unwrap().pixels.to_vec(), scene(9).to_vec());
+    }
+
+    #[test]
+    fn photomerge_joins_frames_on_a_canvas_that_fits_them_with_no_gaps_at_the_seams() {
+        // Three frames a camera moving along the scene took, and one of
+        // something else.
+        let wide = scene(3);
+        let frame = |x: u32| Tiled::from_slice(400, H, [0; 4], &wide.crop(x, 0, 400, H));
+        let named = |name: &str, pixels| (name.to_owned(), pixels);
+        let mut frames = vec![named("Left", frame(0)), named("Middle", frame(120)), named("Right", frame(240))];
+        frames.push(named("Elsewhere", scene(9)));
+        let (doc, left) = photomerge(&frames, ColorProfile::srgb()).unwrap();
+        assert_eq!(left, ["Elsewhere"]);
+        assert_eq!((doc.width, doc.height), (W, H));
+        let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Left", "Middle", "Right"]);
+        // Together they show the scene, solid all over.
+        let (whole, merged) = (wide.to_vec(), doc.composite());
+        let off = |i: usize| whole[i][0].abs_diff(merged.pixels()[i][0]);
+        let inner = |i: usize| (2..W as usize - 2).contains(&(i % W as usize)) && (2..H as usize - 2).contains(&(i / W as usize));
+        assert!((0..whole.len()).all(|i| !inner(i) || merged.pixels()[i][3] == 65535));
+        let far = (0..whole.len()).filter(|&i| off(i) > 2000).count();
+        assert!(far < whole.len() / 100, "{far} pixels out");
+        // Each shows where it's the one a point is furthest inside, and
+        // hides what's above it in the stack nowhere it's needed.
+        let mask = |k: usize, x: u32| doc.layers[k].mask.as_ref().unwrap().pixels.get(x, 240);
+        assert_eq!((mask(0, 50), mask(1, 50), mask(2, 50)), (65535, 0, 0));
+        assert_eq!((mask(1, 320), mask(2, 320)), (65535, 0));
+        assert_eq!(mask(2, 600), 65535);
+        // Half and half on the seam between the upper two.
+        assert!(mask(2, 380).abs_diff(32768) < 6000, "{}", mask(2, 380));
+
+        assert!(photomerge(&frames[2..], ColorProfile::srgb()).is_err());
     }
 }

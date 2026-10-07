@@ -45,6 +45,11 @@ const LUT_SIZE: usize = 33;
 /// How near Free Transform's handles the pointer grabs them, in points.
 const HANDLE_REACH: f32 = 8.0;
 
+/// A photo to merge with others: its name and how it looks.
+type Frame = (String, Tiled<omapix_engine::Pixel>);
+/// Photos merged into a new image, and the names of those left out.
+type Merged = (Document, Vec<String>);
+
 /// What a file dialog was opened for.
 #[derive(Clone, Copy)]
 enum Purpose {
@@ -55,6 +60,7 @@ enum Purpose {
     ExportPng,
     ExportLut,
     ProofProfile,
+    Photomerge,
 }
 
 /// Something to do once unsaved changes are dealt with.
@@ -495,7 +501,10 @@ pub struct App {
     /// Files being opened in the background, shown in the order asked for.
     opening: VecDeque<(PathBuf, Receiver<Opened>)>,
     /// A file dialog open in the background.
-    picking: Option<(Purpose, Receiver<Option<PathBuf>>)>,
+    picking: Option<(Purpose, Receiver<Option<Vec<PathBuf>>>)>,
+    /// Photos being merged into a new image: what's doing it, and the image
+    /// with the names of the photos it left out.
+    merging: Option<(Command, Receiver<Result<Merged, String>>)>,
     file_job: Option<FileJob>,
     batch_export: Option<BatchJob>,
     dialog: Option<Dialog>,
@@ -611,6 +620,7 @@ impl App {
             saved_tools,
             opening: VecDeque::new(),
             picking: None,
+            merging: None,
             file_job: None,
             batch_export: None,
             dialog: None,
@@ -868,6 +878,30 @@ impl App {
         self.pasting = Some(rx);
     }
 
+    /// Photomerge: `paths` lined up as the layers of a new image, in a tab
+    /// of its own, put together in the background.
+    fn photomerge(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        if paths.len() < 2 {
+            self.message("Photomerge needs two or more photos", true);
+            return;
+        }
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let merged = load_frames(&paths).and_then(|(frames, profile)| {
+                let (mut doc, left) = align::photomerge(&frames, profile)?;
+                // Saved beside the photos, unless somewhere else is chosen.
+                doc.path = paths[0].with_file_name("Panorama");
+                Ok((doc, left))
+            });
+            log::info!("merged {} photos in {:?}", paths.len(), started.elapsed());
+            let _ = tx.send(merged);
+            ctx.request_repaint();
+        });
+        self.merging = Some((Command::Photomerge, rx));
+    }
+
     fn pick(&mut self, purpose: Purpose, ctx: &egui::Context) {
         if self.picking.is_some() {
             return;
@@ -910,6 +944,7 @@ impl App {
                 .set_title("Export Adjustments as LUT")
                 .add_filter("Cube LUT", &["cube"])
                 .set_file_name(format!("{}.cube", self.preset_name())),
+            Purpose::Photomerge => dialog.set_title("Photomerge").add_filter("Images", &OPEN_EXTENSIONS),
             Purpose::ProofProfile => {
                 // Where the last one was, or where profiles are installed.
                 let last = self.filters.proof_profile.as_deref().and_then(Path::parent);
@@ -924,11 +959,12 @@ impl App {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let file = match purpose {
-                Purpose::Open | Purpose::ProofProfile => dialog.pick_file(),
-                _ => dialog.save_file(),
+            let files = match purpose {
+                Purpose::Photomerge => dialog.pick_files(),
+                Purpose::Open | Purpose::ProofProfile => dialog.pick_file().map(|f| vec![f]),
+                _ => dialog.save_file().map(|f| vec![f]),
             };
-            let _ = tx.send(file);
+            let _ = tx.send(files);
             ctx.request_repaint();
         });
         self.picking = Some((purpose, rx));
@@ -1092,6 +1128,13 @@ impl App {
         {
             let purpose = *purpose;
             self.picking = None;
+            let result = match (purpose, result) {
+                (Purpose::Photomerge, Some(paths)) => {
+                    self.photomerge(paths, ctx);
+                    None
+                }
+                (_, result) => result.and_then(|paths| paths.into_iter().next()),
+            };
             if let Some(path) = result {
                 match purpose {
                     Purpose::Open => self.open(path, ctx),
@@ -1100,6 +1143,21 @@ impl App {
                     Purpose::ProofProfile => self.set_proof_profile(path),
                     _ => self.write(purpose, path, ctx),
                 }
+            }
+        }
+        if let Some((cmd, rx)) = &self.merging
+            && let Ok(result) = rx.try_recv()
+        {
+            let name = cmd.label().trim_end_matches('…');
+            self.merging = None;
+            match result {
+                Ok((doc, left)) => {
+                    self.new_image(doc);
+                    if !left.is_empty() {
+                        self.message(format!("{name} left out {}: nothing lines up with them", left.join(", ")), true);
+                    }
+                }
+                Err(err) => self.message(format!("{name}: {err}"), true),
             }
         }
         while let Some(result) = self.opening.front().and_then(|(_, rx)| rx.try_recv().ok()) {
@@ -1257,6 +1315,7 @@ impl App {
                     | Command::Open
                     | Command::Quit
                     | Command::BatchExport
+                    | Command::Photomerge
                     | Command::AiModels
             )
                 || (cmd == Command::ReopenLast && self.recent.last().is_some());
@@ -1431,6 +1490,7 @@ impl App {
             }
             Command::NewFromClipboard => self.new_from_clipboard(ctx),
             Command::Open => self.pick(Purpose::Open, ctx),
+            Command::Photomerge => self.pick(Purpose::Photomerge, ctx),
             Command::Close => self.guard(Then::Close, ctx),
             Command::ReopenLast => {
                 if let Some(path) = self.recent.last().cloned() {
@@ -2241,6 +2301,9 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::ExportJpeg, None);
                 self.menu_item(ui, Command::ExportPng, None);
                 self.menu_item(ui, Command::BatchExport, None);
+                ui.menu_button("Automate", |ui| {
+                    self.menu_item(ui, Command::Photomerge, None);
+                });
                 ui.separator();
                 self.menu_item(ui, Command::Quit, None);
             });
@@ -2619,6 +2682,7 @@ self.filters.remember(&filter);
                     })
                     .or_else(|| self.batch_export.as_ref().map(|b| format!("Exporting {} of {}…", b.done + 1, b.total)))
                     .or_else(|| self.file_job.as_ref().map(|j| format!("{}…", j.label)))
+                    .or_else(|| self.merging.as_ref().map(|(cmd, _)| cmd.label().to_owned()))
                     .or_else(|| {
                         let editor = self.editor.as_ref()?;
                         editor.busy().map(|l| format!("{l}…"))
@@ -4666,6 +4730,20 @@ fn copy(editor: &Editor, merged: bool) -> Option<Clip> {
     (!clip.is_empty()).then_some(clip)
 }
 
+/// The images at `paths` as they look, each with its file's name, all in
+/// the first one's colour space.
+fn load_frames(paths: &[PathBuf]) -> Result<(Vec<Frame>, ColorProfile), String> {
+    let mut frames = Vec::new();
+    let mut profile: Option<ColorProfile> = None;
+    for path in paths {
+        let (clip, name) = load_clip(path).map_err(|e| format!("couldn't open {}: {e}", path.display()))?;
+        let profile = profile.get_or_insert_with(|| clip.profile.clone());
+        let [_, _, w, h] = clip.bounds;
+        frames.push((name, clip.place(w, h, profile, None).map_err(|e| e.to_string())?));
+    }
+    Ok((frames, profile.ok_or("no photos")?))
+}
+
 fn load_clip(path: &Path) -> Result<(Clip, String), String> {
     let mut doc = omapix_engine::io::load(path).map_err(|e| e.to_string())?;
     let _ = ops::prepare_for_editing(&mut doc);
@@ -5905,6 +5983,7 @@ mod tests {
             saved_tools: String::new(),
             opening: VecDeque::new(),
             picking: None,
+            merging: None,
             file_job: None,
             batch_export: None,
             dialog: None,
@@ -7456,27 +7535,80 @@ mod tests {
         assert_eq!(app.crop_box(), [0.0, 0.0, 500.0, 350.0]);
     }
 
-    #[test]
-    fn auto_align_layers_lines_up_the_selected_layers_and_says_which_it_couldnt() {
-        let ctx = egui::Context::default();
-        let mut app = test_app();
-        // A scene of grey rectangles, and the same one from a little to
-        // the side, as a second frame of it would be.
-        let (w, h) = (600usize, 400usize);
+    /// A scene of grey rectangles for photos to be lined up by.
+    fn scene(w: usize, h: usize) -> Tiled<omapix_engine::Pixel> {
         let mut px = vec![[30000u16, 30000, 30000, 65535]; w * h];
         let mut seed = 7u64;
         let mut random = |n: usize| {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (seed >> 33) as usize % n
         };
-        for _ in 0..400 {
+        for _ in 0..w * h / 600 {
             let (x, y, v) = (random(w), random(h), 5000 + random(55000) as u16);
             let (rw, rh) = (8 + random(50), 8 + random(50));
             for j in y..(y + rh).min(h) {
                 px[j * w + x..j * w + (x + rw).min(w)].fill([v, v, v, 65535]);
             }
         }
-        let scene = Tiled::from_slice(w as u32, h as u32, [0; 4], &px);
+        Tiled::from_slice(w as u32, h as u32, [0; 4], &px)
+    }
+
+    #[test]
+    fn photomerge_opens_the_photos_chosen_as_one_image_in_a_new_tab() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix-app-photomerge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two frames of a scene 900 wide, 300 apart.
+        let wide = scene(900, 400);
+        let paths: Vec<PathBuf> = [("left", 0), ("right", 300)]
+            .into_iter()
+            .map(|(name, x)| {
+                let frame = omapix_engine::Raster::new(600, 400, wide.crop(x, 0, 600, 400));
+                let doc = Document::from_image("t.tif".into(), &frame, ColorProfile::srgb(), 16);
+                let path = dir.join(format!("{name}.png"));
+                export::png(&doc, &path).unwrap();
+                path
+            })
+            .collect();
+        let finish = |app: &mut App| {
+            while app.merging.is_some() {
+                std::thread::sleep(Duration::from_millis(5));
+                app.poll(&ctx);
+            }
+        };
+
+        app.photomerge(paths[..1].to_vec(), &ctx);
+        assert_eq!(app.status.take().map(|s| s.0), Some("Photomerge needs two or more photos".into()));
+        app.photomerge(paths.clone(), &ctx);
+        finish(&mut app);
+        assert!(app.status.is_none(), "{:?}", app.status.as_ref().map(|s| &s.0));
+        assert_eq!(app.tabs().count(), 2);
+        let doc = &app.editor.as_ref().unwrap().doc;
+        assert_eq!((doc.width, doc.height, doc.file_name()), (900, 400, "Panorama".to_owned()));
+        let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["left", "right"]);
+        assert!(doc.layers.iter().all(|l| l.mask.is_some()));
+        assert_eq!(doc.composite().pixels()[200 * 900 + 450][3], 65535);
+
+        // What doesn't line up is said, and nothing opens.
+        let other = omapix_engine::Raster::new(600, 400, vec![[30000, 30000, 30000, 65535]; 600 * 400]);
+        export::png(&Document::from_image("t.tif".into(), &other, ColorProfile::srgb(), 16), &paths[1]).unwrap();
+        app.photomerge(paths, &ctx);
+        finish(&mut app);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("Photomerge: the photos don't line up with each other"));
+        assert_eq!(app.tabs().count(), 2);
+    }
+
+    #[test]
+    fn auto_align_layers_lines_up_the_selected_layers_and_says_which_it_couldnt() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        // A scene, and the same one from a little to the side, as a second
+        // frame of it would be.
+        let (w, h) = (600usize, 400usize);
+        let scene = scene(w, h);
         let editor = app.editor.as_mut().unwrap();
         let bottom = editor.active;
         let mut top = 0;

@@ -25,7 +25,7 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   Brush, Gradient, Paint Bucket, Eyedropper, Crop, marquees, Lasso, Magic
   Wand, Quick Selection and Object Selection, with Free Transform,
   Auto-Align Layers, Liquify and Select and Mask. Pen pressure from a
-  tablet.
+  tablet. Photomerge for panoramas.
 - **Adjustment layers:** Curves, Levels, Hue/Saturation, Color Balance,
   Selective Color, Channel Mixer and Color Lookup (`.cube` LUTs), with
   presets and export as a LUT.
