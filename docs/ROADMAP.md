@@ -216,6 +216,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Auto-Align Layers: two handheld frames of a group (drop the second on the first, Shift+click both layers, Edit › Auto-Align Layers), the background at 100 % with the top layer at 50 %, a head masked in from the other frame; a layer with Lock Position on as the one that stays; a layer of something else, named in the status bar
 - [ ] Photomerge: three or four overlapping handheld frames (File › Automate › Photomerge…), the seams at 100 %, painting on a mask to move a seam off someone, then Crop and Save As; a photo of something else among them, named in the status bar
 - [ ] Merge to HDR: a handheld three-frame bracket (File › Automate › Merge to HDR…), the Merged layer at 100 % for doubled edges, highlights and shadows against the middle exposure, a Curves layer on top, and an exposure layer shown and masked in by hand
+- [ ] Frequency Separation's edit layers: both dialogs with Add edit layers ticked, cloning and healing texture on High Edit and blurring a lassoed patch of Low Edit on a 24 MP portrait, erasing part of a copy and hiding it to get the layer back, unticked (as before), the tick remembered after a restart, Defaults, and how big the .ora is
 - [ ] Undo/redo after each of the above (done for everything checked)
 
 ## 3. Retouching and editing
@@ -227,15 +228,10 @@ The UI has been tested through the same code paths with scripts
   - Later: the Blending Options for "Blend Clipped Layers as Group" off, and dragging a layer into a clipping mask making it clipped (as new layers are).
 - ~~**Retouching setups as groups**~~ (done): Retouch › Frequency Separation now puts its two layers in a Pass Through "Frequency Separation" group, so hiding the group shows the image before. Retouch › Frequency Separation (3 Bands)… splits into Low (color/tone), Mid (blotches), and High (texture) layers in their own group. Retouch › Dodge & Burn Curves makes the pro setup in one step: a "Dodge & Burn" group with a "Dodge" Curves layer (midtones 50 % → 65 %) above a "Burn" one (50 % → 35 %), each with a black mask. It selects the Dodge mask, ready to paint white with a soft, low-opacity brush; select Burn to darken. The grey Soft Light Dodge & Burn Layer is still there too.
   - Later: choosing how strong the curves are, and Luminosity mode for either layer if darkening shifts colour too much (both can be set by hand for now).
-- **Non-destructive Frequency Separation layers**: an option (checkbox in the Frequency Separation and Frequency Separation 3 dialogs, enabled by default and remembered in `filters.toml`) to build duplicate edit layers in Normal mode clipped to High and Mid (and a Normal edit layer above Low), so texture cloning, healing and blotch smoothing are semi-non-destructive.
-  - Because clipped layers composite onto the base with their own Normal mode before blending through the base's GrainMerge mode, any strokes on the clipped duplicate override the texture, while erasing or hiding the clipped layer restores the unedited frequency layer underneath.
-  - Hierarchy built inside the group:
-    - `High Edit` (Normal, clipped to High)
-    - `High - texture` (GrainMerge)
-    - `Mid Edit` (Normal, clipped to Mid, in 3-band setup)
-    - `Mid - blotches` (GrainMerge, in 3-band setup)
-    - `Low Edit` (Normal, above Low)
-    - `Low - color/tone` (Normal)
+- ~~**Edit layers for Frequency Separation**~~ (done): both Frequency Separation dialogs have an Add edit layers checkbox, ticked to begin with and remembered (`separation_edit_layers` in `filters.toml` and `defaults.toml`). Ticked, each layer gets a copy just above it to retouch on, "Low Edit", "Mid Edit" and "High Edit", so the layers themselves stay as they were split: erasing part of a copy, or hiding it, brings that back. Mid's and High's copies are Normal and clipped to them, so they stand in for the layer's pixels and blend as it does (Grain Merge); Low's is an ordinary layer above it. High Edit is selected afterwards (Mid Edit with three bands), and it's all one undo step. Clone, heal and blur on a copy with Sample on Current Layer, as on the layers before.
+  - A copy shares its layer's tiles until it's painted on, so it costs no memory at first, but each is a layer of its own in the .ora: a 24 MP image split in two went from 519 MB to 766 MB. Unticked, it's the two or three layers as before.
+  - With clipped layers in the group, slider drags and moves of a layer in it or below it aren't shown live on the GPU, which doesn't do clipping masks yet (see GPU compositing); those of layers above the group still are.
+  - Later: empty copies that clone and heal from the layer below them, which would cost nothing on disk until painted, and one file for a copy not yet painted on.
 - ~~**Lock transparent pixels**~~ (done): `/` (Layer › Lock Transparent Pixels, or the lock button under Opacity) locks the selected layers' transparency, as in Photoshop. Brushes, clone and healing then change only colour, as if the pixels were opaque, keeping each pixel's transparency; fills do the same. The eraser and Delete paint the background colour instead. Locked rows show a lock. Saved in OpenRaster as `omapix:lock-alpha`.
   - ~~Lock All, Lock Image Pixels and Lock Position~~ (done).
   - Later: filters and the Move tool keeping transparency too.

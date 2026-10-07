@@ -68,6 +68,8 @@ pub struct FilterSettings {
     /// from the image's size.
     pub separation3_fine: Option<f32>,
     pub separation3_coarse: Option<f32>,
+    /// Whether both add a copy above each layer to retouch on.
+    pub separation_edit_layers: bool,
     /// Auto Retouch's steps, as last used for All Faces.
     pub auto_retouch: crate::auto_retouch::Retouch,
     /// Heal Blemishes' Sensitivity, 0–100.
@@ -108,6 +110,7 @@ impl Default for FilterSettings {
             separation_radius: None,
             separation3_fine: None,
             separation3_coarse: None,
+            separation_edit_layers: true,
             auto_retouch: Default::default(),
             blemish_sensitivity: 50.0,
             smooth_skin: Default::default(),
