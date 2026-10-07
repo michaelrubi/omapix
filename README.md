@@ -35,7 +35,7 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   High Pass sharpening, and a Finish step (sharpen, then grain).
 - **AI retouching, on your own machine:** Auto Retouch, Heal Blemishes,
   Smooth Skin, Even Tone, Reduce Shine, Lighten Under Eyes, Whiten Teeth
-  and Eyes, Face-Aware Liquify, Body Reshape, Select Subject, Skin and
+  and Eyes, Makeup, Face-Aware Liquify, Body Reshape, Select Subject, Skin and
   Hair, Content-Aware Fill, Generative Fill, Denoise and upscaling. Every
   result is an ordinary layer, mask or selection. No cloud and no account
   (see [AI features](#ai-features)).
