@@ -104,16 +104,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } = value.parse()?;
         }
         let t = Instant::now();
+        let bodies: Vec<_> = found.iter().filter_map(|pose| pose.body(&image)).collect();
+        let lines = t.elapsed();
+        let t = Instant::now();
         let mut field = Field::new(w as u32, h as u32);
-        for body in found.iter().filter_map(Pose::body) {
-            reshape(&mut field, &body, &shape, 0);
+        for body in &bodies {
+            reshape(&mut field, body, &shape, 0);
         }
         let made = t.elapsed();
         let t = Instant::now();
         let before = Tiled::from_slice(w as u32, h as u32, [0; 4], raster.pixels());
         let mut after = vec![[0u8; 4]; srgb.len()];
         DisplayTransform::to_srgb(&doc.profile)?.convert(&warped(&before, &field).to_vec(), &mut after);
-        println!("  {sliders}: the warp in {made:?}, the image warped in {:?}", t.elapsed());
+        println!("  {sliders}: the lines behind in {lines:?}, the warp in {made:?}, the image warped in {:?}", t.elapsed());
         let mut img = image::RgbImage::new(ow * 2, oh);
         for (x, y, pixel) in img.enumerate_pixels_mut() {
             let from = if x < ow { &srgb } else { &after };
