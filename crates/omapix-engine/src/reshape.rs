@@ -326,6 +326,49 @@ fn symmetrise(face: &mut Face, amounts: &Symmetry) {
     }
 }
 
+/// How uneven faces usually are, feature by feature, as [`unevenness`]
+/// measures it: the middle of seventeen portraits' looking at the camera.
+/// Eyes are the most alike and the outline the least (hair and the turn of
+/// the head are in it too).
+const USUAL: Symmetry = Symmetry { eyes: 0.006, brows: 0.012, nose: 0.012, mouth: 0.008, jaw: 0.02 };
+
+/// The Symmetry that evens each of `face`'s features only as far as faces
+/// usually are, in whole numbers: none for a feature no more uneven than
+/// usual, half for one twice as uneven, and never all of it, so a face is
+/// left its own.
+pub fn harmony(face: &Face) -> Symmetry {
+    let uneven = unevenness(face);
+    let amount = |uneven: f32, usual: f32| if uneven > usual { (100.0 * (1.0 - usual / uneven)).round() } else { 0.0 };
+    Symmetry {
+        eyes: amount(uneven.eyes, USUAL.eyes),
+        brows: amount(uneven.brows, USUAL.brows),
+        nose: amount(uneven.nose, USUAL.nose),
+        mouth: amount(uneven.mouth, USUAL.mouth),
+        jaw: amount(uneven.jaw, USUAL.jaw),
+    }
+}
+
+/// How uneven each of `face`'s features is: how far its points would go,
+/// on average, to be made fully alike, as a part of the distance between
+/// the eyes. Less for a face turned from the camera, as its symmetry is
+/// held back, and none for one turned too far to tell.
+fn unevenness(face: &Face) -> Symmetry {
+    let mut even = face.clone();
+    symmetrise(&mut even, &Symmetry { eyes: 100.0, brows: 100.0, nose: 100.0, mouth: 100.0, jaw: 100.0 });
+    let iod = Frame::of(face).iod;
+    let moved = |from: &Sides, to: &Sides| {
+        let far = from.points().zip(to.points()).map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1])).sum::<f32>();
+        far / from.points().count().max(1) as f32 / iod
+    };
+    Symmetry {
+        eyes: moved(&face.eyes, &even.eyes),
+        brows: moved(&face.brows, &even.brows),
+        nose: moved(&face.nose, &even.nose),
+        mouth: moved(&face.lips, &even.lips),
+        jaw: moved(&face.outline, &even.outline),
+    }
+}
+
 /// Move `points` as one towards `to`: shifted, turned and scaled the way
 /// that brings them nearest (by least squares). Point by point they'd each
 /// go their own way, and an outline would come out wavy.
@@ -551,6 +594,34 @@ mod tests {
         bent.nose.middle[3][0] += 6.0;
         let straight = shaped(&bent, &Shape { symmetry: Symmetry { nose: 100.0, ..Default::default() }, ..Default::default() });
         assert!((straight.nose.middle[3][0] - 300.0).abs() < 0.5, "{:?}", straight.nose.middle[3]);
+    }
+
+    #[test]
+    fn harmony_evens_a_feature_only_as_far_as_faces_usually_are() {
+        // A face the same either side needs nothing.
+        assert_eq!(harmony(&face()), Symmetry::default());
+        // The eye on the left 6 px higher: each would go 3 px to be alike,
+        // 0.03 of the distance between the eyes and five times the usual,
+        // so four fifths of it is taken out. The rest is left alone.
+        let mut uneven = face();
+        for p in &mut uneven.eyes.left {
+            p[1] -= 6.0;
+        }
+        let found = harmony(&uneven);
+        assert!((78.0..=82.0).contains(&found.eyes), "{found:?}");
+        assert_eq!(Symmetry { eyes: 0.0, ..found }, Symmetry::default());
+        let height = |eye: &[Point]| middle(eye)[1];
+        let even = shaped(&uneven, &Shape { symmetry: found, ..Default::default() });
+        let left = (height(&even.eyes.right) - height(&even.eyes.left)) / 2.0;
+        assert!((left / 100.0 - USUAL.eyes).abs() < 0.002, "{left} px each is as uneven as usual");
+        // 1 px higher is within the usual: nothing.
+        let mut nearly = face();
+        for p in &mut nearly.eyes.left {
+            p[1] -= 1.0;
+        }
+        assert_eq!(harmony(&nearly), Symmetry::default());
+        // Turned too far to tell, nothing.
+        assert_eq!(harmony(&turned(uneven, 35.0)), Symmetry::default());
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use egui::{RichText, Slider, vec2};
 use omapix_ai::face::outline;
 use omapix_engine::Document;
-use omapix_engine::reshape::{Face, Shape, Sides, facing};
+use omapix_engine::reshape::{Face, Shape, Sides, facing, harmony};
 
 use crate::editor::{Editor, Figure};
 use crate::face_selection::analyse;
@@ -23,6 +23,9 @@ type Value<S> = fn(&mut S) -> &mut f32;
 
 /// What Symmetry's sliders say when hovered, after their own hints.
 const FACING: &str = "For faces looking at the camera: less is done as a face turns away, and nothing turned far";
+
+/// What the faces' Auto says when hovered.
+const AUTO: &str = "Sets Symmetry's sliders from the face: each feature is evened only as far as faces usually are, and one that's even enough is left alone";
 
 /// A group of sliders: its name, whether it starts open, their least value
 /// and what they all say when hovered, after their own hints; then each
@@ -157,6 +160,12 @@ pub trait Sliders: Figure + Send + 'static {
     fn note(&self) -> Option<(&'static str, String)> {
         None
     }
+
+    /// What Auto would make of its `shape`, and what Auto says when
+    /// hovered, for those it can set sliders for.
+    fn auto(&self, _shape: &Self::Shape) -> Option<(Self::Shape, &'static str)> {
+        None
+    }
 }
 
 impl Sliders for Face {
@@ -179,6 +188,11 @@ impl Sliders for Face {
             part => format!("Turned away: held back to {part:.0} %"),
         };
         Some(("Symmetry", why))
+    }
+
+    /// Symmetry's sliders set from how uneven the face is.
+    fn auto(&self, shape: &Shape) -> Option<(Shape, &'static str)> {
+        Some((Shape { symmetry: harmony(self), ..*shape }, AUTO))
     }
 }
 
@@ -213,6 +227,7 @@ impl<F: Sliders> Panel<F> {
         let found = editor.liquify_figures::<F>();
         let mut shapes: Option<Vec<F::Shape>> = found.map(|all| all.iter().map(|(_, shape)| *shape).collect());
         let notes: Vec<_> = found.unwrap_or_default().iter().map(|(figure, _)| figure.note()).collect();
+        let autos: Vec<_> = found.unwrap_or_default().iter().map(|(figure, shape)| figure.auto(shape)).collect();
         let mut preview = editor.liquify_shapes_shown();
         egui::Window::new(F::TITLE)
             .open(open)
@@ -225,7 +240,7 @@ impl<F: Sliders> Panel<F> {
                     let why = self.failed.as_deref().unwrap_or(F::NONE);
                     ui.label(RichText::new(why).color(theme.dark_foreground));
                 }
-                Some(shapes) => self.sliders(ui, shapes, &notes, &mut preview, theme),
+                Some(shapes) => self.sliders(ui, shapes, &notes, &autos, &mut preview, theme),
             });
         if preview != editor.liquify_shapes_shown() {
             editor.show_liquify_shapes(preview);
@@ -269,8 +284,17 @@ impl<F: Sliders> Panel<F> {
     /// The face to shape, if there's more than one, then its sliders in
     /// groups that fold away, and `preview`: off, the faces are shown as
     /// they were, and the sliders wait. `notes` is what each face has to
-    /// say above one of its groups.
-    fn sliders(&mut self, ui: &mut egui::Ui, shapes: &mut [F::Shape], notes: &[Option<(&str, String)>], preview: &mut bool, theme: &Theme) {
+    /// say above one of its groups, and `autos` what Auto would make of
+    /// each.
+    fn sliders(
+        &mut self,
+        ui: &mut egui::Ui,
+        shapes: &mut [F::Shape],
+        notes: &[Option<(&str, String)>],
+        autos: &[Option<(F::Shape, &str)>],
+        preview: &mut bool,
+        theme: &Theme,
+    ) {
         self.selected = self.selected.min(shapes.len() - 1);
         if shapes.len() > 1 {
             ui.horizontal_wrapped(|ui| {
@@ -315,6 +339,11 @@ impl<F: Sliders> Panel<F> {
         ui.horizontal(|ui| {
             if ui.add_enabled(*preview && *shape != F::Shape::default(), egui::Button::new("Reset")).clicked() {
                 *shape = F::Shape::default();
+            }
+            if let Some((auto, hint)) = &autos[self.selected]
+                && ui.add_enabled(*preview && shape != auto, egui::Button::new("Auto")).on_hover_text(*hint).clicked()
+            {
+                *shape = *auto;
             }
             ui.checkbox(preview, "Preview").on_hover_text("Off, the picture is shown without the sliders' work");
         });
@@ -538,6 +567,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn auto_sets_symmetry_from_the_face_as_one_step_and_keeps_the_other_sliders() {
+        let ctx = egui::Context::default();
+        let (mut editor, mut panel) = (liquifying(), FaceLiquify::default());
+        // The eye on the left 6 px higher, and the eyes already made larger.
+        let mut uneven = landmarks();
+        for i in outline::LEFT_EYE {
+            uneven[i][1] -= 6.0;
+        }
+        editor.cancel_liquify();
+        editor.begin_liquify().unwrap();
+        editor.set_liquify_figures(editor.active, vec![face(&uneven)]);
+        panel.shape(&ctx, &mut editor, &[Shape { eye_size: 30.0, ..Default::default() }]);
+        let away = Pos2::new(10.0, 500.0);
+        frame_at(&ctx, &mut panel, &mut editor, away, false);
+        let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
+
+        // A click on Auto evens the eyes most of the way, and nothing else.
+        let auto = texts.iter().find(|(t, _)| t == "Auto").expect("an Auto button").1 + vec2(5.0, 5.0);
+        frame_at(&ctx, &mut panel, &mut editor, auto, true);
+        frame_at(&ctx, &mut panel, &mut editor, auto, false);
+        let shape = shapes(&editor)[0];
+        assert!((75.0..=85.0).contains(&shape.symmetry.eyes), "{:?}", shape.symmetry);
+        let eyes = omapix_engine::reshape::Symmetry { eyes: shape.symmetry.eyes, ..Default::default() };
+        assert_eq!(shape, Shape { eye_size: 30.0, symmetry: eyes, ..Default::default() });
+        // Clicked again, there's nothing more for it to do.
+        frame_at(&ctx, &mut panel, &mut editor, auto, true);
+        frame_at(&ctx, &mut panel, &mut editor, auto, false);
+        assert_eq!(shapes(&editor)[0], shape);
+        // It's one step to undo.
+        editor.undo();
+        assert_eq!(shapes(&editor), [Shape { eye_size: 30.0, ..Default::default() }]);
+    }
+
+    #[test]
     fn each_eye_and_brow_has_a_group_that_starts_folded() {
         use omapix_engine::reshape::Brow;
         let ctx = egui::Context::default();
@@ -659,8 +722,10 @@ pub(crate) mod tests {
         let (Ok(photos), Ok(out)) = (std::env::var("OMAPIX_FACE_PHOTO"), std::env::var("OMAPIX_FACE_OUT")) else {
             return;
         };
+        // `SHAPE=Auto` gives each face what Auto would.
+        let auto = std::env::var("SHAPE").is_ok_and(|shape| shape == "Auto");
         let mut shape = Shape::default();
-        for setting in std::env::var("SHAPE").unwrap_or("Symmetry=100".into()).split(',') {
+        for setting in std::env::var("SHAPE").unwrap_or("Symmetry=100".into()).split(',').filter(|_| !auto) {
             let (name, value) = setting.split_once('=').unwrap();
             let value: f32 = value.parse().unwrap();
             let group = SLIDERS.iter().find(|(group, ..)| *group == name).map(|(.., sliders)| *sliders);
@@ -670,7 +735,7 @@ pub(crate) mod tests {
                 *at(&mut shape) = value;
             }
         }
-        assert_ne!(shape, Shape::default(), "no such slider");
+        assert!(auto || shape != Shape::default(), "no such slider");
         let photos = std::path::Path::new(&photos);
         let mut paths: Vec<_> = match std::fs::read_dir(photos) {
             Ok(dir) => dir.map(|e| e.unwrap().path()).collect(),
@@ -699,15 +764,16 @@ pub(crate) mod tests {
             editor.canvas.lay_out_for_test(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0)), zoom);
             editor.begin_liquify().unwrap();
             editor.set_liquify_figures(editor.active, faces.clone());
-            let mut half = shape;
+            let shapes: Vec<_> = faces.iter().map(|face| if auto { face.auto(&shape).unwrap().0 } else { shape }).collect();
+            let mut halves = shapes.clone();
             for (.., at) in SLIDERS.iter().flat_map(|(.., sliders)| *sliders) {
-                *at(&mut half) /= 2.0;
+                halves.iter_mut().for_each(|half| *at(half) /= 2.0);
             }
             let t = std::time::Instant::now();
-            editor.shape_liquify::<Face>(&vec![half; faces.len()]);
+            editor.shape_liquify::<Face>(&halves);
             let first = t.elapsed();
             let t = std::time::Instant::now();
-            editor.shape_liquify::<Face>(&vec![shape; faces.len()]);
+            editor.shape_liquify::<Face>(&shapes);
             let quick = t.elapsed();
             let t = std::time::Instant::now();
             editor.end_liquify_stroke();
@@ -726,6 +792,9 @@ pub(crate) mod tests {
                 let [l, t, r, b] = [bound(0, true), bound(1, true), bound(0, false), bound(1, false)];
                 let iod = (face.eyes.right[0][0] - face.eyes.left[0][0]).hypot(face.eyes.right[0][1] - face.eyes.left[0][1]);
                 eprintln!("  face {}: {:.0} × {:.0}, eyes' outer corners {iod:.0} apart, Symmetry at {:.0} %", n + 1, r - l, b - t, facing(face) * 100.0);
+                if auto {
+                    eprintln!("    Auto: {:?}", shapes[n].symmetry);
+                }
                 let pad = (r - l).max(b - t) * 0.3;
                 let [x0, y0, x1, y1] = [(l - pad).max(0.0), (t - pad).max(0.0), (r + pad).min(iw), (b + pad).min(ih)];
                 let step = ((x1 - x0) / 800.0).max(1.0);

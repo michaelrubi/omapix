@@ -171,6 +171,7 @@ mod tests {
         let has = |texts: &[(String, Pos2)], text: &str| texts.iter().any(|(t, _)| t == text);
         assert!(has(&texts, "Body Reshape") && has(&texts, "Waist") && has(&texts, "Leg Length") && has(&texts, "Head Size"));
         assert!(!has(&texts, "Body 1"), "only one");
+        assert!(has(&texts, "Reset") && !has(&texts, "Auto"), "Auto is the faces'");
 
         editor.cancel_liquify();
         editor.begin_liquify().unwrap();
