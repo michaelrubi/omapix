@@ -91,6 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for slider in sliders.split(',') {
             let (name, value) = slider.split_once('=').ok_or("SHAPE is name=value,…")?;
             *match name {
+                "level" => &mut shape.level,
                 "head" => &mut shape.head,
                 "neck" => &mut shape.neck,
                 "shoulders" => &mut shape.shoulders,

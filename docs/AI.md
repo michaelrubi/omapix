@@ -886,7 +886,12 @@ Reordered on 2026-09-29 (see Decisions).
       the face's features is, evening it only as far as faces usually are
       (`reshape::harmony`). No model of its own.
     - One Harmonize slider for how much, and a small smile lift.
-    - Posture & silhouette alignment from pose landmarks.
+    - ~~Level Shoulders~~ (done, 2026-10-07): a slider in Body Reshape's
+      new Posture group, with how far from level the shoulders are said
+      above it. No Auto for bodies: nothing the pose model gives measures
+      a slouch or a waist. See "Posture" under Body Reshape below.
+    - A Head Tilt slider, and a bend along the spine for a slouch seen
+      from the side.
     - Background line protection (straight edge dampening).
 
 ### Face analysis spike
@@ -1572,6 +1577,38 @@ OMAPIX_BODY_PHOTO=photos cargo test --release -p omapix body_reshape_in_photos -
   - **At 100:** Waist 20 % wider, Hips 15 %, Shoulders 12 %, Arms 25 %,
     Legs 20 %; legs 8 % longer; the head 12 % larger; the neck longer by
     12 % of the way from the shoulders to the ears.
+- **Posture** (milestone 16, 2026-10-07). **Level Shoulders**, 0 to 100,
+  is the one slider that isn't a width or a length: at 100 the two
+  shoulder joints are at the same height in the picture, each having gone
+  half way.
+  - It's a shear up and down, not a turn: a point moves by how far the
+    line through the shoulders is from level at its x, and beyond a
+    shoulder by as much as the shoulder, so the top of an arm goes with
+    it. Measured in shoulder widths from that line, all of it is done
+    from 0.1 above (the tops of the shoulders) to the line, none from
+    0.35 above (the jaw) so the head isn't skewed, and less and less down
+    to 1.0 below (about the waist). Then it fades out behind the person
+    as the other sliders do.
+  - More than 30° from level nothing is done, and the panel says so.
+    Level is the picture's, not the spine's: with the hips out of view
+    the spine is a guess.
+  - **No Auto.** Looked for on the twenty-nine people the pose model
+    finds in `~/Pictures/sample` and `~/Pictures/blemish-tests`:
+    - *Shoulder tilt* is measured well (the middle one 5°, eight over
+      10°, none over 30°), but looking at them, nearly all are the pose.
+      So it's a slider and a number, not a button.
+    - *A slouch.* The head's height above the shoulders, in shoulder
+      widths, was 0.62–0.77 on the eight full-length portraits facing
+      the camera, and 0.48–0.63 on twelve close-ups and selfies: it
+      follows how close and how high the camera is. Full length, nobody
+      was far enough from the rest to call slouching.
+    - *The waist.* The matte's width at the waist against the hips ran
+      from 0.45 to 2.04: it's the dress, the sleeves and where the arms
+      are. In nine there was no edge to find at all.
+    - *Depth.* The landmarker's z put the ears 0.1–1.05 shoulder widths
+      in front of the shoulders in every photo, and one shoulder more
+      than a shoulder width behind the other in nine. Not used.
+  - The warp takes 1–8 ms (8 ms at 24 MP), like the others.
 - **Background protection.** Outside the person (by a distance transform
   of the matte) a move fades out over five times its own length, so a
   10 px move is gone 50 px from them: small moves touch almost nothing
