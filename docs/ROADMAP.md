@@ -476,6 +476,23 @@ What Omapix needs before people other than Michael can install it, rely on it an
 - **Issue templates** for bug reports, asking for what CONTRIBUTING.md lists.
 - **A user guide.** DESIGN.md's shortcut table covers the basics, and the rest is only in the roadmap's descriptions of finished items. One page for each of the main workflows (darktable round trip, frequency separation, Auto Retouch) would do.
 
+## Borrowing from PhotoCraft
+
+[PhotoCraft](https://github.com/storytold/photocraft) is a general Photoshop clone in Rust, built much as Omapix is (egui on wgpu, 256 px copy-on-write tiles). It's under MIT or Apache-2.0, so its code can go into Omapix with its copyright notice kept. It has no AI retouching, frequency separation, native Wayland pen input or darktable round trip, so it doesn't replace Omapix. Nothing here is planned: it's where to look first when one of these is wanted.
+
+Read on 2026-10-08 at commit [`ec477ca`](https://github.com/storytold/photocraft/tree/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1), which the links below point to. It was eight days old then and little of it had been used by anyone, so check whatever's taken against real files.
+
+- **PSD export and fuller PSD import**: [`crates/psd`](https://github.com/storytold/photocraft/tree/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/psd) is a reader and writer for PSD and PSB that stands alone (about 10,900 lines, needing only `thiserror` and `flate2`). It keeps the blocks it doesn't understand, and `PsdBuilder` writes a new file from layers and a composite. Omapix's `psd.rs` only opens PSDs. It isn't on crates.io, so it would be a git dependency pinned to a commit, or a copy. [`crates/io/src/psd_export.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/io/src/psd_export.rs) shows a document being turned into one.
+- **Photoshop brush files (`.abr`)**: [`crates/psd/src/abr.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/psd/src/abr.rs) reads both the old and the current layout.
+- **To read, not to drop in.** These work on PhotoCraft's own raster types in `f32`, so they'd be ported to `Tiled<[u16; 4]>`:
+  - Dodge, Burn and Sponge, with Protect Tones, which Omapix has no tools for: [`crates/algo/src/retouch.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/algo/src/retouch.rs).
+  - Brush dynamics (Shape Dynamics, Scattering, Texture, Dual Brush, Transfer, Smoothing): [`crates/paint`](https://github.com/storytold/photocraft/tree/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/paint).
+  - Healing by Poisson blending, solved coarse to fine: [`crates/algo/src/poisson.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/algo/src/poisson.rs).
+  - Content-Aware Fill without a model (PatchMatch, with a sampling area and rotated, scaled and mirrored patches): [`crates/algo/src/inpaint.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/algo/src/inpaint.rs) and [`content_aware.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/algo/src/content_aware.rs).
+  - Liquify as a displacement field that strokes replay: [`crates/algo/src/liquify.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/algo/src/liquify.rs).
+  - Select and Mask's Smart Radius and Decontaminate Colours: [`crates/algo/src/matting.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/algo/src/matting.rs).
+- Not wanted: its camera raw (darktable does that), type, vectors, CMYK and smart objects.
+
 ## Out of scope for now
 - Vector and layout tools (Omapix is raster only).
 - Plugins and scripting beyond `OMAPIX_SCRIPT` (external automation and agent workflows are handled via the MCP server).
