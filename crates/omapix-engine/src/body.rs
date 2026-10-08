@@ -1,8 +1,8 @@
 //! Body Reshape (docs/AI.md, feature 8): sliders that make a person's
 //! waist, hips, shoulders, arms and legs wider or narrower, their legs and
-//! neck longer and their head larger, as a warp ([`crate::warp`]) about
-//! the bones the pose model finds, faded out away from the person so what's
-//! behind them bends as little as it can.
+//! neck longer and their head larger, and level their shoulders, as a warp
+//! ([`crate::warp`]) about the bones the pose model finds, faded out away
+//! from the person so what's behind them bends as little as it can.
 
 use crate::reshape::ramp;
 use crate::selection::{edt_rows, transpose_f32};
@@ -41,6 +41,9 @@ pub struct Matte<'a> {
 /// as it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Shape {
+    /// The shoulders brought level, 0 to 100: at 100 one is as high as the
+    /// other.
+    pub level: f32,
     pub head: f32,
     pub neck: f32,
     pub shoulders: f32,
@@ -70,6 +73,14 @@ const WAIST_LINE: [f32; 3] = [0.25, 0.62, 0.95];
 const HIP_LINE: [f32; 3] = [0.75, 1.05, 1.4];
 /// The torso is measured from above the shoulders to below the hips.
 const TORSO: [f32; 2] = [-0.2, 1.4];
+
+/// Shoulders further from level than this (degrees) aren't levelled: the
+/// person's lying down, or leaning far.
+pub const LEVELLED: f32 = 30.0;
+/// Where levelling the shoulders works, in shoulder widths above and below
+/// the line through them: all of it from the tops of the shoulders to the
+/// line, none from the jaw up, and less and less down to the waist.
+const LEVEL: [f32; 3] = [-0.35, -0.1, 1.0];
 
 /// What's beside a part goes with its edge, less the further away it is:
 /// to nothing at this many times the part's half-width (the head's radius)
@@ -325,6 +336,8 @@ pub struct Body {
     strides: Vec<Leg>,
     /// The head's middle (between the ears) and its radius, hair and all.
     head: Option<(Point, f32)>,
+    /// The shoulders, the one on the left of the picture first.
+    shoulders: [Point; 2],
     outside: Outside,
     /// The image's part they may move in, (x0, y0, x1, y1), before it's
     /// cut to the image.
@@ -382,7 +395,40 @@ impl Body {
         // They may move a little beyond the matte's square.
         let reach = matte.side * (0.5 * (outside.sin.abs() + outside.cos.abs()) + 0.25);
         let area = [matte.centre[0] - reach, matte.centre[1] - reach, matte.centre[0] + reach, matte.centre[1] + reach];
-        Some(Self { torso, arms, legs, strides, head, outside, area })
+        let mut shoulders = [[left[0], left[1]], [right[0], right[1]]];
+        shoulders.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        Some(Self { torso, arms, legs, strides, head, shoulders, outside, area })
+    }
+
+    /// How far the shoulders are from level, in degrees. Beyond
+    /// [`LEVELLED`] they're left as they are.
+    pub fn shoulder_tilt(&self) -> f32 {
+        let [a, b] = self.shoulders;
+        (b[1] - a[1]).atan2(b[0] - a[0]).to_degrees().abs()
+    }
+
+    /// Where `p` reads from with the shoulders a `part` of the way to
+    /// level: each goes up or down to meet the other, with what's above
+    /// and beside it, and the body below less and less down to the waist.
+    /// The head stays.
+    fn levelled(&self, p: Point, part: f32) -> Point {
+        if self.shoulder_tilt() > LEVELLED {
+            return [0.0; 2];
+        }
+        let [a, b] = self.shoulders;
+        let (across, slope) = (b[0] - a[0], (b[1] - a[1]) / (b[0] - a[0]));
+        // How far down a point at `y` goes: beyond a shoulder, as far as
+        // the shoulder.
+        let x = (p[0] - (a[0] + b[0]) / 2.0).clamp(-across / 2.0, across / 2.0);
+        let line = (a[1] + b[1]) / 2.0 + slope * x;
+        let [none, top, waist] = LEVEL;
+        let down = |y: f32| {
+            let below = (y - line) / across;
+            -slope * x * part * ramp(none, top, below) * (1.0 - ramp(0.0, waist, below))
+        };
+        // What ends up at `p` came from where going down brings it here.
+        let from = p[1] - down(p[1] - down(p[1]));
+        [0.0, from - p[1]]
     }
 
     /// Where `p` reads from with the head a part `larger`, and `lifted` on
@@ -432,6 +478,9 @@ impl Body {
         }
         if shape.head != 0.0 || shape.neck != 0.0 {
             add(self.headed(p, HEAD * part(shape.head), NECK * part(shape.neck)));
+        }
+        if shape.level != 0.0 {
+            add(self.levelled(p, part(shape.level)));
         }
         // Outside the person (as they were) it fades out, the sooner the
         // less it is.
@@ -669,6 +718,51 @@ mod tests {
         for field in [&larger, &lifted] {
             assert_eq!((field.at(512.0, 304.0), field.at(440.0, 320.0), field.at(512.0, 600.0)), ([0.0; 2], [0.0; 2], [0.0; 2]));
         }
+    }
+
+    /// [`body`], one shoulder `drop` px below where it was and the other as
+    /// far above: the person's left, on the right of the picture, the lower.
+    fn leaning(drop: f32) -> Body {
+        let mut joints = joints(false);
+        joints.shoulders[0][1] += drop;
+        joints.shoulders[1][1] -= drop;
+        let mut cover = cover(&joints);
+        // Their torso goes up to the higher shoulder.
+        let cell = SIDE / SIZE as f32;
+        for (k, v) in cover.iter_mut().enumerate() {
+            let p = [((k % SIZE) as f32 + 0.5) * cell, ((k / SIZE) as f32 + 0.5) * cell];
+            if (p[0] - 512.0).abs() <= 80.0 && (300.0 - drop.abs()..=300.0).contains(&p[1]) {
+                *v = 1.0;
+            }
+        }
+        Body::new(&joints, &Matte { centre: [512.0; 2], side: SIDE, angle: 0.0, size: SIZE, cover: &cover }).unwrap()
+    }
+
+    #[test]
+    fn levelled_shoulders_meet_half_way_and_leave_the_head_and_waist() {
+        let body = leaning(10.0);
+        assert!((body.shoulder_tilt() - 7.1).abs() < 0.1, "{}", body.shoulder_tilt());
+        let level = field(&body, &Shape { level: 100.0, ..Default::default() });
+        // The shoulders, at y = 290 and 310, meet at 300, and half way with
+        // the slider half way.
+        let (high, low) = (goes(&level, [432.0, 290.0]), goes(&level, [592.0, 310.0]));
+        assert!((high[1] - 300.0).abs() < 1.0 && (low[1] - 300.0).abs() < 1.0, "{high:?} {low:?}");
+        assert_eq!((high[0], low[0]), (432.0, 592.0));
+        let half = field(&body, &Shape { level: 50.0, ..Default::default() });
+        let low = goes(&half, [592.0, 310.0]);
+        assert!((low[1] - 305.0).abs() < 1.0, "{low:?}");
+        // The top of an arm goes with its shoulder, and the chest below
+        // less: between them nothing's torn.
+        let (arm, chest) = (goes(&level, [612.0, 330.0]), goes(&level, [580.0, 380.0]));
+        assert!((330.0 - arm[1] - 9.0).abs() < 1.5 && (2.0..8.0).contains(&(380.0 - chest[1])), "{arm:?} {chest:?}");
+        // The head, the spine, the waist and all below stay.
+        for p in [[512.0, 220.0], [550.0, 230.0], [512.0, 320.0], [440.0, 480.0], [590.0, 480.0], [467.0, 700.0]] {
+            assert_eq!(level.at(p[0], p[1]), [0.0; 2], "{p:?}");
+        }
+        // Level already, there's nothing to do; leaning far, nothing's done.
+        let none = [body.clone(), leaning(0.0), leaning(60.0)].map(|body| field(&body, &Shape { level: 100.0, ..Default::default() }).at(592.0, 310.0));
+        assert!(none[0][1] > 5.0 && none[1] == [0.0; 2] && none[2] == [0.0; 2], "{none:?}");
+        assert!(leaning(60.0).shoulder_tilt() > LEVELLED);
     }
 
     #[test]

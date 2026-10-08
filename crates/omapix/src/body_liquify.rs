@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use omapix_ai::face::Image;
 use omapix_ai::pose::{Pose, Poses};
 use omapix_engine::Document;
-use omapix_engine::body::{Body, Shape};
+use omapix_engine::body::{Body, LEVELLED, Shape};
 
 use crate::face_liquify::{Group, Panel, Sliders};
 use crate::face_selection::srgb;
@@ -24,7 +24,8 @@ pub fn unload() {
     }
 }
 
-const SLIDERS: [Group<Shape>; 3] = [
+const SLIDERS: [Group<Shape>; 4] = [
+    ("Posture", true, 0.0, None, &[("Level Shoulders", "Brings the shoulders level, each half way to the other", |s| &mut s.level)]),
     (
         "Head",
         true,
@@ -71,6 +72,16 @@ impl Sliders for Body {
         let image = Image { pixels: &srgb, width: image.width() as usize, height: image.height() as usize };
         Ok(poses(&image)?.iter().filter_map(Pose::body).collect())
     }
+
+    /// How far the shoulders are from level: what Level Shoulders has to do.
+    fn note(&self) -> Option<(&'static str, String)> {
+        let why = match self.shoulder_tilt() {
+            tilt if tilt > LEVELLED => "Leaning too far: nothing is done".into(),
+            tilt if tilt < 0.5 => "The shoulders are level".into(),
+            tilt => format!("The shoulders are {tilt:.0}° from level"),
+        };
+        Some(("Posture", why))
+    }
 }
 
 /// Everyone the pose model sees in `image`, from left to right.
@@ -102,6 +113,12 @@ mod tests {
     /// shoulders at y = 200 and hips at y = 360 either side of x = 300, a
     /// torso 120 wide and a head 40 in radius at (300, 130).
     fn body() -> Body {
+        leaning(0.0)
+    }
+
+    /// [`body`], the shoulder on the right of the picture `drop` px lower
+    /// and the other as far higher.
+    fn leaning(drop: f32) -> Body {
         const SIZE: usize = 150;
         let cover: Vec<f32> = (0..SIZE * SIZE)
             .map(|k| {
@@ -111,7 +128,9 @@ mod tests {
             })
             .collect();
         let pair = |x: f32, y: f32| [[300.0 + x, y, 1.0], [300.0 - x, y, 1.0]];
-        let joints = Joints { ears: pair(20.0, 130.0), shoulders: pair(50.0, 200.0), hips: pair(30.0, 360.0), ..Default::default() };
+        let mut joints = Joints { ears: pair(20.0, 130.0), shoulders: pair(50.0, 200.0), hips: pair(30.0, 360.0), ..Default::default() };
+        joints.shoulders[0][1] += drop;
+        joints.shoulders[1][1] -= drop;
         Body::new(&joints, &Matte { centre: [300.0; 2], side: 600.0, angle: 0.0, size: SIZE, cover: &cover }).unwrap()
     }
 
@@ -172,6 +191,16 @@ mod tests {
         assert!(has(&texts, "Body Reshape") && has(&texts, "Waist") && has(&texts, "Leg Length") && has(&texts, "Head Size"));
         assert!(!has(&texts, "Body 1"), "only one");
         assert!(has(&texts, "Reset") && !has(&texts, "Auto"), "Auto is the faces'");
+        // Posture says what Level Shoulders has to do.
+        assert!(has(&texts, "Posture") && has(&texts, "Level Shoulders") && has(&texts, "The shoulders are level"));
+        for (drop, says) in [(5.0, "The shoulders are 6° from level"), (40.0, "Leaning too far: nothing is done")] {
+            editor.cancel_liquify();
+            editor.begin_liquify().unwrap();
+            editor.set_liquify_figures(editor.active, vec![leaning(drop)]);
+            frame_at(&ctx, &mut panel, &mut editor, away, false);
+            let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
+            assert!(has(&texts, says), "{says}");
+        }
 
         editor.cancel_liquify();
         editor.begin_liquify().unwrap();
