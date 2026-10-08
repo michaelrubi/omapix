@@ -4,6 +4,8 @@
 //! ([`crate::warp`]) about the bones the pose model finds, faded out away
 //! from the person so what's behind them bends as little as it can.
 
+use rayon::prelude::*;
+
 use crate::reshape::ramp;
 use crate::selection::{edt_rows, transpose_f32};
 use crate::warp::Field;
@@ -93,6 +95,35 @@ const FADE: f32 = 5.0;
 /// A joint this likely to be in view is.
 const SEEN: f32 = 0.5;
 
+/// The picture is looked at for straight lines behind the person this many
+/// times as finely as the matte, each way.
+pub const LINES: usize = 4;
+/// An edge is where the light changes by this much, of all the way from
+/// black to white, from one of those points to the next: not one below the
+/// first, and all of one from the second.
+const EDGE: [f32; 2] = [0.006, 0.025];
+/// And changes one way far more than the other: by this much of all its
+/// changing.
+const ONE_WAY: [f32; 2] = [0.4, 0.8];
+/// Edges are measured over about this many points.
+const SHARP: f32 = 1.5;
+/// A line is an edge that carries on the same way for this many points, to
+/// one side or the other: not one with this much of that an edge, and all of
+/// one with this much. Leaves and bark don't.
+const RUN: isize = 32;
+const STRAIGHT: [f32; 2] = [0.6, 0.9];
+/// A line holds what's within about this many of the matte's cells of it,
+/// and this firmly.
+const REACH: f32 = 8.0;
+const HOLD: f32 = 60.0;
+/// The matte's edge is only so good: nothing nearer the person than the
+/// first of these, in its cells, is looked at or held, and all of it from
+/// the second.
+const CLEAR: [f32; 2] = [0.5, 1.5];
+/// A move straight out from the person is held over this many times its
+/// length, so what's between is stretched to no more than twice as long.
+const OUT: f32 = 2.0;
+
 /// From 0 at `from` up to 1 at `peak` and back to 0 at `to`.
 fn bump([from, peak, to]: [f32; 3], s: f32) -> f32 {
     ramp(from, peak, s) * (1.0 - ramp(peak, to, s))
@@ -139,11 +170,17 @@ impl Outside {
         Self { centre: matte.centre, sin, cos, size, cell, far: far.collect() }
     }
 
-    /// How far outside the person `p` is, in pixels: 0 on them.
-    fn distance(&self, p: Point) -> f32 {
+    /// Where on the grid `p` is: across and down, in cells.
+    fn place(&self, p: Point) -> (f32, f32) {
         let (x, y) = (p[0] - self.centre[0], p[1] - self.centre[1]);
         let middle = (self.size - 1) as f32 / 2.0;
-        let (u, v) = ((x * self.cos + y * self.sin) / self.cell + middle, (y * self.cos - x * self.sin) / self.cell + middle);
+        ((x * self.cos + y * self.sin) / self.cell + middle, (y * self.cos - x * self.sin) / self.cell + middle)
+    }
+
+    /// How far outside the person `p` is, in pixels: 0 on them.
+    fn distance(&self, p: Point) -> f32 {
+        let (u, v) = self.place(p);
+        let middle = (self.size - 1) as f32 / 2.0;
         // Beyond the grid, as far as its edge is, and on from there.
         let (cu, cv) = (u.clamp(0.0, 2.0 * middle), v.clamp(0.0, 2.0 * middle));
         let (i, j) = ((cu as usize).min(self.size - 2), (cv as usize).min(self.size - 2));
@@ -169,6 +206,131 @@ impl Outside {
             t += step;
         }
         None
+    }
+}
+
+/// The straight lines in the picture behind the person: a door frame, a
+/// horizon, the courses of a wall. A move across one bends it, and that
+/// shows, so it's held back there ([`Body::held`]); a move along one doesn't.
+#[derive(Clone, Debug, PartialEq)]
+struct Lines {
+    /// At each point of [`Outside`]'s grid, what's held of a move there, as
+    /// xx, xy and yy across and down the grid: the ways the lines round it
+    /// face, each as strong as they are.
+    held: Vec<[f32; 3]>,
+}
+
+impl Lines {
+    /// Those in `light`: how light the picture is, 0–1, at [`LINES`] times
+    /// as many points each way as `outside`'s grid, and less than 0 outside
+    /// the picture.
+    fn of(light: &[f32], outside: &Outside) -> Self {
+        let (size, fine) = (outside.size, outside.size * LINES);
+        let at = |i: isize, j: isize| light[j.clamp(0, fine as isize - 1) as usize * fine + i.clamp(0, fine as isize - 1) as usize];
+        let cell = |k: usize| k / fine / LINES * size + k % fine / LINES;
+        let blur = |plane: &[f32], side: usize, sigma: f32| crate::denoise::blur(plane, side, side, sigma);
+        // Where there's something behind to look at: clear of the person,
+        // and two points in from the picture's edge.
+        let clear: Vec<f32> = (0..fine * fine)
+            .into_par_iter()
+            .map(|k| {
+                let (i, j) = ((k % fine) as isize, (k / fine) as isize);
+                let cut = (-2..=2).any(|y| (-2..=2).any(|x| at(i + x, j + y) < 0.0));
+                if cut { 0.0 } else { ramp(CLEAR[0], CLEAR[1], outside.far[cell(k)] / outside.cell) }
+            })
+            .collect();
+        // How much the light changes across and down there, each squared
+        // and the two together, smoothed: over a few points an edge changes
+        // one way, and texture every way.
+        let slopes: Vec<[f32; 3]> = (0..fine * fine)
+            .into_par_iter()
+            .map(|k| {
+                let (i, j) = ((k % fine) as isize, (k / fine) as isize);
+                if clear[k] == 0.0 {
+                    return [0.0; 3];
+                }
+                let across = at(i + 1, j - 1) + 2.0 * at(i + 1, j) + at(i + 1, j + 1) - at(i - 1, j - 1) - 2.0 * at(i - 1, j) - at(i - 1, j + 1);
+                let down = at(i - 1, j + 1) + 2.0 * at(i, j + 1) + at(i + 1, j + 1) - at(i - 1, j - 1) - 2.0 * at(i, j - 1) - at(i + 1, j - 1);
+                [across * across, across * down, down * down].map(|v| v * clear[k] / 64.0)
+            })
+            .collect();
+        let smooth = |c: usize| blur(&slopes.iter().map(|s| s[c]).collect::<Vec<_>>(), fine, SHARP);
+        let (xx, xy, yy, seen) = (smooth(0), smooth(1), smooth(2), blur(&clear, fine, SHARP));
+        // How much of an edge each point is, and the way it faces, as the
+        // cosine and sine of twice its angle.
+        let edges: Vec<[f32; 3]> = (0..fine * fine)
+            .map(|k| {
+                let seen = seen[k].max(1e-3);
+                let (mean, half, cross) = ((xx[k] + yy[k]) / 2.0 / seen, (xx[k] - yy[k]) / 2.0 / seen, xy[k] / seen);
+                let apart = half.hypot(cross);
+                if clear[k] == 0.0 || apart <= 0.0 {
+                    return [0.0; 3];
+                }
+                [ramp(EDGE[0], EDGE[1], (mean + apart).sqrt()) * ramp(ONE_WAY[0], ONE_WAY[1], apart / mean), half / apart, cross / apart]
+            })
+            .collect();
+        // How much of a line: of an edge carrying on the same way, on its
+        // better side. What's behind the person or out of the picture
+        // doesn't count against it.
+        let lines: Vec<f32> = (0..fine * fine)
+            .into_par_iter()
+            .map(|k| {
+                let [edge, cos, sin] = edges[k];
+                if edge == 0.0 {
+                    return 0.0;
+                }
+                let facing = 0.5 * sin.atan2(cos);
+                let (x, y) = ((k % fine) as f32, (k / fine) as f32);
+                let side = |way: f32| {
+                    let (mut sum, mut count) = (0.0f32, 0.0f32);
+                    for t in 1..=RUN {
+                        let (i, j) = ((x - way * t as f32 * facing.sin()).round() as isize, (y + way * t as f32 * facing.cos()).round() as isize);
+                        if i < 0 || j < 0 || i >= fine as isize || j >= fine as isize || clear[j as usize * fine + i as usize] == 0.0 {
+                            continue;
+                        }
+                        let [edge, c, s] = edges[j as usize * fine + i as usize];
+                        sum += edge * (c * cos + s * sin).max(0.0);
+                        count += 1.0;
+                    }
+                    sum / count.max(RUN as f32 / 4.0)
+                };
+                edge * ramp(STRAIGHT[0], STRAIGHT[1], side(1.0).max(side(-1.0)))
+            })
+            .collect();
+        // On the grid: what the lines in each cell hold, spread to what's
+        // round them.
+        let mut held = [0, 1, 2].map(|_| vec![0.0f32; size * size]);
+        for k in (0..fine * fine).filter(|&k| lines[k] > 0.0) {
+            let (w, [_, cos, sin]) = (lines[k] * HOLD / (LINES * LINES) as f32, edges[k]);
+            for (plane, part) in held.iter_mut().zip([0.5 + cos / 2.0, sin / 2.0, 0.5 - cos / 2.0]) {
+                plane[cell(k)] += w * part;
+            }
+        }
+        let [a, b, c] = held.map(|plane| blur(&plane, size, REACH));
+        Self { held: (0..size * size).map(|k| [a[k], b[k], c[k]]).collect() }
+    }
+
+    /// The part of the move `d` that's held at (u, v) of a grid of `size`,
+    /// all of them across and down the grid: what of it goes across the
+    /// lines there.
+    fn across(&self, size: usize, (u, v): (f32, f32), d: Point) -> Point {
+        let last = (size - 1) as f32;
+        if u < 0.0 || v < 0.0 || u > last || v > last {
+            return [0.0; 2];
+        }
+        let (i, j) = ((u as usize).min(size - 2), (v as usize).min(size - 2));
+        let (fx, fy) = (u - i as f32, v - j as f32);
+        let at = |i: usize, j: usize| self.held[j * size + i];
+        let lerp = |p: [f32; 3], q: [f32; 3], t: f32| [0, 1, 2].map(|c| p[c] + (q[c] - p[c]) * t);
+        let [xx, xy, yy] = lerp(lerp(at(i, j), at(i + 1, j), fx), lerp(at(i, j + 1), at(i + 1, j + 1), fx), fy);
+        // The way the most is held, and how much that way and the other:
+        // more lines hold no more than all of it.
+        let (mean, half) = ((xx + yy) / 2.0, (xx - yy) / 2.0);
+        let apart = half.hypot(xy);
+        let (most, least) = (1.0 - (-(mean + apart)).exp(), 1.0 - (-(mean - apart).max(0.0)).exp());
+        let (sin, cos) = (0.5 * xy.atan2(half)).sin_cos();
+        let along = (d[0] * cos + d[1] * sin) * (most - least);
+        [d[0] * least + along * cos, d[1] * least + along * sin]
     }
 }
 
@@ -339,6 +501,8 @@ pub struct Body {
     /// The shoulders, the one on the left of the picture first.
     shoulders: [Point; 2],
     outside: Outside,
+    /// The straight lines behind them, if they've been looked for.
+    lines: Option<Lines>,
     /// The image's part they may move in, (x0, y0, x1, y1), before it's
     /// cut to the image.
     area: [f32; 4],
@@ -397,7 +561,34 @@ impl Body {
         let area = [matte.centre[0] - reach, matte.centre[1] - reach, matte.centre[0] + reach, matte.centre[1] + reach];
         let mut shoulders = [[left[0], left[1]], [right[0], right[1]]];
         shoulders.sort_by(|a, b| a[0].total_cmp(&b[0]));
-        Some(Self { torso, arms, legs, strides, head, shoulders, outside, area })
+        Some(Self { torso, arms, legs, strides, head, shoulders, outside, lines: None, area })
+    }
+
+    /// With the straight lines behind them found, for moves across them to
+    /// be held back. `light` is how light the picture is, 0–1, at [`LINES`]
+    /// times as many points of the matte's square each way as the matte
+    /// has, in rows, and less than 0 outside the picture.
+    pub fn with_lines(mut self, light: &[f32]) -> Self {
+        assert_eq!(light.len(), (self.outside.size * LINES).pow(2));
+        self.lines = Some(Lines::of(light, &self.outside));
+        self
+    }
+
+    /// The move `d` at `p`, which reads from `from`, `far` outside the
+    /// person, and was `moved` long before it faded: less what the straight
+    /// lines behind hold of it.
+    fn held(&self, lines: &Lines, p: Point, d: Point, from: Point, far: f32, moved: f32) -> Point {
+        let Outside { sin, cos, cell, size, .. } = self.outside;
+        let held = lines.across(size, self.outside.place(p), [d[0] * cos + d[1] * sin, d[1] * cos - d[0] * sin]);
+        let held = [held[0] * cos - held[1] * sin, held[1] * cos + held[0] * sin];
+        // The way out from the person.
+        let further = |x: f32, y: f32| self.outside.distance([from[0] + x, from[1] + y]) - self.outside.distance([from[0] - x, from[1] - y]);
+        let (out, _) = towards([0.0; 2], [further(cell, 0.0), further(0.0, cell)]);
+        // All of it is held as soon as it's clear of them, but for the part
+        // straight out, which is let go of more slowly.
+        let (soon, slowly) = (ramp(CLEAR[0] * cell, CLEAR[1] * cell, far), ramp(cell, cell + OUT * moved, far));
+        let straight = (held[0] * out[0] + held[1] * out[1]) * (slowly - soon);
+        [d[0] - soon * held[0] - straight * out[0], d[1] - soon * held[1] - straight * out[1]]
     }
 
     /// How far the shoulders are from level, in degrees. Beyond
@@ -488,8 +679,14 @@ impl Body {
         if moved == 0.0 {
             return d;
         }
-        let fade = 1.0 - ramp(0.0, FADE * moved + self.outside.cell, self.outside.distance([p[0] + d[0], p[1] + d[1]]));
-        [d[0] * fade, d[1] * fade]
+        let from = [p[0] + d[0], p[1] + d[1]];
+        let far = self.outside.distance(from);
+        let fade = 1.0 - ramp(0.0, FADE * moved + self.outside.cell, far);
+        let d = [d[0] * fade, d[1] * fade];
+        match &self.lines {
+            Some(lines) if far > 0.0 => self.held(lines, p, d, from, far, moved),
+            _ => d,
+        }
     }
 }
 
@@ -763,6 +960,57 @@ mod tests {
         let none = [body.clone(), leaning(0.0), leaning(60.0)].map(|body| field(&body, &Shape { level: 100.0, ..Default::default() }).at(592.0, 310.0));
         assert!(none[0][1] > 5.0 && none[1] == [0.0; 2] && none[2] == [0.0; 2], "{none:?}");
         assert!(leaning(60.0).shoulder_tilt() > LEVELLED);
+    }
+
+    /// How light a picture is behind the person, for [`Body::with_lines`]:
+    /// dark where `dark` says, a point to a pixel.
+    fn light(dark: impl Fn(usize, usize) -> bool) -> Vec<f32> {
+        let side = SIZE * LINES;
+        (0..side * side).map(|k| if dark(k % side, k / side) { 0.3 } else { 0.7 }).collect()
+    }
+
+    #[test]
+    fn straight_lines_behind_hold_moves_across_them_and_not_along_them() {
+        // Lines 4 px thick every 40, across the picture and down it, and
+        // pebbles: one in each 12 px square, somewhere in it.
+        let rows = leaning(10.0).with_lines(&light(|_, y| y % 40 < 4));
+        let columns = leaning(10.0).with_lines(&light(|x, _| x % 40 < 4));
+        let pebbles = leaning(10.0).with_lines(&light(|x, y| {
+            let h = ((x / 12) as u32).wrapping_mul(374761393).wrapping_add(((y / 12) as u32).wrapping_mul(668265263));
+            let h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+            ((x % 12) as f32 - (3 + (h >> 8) % 6) as f32).hypot((y % 12) as f32 - (3 + (h >> 16) % 6) as f32) < 3.0
+        }));
+        let plain = leaning(10.0);
+        let at = |body: &Body, shape: &Shape, p: Point| field(body, shape).at(p[0], p[1]);
+
+        // Levelling the shoulders takes what's beside each up or down with
+        // it: here 20 px or more out from the arms.
+        let level = Shape { level: 100.0, ..Default::default() };
+        for (p, least) in [([660.0, 320.0], 5.0), ([380.0, 280.0], 3.0)] {
+            assert!(plain.outside.distance(p) > 20.0);
+            let goes = at(&plain, &level, p);
+            assert!(goes[0] == 0.0 && goes[1].abs() > least, "{p:?} {goes:?}");
+            // Lines across the picture would bend, so they're held where
+            // they are. Lines down it only slide along themselves, and
+            // pebbles aren't lines: those go as they did.
+            let held = at(&rows, &level, p);
+            assert!(held[0].abs() < 1.0 && held[1].abs() < 1.0, "{p:?} {held:?}");
+            let (slid, loose) = (at(&columns, &level, p), at(&pebbles, &level, p));
+            assert!((slid[1] - goes[1]).abs() < 0.1 && (loose[1] - goes[1]).abs() < 0.5, "{p:?} {slid:?} {loose:?}");
+        }
+        // The person goes as they did, whatever's behind.
+        for p in [[592.0, 310.0], [612.0, 330.0], [432.0, 290.0]] {
+            assert_eq!(at(&rows, &level, p), at(&plain, &level, p), "{p:?}");
+        }
+
+        // A narrower waist takes what's beside it in, along the lines across
+        // the picture: they don't hold it. The lines down it do, by more
+        // than half.
+        let waist = Shape { waist: -100.0, ..Default::default() };
+        let p = [610.0, 424.0];
+        let (goes, slid, held) = (at(&plain, &waist, p), at(&rows, &waist, p), at(&columns, &waist, p));
+        assert!(goes[0] > 10.0 && (slid[0] - goes[0]).abs() < 0.1 && slid[1].abs() < 0.1, "{goes:?} {slid:?}");
+        assert!(held[0] < goes[0] / 2.0, "{held:?}");
     }
 
     #[test]

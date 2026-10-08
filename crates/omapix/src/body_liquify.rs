@@ -70,7 +70,7 @@ impl Sliders for Body {
         let image = doc.composite();
         let srgb = srgb(&image, &doc.profile)?;
         let image = Image { pixels: &srgb, width: image.width() as usize, height: image.height() as usize };
-        Ok(poses(&image)?.iter().filter_map(Pose::body).collect())
+        Ok(poses(&image)?.iter().filter_map(|pose| pose.body(&image)).collect())
     }
 
     /// How far the shoulders are from level: what Level Shoulders has to do.

@@ -892,7 +892,10 @@ Reordered on 2026-09-29 (see Decisions).
       a slouch or a waist. See "Posture" under Body Reshape below.
     - A Head Tilt slider, and a bend along the spine for a slouch seen
       from the side.
-    - Background line protection (straight edge dampening).
+    - ~~Background line protection~~ (done, 2026-10-07, for Body
+      Reshape): straight lines behind the person are found in the picture,
+      and the part of a move that goes across one is held back. See
+      "Background protection" under Body Reshape below.
 
 ### Face analysis spike
 
@@ -1615,13 +1618,58 @@ OMAPIX_BODY_PHOTO=photos cargo test --release -p omapix body_reshape_in_photos -
   behind, and large ones are spread far enough not to tear. On the
   portraits tried, looked at about 1000 px across, tree trunks and a log
   beside and behind the figure don't visibly bend with the sliders at
-  either end. Still to look at: straight lines (a door frame, a horizon)
-  at full size.
+  either end.
+  - **Straight lines** (2026-10-07). That fade bends them: with Level
+    Shoulders at 100 on a selfie against a block wall, the mortar lines
+    sag towards the shoulder over 300 px. So the lines behind each person
+    are found when the person is (`Lines` in `body.rs`), and held:
+    - *Finding them.* `Pose::body` samples how light the picture is over
+      the matte's square, four times as finely as the matte (1024²).
+      Where that's clear of the person (half a matte cell to a cell and a
+      half out) and inside the picture, a structure tensor smoothed over
+      a few points says how much of an edge each point is and which way
+      it faces. A line is an edge that carries on: looking 32 points
+      along it each way, 60–90 % of the better side has to be edge facing
+      the same way. What's behind the person or off the picture isn't
+      counted against it, so a line that stops at the person is still
+      one. That keeps mortar courses, trunks and logs, and drops leaves,
+      bark and litter, which a tensor alone marks nearly everywhere.
+    - *Holding.* Each line's facing, as a 2 × 2 matrix, is summed onto
+      the matte's grid and spread with a blur of 8 cells: narrower and
+      the hold starts and stops within a move's length, which folds and
+      smears the picture. At a point, the matrix's two directions say
+      how much of a move each way is held (all of it once there's a line
+      or two near), so a move across a line is taken out and one along
+      it kept; with lines both ways (tiles), all of it.
+    - *At the person's edge.* The edge has to move, so what's held is
+      split by the way out from the person (the slope of the distance to
+      them). The part along their edge is held from a cell and a half
+      out: the body slides past the line. The part straight out is let
+      go of over twice the move's length, so what's between stretches to
+      no more than twice as long. It leaves a short kink where a line
+      meets the person, and with a big move a stretched band there.
+      Starting the hold at the matte's edge itself dented an arm the
+      matte had cut short, so it doesn't.
+    - *Tried.* The selfie above: straight to within 30 px of the arm. A
+      full-length portrait (1836 × 2364) with a grid drawn behind it,
+      Waist and Hips −50, Legs −40, Level Shoulders 100: the grid's lines
+      beside the waist, hips and sleeves stay straight where they bowed.
+      Six portraits in the woods: the same as before but for a thin band
+      round the person, and nothing to choose between the two there.
+    - *Not done.* Where the matte takes the background for the person
+      (the wall beside the hair in that selfie) it goes with them as
+      before. A line close beside the person's edge and along it still
+      goes with the edge. The picture's own edges aren't held: a big
+      move near one still reads past it and smears. Faces' sliders and
+      the brushes don't look for lines.
+    - It adds 0.05–0.13 s a person to finding them (0.13 s at 24 MP:
+      about half sampling the picture and half finding the lines), and
+      the warp itself goes from 3 to 4.5 ms at 24 MP.
 - **Parts out of view.** A limb needs both its joints likely in view
   (above 0.5), and a body both shoulders; a slider with nothing to work
   on does nothing.
 - **Speed.** Finding a person takes 0.06–0.3 s once the models are loaded
-  (1.8 s the first time). Fitted in a 1600 × 1000 canvas, a step of a
+  (1.8 s the first time), and the lines behind them 0.05–0.13 s more. Fitted in a 1600 × 1000 canvas, a step of a
   drag takes 15–40 ms, and warping the layer 0.02–0.1 s for the photos
   up to 8 MP and 0.08–0.13 s at 24 MP. The warp itself is 2–6 ms: there's
   no system to solve.
