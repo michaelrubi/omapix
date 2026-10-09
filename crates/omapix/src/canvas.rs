@@ -1417,7 +1417,7 @@ mod tests {
     }
 
     #[test]
-    fn round_brush_outline_draws_two_circles() {
+    fn the_brush_outline_is_a_circle_or_the_tips_ellipse_at_its_angle() {
         let ctx = egui::Context::default();
         let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
         let mut canvas = Canvas::new(800, 600, transform);
@@ -1441,6 +1441,8 @@ mod tests {
             out
         };
         frame(&mut canvas, BrushOutline::round(100.0));
+
+        // (a) A round brush: two circles of its radius.
         let out = frame(&mut canvas, BrushOutline::round(100.0));
         let circles: Vec<_> = out
             .shapes
@@ -1451,37 +1453,7 @@ mod tests {
             })
             .collect();
         assert_eq!(circles.len(), 2);
-        for c in circles {
-            assert_eq!(c.center, pointer);
-            assert_eq!(c.radius, 50.0);
-        }
-    }
-
-    #[test]
-    fn flat_brush_outline_spans_match_angle_and_proportions() {
-        let ctx = egui::Context::default();
-        let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
-        let mut canvas = Canvas::new(800, 600, transform);
-        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
-        canvas.lay_out_for_test(view, 1.0);
-        let pointer = pos2(400.0, 300.0);
-        let mut time = 0.0;
-        let mut frame = |canvas: &mut Canvas, outline| {
-            time += 0.1;
-            let input = egui::RawInput {
-                time: Some(time),
-                screen_rect: Some(view),
-                events: vec![egui::Event::PointerMoved(pointer)],
-                ..Default::default()
-            };
-            let mut out = ctx.run_ui(input, |ui| {
-                let overlay = Overlay { tool: true, brush: Some(outline), ..Default::default() };
-                canvas.show(ui, Color32::BLACK, overlay);
-            });
-            out.textures_delta.clear();
-            out
-        };
-        frame(&mut canvas, BrushOutline::round(100.0));
+        assert!(circles.iter().all(|c| c.center == pointer && c.radius == 50.0));
 
         // (b) Roundness 0.5, angle 0: full diameter horizontally, half vertically.
         let b = BrushOutline { diameter: 100.0, along: 1.0, across: 0.5, angle: 0.0 };
@@ -1494,6 +1466,17 @@ mod tests {
         let (cx, cy) = closed_line_spans(&frame(&mut canvas, c).shapes);
         assert!((cx - 50.0).abs() < 1e-3, "span {cx} for 50.0");
         assert!((cy - 100.0).abs() < 1e-3, "span {cy} for 100.0");
+
+        // At 45 degrees its ends are up to the right and down to the left:
+        // anticlockwise, as a dab is laid.
+        let turned = BrushOutline { diameter: 100.0, along: 1.0, across: 0.5, angle: 45.0 };
+        let out = frame(&mut canvas, turned);
+        let far = out.shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Path(p) if p.closed => p.points.iter().copied().max_by(|a, b| a.distance(pointer).total_cmp(&b.distance(pointer))),
+            _ => None,
+        });
+        let end = far.unwrap() - pointer;
+        assert!(end.x * end.y < 0.0 && (end.length() - 50.0).abs() < 0.5, "{end:?}");
 
         // (d) Sampled tip 100 wide and 50 high gives the same spans as (b).
         let tip = Tip::new(100, 50, vec![65535; 100 * 50]).unwrap();
