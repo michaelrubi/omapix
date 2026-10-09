@@ -1,6 +1,7 @@
 //! The membrane: the smoothest surface through the pixels round a hole,
-//! which is what fills it when there's nothing to copy, and what a fill's
-//! tone is matched to ([`crate::inpaint`]). It solves Laplace's equation
+//! which is what fills it when there's nothing to copy, what a fill's tone
+//! is matched to ([`crate::inpaint`]), and how a heal's tone is carried
+//! across it ([`crate::brush`]). It solves Laplace's equation
 //! over the hole (Pérez, Gangnet and Blake, "Poisson Image Editing", 2003)
 //! by over-relaxation, at half the size first and so on down, so each size
 //! starts close to its answer and needs only a few sweeps.

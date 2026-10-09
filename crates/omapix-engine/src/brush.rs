@@ -21,6 +21,9 @@ use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::toning::{self, ToneRange};
 
 const MAX: f32 = u16::MAX as f32;
+/// Added to both sides of a heal's ratios, so noise in near-black doesn't
+/// count as a pixel being several times lighter than another.
+const DARK: f32 = 0.01;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -347,12 +350,14 @@ impl Stroke {
     /// a healed one and returns the tiles that changed; other strokes are
     /// already final.
     ///
-    /// Healing keeps the copy's fine texture but takes its tone and colour
-    /// from the destination's surroundings: it adds the difference between
-    /// the smoothed surroundings of the destination and of the source. Both
-    /// are smoothed with the painted area weighted out, so the blemish being
-    /// covered doesn't tint the result. This is a fast approximation of
-    /// Photoshop's healing brush (Poisson blending) that works well on skin.
+    /// Healing keeps the copy's texture but takes its tone and colour from
+    /// round the painted area: the copy is lightened or darkened by however
+    /// much the destination differs from it there, carried smoothly across
+    /// the painted area ([`crate::poisson`]), so its edge meets what's round
+    /// it with no step. This is Photoshop's healing brush (Poisson
+    /// blending), by ratio, as light does. What's outside a selection is
+    /// left out of it, so a selection drawn along an edge keeps that edge's
+    /// colour from bleeding in.
     pub fn finish(&mut self, surface: &mut Surface) -> Vec<(u32, u32)> {
         if self.paint == Paint::SpotHeal {
             let Some((dx, dy)) = self.find_source() else {
@@ -383,42 +388,36 @@ impl Stroke {
             return tiles;
         }
         let (w, h) = (orig.width(), orig.height());
-        let sigma = (self.settings.size * 0.25).max(3.0);
-        let margin = (sigma * 3.0).ceil() as u32;
-        let x0 = (tiles.iter().map(|t| t.0).min().unwrap() * TILE).saturating_sub(margin);
-        let y0 = (tiles.iter().map(|t| t.1).min().unwrap() * TILE).saturating_sub(margin);
-        let x1 = ((tiles.iter().map(|t| t.0).max().unwrap() + 1) * TILE + margin).min(w);
-        let y1 = ((tiles.iter().map(|t| t.1).max().unwrap() + 1) * TILE + margin).min(h);
-        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
-
-        let coverage_at = |x: u32, y: u32| -> f32 {
-            self.coverage
-                .get(&(x / TILE, y / TILE))
-                .map_or(0.0, |c| c[((y % TILE) * TILE + x % TILE) as usize])
-        };
-        let norm = |p: Pixel| {
-            [
-                f32::from(p[0]) / MAX,
-                f32::from(p[1]) / MAX,
-                f32::from(p[2]) / MAX,
-            ]
-        };
-
-        // Surroundings of destination and source, painted area weighted out.
-        let mut dest = Vec::with_capacity(rw * rh);
-        let mut copy = Vec::with_capacity(rw * rh);
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let weight = (1.0 - coverage_at(x, y)).powi(2);
-                let d = norm(src.get(x, y));
-                let c = self.copied(x, y);
-                let c = if c[3] == 0 { d } else { norm(c) };
-                dest.push([d[0] * weight, d[1] * weight, d[2] * weight, weight]);
-                copy.push([c[0] * weight, c[1] * weight, c[2] * weight, weight]);
+        // The painted pixels and a ring of pixels round them.
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for (&(col, row), cov) in &self.coverage {
+            for (i, _) in cov.iter().enumerate().filter(|(_, c)| **c > 0.0) {
+                let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
             }
         }
-        let dest = crate::filters::blur_buffer(dest, rw, rh, sigma);
-        let copy = crate::filters::blur_buffer(copy, rw, rh, sigma);
+        if x0 >= x1 {
+            return tiles;
+        }
+        let (x0, y0, x1, y1) = (x0.saturating_sub(1), y0.saturating_sub(1), (x1 + 1).min(w), (y1 + 1).min(h));
+        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+
+        // How much lighter the destination is than the copy (as a
+        // logarithm), known in the ring and worked out for the rest: the
+        // painted pixels, and those with nothing to go by.
+        let mut unknown = Vec::with_capacity(rw * rh);
+        let mut gain = Vec::with_capacity(rw * rh);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (col, row, i) = (x / TILE, y / TILE, ((y % TILE) * TILE + x % TILE) as usize);
+                let painted = self.coverage.get(&(col, row)).is_some_and(|c| c[i] > 0.0);
+                let (d, c) = (src.get(x, y), self.copied(x, y));
+                unknown.push(painted || d[3] == 0 || c[3] == 0 || self.limit_at(col, row, i) <= 0.0);
+                let (d, c) = (rgb(d), rgb(c));
+                gain.push([0, 1, 2].map(|ch| ((d[ch] + DARK) / (c[ch] + DARK)).ln()));
+            }
+        }
+        let gain = crate::poisson::membrane_fill(rw, rh, &gain, &unknown);
 
         let opacity = self.settings.opacity;
         for &(col, row) in &tiles {
@@ -440,16 +439,12 @@ impl Stroke {
                     continue;
                 }
                 let r = ((y - y0) as usize) * rw + (x - x0) as usize;
-                let (d, c) = (dest[r], copy[r]);
                 let mut healed = copied;
-                if d[3] > 1e-4 && c[3] > 1e-4 {
-                    for ch in 0..3 {
-                        // As light does: a copy from shadow brightened keeps
-                        // its texture in proportion.
-                        let gain = (d[ch] / d[3]) / (c[ch] / c[3]).max(1e-3);
-                        let v = f32::from(copied[ch]) / MAX * gain.clamp(0.25, 4.0);
-                        healed[ch] = (v.clamp(0.0, 1.0) * MAX).round() as u16;
-                    }
+                for ch in 0..3 {
+                    // As light does: a copy from shadow brightened keeps
+                    // its texture in proportion.
+                    let v = (f32::from(copied[ch]) / MAX + DARK) * gain[r][ch].exp().clamp(0.25, 4.0) - DARK;
+                    healed[ch] = (v.clamp(0.0, 1.0) * MAX).round() as u16;
                 }
                 out[i] = self.paint_onto(base[i], a, Paint::Color(healed));
             }
@@ -965,6 +960,66 @@ mod tests {
         // A plain clone would have brought the darker tone from the left.
         let cloned = img.get(90, 100)[0];
         assert!(healed.abs_diff(expected) < cloned.abs_diff(expected) / 3);
+    }
+
+    #[test]
+    fn healing_meets_what_is_round_it_at_a_hard_edge() {
+        // Plain skin on the left to copy from, and uneven light on the
+        // right, where the dab lands.
+        let (w, h) = (300, 200);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let tone = if x < 100.0 { 40000.0 } else { 36000.0 + 12000.0 * (x / 15.0).sin() * (y / 20.0).cos() };
+                [tone as u16, tone as u16 - 4000, tone as u16 - 8000, 65535]
+            })
+            .collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+        let surface = Surface::Pixels(img.clone());
+        let settings = BrushSettings { size: 60.0, hardness: 1.0, ..Default::default() };
+        let mut s = Stroke::new(settings, Paint::Heal { dx: -140, dy: 0 }, surface.clone()).sampling(img.clone());
+        let mut out = surface;
+        let tiles = s.add_point(200.0, 100.0, 1.0);
+        s.apply(&mut out, &tiles);
+        s.finish(&mut out);
+        let Surface::Pixels(out) = out else { unreachable!() };
+        // No step at the dab's edge: just inside it, the skin's nearly as it was.
+        let mut worst = 0;
+        for i in 0..w * h {
+            let (x, y) = (i % w, i / w);
+            let d = (x as f32 + 0.5 - 200.0).hypot(y as f32 + 0.5 - 100.0);
+            if (29.0..30.0).contains(&d) {
+                for c in 0..3 {
+                    worst = worst.max(out.get(x, y)[c].abs_diff(img.get(x, y)[c]));
+                }
+            }
+        }
+        assert!(worst < 1500, "{worst}");
+    }
+
+    #[test]
+    fn a_selection_keeps_what_is_outside_it_out_of_a_heal() {
+        // Skin with something dark beside it, which the dab overlaps and
+        // the selection stops short of.
+        let (w, h) = (300, 200);
+        let px: Vec<Pixel> = (0..w * h).map(|i| if i % w >= 215 { [5000, 5000, 5000, 65535] } else { [40000, 36000, 32000, 65535] }).collect();
+        let img = Tiled::from_slice(w, h, [0; 4], &px);
+        let surface = Surface::Pixels(img.clone());
+        let settings = BrushSettings { size: 60.0, hardness: 0.5, ..Default::default() };
+        let selection = crate::selection::Selection::rectangle(w, h, (0.0, 0.0), (212.0, 200.0));
+        let mut s = Stroke::new(settings, Paint::Heal { dx: -100, dy: 0 }, surface.clone())
+            .sampling(img.clone())
+            .within(selection.coverage);
+        let mut out = surface;
+        let tiles = s.add_point(190.0, 100.0, 1.0);
+        s.apply(&mut out, &tiles);
+        s.finish(&mut out);
+        let Surface::Pixels(out) = out else { unreachable!() };
+        // The skin beside the dark isn't darkened by it.
+        for x in 165..212 {
+            assert!(out.get(x, 100)[0].abs_diff(40000) < 500, "{x}: {}", out.get(x, 100)[0]);
+        }
+        assert_eq!(out.get(216, 100), img.get(216, 100));
     }
 
     #[test]
