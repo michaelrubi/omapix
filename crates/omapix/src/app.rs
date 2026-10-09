@@ -167,6 +167,7 @@ struct PendingClip {
 enum TopTab {
     Navigator,
     Histogram,
+    BrushSettings,
 }
 
 impl TopTab {
@@ -175,9 +176,10 @@ impl TopTab {
         *shown = (*shown != Some(tab)).then_some(tab);
     }
 
-    const ALL: [(TopTab, Command); 2] = [
+    const ALL: [(TopTab, Command); 3] = [
         (TopTab::Navigator, Command::ShowNavigator),
         (TopTab::Histogram, Command::ShowHistogram),
+        (TopTab::BrushSettings, Command::ShowBrushSettings),
     ];
 }
 
@@ -1416,7 +1418,8 @@ impl App {
             | Command::ShowChannels
             | Command::ShowHistory
             | Command::ShowNavigator
-            | Command::ShowHistogram => true,
+            | Command::ShowHistogram
+            | Command::ShowBrushSettings => true,
             Command::SaveSelection => editor.doc.selection.is_some(),
             Command::SaveAdjustmentPreset | Command::ExportAdjustmentLut => {
                 Preset::from_layers(doc, &editor.selected()).is_some()
@@ -1585,6 +1588,7 @@ impl App {
             Command::ShowHistory => self.right_tab = RightTab::History,
             Command::ShowNavigator => TopTab::toggle(&mut self.top_tab, TopTab::Navigator),
             Command::ShowHistogram => TopTab::toggle(&mut self.top_tab, TopTab::Histogram),
+            Command::ShowBrushSettings => TopTab::toggle(&mut self.top_tab, TopTab::BrushSettings),
             Command::Quit => self.guard(Then::Quit, ctx),
             Command::Save => self.save(ctx),
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
@@ -5492,6 +5496,7 @@ impl eframe::App for App {
                         match top_tab {
                             TopTab::Navigator => self.navigator.show(ui, editor, &self.theme),
                             TopTab::Histogram => self.histogram.show(ui, editor, &self.theme),
+                            TopTab::BrushSettings => self.tools.brush_settings(ui, &self.theme),
                         }
                         ui.separator();
                     }
@@ -7238,6 +7243,11 @@ mod tests {
         // Window -> Histogram toggles Histogram off
         app.run(Command::ShowHistogram, &ctx);
         assert_eq!(app.top_tab, None);
+
+        // F5, as in Photoshop
+        app.run(Command::ShowBrushSettings, &ctx);
+        assert_eq!(app.top_tab, Some(TopTab::BrushSettings));
+        assert_eq!(Command::ShowBrushSettings.shortcut().map(|s| s.logical_key), Some(egui::Key::F5));
     }
 
     #[test]

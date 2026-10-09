@@ -1,7 +1,8 @@
 //! Brush strokes, painted the way Photoshop's Brush tool paints.
 //!
-//! A stroke lays round dabs along the pointer's path. Dabs build up a
-//! per-stroke coverage buffer: each dab adds `flow` of its shape, and the
+//! A stroke lays dabs along the pointer's path: round ones a tenth of
+//! their diameter apart, unless the Brush Settings ([`crate::dynamics`])
+//! say otherwise. Dabs build up a per-stroke coverage buffer: each dab adds `flow` of its shape, and the
 //! finished coverage is applied at `opacity`. So a single stroke never
 //! exceeds its opacity however often it crosses itself, while low flow
 //! builds up gradually, exactly like Photoshop's opacity/flow pair.
@@ -17,6 +18,7 @@
 use std::collections::HashMap;
 
 use crate::Pixel;
+use crate::dynamics::{Dab, Dynamics, Step, mix};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::toning::{self, ToneRange};
 
@@ -45,6 +47,8 @@ pub struct BrushSettings {
     /// A pen's pressure scales each dab's flow, so light strokes build up
     /// slowly (Photoshop's Transfer › Flow Jitter › Pen Pressure).
     pub flow_pressure: bool,
+    /// The tip's shape and how it varies (Photoshop's Brush Settings).
+    pub dynamics: Dynamics,
 }
 
 impl Default for BrushSettings {
@@ -57,6 +61,7 @@ impl Default for BrushSettings {
             size_pressure: true,
             opacity_pressure: true,
             flow_pressure: false,
+            dynamics: Dynamics::default(),
         }
     }
 }
@@ -120,6 +125,14 @@ pub struct Stroke {
     last: Option<(f32, f32, f32)>,
     /// Distance travelled since the last dab.
     carried: f32,
+    /// What the dabs' random variation comes from: where the stroke began.
+    seed: u64,
+    /// Steps and dabs laid so far.
+    steps: u64,
+    dabs: u64,
+    /// The first point is waiting for the stroke's direction, which its
+    /// dabs depend on.
+    waiting: bool,
 }
 
 impl Stroke {
@@ -134,6 +147,10 @@ impl Stroke {
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
+            seed: 0,
+            steps: 0,
+            dabs: 0,
+            waiting: false,
         }
     }
 
@@ -194,12 +211,13 @@ impl Stroke {
 
     /// The distance between dabs at `pressure`.
     fn spacing(&self, pressure: f32) -> f32 {
-        (self.diameter(pressure) * 0.1).max(0.5)
+        self.settings.dynamics.step(self.diameter(pressure))
     }
 
     fn diameter(&self, pressure: f32) -> f32 {
         if self.settings.size_pressure {
-            self.settings.size * pressure
+            let least = self.settings.dynamics.minimum_diameter.clamp(0.0, 1.0);
+            self.settings.size * (least + (1.0 - least) * pressure)
         } else {
             self.settings.size
         }
@@ -212,16 +230,28 @@ impl Stroke {
         let mut touched = Vec::new();
         let pressure = pressure.clamp(0.0, 1.0);
         match self.last {
-            None => self.dab(x, y, pressure, &mut touched),
+            None => {
+                self.seed = mix(u64::from(x.to_bits()) << 32 | u64::from(y.to_bits()));
+                self.waiting = self.settings.dynamics.follows_direction();
+                if !self.waiting {
+                    self.step(x, y, pressure, 0.0, &mut touched);
+                }
+            }
             Some((lx, ly, lp)) => {
                 let (dx, dy) = (x - lx, y - ly);
                 let length = (dx * dx + dy * dy).sqrt();
+                // Anticlockwise from east; y runs down the image.
+                let direction = (-dy).atan2(dx);
+                if self.waiting && length > 0.0 {
+                    self.waiting = false;
+                    self.step(lx, ly, lp, direction, &mut touched);
+                }
                 let mut t = self.spacing(lp) - self.carried;
                 let mut spaced = self.spacing(lp);
                 while t <= length {
                     let f = t / length;
                     let p = lp + (pressure - lp) * f;
-                    self.dab(lx + dx * f, ly + dy * f, p, &mut touched);
+                    self.step(lx + dx * f, ly + dy * f, p, direction, &mut touched);
                     spaced = self.spacing(p);
                     t += spaced;
                 }
@@ -234,13 +264,30 @@ impl Stroke {
         touched
     }
 
-    fn dab(&mut self, cx: f32, cy: f32, pressure: f32, touched: &mut Vec<(u32, u32)>) {
+    /// Lay the dabs of one step along the stroke, at `pressure` and going
+    /// in `direction`.
+    fn step(&mut self, x: f32, y: f32, pressure: f32, direction: f32, touched: &mut Vec<(u32, u32)>) {
+        let at = Step {
+            x,
+            y,
+            diameter: self.diameter(pressure),
+            // Coverage builds up to this.
+            most: if self.settings.opacity_pressure { pressure } else { 1.0 },
+            flow: self.settings.flow * if self.settings.flow_pressure { pressure } else { 1.0 },
+            direction,
+        };
+        let dabs = self.settings.dynamics.dabs(self.seed, self.steps, &mut self.dabs, &at);
+        self.steps += 1;
+        for dab in &dabs {
+            self.dab(dab, touched);
+        }
+    }
+
+    fn dab(&mut self, dab: &Dab, touched: &mut Vec<(u32, u32)>) {
         let (w, h) = self.original.size();
-        let r = self.diameter(pressure) / 2.0;
+        let Dab { x: cx, y: cy, radius: r, roundness, most, flow, .. } = *dab;
         let hardness = self.settings.hardness.clamp(0.0, 0.999);
-        let flow = self.settings.flow * if self.settings.flow_pressure { pressure } else { 1.0 };
-        // Coverage builds up to this.
-        let most = if self.settings.opacity_pressure { pressure } else { 1.0 };
+        let (sin, cos) = dab.angle.sin_cos();
         let x0 = (cx - r).floor().max(0.0) as u32;
         let y0 = (cy - r).floor().max(0.0) as u32;
         let x1 = ((cx + r).ceil() as u32).min(w);
@@ -259,9 +306,13 @@ impl Stroke {
                 for py in y0.max(ty)..y1.min(ty + TILE) {
                     for px in x0.max(tx)..x1.min(tx + TILE) {
                         // Distance from the pixel centre, as a fraction of the radius.
-                        let d = ((px as f32 + 0.5 - cx).powi(2) + (py as f32 + 0.5 - cy).powi(2))
-                            .sqrt()
-                            / r.max(0.5);
+                        let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+                        let d = if roundness >= 1.0 {
+                            (dx.powi(2) + dy.powi(2)).sqrt() / r.max(0.5)
+                        } else {
+                            // Along the tip, and across it, where it's narrower.
+                            (dx * cos - dy * sin).hypot((dx * sin + dy * cos) / roundness) / r.max(0.5)
+                        };
                         let shape = falloff(d, hardness);
                         if shape <= 0.0 {
                             continue;
@@ -359,6 +410,16 @@ impl Stroke {
     /// left out of it, so a selection drawn along an edge keeps that edge's
     /// colour from bleeding in.
     pub fn finish(&mut self, surface: &mut Surface) -> Vec<(u32, u32)> {
+        // A click that never moved: the dab that was waiting to know which
+        // way the stroke went.
+        let mut waited = Vec::new();
+        if let (true, Some((x, y, pressure))) = (self.waiting, self.last) {
+            self.waiting = false;
+            self.step(x, y, pressure, 0.0, &mut waited);
+            waited.sort_unstable();
+            waited.dedup();
+            self.apply(surface, &waited);
+        }
         if self.paint == Paint::SpotHeal {
             let Some((dx, dy)) = self.find_source() else {
                 // Nowhere to copy from: undo the overlay.
@@ -376,12 +437,12 @@ impl Stroke {
             self.paint = Paint::Heal { dx, dy };
         }
         let Paint::Heal { .. } = self.paint else {
-            return Vec::new();
+            return waited;
         };
         let (Some(src), Surface::Pixels(orig), Surface::Pixels(dst)) =
             (&self.source, &self.original, surface)
         else {
-            return Vec::new();
+            return waited;
         };
         let tiles: Vec<(u32, u32)> = self.coverage.keys().copied().collect();
         if tiles.is_empty() {
@@ -1144,5 +1205,104 @@ mod tests {
             unreachable!()
         };
         assert!((60..540).all(|x| out.get(x, 50)[0] == 0));
+    }
+
+    /// A black stroke through `points` on white, and its red channel.
+    fn stroked(settings: BrushSettings, points: &[(f32, f32)], finish: bool) -> Tiled<Pixel> {
+        let mut out = Surface::Pixels(white(300, 200));
+        let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone());
+        for &(x, y) in points {
+            let tiles = s.add_point(x, y, 1.0);
+            s.apply(&mut out, &tiles);
+        }
+        if finish {
+            s.finish(&mut out);
+        }
+        let Surface::Pixels(out) = out else { unreachable!() };
+        out
+    }
+
+    fn hard(size: f32, dynamics: Dynamics) -> BrushSettings {
+        BrushSettings { size, hardness: 1.0, dynamics, ..Default::default() }
+    }
+
+    #[test]
+    fn a_flat_tip_paints_an_ellipse_at_its_angle() {
+        // Half as high as it's wide: 40 px across, 20 up and down.
+        let flat = Dynamics { roundness: 0.5, ..Default::default() };
+        let out = stroked(hard(40.0, flat), &[(100.0, 100.0)], true);
+        let painted = |x, y| out.get(x, y)[0] == 0;
+        assert!(painted(117, 100) && painted(83, 100) && painted(100, 108) && painted(100, 91));
+        assert!(!painted(100, 112) && !painted(100, 87) && !painted(122, 100));
+        // Turned a quarter, it stands up.
+        let out = stroked(hard(40.0, Dynamics { angle: 90.0, ..flat }), &[(100.0, 100.0)], true);
+        assert!(out.get(100, 117)[0] == 0 && out.get(108, 100)[0] == 0 && out.get(112, 100)[0] == 65535);
+        // Turned an eighth, anticlockwise: its ends are up to the right
+        // and down to the left.
+        let out = stroked(hard(40.0, Dynamics { angle: 45.0, ..flat }), &[(100.0, 100.0)], true);
+        assert!(out.get(112, 88)[0] == 0 && out.get(88, 112)[0] == 0);
+        assert!(out.get(112, 112)[0] == 65535 && out.get(88, 88)[0] == 65535);
+    }
+
+    #[test]
+    fn wide_spacing_leaves_gaps_between_dabs() {
+        // 10 px dabs every 30 px.
+        let apart = Dynamics { spacing: 3.0, ..Default::default() };
+        let out = stroked(hard(10.0, apart), &[(50.0, 100.0), (200.0, 100.0)], true);
+        let painted: Vec<bool> = (40..210).map(|x| out.get(x, 100)[0] == 0).collect();
+        let dabs = painted.windows(2).filter(|w| !w[0] && w[1]).count();
+        assert_eq!(dabs, 6, "at 50, 80, 110, 140, 170 and 200");
+        assert!(out.get(50, 100)[0] == 0 && out.get(65, 100)[0] == 65535 && out.get(80, 100)[0] == 0);
+    }
+
+    #[test]
+    fn the_first_dab_waits_for_the_strokes_direction() {
+        // A flat tip that follows the stroke.
+        let following = Dynamics { roundness: 0.25, angle_follows: true, spacing: 10.0, ..Default::default() };
+        // Nothing until the pointer moves, and then the dab lies along
+        // the way it went: down.
+        let out = stroked(hard(40.0, following), &[(100.0, 100.0)], false);
+        assert_eq!(out.get(100, 100)[0], 65535);
+        let out = stroked(hard(40.0, following), &[(100.0, 100.0), (100.0, 110.0)], false);
+        assert!(out.get(100, 117)[0] == 0 && out.get(100, 83)[0] == 0 && out.get(110, 100)[0] == 65535);
+        // A click that never moves gets its dab when it's let go.
+        let out = stroked(hard(40.0, following), &[(100.0, 100.0), (100.0, 100.0)], true);
+        assert!(out.get(117, 100)[0] == 0 && out.get(100, 110)[0] == 65535);
+    }
+
+    #[test]
+    fn a_scattered_stroke_is_the_same_however_its_points_arrive() {
+        let scattered = Dynamics {
+            spacing: 0.5,
+            scatter: 3.0,
+            count: 3,
+            count_jitter: 0.5,
+            size_jitter: 0.8,
+            angle_jitter: 1.0,
+            roundness_jitter: 0.5,
+            opacity_jitter: 0.5,
+            flow_jitter: 0.5,
+            ..Default::default()
+        };
+        let whole = stroked(hard(12.0, scattered), &[(40.0, 100.0), (240.0, 100.0)], true);
+        let parts = stroked(hard(12.0, scattered), &[(40.0, 100.0), (90.0, 100.0), (171.0, 100.0), (240.0, 100.0)], true);
+        assert!(whole.to_vec() == parts.to_vec());
+        // Dabs off the line, well beyond the brush's own 6 px.
+        let far = (60..220).any(|x| (60..82).chain(118..140).any(|y| whole.get(x, y)[0] < 65535));
+        assert!(far);
+        // Another stroke elsewhere scatters differently.
+        let other = stroked(hard(12.0, scattered), &[(40.0, 101.0), (240.0, 101.0)], true);
+        assert!((0..200).any(|y| (0..300).any(|x| whole.get(x, y) != other.get(x, (y + 1).min(199)))));
+    }
+
+    #[test]
+    fn minimum_diameter_keeps_a_light_touch_from_vanishing() {
+        let settings = BrushSettings { size: 40.0, hardness: 1.0, ..Default::default() };
+        let stroke = |least: f32| {
+            let dynamics = Dynamics { minimum_diameter: least, ..Default::default() };
+            Stroke::new(BrushSettings { dynamics, ..settings }, Paint::Erase, Surface::Pixels(white(8, 8)))
+        };
+        assert_eq!((stroke(0.0).diameter(0.0), stroke(0.0).diameter(0.5)), (0.0, 20.0));
+        assert_eq!((stroke(0.5).diameter(0.0), stroke(0.5).diameter(0.5), stroke(0.5).diameter(1.0)), (20.0, 30.0, 40.0));
     }
 }
