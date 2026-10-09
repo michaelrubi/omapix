@@ -8398,11 +8398,13 @@ mod tests {
         let edge = editor.doc.selection.as_ref().unwrap().at(99, 150);
         assert!(edge > 0.1 && edge < 0.9, "{edge}");
 
-        // To a layer mask: the layer gets it and the selection goes.
+        // To a layer mask with smart radius: the layer gets it and the selection goes.
+        app.filters.select_and_mask.smart_radius = true;
         open(&mut app, crate::select_and_mask::Output::LayerMask);
         run(&mut app, vec![key(egui::Key::Enter)]);
         let editor = app.editor.as_ref().unwrap();
         assert!(editor.doc.selection.is_none());
+        assert!(app.filters.select_and_mask.smart_radius);
         let mask = editor.doc.layer(editor.active).unwrap().mask.as_ref().unwrap();
         assert!(mask.pixels.get(150, 150) > 60000 && mask.pixels.get(50, 50) == 0);
     }

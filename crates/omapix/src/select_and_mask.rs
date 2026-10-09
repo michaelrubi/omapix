@@ -110,6 +110,10 @@ impl SelectAndMask {
                 };
                 egui::Grid::new("select-and-mask-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     slider(ui, "Radius", &mut o.radius, 0.0..=250.0, " px", "Edge Detection: how far either side of the edge to look for the photo's own, for hair and fur");
+                    ui.label("");
+                    ui.checkbox(&mut o.smart_radius, "Smart Radius")
+                        .on_hover_text("Automatically adapt the radius to the edge's sharpness: narrower on hard edges, wider on soft ones");
+                    ui.end_row();
                     slider(ui, "Smooth", &mut o.smooth, 0.0..=100.0, "", "Rounds off a jagged outline");
                     slider(ui, "Feather", &mut o.feather, 0.0..=250.0, " px", "Softens the edge");
                     slider(ui, "Contrast", &mut o.contrast, 0.0..=100.0, " %", "Hardens soft edges");
