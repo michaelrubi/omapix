@@ -86,7 +86,8 @@ fn thumbnail(brush: &Preset) -> egui::ColorImage {
         ..Default::default()
     };
     // Its shape alone, with nothing varying.
-    (settings.dynamics.angle, settings.dynamics.roundness) = (brush.dynamics.angle, brush.dynamics.roundness);
+    let (shape, tip) = (&mut settings.dynamics, brush.dynamics);
+    (shape.angle, shape.roundness, shape.flip_x, shape.flip_y) = (tip.angle, tip.roundness, tip.flip_x, tip.flip_y);
     let mut out = Surface::Mask(Tiled::new(n, n, 0));
     let mut stroke = Stroke::new(settings, Paint::Mask(u16::MAX), out.clone());
     if let Some(tip) = &brush.tip {
