@@ -283,7 +283,6 @@ const POSE_MODELS: &[&str] = &[omapix_ai::pose::MODEL];
 fn models_for(cmd: Command) -> &'static [&'static str] {
     match cmd {
         Command::SelectSubject => &[omapix_ai::subject::MODEL],
-        Command::ContentAwareFill => &[omapix_ai::lama::MODEL],
         Command::GenerativeFill => &[omapix_ai::flux::MODEL],
         Command::Denoise => &[omapix_ai::denoise::MODEL],
         Command::SelectSkin
@@ -1445,7 +1444,7 @@ impl App {
             | Command::Feather => {
                 editor.doc.selection.is_some()
             }
-            Command::ContentAwareFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
+            Command::ContentAwareFill | Command::TextureFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
             Command::Denoise => self.denoising.busy().is_none(),
             Command::ImageSize => self.upscaling.busy().is_none(),
             Command::SelectSubject => !self.select_subject.busy(),
@@ -1699,9 +1698,9 @@ impl App {
                     name: self.preset_name(),
                 });
             }
-            Command::ContentAwareFill => {
+            Command::ContentAwareFill | Command::TextureFill => {
                 if let Some(editor) = &self.editor
-                    && let Err(e) = self.content_fill.start(ctx, editor)
+                    && let Err(e) = self.content_fill.start(ctx, editor, cmd == Command::TextureFill)
                 {
                     self.message(e, true);
                 }
@@ -2231,6 +2230,7 @@ self.filters.remember(&filter);
             self.menu_item(ui, Command::SaveSelection, None);
             ui.separator();
             self.menu_item(ui, Command::ContentAwareFill, None);
+            self.menu_item(ui, Command::TextureFill, None);
             self.menu_item(ui, Command::GenerativeFill, None);
             self.menu_item(ui, Command::FillForeground, None);
             self.menu_item(ui, Command::FillBackground, None);
@@ -2412,6 +2412,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::FillBackground, None);
                 self.menu_item(ui, Command::Clear, None);
                 self.menu_item(ui, Command::ContentAwareFill, None);
+                self.menu_item(ui, Command::TextureFill, None);
                 self.menu_item(ui, Command::GenerativeFill, None);
             });
             ui.menu_button("Image", |ui| {
@@ -8243,12 +8244,14 @@ mod tests {
         app.models = HashMap::from([(omapix_ai::subject::MODEL, false), (omapix_ai::lama::MODEL, true)]);
         assert!(!app.enabled(Command::SelectSubject));
         assert!(app.enabled(Command::ContentAwareFill));
+        // Without its model Content-Aware Fill copies texture instead, as
+        // Texture Fill always does.
         app.models.insert(omapix_ai::lama::MODEL, false);
-        assert!(!app.enabled(Command::ContentAwareFill));
+        assert!(app.enabled(Command::ContentAwareFill) && app.enabled(Command::TextureFill));
         assert!(app.enabled(Command::GenerativeFill));
         // It needs no selection: without one it fills empty canvas.
         let selection = app.editor.as_mut().unwrap().doc.selection.take();
-        assert!(app.enabled(Command::GenerativeFill) && !app.enabled(Command::ContentAwareFill));
+        assert!(app.enabled(Command::GenerativeFill) && !app.enabled(Command::ContentAwareFill) && !app.enabled(Command::TextureFill));
         app.editor.as_mut().unwrap().doc.selection = selection;
         app.models.insert(omapix_ai::flux::MODEL, false);
         assert!(!app.enabled(Command::GenerativeFill));

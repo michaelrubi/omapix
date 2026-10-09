@@ -1,10 +1,12 @@
-//! Filling a selection from its surroundings with an inpainting model
-//! (Edit › Content-Aware Fill, docs/AI.md): the square patch round the
-//! selection that the model sees, and its answer as a new layer.
+//! Filling a selection from its surroundings (Edit › Content-Aware Fill):
+//! with an inpainting model (docs/AI.md), the square patch round the
+//! selection that the model sees and its answer as a new layer, or with
+//! none, by copying texture ([`crate::inpaint`]).
 
 use rayon::prelude::*;
 
 use crate::color::{self, ColorProfile};
+use crate::inpaint;
 use crate::layer::{Layer, Mask};
 use crate::raster::Raster;
 use crate::refine::{centre, sample};
@@ -209,6 +211,52 @@ pub fn layer(
     Ok(layer)
 }
 
+/// The least `image` round the selection that [`copied`] copies from.
+const SURROUNDINGS: u32 = 256;
+
+/// A layer holding what `selection` selects in `image`, filled with texture
+/// copied from round it, masked to `selection`. It looks as far from the
+/// selection as the selection is long, on every side, and works on the
+/// image's own values at its own size, so the fill is as sharp as what's
+/// round it. `None` with nothing selected.
+pub fn copied(id: u64, name: &str, image: &Raster, selection: &Selection) -> Option<Layer> {
+    let [bx, by, bw, bh] = selection.bounds()?;
+    let (w, h) = (image.width(), image.height());
+    let pad = bw.max(bh).max(SURROUNDINGS);
+    let (x, y) = (bx.saturating_sub(pad), by.saturating_sub(pad));
+    let (cw, ch) = ((bx + bw + pad).min(w) - x, (by + bh + pad).min(h) - y);
+    let window = move || (0..ch).flat_map(move |py| (0..cw).map(move |px| (x + px, y + py)));
+    let pixels: Vec<Pixel> = window().map(|(px, py)| image.get(px, py)).collect();
+    let hole: Vec<bool> = window().map(|(px, py)| selection.at(px, py) > 0.0).collect();
+    let empty: Vec<bool> = pixels.iter().map(|p| p[3] < u16::MAX).collect();
+    let rgb: Vec<[f32; 3]> = pixels.iter().map(|p| [0, 1, 2].map(|c| f32::from(p[c]) / 65535.0)).collect();
+    let filled = inpaint::fill(cw as usize, ch as usize, &rgb, &hole, &empty);
+
+    // Only the selection's pixels, so the layer has no more tiles than
+    // the selection touches.
+    let at = |px: u32, py: u32| ((py - y) * cw + (px - x)) as usize;
+    let pixels = Tiled::from_tiles(w, h, [0; 4], |col, row| {
+        let (tx, ty) = (col * TILE, row * TILE);
+        if tx >= bx + bw || ty >= by + bh || tx + TILE <= bx || ty + TILE <= by {
+            return None;
+        }
+        let mut tile = vec![[0; 4]; (TILE * TILE) as usize];
+        for py in ty.max(by)..(ty + TILE).min(by + bh) {
+            for px in (tx.max(bx)..(tx + TILE).min(bx + bw)).filter(|&px| hole[at(px, py)]) {
+                let [r, g, b] = filled[at(px, py)].map(|v| (v * 65535.0).round() as u16);
+                tile[((py - ty) * TILE + (px - tx)) as usize] = [r, g, b, u16::MAX];
+            }
+        }
+        Some(tile)
+    });
+    let mut layer = Layer::from_pixels(id, name, pixels);
+    layer.mask = Some(Mask {
+        pixels: selection.coverage.clone(),
+        enabled: true,
+    });
+    Some(layer)
+}
+
 /// `plane` (`sw` × `sh`) at `dw` × `dh`: averaged over each pixel's
 /// footprint when shrinking, interpolated when growing.
 fn resample(plane: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f32> {
@@ -323,6 +371,35 @@ mod tests {
 
         let solid = Raster::new(20, 20, vec![[1, 2, 3, 65535]; 400]);
         assert!(empty(&solid, 10.0).is_none());
+    }
+
+    #[test]
+    fn copying_fills_the_selection_from_round_it_on_a_layer_of_its_own() {
+        // The red square on grey, in a corner of a bigger image.
+        let (image, selection) = scene(1200, 900, [200, 200, 100, 40]);
+        let layer = copied(7, "Content-Aware Fill", &image, &selection).unwrap();
+        // Grey where the square was, and nothing anywhere else.
+        for (x, y) in [(200, 200), (250, 220), (299, 239)] {
+            let p = layer.pixels.get(x, y);
+            assert!(p[0].abs_diff(32768) < 300 && p[1].abs_diff(32768) < 300 && p[3] == 65535, "{x} {y} {p:?}");
+        }
+        assert_eq!(layer.pixels.get(199, 220)[3], 0);
+        assert_eq!(layer.pixels.get(250, 240)[3], 0);
+        // Only the tiles the selection touches.
+        let tiles = (0..4).flat_map(|row| (0..5).map(move |col| (col, row))).filter(|&(col, row)| layer.pixels.tile(col, row).is_some());
+        assert_eq!(tiles.collect::<Vec<_>>(), [(0, 0), (1, 0)]);
+        let mask = &layer.mask.as_ref().unwrap().pixels;
+        assert_eq!((mask.get(250, 220), mask.get(199, 220)), (65535, 0));
+
+        // At the image's edge, and with part of the image empty.
+        let (mut image, selection) = scene(300, 200, [0, 0, 40, 40]);
+        for y in 0..200 {
+            image.row_mut(y)[200..].fill([0; 4]);
+        }
+        let layer = copied(7, "Content-Aware Fill", &image, &selection).unwrap();
+        let p = layer.pixels.get(20, 20);
+        assert!(p[0].abs_diff(32768) < 300 && p[3] == 65535, "{p:?}");
+        assert!(copied(7, "x", &image, &Selection::from_coverage(Tiled::new(300, 200, 0))).is_none());
     }
 
     #[test]
