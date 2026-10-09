@@ -6,7 +6,7 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, ComboBox, RichText, Slider, vec2};
-use omapix_engine::refine::{EdgeOptions, colours, refine_edge};
+use omapix_engine::refine::{EdgeOptions, colours, decontaminate_colours, refine_edge};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::Mask;
 
@@ -118,12 +118,26 @@ impl SelectAndMask {
                     slider(ui, "Feather", &mut o.feather, 0.0..=250.0, " px", "Softens the edge");
                     slider(ui, "Contrast", &mut o.contrast, 0.0..=100.0, " %", "Hardens soft edges");
                     slider(ui, "Shift Edge", &mut o.shift_edge, -100.0..=100.0, " %", "Moves soft edges out, or in with negative values");
+                    ui.label("");
+                    if ui.checkbox(&mut o.decontaminate, "Decontaminate Colors")
+                        .on_hover_text("Replaces color fringing in edge transitions with nearby foreground colors")
+                        .changed()
+                        && o.decontaminate
+                        && self.output == Output::Selection
+                    {
+                        self.output = Output::NewLayerWithMask;
+                    }
+                    ui.end_row();
+                    if o.decontaminate {
+                        slider(ui, "Amount", &mut o.decontaminate_amount, 0.0..=100.0, " %", "How strongly to replace fringe color with foreground color");
+                    }
                     ui.label("Output To");
                     ComboBox::from_id_salt("select-and-mask-output")
                         .selected_text(self.output.label())
                         .show_ui(ui, |ui| {
                             for output in Output::ALL {
-                                let possible = has_pixels || output != Output::NewLayerWithMask;
+                                let possible = (has_pixels || output != Output::NewLayerWithMask)
+                                    && (!o.decontaminate || output != Output::Selection);
                                 ui.add_enabled_ui(possible, |ui| {
                                     ui.selectable_value(&mut self.output, output, output.label());
                                 });
@@ -162,7 +176,7 @@ impl SelectAndMask {
         match self.output {
             Output::Selection => editor.set_selection(label, refined, Combine::Replace),
             Output::LayerMask | Output::NewLayerWithMask => {
-                let (output, active) = (self.output, editor.active);
+                let (output, active, options) = (self.output, editor.active, self.options);
                 editor.edit(label, |doc, current| {
                     let target = if output == Output::NewLayerWithMask {
                         let Some(index) = doc.index_of(active) else {
@@ -179,6 +193,14 @@ impl SelectAndMask {
                         active
                     };
                     if let Some(layer) = doc.layer_mut(target) {
+                        if options.decontaminate {
+                            layer.pixels = decontaminate_colours(
+                                &layer.pixels,
+                                &refined.coverage,
+                                options.radius,
+                                options.decontaminate_amount,
+                            );
+                        }
                         layer.mask = Some(Mask {
                             pixels: refined.coverage,
                             enabled: true,

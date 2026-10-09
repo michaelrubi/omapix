@@ -8407,6 +8407,18 @@ mod tests {
         assert!(app.filters.select_and_mask.smart_radius);
         let mask = editor.doc.layer(editor.active).unwrap().mask.as_ref().unwrap();
         assert!(mask.pixels.get(150, 150) > 60000 && mask.pixels.get(50, 50) == 0);
+
+        // With Decontaminate Colors to NewLayerWithMask: creates a copy layer, decontaminates, and applies mask.
+        app.editor.as_mut().unwrap().doc.selection = Some(omapix_engine::Selection::rectangle(600, 400, (100.0, 100.0), (300.0, 300.0)));
+        app.filters.select_and_mask.decontaminate = true;
+        app.filters.select_and_mask.decontaminate_amount = 100.0;
+        open(&mut app, crate::select_and_mask::Output::NewLayerWithMask);
+        run(&mut app, vec![key(egui::Key::Enter)]);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.doc.selection.is_none());
+        assert!(app.filters.select_and_mask.decontaminate);
+        let active_layer = editor.doc.layer(editor.active).unwrap();
+        assert!(active_layer.mask.is_some());
     }
 
     #[test]
