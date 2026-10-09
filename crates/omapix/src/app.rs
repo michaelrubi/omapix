@@ -5634,10 +5634,13 @@ impl eframe::App for App {
                 let modifiers = ui.input(|i| i.modifiers);
                 // An armed Curves or Levels eyedropper, or Free Transform, takes the
                 // pointer from the tools.
-                let liquify_brush = editor.liquifying().then_some(self.tools.liquify.size);
+                let liquify_brush = editor
+                    .liquifying()
+                    .then(|| crate::canvas::BrushOutline::round(self.tools.liquify.size));
                 let tools_off = self.properties.eyedropper.is_some()
                     || editor.transform().is_some()
                     || liquify_brush.is_some();
+                let tip = self.brushes.tip(brush.tip);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
                     alt_samples: !tools_off && (tool.copies() || (tool.paints() && tool.alt_picks_colour())),
@@ -5647,7 +5650,7 @@ impl eframe::App for App {
                     brush: (!tools_off
                         && tool.has_brush()
                         && !(modifiers.alt && tool.alt_picks_colour() && !ui.input(|i| i.pointer.secondary_down())))
-                    .then_some(brush.size)
+                    .then(|| crate::canvas::outline(&brush, tip.as_deref()))
                     .or(liquify_brush),
                     moves: !tools_off && tool == crate::tools::Tool::Move,
                     source,

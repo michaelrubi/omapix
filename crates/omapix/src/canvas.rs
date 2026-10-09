@@ -18,8 +18,10 @@ use egui::{
     Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
     StrokeKind, TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Ui, Vec2, pos2, vec2,
 };
+use omapix_engine::brush::BrushSettings;
 use omapix_engine::pyramid::Pyramid;
 use omapix_engine::tiled::TILE;
+use omapix_engine::tip::Tip;
 use omapix_engine::{DisplayTransform, Pixel, Raster, tiles};
 
 use crate::tools::CursorBadge;
@@ -193,6 +195,63 @@ pub enum SourceMarker {
     Offset(Vec2),
 }
 
+/// The shape of a brush's tip at the pointer: its diameter in image pixels,
+/// how far it reaches along and across the tip as fractions of the radius,
+/// and its angle in degrees anticlockwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrushOutline {
+    pub diameter: f32,
+    pub along: f32,
+    pub across: f32,
+    pub angle: f32,
+}
+
+impl BrushOutline {
+    /// A plain round brush.
+    pub fn round(diameter: f32) -> Self {
+        Self {
+            diameter,
+            along: 1.0,
+            across: 1.0,
+            angle: 0.0,
+        }
+    }
+}
+
+/// The outline of a brush's tip from its settings and optional sampled tip.
+pub fn outline(settings: &BrushSettings, tip: Option<&Tip>) -> BrushOutline {
+    let (along, across) = match tip {
+        Some(tip) => {
+            let (tw, th) = tip.size();
+            let longer = (tw.max(th) as f32).max(1.0);
+            (tw as f32 / longer, th as f32 / longer * settings.dynamics.roundness)
+        }
+        None => (1.0, settings.dynamics.roundness),
+    };
+    BrushOutline {
+        diameter: settings.size,
+        along,
+        across,
+        angle: settings.dynamics.angle,
+    }
+}
+
+/// The points of an ellipse turned by `angle` degrees anticlockwise,
+/// reaching `along` along its axis and `across` across it.
+fn brush_points(center: Pos2, along: f32, across: f32, angle: f32) -> Vec<Pos2> {
+    let (sin, cos) = angle.to_radians().sin_cos();
+    const POINTS: usize = 64;
+    (0..POINTS)
+        .map(|i| {
+            let t = i as f32 * std::f32::consts::TAU / POINTS as f32;
+            let (u, v) = (along * t.cos(), across * t.sin());
+            let dx = u * cos + v * sin;
+            let dy = -u * sin + v * cos;
+            pos2(center.x + dx, center.y + dy)
+        })
+        .collect()
+}
+
 /// What the active tool wants from the canvas this frame.
 #[derive(Default)]
 pub struct Overlay<'a> {
@@ -203,8 +262,8 @@ pub struct Overlay<'a> {
     pub alt_samples: bool,
     /// The Eyedropper tool samples on primary click or drag.
     pub samples: bool,
-    /// Brush diameter in image pixels, for its outline at the pointer.
-    pub brush: Option<f32>,
+    /// Brush outline at the pointer, in image pixels.
+    pub brush: Option<BrushOutline>,
     /// Show the Move tool's cursor rather than a crosshair (without a brush).
     pub moves: bool,
     pub source: Option<SourceMarker>,
@@ -577,8 +636,8 @@ impl Canvas {
         }
     }
 
-    /// Draw the canvas and handle navigation. `brush` is the diameter of the
-    /// active brush in image pixels, to draw its outline at the pointer;
+    /// Draw the canvas and handle navigation. `brush` in `overlay` gives the outline
+    /// of the active brush, to draw its shape at the pointer;
     /// `source` marks where a clone or heal tool copies from. Returns pointer
     /// input for the active tool.
     pub fn show(
@@ -641,7 +700,7 @@ impl Canvas {
             && tool
         {
             match brush {
-                Some(diameter) => self.brush_cursor(ui, self.resizing.unwrap_or(pointer), diameter),
+                Some(outline) => self.brush_cursor(ui, self.resizing.unwrap_or(pointer), outline),
                 None => self.drawn_cursor(ui, pointer, moves),
             }
             if let Some(badge) = badge {
@@ -850,21 +909,36 @@ impl Canvas {
         None
     }
 
-    fn brush_cursor(&self, ui: &Ui, pointer: Pos2, diameter: f32) {
-        let radius = diameter * self.view.zoom / self.ppp / 2.0;
+    fn brush_cursor(&self, ui: &Ui, pointer: Pos2, outline: BrushOutline) {
+        let radius = outline.diameter * self.view.zoom / self.ppp / 2.0;
+        let reach_along = radius * outline.along;
+        let reach_across = radius * outline.across;
+        let reach = reach_along.max(reach_across);
         let painter = ui.painter_at(self.rect);
-        if radius >= 3.0 {
+        if reach >= 3.0 {
             // Dark and light rings, visible on any image.
-            painter.circle_stroke(
-                pointer,
-                radius,
-                Stroke::new(1.5, Color32::from_black_alpha(160)),
-            );
-            painter.circle_stroke(
-                pointer,
-                radius,
-                Stroke::new(0.75, Color32::from_white_alpha(200)),
-            );
+            if outline.along == outline.across {
+                painter.circle_stroke(
+                    pointer,
+                    reach_along,
+                    Stroke::new(1.5, Color32::from_black_alpha(160)),
+                );
+                painter.circle_stroke(
+                    pointer,
+                    reach_along,
+                    Stroke::new(0.75, Color32::from_white_alpha(200)),
+                );
+            } else {
+                let points = brush_points(pointer, reach_along, reach_across, outline.angle);
+                painter.add(egui::Shape::closed_line(
+                    points.clone(),
+                    Stroke::new(1.5, Color32::from_black_alpha(160)),
+                ));
+                painter.add(egui::Shape::closed_line(
+                    points,
+                    Stroke::new(0.75, Color32::from_white_alpha(200)),
+                ));
+            }
             ui.ctx().set_cursor_icon(CursorIcon::None);
         } else {
             self.drawn_cursor(ui, pointer, false);
@@ -1311,7 +1385,7 @@ mod tests {
             let input = egui::RawInput { time: Some(time), screen_rect: Some(view), events: vec![egui::Event::ModifiersChanged(alt), event], ..Default::default() };
             let mut input_out = None;
             let mut out = ctx.run_ui(input, |ui| {
-                let overlay = Overlay { tool: true, brush: Some(100.0), ..Default::default() };
+                let overlay = Overlay { tool: true, brush: Some(BrushOutline::round(100.0)), ..Default::default() };
                 input_out = canvas.show(ui, Color32::BLACK, overlay).0;
             });
             out.textures_delta.clear();
@@ -1322,6 +1396,121 @@ mod tests {
         frame(&mut canvas, button(true));
         let drag = frame(&mut canvas, egui::Event::PointerMoved(pos2(430.0, 300.0)));
         assert!(matches!(drag, Some(ToolInput::BrushDrag { size, .. }) if size > 0.0), "{drag:?}");
+    }
+
+    fn closed_line_spans(shapes: &[egui::epaint::ClippedShape]) -> (f32, f32) {
+        let paths: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Path(p) if p.closed => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths.len(), 2);
+        let xs: Vec<f32> = paths[0].points.iter().map(|p| p.x).collect();
+        let ys: Vec<f32> = paths[0].points.iter().map(|p| p.y).collect();
+        let span_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - xs.iter().copied().fold(f32::INFINITY, f32::min);
+        let span_y = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - ys.iter().copied().fold(f32::INFINITY, f32::min);
+        (span_x, span_y)
+    }
+
+    #[test]
+    fn round_brush_outline_draws_two_circles() {
+        let ctx = egui::Context::default();
+        let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
+        let mut canvas = Canvas::new(800, 600, transform);
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        canvas.lay_out_for_test(view, 1.0);
+        let pointer = pos2(400.0, 300.0);
+        let mut time = 0.0;
+        let mut frame = |canvas: &mut Canvas, outline| {
+            time += 0.1;
+            let input = egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(view),
+                events: vec![egui::Event::PointerMoved(pointer)],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let overlay = Overlay { tool: true, brush: Some(outline), ..Default::default() };
+                canvas.show(ui, Color32::BLACK, overlay);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        frame(&mut canvas, BrushOutline::round(100.0));
+        let out = frame(&mut canvas, BrushOutline::round(100.0));
+        let circles: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles.len(), 2);
+        for c in circles {
+            assert_eq!(c.center, pointer);
+            assert_eq!(c.radius, 50.0);
+        }
+    }
+
+    #[test]
+    fn flat_brush_outline_spans_match_angle_and_proportions() {
+        let ctx = egui::Context::default();
+        let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
+        let mut canvas = Canvas::new(800, 600, transform);
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        canvas.lay_out_for_test(view, 1.0);
+        let pointer = pos2(400.0, 300.0);
+        let mut time = 0.0;
+        let mut frame = |canvas: &mut Canvas, outline| {
+            time += 0.1;
+            let input = egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(view),
+                events: vec![egui::Event::PointerMoved(pointer)],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let overlay = Overlay { tool: true, brush: Some(outline), ..Default::default() };
+                canvas.show(ui, Color32::BLACK, overlay);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        frame(&mut canvas, BrushOutline::round(100.0));
+
+        // (b) Roundness 0.5, angle 0: full diameter horizontally, half vertically.
+        let b = BrushOutline { diameter: 100.0, along: 1.0, across: 0.5, angle: 0.0 };
+        let (bx, by) = closed_line_spans(&frame(&mut canvas, b).shapes);
+        assert!((bx - 100.0).abs() < 1e-3, "span {bx} for 100.0");
+        assert!((by - 50.0).abs() < 1e-3, "span {by} for 50.0");
+
+        // (c) Angle 90: spans swap.
+        let c = BrushOutline { diameter: 100.0, along: 1.0, across: 0.5, angle: 90.0 };
+        let (cx, cy) = closed_line_spans(&frame(&mut canvas, c).shapes);
+        assert!((cx - 50.0).abs() < 1e-3, "span {cx} for 50.0");
+        assert!((cy - 100.0).abs() < 1e-3, "span {cy} for 100.0");
+
+        // (d) Sampled tip 100 wide and 50 high gives the same spans as (b).
+        let tip = Tip::new(100, 50, vec![65535; 100 * 50]).unwrap();
+        let settings = BrushSettings { size: 100.0, ..Default::default() };
+        let d = outline(&settings, Some(&tip));
+        let (dx, dy) = closed_line_spans(&frame(&mut canvas, d).shapes);
+        assert!((dx - bx).abs() < 1e-3 && (dy - by).abs() < 1e-3, "got ({dx}, {dy}), wanted ({bx}, {by})");
+    }
+
+    #[test]
+    fn outline_for_tall_sampled_tip() {
+        let tip = Tip::new(40, 80, vec![65535; 40 * 80]).unwrap();
+        let settings = BrushSettings { size: 120.0, ..Default::default() };
+        let out = outline(&settings, Some(&tip));
+        assert_eq!((out.along, out.across), (0.5, 1.0));
+        assert_eq!(out.diameter, 120.0);
+        assert_eq!(out.angle, 0.0);
     }
 
     #[test]
