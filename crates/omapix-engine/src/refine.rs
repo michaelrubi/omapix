@@ -84,7 +84,7 @@ fn coverage(values: &[f32], lw: usize, lh: usize, image: &Raster, inside: impl F
 }
 
 /// Select and Mask's settings, as in Photoshop.
-#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct EdgeOptions {
     /// Edge Detection: how far (pixels) either side of the edge it's
@@ -100,6 +100,30 @@ pub struct EdgeOptions {
     pub contrast: f32,
     /// −100–100 %: moves soft edges in or out.
     pub shift_edge: f32,
+    /// Replaces color fringing in edge transitions with nearby foreground colors.
+    pub decontaminate: bool,
+    /// 0–100 %: how strongly to replace fringe color with foreground color.
+    #[serde(default = "default_decontaminate_amount")]
+    pub decontaminate_amount: f32,
+}
+
+fn default_decontaminate_amount() -> f32 {
+    100.0
+}
+
+impl Default for EdgeOptions {
+    fn default() -> Self {
+        Self {
+            radius: 0.0,
+            smart_radius: false,
+            smooth: 0.0,
+            feather: 0.0,
+            contrast: 0.0,
+            shift_edge: 0.0,
+            decontaminate: false,
+            decontaminate_amount: 100.0,
+        }
+    }
 }
 
 /// `image`'s colours, 0–1: what [`refine_edge`] finds edges in.
@@ -276,6 +300,112 @@ pub fn edge_width(guide: &[[f32; 3]], w: usize, h: usize, r: usize) -> Vec<f32> 
     let hi = max_square(&y, w, h, r, true);
     let lo = max_square(&y, w, h, r, false);
     (0..w * h).map(|i| (hi[i] - lo[i]) / gm[i].max(1e-4)).collect()
+}
+
+/// Decontaminates colours in the soft fringe of `coverage`: each fringe pixel
+/// moves towards the average colour of nearby fully selected pixels (normalised
+/// convolution with a box of radius `max(radius, 3)`, widened ×4 where no such pixel
+/// is near), by `amount`% scaled by its transparency.
+/// Adapted from PhotoCraft (crates/algo/src/matting.rs), MIT / Apache-2.0.
+pub fn decontaminate_colours(
+    pixels: &Tiled<[u16; 4]>,
+    coverage: &Tiled<u16>,
+    radius: f32,
+    amount: f32,
+) -> Tiled<[u16; 4]> {
+    let (w, h) = (pixels.width() as usize, pixels.height() as usize);
+    let tile = TILE as usize;
+    let rad = (radius.max(3.0)).ceil() as usize;
+    let halo = 4 * rad;
+    let amount = (amount / 100.0).clamp(0.0, 1.0);
+    if amount <= 0.0 || w == 0 || h == 0 {
+        return pixels.clone();
+    }
+    let soft_cov = |v: u16| v > 1310 && v < 64224;
+
+    Tiled::from_tiles(w as u32, h as u32, pixels.fill(), |col, row| {
+        let own = || pixels.tile(col, row).map(<[[u16; 4]]>::to_vec);
+        let (tx, ty) = (col as usize * tile, row as usize * tile);
+
+        let has_soft = match coverage.tile(col, row) {
+            Some(t) => t.iter().any(|&v| soft_cov(v)),
+            None => soft_cov(coverage.fill()),
+        };
+        if !has_soft {
+            return own();
+        }
+
+        let (x0, y0) = (tx.saturating_sub(halo), ty.saturating_sub(halo));
+        let (x1, y1) = ((tx + tile + halo).min(w), (ty + tile + halo).min(h));
+        let (ww, wh) = (x1 - x0, y1 - y0);
+        let at = |x: usize, y: usize| (y - y0) * ww + (x - x0);
+
+        let mut buf = Vec::with_capacity(ww * wh);
+        let mut al = Vec::with_capacity(ww * wh);
+        let mut orig_px = Vec::with_capacity(ww * wh);
+
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = pixels.get(x as u32, y as u32);
+                let cov = coverage.get(x as u32, y as u32);
+                let a = cov as f32 / MAX;
+                let alpha = p[3] as f32 / MAX;
+                let wts = if a >= 0.98 { alpha } else { 0.0 };
+                let r = p[0] as f32 / MAX;
+                let g = p[1] as f32 / MAX;
+                let b = p[2] as f32 / MAX;
+                buf.push([wts, wts * r, wts * g, wts * b]);
+                al.push(a);
+                orig_px.push([r, g, b, alpha]);
+            }
+        }
+
+        let rad_c = rad.min(ww.saturating_sub(1)).min(wh.saturating_sub(1));
+        let rad4_c = (rad * 4).min(ww.saturating_sub(1)).min(wh.saturating_sub(1));
+
+        let filtered = box_filter_2d(buf.clone(), ww, wh, rad_c);
+        let filtered2 = box_filter_2d(buf, ww, wh, rad4_c);
+
+        let mut out = vec![pixels.fill(); TILE_PIXELS];
+        for y in ty..(ty + tile).min(h) {
+            for x in tx..(tx + tile).min(w) {
+                let i = at(x, y);
+                let a = al[i];
+                let orig = orig_px[i];
+                let out_px = if a > 0.02 && a < 0.98 {
+                    let k = amount * ((1.0 - a) * 4.0).clamp(0.0, 1.0);
+                    let den = filtered[i][0];
+                    let den2 = filtered2[i][0];
+                    let mut rgb = [0.0; 3];
+                    for c in 0..3 {
+                        let f = if den > 1e-4 {
+                            filtered[i][c + 1] / den
+                        } else if den2 > 1e-4 {
+                            filtered2[i][c + 1] / den2
+                        } else {
+                            orig[c]
+                        };
+                        rgb[c] = orig[c] + (f - orig[c]) * k;
+                    }
+                    [
+                        unit(rgb[0]),
+                        unit(rgb[1]),
+                        unit(rgb[2]),
+                        unit(orig[3]),
+                    ]
+                } else {
+                    [
+                        unit(orig[0]),
+                        unit(orig[1]),
+                        unit(orig[2]),
+                        unit(orig[3]),
+                    ]
+                };
+                out[(y - ty) * tile + (x - tx)] = out_px;
+            }
+        }
+        Some(out)
+    })
 }
 
 /// Running max (or min) over a window of radius `r` (edge-clipped), van Herk / Gil–Werman:
@@ -552,5 +682,55 @@ mod tests {
         // Smart radius leaves pixels outside its ~2px reach untouched:
         assert_eq!(rough.coverage.get(190, 200), 0);
         assert_eq!(smart.coverage.get(190, 200), 0);
+    }
+
+    #[test]
+    fn decontaminate_colours_replaces_fringe_with_foreground() {
+        let (w, h) = (20u32, 8u32);
+        // Foreground red on the left (x < 10), background blue on the right (x > 10).
+        // Fringe pixel at x = 10 is a 50/50 mix (purple).
+        let mut px = vec![[0u16; 4]; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) as usize;
+                px[idx] = if x < 10 {
+                    [65535, 0, 0, 65535] // Red
+                } else if x == 10 {
+                    [32768, 0, 32768, 65535] // Purple fringe
+                } else {
+                    [0, 0, 65535, 65535] // Blue
+                };
+            }
+        }
+        let pixels = Tiled::from_slice(w, h, [0; 4], &px);
+
+        // Mask: 65535 for x < 10, 32768 for x == 10, 0 for x > 10.
+        let mut cov = vec![0u16; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = (y * w + x) as usize;
+                cov[idx] = if x < 10 {
+                    65535
+                } else if x == 10 {
+                    32768
+                } else {
+                    0
+                };
+            }
+        }
+        let coverage = Tiled::from_slice(w, h, 0, &cov);
+
+        let result = decontaminate_colours(&pixels, &coverage, 3.0, 100.0);
+
+        // At x = 10 (the fringe), color should have moved strongly towards red (foreground).
+        let fringe = result.get(10, 4);
+        assert!(fringe[0] > 55000, "expected red > 55000, got {}", fringe[0]);
+        assert!(fringe[2] < 10000, "expected blue < 10000, got {}", fringe[2]);
+
+        // At x = 5 (deep inside foreground), color is untouched red.
+        assert_eq!(result.get(5, 4), [65535, 0, 0, 65535]);
+
+        // At x = 15 (deep outside), color is untouched blue.
+        assert_eq!(result.get(15, 4), [0, 0, 65535, 65535]);
     }
 }
