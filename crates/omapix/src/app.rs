@@ -2271,6 +2271,13 @@ self.filters.remember(&filter);
     /// Right-clicking the image, as in Photoshop: what's handy for the
     /// selection, or with none, for the layer.
     fn canvas_menu(&mut self, ui: &mut Ui) {
+        // With a tool that has a brush: its panel, as Photoshop's
+        // right-click brings up the brushes.
+        if self.tools.tool.has_brush() {
+            let tick = if self.top_tab == Some(TopTab::BrushSettings) { "✓" } else { "  " };
+            self.menu_item(ui, Command::ShowBrushSettings, Some(format!("{tick} {}", Command::ShowBrushSettings.label())));
+            ui.separator();
+        }
         if self.editor.as_ref().is_some_and(|e| e.doc.selection.is_some()) {
             self.menu_item(ui, Command::Deselect, None);
             self.menu_item(ui, Command::InvertSelection, Some("Select Inverse".into()));
@@ -8406,6 +8413,12 @@ mod tests {
         let texts = frame(&mut app, vec![]);
         assert!(texts.iter().any(|t| t == "Select All"), "{texts:?}");
         assert!(!texts.iter().any(|t| t == "Content-Aware Fill"), "{texts:?}");
+
+        // A tool with a brush has its panel at the top; one without doesn't.
+        assert!(app.tools.tool.has_brush() && texts[0].ends_with("Brush Settings"), "{texts:?}");
+        app.tools.tool = crate::tools::Tool::Move;
+        let texts = frame(&mut app, vec![]);
+        assert!(!texts.iter().any(|t| t.ends_with("Brush Settings")), "{texts:?}");
     }
 
     #[test]

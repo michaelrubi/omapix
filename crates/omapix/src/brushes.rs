@@ -17,6 +17,8 @@ use crate::theme::Theme;
 
 /// A brush's picture in the list: this many pixels square.
 const THUMBNAIL: u32 = 40;
+/// How high the stroke's preview is, in points.
+const PREVIEW: f32 = 56.0;
 
 /// What reading the folder found: each file's name and brushes, and what
 /// to say about the file just added (and whether it failed).
@@ -28,6 +30,9 @@ pub struct Library {
     files: Vec<(String, Vec<Preset>)>,
     /// A picture of each brush's dab, made when the list is first shown.
     thumbnails: Vec<Vec<egui::TextureHandle>>,
+    /// A stroke drawn with a brush, at a size in pixels: the preview, kept
+    /// until either changes.
+    preview: Option<(BrushSettings, [u32; 2], egui::TextureHandle)>,
     reading: Option<Receiver<Read>>,
 }
 
@@ -95,9 +100,39 @@ fn thumbnail(brush: &Preset) -> egui::ColorImage {
     }
     let tiles = stroke.add_point(n as f32 / 2.0, n as f32 / 2.0, 1.0);
     stroke.apply(&mut out, &tiles);
-    let Surface::Mask(mask) = out else { unreachable!() };
+    picture(out, [n; 2])
+}
+
+/// A stroke with `brush` on a strip `width` by `height` pixels, as a pen
+/// pressing harder in the middle would draw it: white where it paints. A
+/// brush too big for the strip is drawn smaller.
+fn stroke_picture(brush: &BrushSettings, tip: Option<Arc<Tip>>, [width, height]: [u32; 2]) -> egui::ColorImage {
+    let (w, h) = (width as f32, height as f32);
+    let settings = BrushSettings { size: brush.size.min(h / 2.0), opacity: 1.0, ..*brush };
+    let mut out = Surface::Mask(Tiled::new(width, height, 0));
+    let mut stroke = Stroke::new(settings, Paint::Mask(u16::MAX), out.clone());
+    if let Some(tip) = tip {
+        stroke = stroke.with_tip(tip);
+    }
+    let margin = settings.size / 2.0 + 2.0;
+    let mut tiles = Vec::new();
+    for i in 0..=80 {
+        let t = i as f32 / 80.0;
+        let y = h / 2.0 - (t * std::f32::consts::TAU).sin() * h * 0.2;
+        tiles.extend(stroke.add_point(margin + t * (w - 2.0 * margin), y, (t * std::f32::consts::PI).sin().max(0.05)));
+    }
+    tiles.sort_unstable();
+    tiles.dedup();
+    stroke.apply(&mut out, &tiles);
+    stroke.finish(&mut out);
+    picture(out, [width, height])
+}
+
+/// What was painted on a mask, as white that's as opaque as the paint.
+fn picture(painted: Surface, [width, height]: [u32; 2]) -> egui::ColorImage {
+    let Surface::Mask(mask) = painted else { unreachable!() };
     let rgba: Vec<u8> = mask.to_vec().iter().flat_map(|v| [255, 255, 255, (v >> 8) as u8]).collect();
-    egui::ColorImage::from_rgba_unmultiplied([n as usize; 2], &rgba)
+    egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba)
 }
 
 impl Library {
@@ -133,6 +168,7 @@ impl Library {
         let (files, said) = self.reading.as_ref()?.try_recv().ok()?;
         (self.reading, self.files) = (None, files);
         self.thumbnails.clear();
+        self.preview = None;
         said
     }
 
@@ -141,6 +177,25 @@ impl Library {
         let id = id?;
         let tips = self.files.iter().flat_map(|(_, brushes)| brushes).filter_map(|b| b.tip.as_ref());
         tips.into_iter().find(|tip| tip.id() == id).cloned()
+    }
+
+    /// A stroke drawn with `brush`, across the panel: drawn again when the
+    /// brush changes.
+    pub fn preview(&mut self, ui: &mut Ui, theme: &Theme, brush: &BrushSettings) {
+        let width = ui.available_width().floor();
+        let scale = ui.ctx().pixels_per_point();
+        let size = [(width * scale) as u32, (PREVIEW * scale) as u32];
+        if size[0] == 0 {
+            return;
+        }
+        if !self.preview.as_ref().is_some_and(|(of, at, _)| of == brush && *at == size) {
+            let image = stroke_picture(brush, self.tip(brush.tip), size);
+            let texture = ui.ctx().load_texture("brush-preview", image, egui::TextureOptions::LINEAR);
+            self.preview = Some((*brush, size, texture));
+        }
+        if let Some((_, _, texture)) = &self.preview {
+            ui.add(egui::Image::new(texture).fit_to_exact_size(vec2(width, PREVIEW)).tint(theme.foreground));
+        }
     }
 
     /// The list of brushes, a file at a time. Gives back the one clicked.
@@ -244,6 +299,45 @@ pub(crate) mod tests {
         assert_eq!(loaded(&mut next), None);
         assert_eq!(next.tip(Some(leaf.id())).map(|tip| tip.size()), Some((30, 20)));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_preview_is_a_stroke_with_the_brush_drawn_again_when_it_changes() {
+        // How much paint is at a pixel of the strip.
+        let alpha = |image: &egui::ColorImage, x: usize, y: usize| image.pixels[y * 240 + x].a();
+        let soft = BrushSettings { size: 20.0, hardness: 1.0, ..Default::default() };
+        let image = stroke_picture(&soft, None, [240, 56]);
+        // How much paint there is in a block of the strip.
+        let paint = |image: &egui::ColorImage, xs: std::ops::Range<usize>, ys: std::ops::Range<usize>| -> u32 {
+            xs.flat_map(|x| ys.clone().map(move |y| (x, y))).map(|(x, y)| u32::from(alpha(image, x, y))).sum()
+        };
+        // An S: up on the left and down on the right, solid in the middle.
+        assert!(paint(&image, 40..90, 0..28) > 4 * paint(&image, 40..90, 28..56));
+        assert!(paint(&image, 150..200, 28..56) > 4 * paint(&image, 150..200, 0..28));
+        assert_eq!(alpha(&image, 120, 28), 255);
+        // Thin and faint at the ends, where the pen is light, and nothing
+        // in the corners.
+        assert!(paint(&image, 14..24, 0..56) > 0 && 4 * paint(&image, 14..24, 0..56) < paint(&image, 115..125, 0..56));
+        assert_eq!(paint(&image, 0..240, 0..3) + paint(&image, 0..240, 53..56), 0);
+        // A brush too big for the strip is drawn at half its height.
+        let big = stroke_picture(&BrushSettings { size: 2000.0, size_pressure: false, opacity_pressure: false, ..soft }, None, [240, 56]);
+        assert!(alpha(&big, 120, 18) == 255 && alpha(&big, 120, 38) == 255 && alpha(&big, 120, 54) == 0);
+
+        // In the panel it's kept until the brush changes.
+        let ctx = egui::Context::default();
+        let mut library = Library::default();
+        let shown = |library: &mut Library, brush: &BrushSettings| {
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(300.0, 200.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| library.preview(ui, &Theme::default(), brush));
+            out.textures_delta.clear();
+            library.preview.as_ref().map(|(of, size, texture)| (*of, *size, texture.id()))
+        };
+        let first = shown(&mut library, &soft).unwrap();
+        assert_eq!((first.0, first.1[1]), (soft, 56));
+        assert_eq!(shown(&mut library, &soft).unwrap().2, first.2, "the same picture");
+        let wet = BrushSettings { hardness: 0.2, ..soft };
+        let second = shown(&mut library, &wet).unwrap();
+        assert!(second.0 == wet && second.2 != first.2);
     }
 
     #[test]

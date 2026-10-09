@@ -143,13 +143,9 @@ impl Render {
         for (&(col, row), tile) in tiles.iter().zip(data) {
             target.put_tile(col, row, tile);
         }
-        for &(col, row) in tiles {
-            let (x0, y0) = (col * TILE, row * TILE);
-            if x0 < w && y0 < h {
-                let area = (x0, y0, (x0 + TILE).min(w), (y0 + TILE).min(h));
-                pyramid.update_from(image, level, area);
-            }
-        }
+        let inside = tiles.iter().map(|&(col, row)| (col * TILE, row * TILE)).filter(|&(x0, y0)| x0 < w && y0 < h);
+        let areas: Vec<_> = inside.map(|(x0, y0)| (x0, y0, (x0 + TILE).min(w), (y0 + TILE).min(h))).collect();
+        pyramid.update_from(image, level, &areas);
         true
     }
 }

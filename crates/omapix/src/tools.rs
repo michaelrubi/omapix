@@ -1065,6 +1065,7 @@ impl Tools {
         if let Some(brush) = brushes.show(ui, theme, &current) {
             self.use_brush(&brush);
         }
+        brushes.preview(ui, theme, &self.settings_mut().clone());
         let d = &mut self.settings_mut().dynamics;
         let heading = |ui: &mut Ui, text: &str| {
             ui.label(RichText::new(text).color(theme.foreground).strong());
@@ -2436,9 +2437,10 @@ mod tests {
             let button = egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
             vec![egui::Event::PointerMoved(pos), button]
         };
-        // The file's two brushes, the second the one with a sampled tip.
+        // The file's two brushes, the second the one with a sampled tip,
+        // and then the stroke's preview.
         let (pictures, command) = frame(&mut tools, &mut brushes, vec![]);
-        assert_eq!((pictures.len(), command), (2, None));
+        assert_eq!((pictures.len(), command), (3, None));
         frame(&mut tools, &mut brushes, click(pictures[1], true));
         frame(&mut tools, &mut brushes, click(pictures[1], false));
         let leaf = tools.clone;
