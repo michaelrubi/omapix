@@ -991,7 +991,9 @@ OMAPIX_FACE_PHOTO=~/Pictures/blemish-tests OMAPIX_FACE_OUT=out \
   the patch's texture measured a few pixels apart against the skin round
   the spot, lumps in the patch, and the patch against its own
   surroundings; candidates start one spot-width away. Tone is corrected by
-  ratio, as light does, over a quarter of the dab's size.
+  ratio, as light does: at first over a quarter of the dab's size, now
+  matched to the pixels round the dab and carried smoothly across it
+  (Poisson blending, see the roadmap).
 - **Left:** long marks (scratches, some scars) need a stroke, not a dab;
   profiles need a better idea of where the nostrils and lips are; dark
   marks on dark skin often need 70–75 %.
