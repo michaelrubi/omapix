@@ -90,6 +90,8 @@ pub struct EdgeOptions {
     /// Edge Detection: how far (pixels) either side of the edge it's
     /// snapped to the photo's own edges, for hair and fur.
     pub radius: f32,
+    /// Automatically adapt the radius to the edge's sharpness: narrower on hard edges, wider on soft ones.
+    pub smart_radius: bool,
     /// 0–100: rounds off a jagged outline.
     pub smooth: f32,
     /// Softens the edge: a Gaussian blur's standard deviation, in pixels.
@@ -111,7 +113,7 @@ pub fn colours(image: &Raster) -> Vec<[f32; 3]> {
 pub fn refine_edge(selection: &Selection, guide: &[[f32; 3]], o: &EdgeOptions) -> Selection {
     let mut coverage = selection.coverage.clone();
     if o.radius >= 0.5 {
-        coverage = snap(&coverage, guide, o.radius.round() as usize);
+        coverage = snap(&coverage, guide, o.radius, o.smart_radius);
     }
     if o.smooth > 0.0 {
         // Blurred, then cut again with a narrow ramp: corners round off
@@ -147,16 +149,19 @@ fn unit(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * MAX).round() as u16
 }
 
-/// `coverage` with its edges found again in `guide`, within `r` pixels of
+/// `coverage` with its edges found again in `guide`, within `radius` pixels of
 /// where they are: a simple matting. What's selected (or not) all the way
-/// round within `r` is sure; each pixel nearer the edge than that is as
+/// round within `radius` is sure; each pixel nearer the edge than that is as
 /// selected as its colour is along the way from the sure unselected
 /// colour nearby to the sure selected one, so a strand of hair the colour of
 /// the hair round it is selected and the gaps between strands aren't. Tiles
 /// with no edge within reach stay as they are.
-fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], r: usize) -> Tiled<u16> {
+/// When `smart_radius` is true, the effective radius adapts to the sharpness
+/// of the image edge: narrower on sharp transitions and wider on soft ones.
+fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], radius: f32, smart_radius: bool) -> Tiled<u16> {
     let (w, h) = (coverage.width() as usize, coverage.height() as usize);
     let tile = TILE as usize;
+    let r = radius.round() as usize;
     // Sure pixels are found `r` away, then their colours averaged over
     // `2 * r` more.
     let reach = 3 * r;
@@ -196,6 +201,32 @@ fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], r: usize) -> Tiled<u16> {
             box_filter_2d(sums, ww, wh, 2 * r)
         };
         let (f, b) = (mean(&inside), mean(&outside));
+
+        let (dist, widths) = if smart_radius {
+            let bin: Vec<bool> = input.iter().map(|&v| v >= 0.5).collect();
+            let mut boundary = vec![false; ww * wh];
+            let mut any = false;
+            for y in 0..wh {
+                for x in 0..ww {
+                    let i = y * ww + x;
+                    let v = bin[i];
+                    let diff = (x > 0 && bin[i - 1] != v)
+                        || (x + 1 < ww && bin[i + 1] != v)
+                        || (y > 0 && bin[i - ww] != v)
+                        || (y + 1 < wh && bin[i + ww] != v);
+                    boundary[i] = diff;
+                    any |= diff;
+                }
+            }
+            if any {
+                (Some(edt(&boundary, ww, wh)), Some(edge_width(&colour, ww, wh, r)))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
         let mut out = vec![0; TILE_PIXELS];
         for y in ty..(ty + tile).min(h) {
             for x in tx..(tx + tile).min(w) {
@@ -207,10 +238,17 @@ fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], r: usize) -> Tiled<u16> {
                     let (fc, bc) = ([1, 2, 3].map(|c| f[i][c] / f[i][0]), [1, 2, 3].map(|c| b[i][c] / b[i][0]));
                     let d = [0, 1, 2].map(|c| fc[c] - bc[c]);
                     let length = d.iter().map(|v| v * v).sum::<f32>();
-                    if length < 4e-4 {
+                    let mat = if length < 4e-4 {
                         input[i]
                     } else {
                         (0..3).map(|c| (colour[i][c] - bc[c]) * d[c]).sum::<f32>() / length
+                    };
+                    if let (Some(dist), Some(widths)) = (&dist, &widths) {
+                        let reff = widths[i].clamp(1.5, radius.max(1.5));
+                        let wgt = (reff + 1.0 - dist[i]).clamp(0.0, 1.0);
+                        input[i] + (mat - input[i]) * wgt
+                    } else {
+                        mat
                     }
                 };
                 out[(y - ty) * tile + (x - tx)] = unit(v);
@@ -218,6 +256,144 @@ fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], r: usize) -> Tiled<u16> {
         }
         Some(out)
     })
+}
+
+/// Per-pixel transition width (pixels) of the guide's luminance: local range / local max
+/// gradient over a window of radius `r` (a sharp step gives ~2, a ramp of width L gives ~L).
+/// Adapted from PhotoCraft (crates/algo/src/matting.rs), MIT / Apache-2.0.
+pub fn edge_width(guide: &[[f32; 3]], w: usize, h: usize, r: usize) -> Vec<f32> {
+    let y: Vec<f32> = guide.iter().map(|p| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).collect();
+    let mut g = vec![0.0f32; w * h];
+    for yy in 0..h {
+        for xx in 0..w {
+            let at = |x: usize, y2: usize| y[y2 * w + x];
+            let gx = (at((xx + 1).min(w - 1), yy) - at(xx.saturating_sub(1), yy)) / 2.0;
+            let gy = (at(xx, (yy + 1).min(h - 1)) - at(xx, yy.saturating_sub(1))) / 2.0;
+            g[yy * w + xx] = (gx * gx + gy * gy).sqrt();
+        }
+    }
+    let gm = max_square(&g, w, h, r, true);
+    let hi = max_square(&y, w, h, r, true);
+    let lo = max_square(&y, w, h, r, false);
+    (0..w * h).map(|i| (hi[i] - lo[i]) / gm[i].max(1e-4)).collect()
+}
+
+/// Running max (or min) over a window of radius `r` (edge-clipped), van Herk / Gil–Werman:
+/// three comparisons per sample whatever the radius.
+/// Adapted from PhotoCraft (crates/algo/src/matting.rs).
+fn running_extreme(src: &[f32], out: &mut [f32], r: usize, max: bool, g: &mut Vec<f32>, hb: &mut Vec<f32>) {
+    let n = src.len();
+    if n == 0 {
+        return;
+    }
+    let k = 2 * r + 1;
+    let f = |a: f32, b: f32| if max { a.max(b) } else { a.min(b) };
+    let pad = if max { f32::NEG_INFINITY } else { f32::INFINITY };
+    let m = (n + 2 * r).div_ceil(k) * k;
+    g.clear();
+    g.resize(m, pad);
+    hb.clear();
+    hb.resize(m, pad);
+    let p = |j: usize| if j >= r && j < r + n { src[j - r] } else { pad };
+    for j in 0..m {
+        g[j] = if j % k == 0 { p(j) } else { f(g[j - 1], p(j)) };
+    }
+    for j in (0..m).rev() {
+        hb[j] = if j % k == k - 1 || j == m - 1 { p(j) } else { f(hb[j + 1], p(j)) };
+    }
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = f(hb[i], g[i + 2 * r]);
+    }
+}
+
+/// Running max (or min) over a square window of radius `r` (edge-clipped), separable.
+/// Adapted from PhotoCraft (crates/algo/src/matting.rs).
+fn max_square(src: &[f32], w: usize, h: usize, r: usize, max: bool) -> Vec<f32> {
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let (mut g, mut hb) = (Vec::new(), Vec::new());
+    let mut tmp = vec![0.0f32; w * h];
+    for y in 0..h {
+        running_extreme(&src[y * w..(y + 1) * w], &mut tmp[y * w..(y + 1) * w], r, max, &mut g, &mut hb);
+    }
+    let mut out = vec![0.0f32; w * h];
+    let (mut col, mut res) = (vec![0.0f32; h], vec![0.0f32; h]);
+    for x in 0..w {
+        for y in 0..h {
+            col[y] = tmp[y * w + x];
+        }
+        running_extreme(&col, &mut res, r, max, &mut g, &mut hb);
+        for y in 0..h {
+            out[y * w + x] = res[y];
+        }
+    }
+    out
+}
+
+/// Euclidean distance transform for binary seeds.
+/// Adapted from PhotoCraft (crates/algo/src/selection.rs).
+fn edt(seeds: &[bool], w: usize, h: usize) -> Vec<f32> {
+    let mut g: Vec<f32> = seeds.iter().map(|&b| if b { 0.0 } else { 1e20 }).collect();
+    let n = w.max(h).max(1);
+    let (mut f, mut o, mut v, mut z) = (vec![0.0; n], vec![0.0; n], vec![0usize; n], vec![0.0f32; n + 1]);
+    for x in 0..w {
+        for y in 0..h {
+            f[y] = g[y * w + x];
+        }
+        dt1(&f[..h], &mut o[..h], &mut v, &mut z);
+        for y in 0..h {
+            g[y * w + x] = o[y];
+        }
+    }
+    for y in 0..h {
+        f[..w].copy_from_slice(&g[y * w..(y + 1) * w]);
+        dt1(&f[..w], &mut o[..w], &mut v, &mut z);
+        for x in 0..w {
+            g[y * w + x] = o[x].sqrt();
+        }
+    }
+    g
+}
+
+fn dt1(f: &[f32], out: &mut [f32], v: &mut [usize], z: &mut [f32]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let mut k = 0;
+    v[0] = 0;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+    for q in 1..n {
+        loop {
+            let p = v[k];
+            let s = ((f[q] + (q * q) as f32) - (f[p] + (p * p) as f32)) / (2.0 * (q as f32 - p as f32));
+            if s <= z[k] && k > 0 {
+                k -= 1;
+                continue;
+            }
+            if s <= z[k] {
+                v[0] = q;
+                z[0] = f32::NEG_INFINITY;
+                z[1] = f32::INFINITY;
+                break;
+            }
+            k += 1;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = f32::INFINITY;
+            break;
+        }
+    }
+    k = 0;
+    for (q, o) in out.iter_mut().enumerate() {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let d = q as f32 - v[k] as f32;
+        *o = d * d + f[v[k]];
+    }
 }
 
 /// Where the centre of pixel `i` of `n` falls on a grid `m` pixels across.
@@ -301,5 +477,80 @@ mod tests {
         let speck = rough.combine(&Selection::rectangle(w, h, (50.0, 50.0), (52.0, 52.0)), crate::selection::Combine::Add);
         let smoothed = refine_edge(&speck, &guide, &EdgeOptions { smooth: 30.0, ..Default::default() });
         assert_eq!((smoothed.at(51, 51), smoothed.at(300, 200)), (0.0, 1.0));
+    }
+
+    #[test]
+    fn max_square_matches_naive() {
+        let (w, h) = (17, 11);
+        let src: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 23) as f32).collect();
+        for r in [1usize, 2, 5] {
+            for max in [true, false] {
+                let fast = max_square(&src, w, h, r, max);
+                for y in 0..h {
+                    for x in 0..w {
+                        let mut v = if max { f32::MIN } else { f32::MAX };
+                        for yy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                            for xx in x.saturating_sub(r)..(x + r + 1).min(w) {
+                                v = if max { v.max(src[yy * w + xx]) } else { v.min(src[yy * w + xx]) };
+                            }
+                        }
+                        assert_eq!(fast[y * w + x], v, "r={r} max={max} ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edge_width_sharp_step_and_soft_ramp() {
+        let (w, h) = (100, 20);
+        // Sharp step image: 0.0 on left, 1.0 on right (step at x=50).
+        let step_guide: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                let v = if x >= 50 { 1.0 } else { 0.0 };
+                [v, v, v]
+            })
+            .collect();
+        let step_widths = edge_width(&step_guide, w, h, 10);
+        // At the step, transition width should be around 2.0 (sharp).
+        let step_w = step_widths[10 * w + 50];
+        assert!(step_w >= 1.5 && step_w <= 2.5, "step width: {step_w}");
+
+        // Linear ramp image over 20 pixels from x=40 to x=60.
+        let ramp_guide: Vec<[f32; 3]> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                let v = if x < 40 { 0.0 } else if x >= 60 { 1.0 } else { (x - 40) as f32 / 20.0 };
+                [v, v, v]
+            })
+            .collect();
+        let ramp_widths = edge_width(&ramp_guide, w, h, 10);
+        // On the ramp, transition width should be much wider (~20.0).
+        let ramp_w = ramp_widths[10 * w + 50];
+        assert!(ramp_w >= 15.0, "ramp width: {ramp_w}");
+    }
+
+    #[test]
+    fn smart_radius_limits_spread_on_sharp_edges() {
+        let (w, h) = (600u32, 400u32);
+        // Sharp square from x=200 to 400.
+        let px = (0..w * h)
+            .map(|i| if (200..400).contains(&(i % w)) && (100..300).contains(&(i / w)) { [60000; 4] } else { [8000, 8000, 8000, 65535] })
+            .collect();
+        let guide = colours(&Raster::new(w, h, px));
+        // A selection starting at x=198 (2 pixels outside the square edge at 200).
+        let rough = Selection::rectangle(w, h, (198.0, 100.0), (400.0, 300.0));
+
+        let standard = refine_edge(&rough, &guide, &EdgeOptions { radius: 20.0, smart_radius: false, ..Default::default() });
+        let smart = refine_edge(&rough, &guide, &EdgeOptions { radius: 20.0, smart_radius: true, ..Default::default() });
+
+        // Both refine the edge inside the square:
+        assert!(standard.at(205, 200) > 0.8, "{}", standard.at(205, 200));
+        assert!(smart.at(205, 200) > 0.8, "{}", smart.at(205, 200));
+
+        // Smart radius leaves pixels outside its ~2px reach untouched:
+        assert_eq!(rough.coverage.get(190, 200), 0);
+        assert_eq!(smart.coverage.get(190, 200), 0);
     }
 }
