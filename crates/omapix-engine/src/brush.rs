@@ -16,10 +16,12 @@
 //! to match its new surroundings when the stroke ends (see [`Stroke::finish`]).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::Pixel;
 use crate::dynamics::{Dab, Dynamics, Step, mix};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
+use crate::tip::Tip;
 use crate::toning::{self, ToneRange};
 
 const MAX: f32 = u16::MAX as f32;
@@ -49,6 +51,9 @@ pub struct BrushSettings {
     pub flow_pressure: bool,
     /// The tip's shape and how it varies (Photoshop's Brush Settings).
     pub dynamics: Dynamics,
+    /// The sampled tip it stamps ([`Tip::id`]), or none for a round one.
+    /// The stroke is given the tip itself ([`Stroke::with_tip`]).
+    pub tip: Option<u64>,
 }
 
 impl Default for BrushSettings {
@@ -62,6 +67,7 @@ impl Default for BrushSettings {
             opacity_pressure: true,
             flow_pressure: false,
             dynamics: Dynamics::default(),
+            tip: None,
         }
     }
 }
@@ -119,6 +125,8 @@ pub struct Stroke {
     limit: Option<Tiled<u16>>,
     /// Keep each pixel's alpha (Lock Transparent Pixels).
     keep_alpha: bool,
+    /// The picture each dab stamps, in place of a round one.
+    tip: Option<Arc<Tip>>,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     /// The last point, and the pen's pressure there.
@@ -144,6 +152,7 @@ impl Stroke {
             source: None,
             limit: None,
             keep_alpha: false,
+            tip: None,
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -157,6 +166,13 @@ impl Stroke {
     /// Only paint where `selection` covers (0–65535 per pixel).
     pub fn within(mut self, selection: Tiled<u16>) -> Self {
         self.limit = Some(selection);
+        self
+    }
+
+    /// Stamp `tip` at each dab: its longer side is the brush's size, and
+    /// hardness doesn't apply.
+    pub fn with_tip(mut self, tip: Arc<Tip>) -> Self {
+        self.tip = Some(tip);
         self
     }
 
@@ -288,10 +304,19 @@ impl Stroke {
         let Dab { x: cx, y: cy, radius: r, roundness, most, flow, .. } = *dab;
         let hardness = self.settings.hardness.clamp(0.0, 0.999);
         let (sin, cos) = dab.angle.sin_cos();
-        let x0 = (cx - r).floor().max(0.0) as u32;
-        let y0 = (cy - r).floor().max(0.0) as u32;
-        let x1 = ((cx + r).ceil() as u32).min(w);
-        let y1 = ((cy + r).ceil() as u32).min(h);
+        // A sampled tip: which of its sizes to read, how many of its pixels
+        // one of the image's is, and how far it reaches, since at an angle
+        // its corners stick out further than its sides.
+        let tip = self.tip.as_deref().map(|tip| {
+            let (tw, th) = tip.size();
+            let (tw, th, longer) = (tw as f32, th as f32, tw.max(th) as f32);
+            (tip, tip.level_for(2.0 * r * roundness.max(0.25)), longer / (2.0 * r), tw, th)
+        });
+        let reach = tip.map_or(r, |(_, _, _, tw, th)| r * tw.hypot(th) / tw.max(th));
+        let x0 = (cx - reach).floor().max(0.0) as u32;
+        let y0 = (cy - reach).floor().max(0.0) as u32;
+        let x1 = ((cx + reach).ceil() as u32).min(w);
+        let y1 = ((cy + reach).ceil() as u32).min(h);
         if x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -305,15 +330,19 @@ impl Stroke {
                 let mut hit = false;
                 for py in y0.max(ty)..y1.min(ty + TILE) {
                     for px in x0.max(tx)..x1.min(tx + TILE) {
-                        // Distance from the pixel centre, as a fraction of the radius.
+                        // The pixel's centre from the dab's, and how much of
+                        // the dab is there.
                         let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
-                        let d = if roundness >= 1.0 {
-                            (dx.powi(2) + dy.powi(2)).sqrt() / r.max(0.5)
+                        let shape = if let Some((tip, level, scale, tw, th)) = tip {
+                            // Along the tip and across it, in its own pixels.
+                            let (along, across) = (dx * cos - dy * sin, (dx * sin + dy * cos) / roundness);
+                            tip.sample(level, 0.5 + along * scale / tw, 0.5 + across * scale / th)
+                        } else if roundness >= 1.0 {
+                            falloff((dx.powi(2) + dy.powi(2)).sqrt() / r.max(0.5), hardness)
                         } else {
                             // Along the tip, and across it, where it's narrower.
-                            (dx * cos - dy * sin).hypot((dx * sin + dy * cos) / roundness) / r.max(0.5)
+                            falloff((dx * cos - dy * sin).hypot((dx * sin + dy * cos) / roundness) / r.max(0.5), hardness)
                         };
-                        let shape = falloff(d, hardness);
                         if shape <= 0.0 {
                             continue;
                         }
@@ -1304,5 +1333,37 @@ mod tests {
         };
         assert_eq!((stroke(0.0).diameter(0.0), stroke(0.0).diameter(0.5)), (0.0, 20.0));
         assert_eq!((stroke(0.5).diameter(0.0), stroke(0.5).diameter(0.5), stroke(0.5).diameter(1.0)), (20.0, 30.0, 40.0));
+    }
+
+    #[test]
+    fn a_sampled_tip_is_stamped_the_right_way_up_at_the_brushs_size_and_angle() {
+        // Twice as wide as it's high, with paint in its right half only.
+        let tip = Arc::new(Tip::new(40, 20, (0..800).map(|i| if i % 40 >= 20 { 65535 } else { 0 }).collect()).unwrap());
+        let stamp = |size: f32, dynamics: Dynamics| {
+            let settings = BrushSettings { size, hardness: 0.0, dynamics, ..Default::default() };
+            let mut out = Surface::Pixels(white(300, 200));
+            let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone()).with_tip(tip.clone());
+            let tiles = s.add_point(100.0, 100.0, 1.0);
+            s.apply(&mut out, &tiles);
+            let Surface::Pixels(out) = out else { unreachable!() };
+            move |x: u32, y: u32| out.get(x, y)[0]
+        };
+        // At twice its size: 80 px wide, 40 high, the right half black to
+        // its edges whatever the hardness.
+        let at = stamp(80.0, Dynamics::default());
+        assert!(at(105, 100) == 0 && at(138, 82) == 0 && at(138, 118) == 0 && at(102, 118) == 0);
+        assert!(at(95, 100) == 65535 && at(62, 100) == 65535 && at(120, 78) == 65535 && at(142, 100) == 65535);
+        // Small, it's read from a smaller copy of itself: still the right half.
+        let at = stamp(8.0, Dynamics::default());
+        assert!(at(102, 100) == 0 && at(97, 100) == 65535 && at(102, 103) == 65535);
+        // Turned a quarter anticlockwise, its right half points up.
+        let at = stamp(80.0, Dynamics { angle: 90.0, ..Default::default() });
+        assert!(at(100, 80) == 0 && at(118, 62) == 0 && at(82, 62) == 0 && at(100, 120) == 65535 && at(125, 80) == 65535);
+        // At an eighth, its far corners reach beyond the brush's radius.
+        let at = stamp(80.0, Dynamics { angle: 45.0, ..Default::default() });
+        assert!(at(138, 85) == 0 && at(114, 61) == 0 && at(88, 112) == 65535);
+        // Half as round, it's half as high.
+        let at = stamp(80.0, Dynamics { roundness: 0.5, ..Default::default() });
+        assert!(at(120, 108) == 0 && at(120, 112) == 65535 && at(120, 92) == 0 && at(120, 88) == 65535);
     }
 }

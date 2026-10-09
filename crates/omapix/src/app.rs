@@ -18,6 +18,7 @@ use omapix_engine::{
     SmartSharpenOptions, align, export, fusion, ops, ora, psd,
 };
 
+use crate::brushes;
 use crate::canvas::ToolInput;
 use crate::settings::{FilterSettings, WebExport};
 use crate::tablet::Tablet;
@@ -80,6 +81,7 @@ enum Purpose {
     ExportWeb,
     ExportLut,
     ProofProfile,
+    ImportBrushes,
     /// The photos for Photomerge or Merge to HDR.
     Merge(Command),
 }
@@ -528,6 +530,8 @@ pub struct App {
     top_tab: Option<TopTab>,
     histogram: HistogramPanel,
     navigator: NavigatorPanel,
+    /// The brushes loaded from Photoshop's brush files.
+    brushes: brushes::Library,
     right_tab: RightTab,
     tools: Tools,
     /// Where the tool options are kept, and what was last written there.
@@ -642,6 +646,13 @@ impl App {
             top_tab: None,
             histogram: HistogramPanel::default(),
             navigator: NavigatorPanel::default(),
+            brushes: {
+                let mut library = brushes::Library::default();
+                if let Some(folder) = brushes::folder() {
+                    library.load(folder, None, ctx);
+                }
+                library
+            },
             right_tab: RightTab::default(),
             drawing: None,
             move_from: None,
@@ -1008,13 +1019,14 @@ impl App {
                     None => dialog,
                 }
             }
+            Purpose::ImportBrushes => dialog.set_title("Import Brushes").add_filter("Photoshop brushes", &["abr"]),
         };
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let files = match purpose {
                 Purpose::Merge(_) => dialog.pick_files(),
-                Purpose::Open | Purpose::ProofProfile => dialog.pick_file().map(|f| vec![f]),
+                Purpose::Open | Purpose::ProofProfile | Purpose::ImportBrushes => dialog.pick_file().map(|f| vec![f]),
                 _ => dialog.save_file().map(|f| vec![f]),
             };
             let _ = tx.send(files);
@@ -1209,6 +1221,12 @@ impl App {
                     Purpose::SaveAs => self.write(purpose, path.with_extension("ora"), ctx),
                     Purpose::ExportLut => self.export_lut(&path.with_extension("cube")),
                     Purpose::ProofProfile => self.set_proof_profile(path),
+                    Purpose::ImportBrushes => {
+                        let folder = brushes::folder().ok_or("There's nowhere to keep brushes".to_owned());
+                        if let Err(why) = folder.and_then(|folder| self.brushes.import(&path, &folder, ctx)) {
+                            self.message(why, true);
+                        }
+                    }
                     Purpose::ExportWeb => {
                         let extension = web_format(&self.filters.web_export).1[0];
                         self.write(purpose, path.with_extension(extension), ctx);
@@ -1216,6 +1234,9 @@ impl App {
                     _ => self.write(purpose, path, ctx),
                 }
             }
+        }
+        if let Some((text, failed)) = self.brushes.poll() {
+            self.message(text, failed);
         }
         if let Some((cmd, rx)) = &self.merging
             && let Ok(result) = rx.try_recv()
@@ -1390,6 +1411,7 @@ impl App {
                     | Command::Photomerge
                     | Command::MergeToHdr
                     | Command::AiModels
+                    | Command::ImportBrushes
             )
                 || (cmd == Command::ReopenLast && self.recent.last().is_some());
         };
@@ -1419,7 +1441,8 @@ impl App {
             | Command::ShowHistory
             | Command::ShowNavigator
             | Command::ShowHistogram
-            | Command::ShowBrushSettings => true,
+            | Command::ShowBrushSettings
+            | Command::ImportBrushes => true,
             Command::SaveSelection => editor.doc.selection.is_some(),
             Command::SaveAdjustmentPreset | Command::ExportAdjustmentLut => {
                 Preset::from_layers(doc, &editor.selected()).is_some()
@@ -1589,6 +1612,7 @@ impl App {
             Command::ShowNavigator => TopTab::toggle(&mut self.top_tab, TopTab::Navigator),
             Command::ShowHistogram => TopTab::toggle(&mut self.top_tab, TopTab::Histogram),
             Command::ShowBrushSettings => TopTab::toggle(&mut self.top_tab, TopTab::BrushSettings),
+            Command::ImportBrushes => self.pick(Purpose::ImportBrushes, ctx),
             Command::Quit => self.guard(Then::Quit, ctx),
             Command::Save => self.save(ctx),
             Command::SaveAs => self.pick(Purpose::SaveAs, ctx),
@@ -2440,6 +2464,8 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::ContentAwareFill, None);
                 self.menu_item(ui, Command::TextureFill, None);
                 self.menu_item(ui, Command::GenerativeFill, None);
+                ui.separator();
+                self.menu_item(ui, Command::ImportBrushes, None);
             });
             ui.menu_button("Image", |ui| {
                 ui.menu_button("Adjustments", |ui| {
@@ -4057,7 +4083,7 @@ self.filters.remember(&filter);
                     paint = Paint::Color(background.unwrap_or([65535; 4]));
                 }
                 let (settings, sample) = (self.tools.settings(), self.tools.sample_from());
-                if editor.begin_stroke(settings, paint, sample) {
+                if editor.begin_stroke(settings, paint, sample, self.brushes.tip(settings.tip)) {
                     editor.stroke_to(p.x, p.y, pressure);
                 }
             }
@@ -5465,7 +5491,7 @@ impl eframe::App for App {
                 .show(ui, |ui| self.tools.toolbar(ui, &self.theme));
         }
         if let Some(editor) = &mut self.editor {
-            let mut command = None;
+            let (mut command, mut above) = (None, None);
             egui::Panel::right("layers")
                 .frame(bar)
                 .default_size(280.0)
@@ -5496,7 +5522,7 @@ impl eframe::App for App {
                         match top_tab {
                             TopTab::Navigator => self.navigator.show(ui, editor, &self.theme),
                             TopTab::Histogram => self.histogram.show(ui, editor, &self.theme),
-                            TopTab::BrushSettings => self.tools.brush_settings(ui, &self.theme),
+                            TopTab::BrushSettings => above = self.tools.brush_settings(ui, &self.theme, &mut self.brushes),
                         }
                         ui.separator();
                     }
@@ -5529,7 +5555,7 @@ impl eframe::App for App {
                         }
                     }
                 });
-            if let Some(cmd) = command {
+            if let Some(cmd) = command.or(above) {
                 let ctx = ui.ctx().clone();
                 self.run(cmd, &ctx);
             }
@@ -5922,7 +5948,7 @@ mod tests {
         // Nothing there to fill or paint on.
         fill(&mut editor, "Fill", Some([255, 0, 0]), [255, 255, 255]);
         let settings = omapix_engine::brush::BrushSettings::default();
-        assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), crate::tools::Sample::Current));
+        assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), crate::tools::Sample::Current, None));
         editor.stroke_to(300.0, 300.0, 1.0);
         editor.end_stroke();
         let pixels = &editor.doc.layer(empty).unwrap().pixels;
@@ -6166,6 +6192,7 @@ mod tests {
             top_tab: None,
             histogram: HistogramPanel::default(),
             navigator: NavigatorPanel::default(),
+            brushes: brushes::Library::default(),
             right_tab: RightTab::default(),
             tools: Tools::default(),
             tools_path: None,
