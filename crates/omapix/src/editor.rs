@@ -919,6 +919,9 @@ impl Editor {
             (_, Paint::Clone { .. }) => "Clone Stamp",
             (_, Paint::Heal { .. }) => "Healing Brush",
             (_, Paint::SpotHeal) => "Spot Healing Brush",
+            (_, Paint::Tone { burn: false, .. }) => "Dodge Tool",
+            (_, Paint::Tone { burn: true, .. }) => "Burn Tool",
+            (_, Paint::Sponge { .. }) => "Sponge Tool",
             _ => "Brush Stroke",
         };
         let before = self.snapshot(label);

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use crate::Pixel;
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
+use crate::toning::{self, ToneRange};
 
 const MAX: f32 = u16::MAX as f32;
 
@@ -74,6 +75,14 @@ pub enum Paint {
     /// nearby patch automatically (Photoshop's Spot Healing Brush). While
     /// painting, the stroke shows as a translucent dark overlay.
     SpotHeal,
+    /// Dodge (or with `burn`, Burn) the tones in `range`, Protect Tones
+    /// keeping the colours' hue (see [`crate::toning`]). The stroke's
+    /// opacity is the tool's Exposure. On a mask it lightens or darkens the
+    /// mask's greys.
+    Tone { range: ToneRange, burn: bool, protect: bool },
+    /// Saturate or desaturate (Photoshop's Sponge). The stroke's opacity is
+    /// its Flow. Masks are left alone.
+    Sponge { saturate: bool, vibrance: bool },
 }
 
 /// The surface a stroke paints on.
@@ -308,6 +317,8 @@ impl Stroke {
                         | Paint::Clone { .. }
                         | Paint::Heal { .. }
                         | Paint::SpotHeal => MAX,
+                        // Worked out for each pixel below.
+                        Paint::Tone { .. } | Paint::Sponge { .. } => 0.0,
                     };
                     let base: Vec<u16> = orig
                         .tile(col, row)
@@ -316,7 +327,13 @@ impl Stroke {
                     for i in 0..TILE_PIXELS {
                         let a = cov[i] * opacity * self.limit_at(col, row, i);
                         let v = f32::from(base[i]);
-                        out[i] = (v + (target - v) * a).round() as u16;
+                        out[i] = match self.paint {
+                            Paint::Tone { range, burn, .. } => {
+                                (toning::tone_curve(v / MAX, a, range, burn) * MAX).round() as u16
+                            }
+                            Paint::Sponge { .. } => base[i],
+                            _ => (v + (target - v) * a).round() as u16,
+                        };
                     }
                 }
                 _ => {}
@@ -628,6 +645,12 @@ fn paint_pixel(base: Pixel, a: f32, paint: Paint) -> Pixel {
             out[3] = (base_a * (1.0 - a) * MAX).round() as u16;
             out
         }
+        Paint::Tone { range, burn, protect } => {
+            toning::on_pixel(base, |c| toning::dodge_burn(c, a, range, burn, protect))
+        }
+        Paint::Sponge { saturate, vibrance } => {
+            toning::on_pixel(base, |c| toning::sponge(c, a, saturate, vibrance))
+        }
         Paint::Mask(_) | Paint::Clone { .. } | Paint::Heal { .. } | Paint::SpotHeal => base,
     }
 }
@@ -673,6 +696,41 @@ mod tests {
         };
         assert_eq!(out.get(100, 100), [0, 0, 0, 65535]);
         assert_eq!(out.get(100, 125), [65535; 4]);
+    }
+
+    #[test]
+    fn toning_strokes_lighten_darken_and_desaturate() {
+        let grey = |c: Pixel| Tiled::from_slice(100, 100, [0; 4], &vec![c; 100 * 100]);
+        let hard = BrushSettings { size: 40.0, hardness: 1.0, opacity: 0.5, ..Default::default() };
+        let tone = |burn| Paint::Tone { range: ToneRange::Midtones, burn, protect: true };
+        let run = |paint, surface: &Surface, points: &[(f32, f32)]| {
+            let Surface::Pixels(out) = stroke(hard, paint, surface, points) else { unreachable!() };
+            out
+        };
+        let mid = Surface::Pixels(grey([32768, 32768, 32768, 40000]));
+        let dodged = run(tone(false), &mid, &[(50.0, 50.0)]);
+        let burnt = run(tone(true), &mid, &[(50.0, 50.0)]);
+        assert!(dodged.get(50, 50)[0] > 36000, "{:?}", dodged.get(50, 50));
+        assert!(burnt.get(50, 50)[0] < 29000, "{:?}", burnt.get(50, 50));
+        // Alpha is kept, and outside the brush nothing changes.
+        assert_eq!(dodged.get(50, 50)[3], 40000);
+        assert_eq!(dodged.get(5, 5), [32768, 32768, 32768, 40000]);
+        // Going back over the same spot in one stroke doesn't build up.
+        let scrubbed = run(tone(false), &mid, &[(50.0, 50.0), (60.0, 50.0), (50.0, 50.0)]);
+        assert_eq!(scrubbed.get(50, 50), dodged.get(50, 50));
+
+        let red = Surface::Pixels(grey([50000, 20000, 15000, 65535]));
+        let p = run(Paint::Sponge { saturate: false, vibrance: false }, &red, &[(50.0, 50.0)]);
+        let p = p.get(50, 50);
+        assert!(p[0] - p[2] < 50000 - 15000, "{p:?}");
+
+        // On a mask, Dodge lightens its greys and Sponge leaves them alone.
+        let mask = Surface::Mask(Tiled::new(100, 100, 32768));
+        let Surface::Mask(m) = stroke(hard, tone(false), &mask, &[(50.0, 50.0)]) else { unreachable!() };
+        assert!(m.get(50, 50) > 36000);
+        let sponge = Paint::Sponge { saturate: true, vibrance: true };
+        let Surface::Mask(m) = stroke(hard, sponge, &mask, &[(50.0, 50.0)]) else { unreachable!() };
+        assert_eq!(m.get(50, 50), 32768);
     }
 
     #[test]

@@ -495,6 +495,9 @@ impl ScriptStep {
                 "Gradient" => ScriptStep::Tool(crate::tools::Tool::Gradient),
                 "PaintBucket" | "Bucket" => ScriptStep::Tool(crate::tools::Tool::PaintBucket),
                 "Crop" => ScriptStep::Tool(crate::tools::Tool::Crop),
+                "Dodge" => ScriptStep::Tool(crate::tools::Tool::Dodge),
+                "Burn" => ScriptStep::Tool(crate::tools::Tool::Burn),
+                "Sponge" => ScriptStep::Tool(crate::tools::Tool::Sponge),
                 _ => return None,
             },
             _ => ScriptStep::Command(Command::from_name(head)?),
@@ -4001,6 +4004,17 @@ self.filters.remember(&filter);
                 else {
                     return;
                 };
+                if modifiers.alt {
+                    match paint {
+                        Paint::Tone { range, burn, protect } => {
+                            paint = Paint::Tone { range, burn: !burn, protect };
+                        }
+                        Paint::Sponge { saturate, vibrance } => {
+                            paint = Paint::Sponge { saturate: !saturate, vibrance };
+                        }
+                        _ => {}
+                    }
+                }
                 if editor.target == Target::Pixels
                     && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
                 {
@@ -5565,7 +5579,7 @@ impl eframe::App for App {
                     || liquify_brush.is_some();
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
-                    alt_samples: !tools_off && tool.paints(),
+                    alt_samples: !tools_off && (tool.copies() || (tool.paints() && tool.alt_picks_colour())),
                     samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
                     // Holding Alt picks up a colour: a crosshair, not the brush,
                     // unless Alt+right-dragging to resize it.
@@ -9795,6 +9809,78 @@ mod tests {
         app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
         let [r, g, b, a] = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(50, 50);
         assert!(r.abs_diff(32768) <= 1 && g == 0 && b.abs_diff(32768) <= 1 && a == 65535, "{r} {g} {b} {a}");
+    }
+
+    #[test]
+    fn toning_tools_dodge_burn_sponge_and_alt_toggle() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().doc.selection = None;
+        let active = app.editor.as_ref().unwrap().active;
+
+        // Fill active layer with mid-grey: [32768, 32768, 32768, 65535]
+        let grey = [32768, 32768, 32768, 65535];
+        let (w, h) = (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height);
+        app.editor.as_mut().unwrap().edit("Fill Grey", |doc, _| {
+            let l = doc.layer_mut(active).unwrap();
+            l.pixels = Tiled::from_raster(&omapix_engine::Raster::new(w, h, vec![grey; (w * h) as usize]));
+        });
+
+        // 1. Dodge tool: lightens midtones
+        app.tools.select(crate::tools::Tool::Dodge);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Dodge Tool"));
+        let p = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(50, 50);
+        assert!(p[0] > 32768, "{p:?}");
+
+        // 2. Alt with Dodge tool: temporarily burns (darkens)
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::ALT);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::ALT);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Burn Tool"));
+        let p2 = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150);
+        assert!(p2[0] < 32768, "{p2:?}");
+
+        // 3. Burn tool: darkens
+        app.tools.select(crate::tools::Tool::Burn);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(250.0, 250.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Burn Tool"));
+        let p3 = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(250, 250);
+        assert!(p3[0] < 32768, "{p3:?}");
+
+        // 4. Alt with Burn tool: temporarily dodges (lightens)
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(350.0, 350.0)), egui::Modifiers::ALT);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::ALT);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Dodge Tool"));
+        let p4 = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(350, 350);
+        assert!(p4[0] > 32768, "{p4:?}");
+
+        // 5. Sponge tool on coloured pixels
+        let red = [50000, 20000, 15000, 65535];
+        app.editor.as_mut().unwrap().edit("Set Red", |doc, _| {
+            let l = doc.layer_mut(active).unwrap();
+            l.pixels = Tiled::from_raster(&omapix_engine::Raster::new(w, h, vec![red; (w * h) as usize]));
+        });
+        app.tools.select(crate::tools::Tool::Sponge);
+        app.tools.sponge_mode = crate::tools::SpongeMode::Desaturate;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Sponge Tool"));
+        let s1 = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(50, 50);
+        assert!(s1[0] - s1[2] < red[0] - red[2], "{s1:?}");
+
+        // Alt with Sponge tool: swaps mode to Saturate
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::ALT);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::ALT);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Sponge Tool"));
+        let s2 = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150);
+        assert!(s2[0] - s2[2] > red[0] - red[2], "{s2:?}");
+
+        // Undo reverts the stroke
+        app.run(Command::Undo, &ctx);
+        let reverted = app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150);
+        assert_eq!(reverted, red);
     }
 
     #[test]

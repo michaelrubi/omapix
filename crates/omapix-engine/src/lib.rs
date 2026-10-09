@@ -37,6 +37,7 @@ pub mod skin;
 pub mod tiled;
 pub mod tiles;
 pub mod tone;
+pub mod toning;
 pub mod transform;
 pub mod under_eyes;
 pub mod upscale;
