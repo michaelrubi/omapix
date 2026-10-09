@@ -46,7 +46,7 @@ fn zip_error(e: zip::result::ZipError) -> Error {
 
 /// Rectangle of whole tiles that differ from the fill value, in pixels:
 /// (x, y, w, h). `None` if every tile is empty.
-fn used_area<T: Copy + PartialEq + Send + Sync>(t: &Tiled<T>) -> Option<(u32, u32, u32, u32)> {
+pub(crate) fn used_area<T: Copy + PartialEq + Send + Sync>(t: &Tiled<T>) -> Option<(u32, u32, u32, u32)> {
     let mut bounds: Option<(u32, u32, u32, u32)> = None;
     for row in 0..t.rows() {
         for col in 0..t.cols() {

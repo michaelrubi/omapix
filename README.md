@@ -39,8 +39,9 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   Hair, Content-Aware Fill, Generative Fill, Denoise and upscaling. Every
   result is an ordinary layer, mask or selection. No cloud and no account
   (see [AI features](#ai-features)).
-- **Files:** opens TIFF, PNG, JPEG, PSD and OpenRaster. Saves layers as
-  OpenRaster (`.ora`, which Krita opens too). Exports 16-bit TIFF, JPEG
+- **Files:** opens TIFF, PNG, JPEG, PSD, PSB and OpenRaster. Saves layers as
+  OpenRaster (`.ora`, which Krita opens too) and exports them as PSD or
+  PSB for Photoshop. Exports 16-bit TIFF, JPEG
   and PNG, one at a time or in batches, and Export for Web sizes one for
   posting and says how big the file will be. darktable gets an "edit in Omapix"
   export target that brings the result back beside the raw.

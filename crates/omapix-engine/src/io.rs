@@ -24,7 +24,7 @@ pub fn load(path: &Path) -> Result<Document> {
         .map(str::to_ascii_lowercase);
     match ext.as_deref() {
         Some("ora") => crate::ora::load(path),
-        Some("psd") => crate::psd::load(path),
+        Some("psd" | "psb") => crate::psd::load(path),
         _ if is_tiff => load_tiff(path),
         _ => load_other(path),
     }
