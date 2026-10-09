@@ -496,8 +496,7 @@ What Omapix needs before people other than Michael can install it, rely on it an
 
 Read on 2026-10-08 at commit [`ec477ca`](https://github.com/storytold/photocraft/tree/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1), which the links below point to. It was eight days old then and little of it had been used by anyone, so check whatever's taken against real files.
 
-- **PSD export and fuller PSD import**: [`crates/psd`](https://github.com/storytold/photocraft/tree/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/psd) is a reader and writer for PSD and PSB that stands alone (about 10,900 lines, needing only `thiserror` and `flate2`). It keeps the blocks it doesn't understand, and `PsdBuilder` writes a new file from layers and a composite. Omapix's `psd.rs` only opens PSDs. It isn't on crates.io, so it would be a git dependency pinned to a commit, or a copy. [`crates/io/src/psd_export.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/io/src/psd_export.rs) shows a document being turned into one.
-- **Photoshop brush files (`.abr`)**: [`crates/psd/src/abr.rs`](https://github.com/storytold/photocraft/blob/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/psd/src/abr.rs) reads both the old and the current layout.
+- ~~**Photoshop brush files (`.abr`)**~~ (done, ported into `omapix-engine/src/abr.rs`, `descriptor.rs` and `patterns.rs`): reads both the legacy v1/v2 and modern sectioned v6+ layouts (sampled tip rasters, ActionDescriptors, patterns).
 - **To read, not to drop in.** These work on PhotoCraft's own raster types in `f32`, so they'd be ported to `Tiled<[u16; 4]>`:
   - ~~Dodge, Burn and Sponge, with Protect Tones~~ (done, ported into `omapix-engine/src/toning.rs` and the `O` tool group).
   - Brush dynamics (Shape Dynamics, Scattering, Texture, Dual Brush, Transfer, Smoothing): [`crates/paint`](https://github.com/storytold/photocraft/tree/ec477ca9c4c5f44ae87b9e4593c8322be2c5f7b1/crates/paint).
