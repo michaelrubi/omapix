@@ -14,6 +14,7 @@ pub mod composite;
 pub mod denoise;
 pub mod descriptor;
 pub mod document;
+pub mod dynamics;
 pub mod export;
 pub mod filters;
 pub mod fill;

@@ -3,6 +3,7 @@
 
 use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
+use omapix_engine::dynamics::{Dynamics, MAX_COUNT};
 use omapix_engine::selection::Combine;
 use omapix_engine::toning::ToneRange;
 use omapix_engine::warp::Brush as LiquifyBrush;
@@ -1030,6 +1031,74 @@ impl Tools {
         for sample in Sample::ALL {
             ui.selectable_value(current, sample, sample.label());
         }
+    }
+
+    /// The Brush Settings panel: the tip of the current tool's brush and
+    /// how its dabs vary along a stroke, as in Photoshop's panel (F5).
+    pub fn brush_settings(&mut self, ui: &mut Ui, theme: &Theme) {
+        // Tools without a brush show the Brush tool's.
+        let name = if self.tool.has_brush() { self.tool.name() } else { Tool::Brush.name() };
+        let d = &mut self.settings_mut().dynamics;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(name).color(theme.dark_foreground));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(*d != Dynamics::default(), Button::new("Reset")).on_hover_text("A plain round brush").clicked() {
+                    *d = Dynamics::default();
+                }
+            });
+        });
+        let heading = |ui: &mut Ui, text: &str| {
+            ui.label(RichText::new(text).color(theme.foreground).strong());
+            ui.end_row();
+        };
+        // A slider over `range`, showing `value` times `scale`.
+        let row = |ui: &mut Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, scale: f32, suffix: &str, hint: &str| {
+            ui.label(label).on_hover_text(hint);
+            let mut shown = *value * scale;
+            let slider = Slider::new(&mut shown, range).suffix(suffix).fixed_decimals(0);
+            if ui.add(slider).on_hover_text(hint).changed() {
+                *value = shown / scale;
+            }
+            ui.end_row();
+        };
+        let percent = |ui: &mut Ui, label: &str, value: &mut f32, hint: &str| row(ui, label, value, 0.0..=100.0, 100.0, "%", hint);
+        // All of it if there's room, leaving the layers some.
+        let height = (ui.available_height() - 220.0).max(120.0);
+        egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
+            // Narrow enough for the panel at the width it starts with.
+            ui.spacing_mut().slider_width = 70.0;
+            egui::Grid::new("brush-settings").num_columns(2).show(ui, |ui| {
+                heading(ui, "Brush Tip Shape");
+                row(ui, "Spacing", &mut d.spacing, 1.0..=300.0, 100.0, "%", "The distance between dabs, as a share of the brush's size");
+                row(ui, "Angle", &mut d.angle, -180.0..=180.0, 1.0, "°", "Turns a tip that isn't round, anticlockwise");
+                row(ui, "Roundness", &mut d.roundness, 1.0..=100.0, 100.0, "%", "The tip's height as a share of its width");
+
+                heading(ui, "Shape Dynamics");
+                percent(ui, "Size Jitter", &mut d.size_jitter, "How much smaller a dab can be at random");
+                percent(ui, "Minimum Diameter", &mut d.minimum_diameter, "The smallest a dab gets, from jitter or a pen's pressure");
+                percent(ui, "Angle Jitter", &mut d.angle_jitter, "How far a dab can turn at random");
+                ui.label("");
+                ui.checkbox(&mut d.angle_follows, "Follow the stroke")
+                    .on_hover_text("The tip turns the way the stroke goes (Photoshop's Control: Direction)");
+                ui.end_row();
+                percent(ui, "Roundness Jitter", &mut d.roundness_jitter, "How much flatter a dab can be at random");
+                percent(ui, "Minimum Roundness", &mut d.minimum_roundness, "The flattest that makes it");
+
+                heading(ui, "Scattering");
+                row(ui, "Scatter", &mut d.scatter, 0.0..=1000.0, 100.0, "%", "How far dabs stray from the stroke, as a share of the brush's radius");
+                ui.label("");
+                ui.checkbox(&mut d.both_axes, "Both Axes").on_hover_text("Stray along the stroke as well as across it");
+                ui.end_row();
+                ui.label("Count").on_hover_text("Dabs at each step");
+                ui.add(Slider::new(&mut d.count, 1..=MAX_COUNT)).on_hover_text("Dabs at each step");
+                ui.end_row();
+                percent(ui, "Count Jitter", &mut d.count_jitter, "How many fewer there can be at random");
+
+                heading(ui, "Transfer");
+                percent(ui, "Opacity Jitter", &mut d.opacity_jitter, "How much lower a dab's opacity can be at random");
+                percent(ui, "Flow Jitter", &mut d.flow_jitter, "How much lower a dab's flow can be at random");
+            });
+        });
     }
 
     /// The options bar: settings for the current tool.
@@ -2222,5 +2291,61 @@ mod tests {
         // Number keys set exposure/opacity
         tools.set_opacity(0.7);
         assert_eq!(tools.settings().opacity, 0.7);
+    }
+
+    #[test]
+    fn the_brush_settings_panel_changes_the_current_tools_brush_and_resets_it() {
+        let ctx = egui::Context::default();
+        let theme = Theme::default();
+        let mut tools = Tools { tool: Tool::Eraser, ..Tools::default() };
+        let mut time = 0.0;
+        // Draw the panel, and give back where its texts are.
+        let mut frame = |tools: &mut Tools, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
+            time += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 900.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| tools.brush_settings(ui, &theme));
+            out.textures_delta.clear();
+            fn texts(shape: &egui::Shape, found: &mut Vec<(String, Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => found.push((t.galley.text().to_owned(), t.visual_bounding_rect().center())),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, found)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| texts(&s.shape, &mut found));
+            found
+        };
+        let click = |pos: Pos2, pressed: bool| {
+            let button = egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            vec![egui::Event::PointerMoved(pos), button]
+        };
+        let at = |drawn: &[(String, Pos2)], text: &str| drawn.iter().find(|(t, _)| t == text).unwrap_or_else(|| panic!("no {text}")).1;
+
+        let drawn = frame(&mut tools, vec![]);
+        // It says whose brush it is, and has every section.
+        for text in ["Eraser", "Brush Tip Shape", "Shape Dynamics", "Scattering", "Transfer", "Spacing", "Flow Jitter"] {
+            at(&drawn, text);
+        }
+        let follow = at(&drawn, "Follow the stroke");
+        frame(&mut tools, click(follow, true));
+        frame(&mut tools, click(follow, false));
+        assert!(tools.eraser.dynamics.angle_follows);
+        assert_eq!(tools.brush.dynamics, Dynamics::default(), "the Brush tool's is its own");
+
+        let drawn = frame(&mut tools, vec![]);
+        let reset = at(&drawn, "Reset");
+        frame(&mut tools, click(reset, true));
+        frame(&mut tools, click(reset, false));
+        assert_eq!(tools.eraser.dynamics, Dynamics::default());
+
+        // A tool with no brush shows the Brush tool's.
+        tools.tool = Tool::Move;
+        at(&frame(&mut tools, vec![]), "Brush");
     }
 }

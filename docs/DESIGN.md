@@ -202,6 +202,7 @@ All follow Photoshop.
 | Clear | Delete |
 | Move / nudge | V / arrow keys (Shift: 10 px) |
 | Brush / Eraser / Clone | B / E / S |
+| Brush Settings panel | F5 |
 | Dodge / Burn / Sponge | O / Shift+O (Alt swaps dodge/burn or sponge mode) |
 | Spot Healing / Healing Brush | J / Shift+J |
 | Marquee / Lasso | M / L (Shift adds, Alt subtracts) |
