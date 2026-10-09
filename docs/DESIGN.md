@@ -178,7 +178,7 @@ Curves and Levels.
 ### 5. Beyond (done)
 
 Liquify, AI-assisted retouching (local models via ONNX Runtime on the GPU,
-see [AI.md](AI.md)), PSD import. The [roadmap](ROADMAP.md) has everything
+see [AI.md](AI.md)), PSD import and export. The [roadmap](ROADMAP.md) has everything
 built since, and what's next.
 
 ## Shortcuts

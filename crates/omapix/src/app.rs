@@ -15,7 +15,7 @@ use omapix_engine::tiled::{Orientation, Tiled};
 use omapix_engine::{
     ColorProfile, DisplayTransform, Document, NoiseDistribution, NoiseOptions, Proof,
     ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions, SmartBlurQuality,
-    SmartSharpenOptions, align, export, fusion, ops, ora,
+    SmartSharpenOptions, align, export, fusion, ops, ora, psd,
 };
 
 use crate::canvas::ToolInput;
@@ -38,7 +38,7 @@ use crate::recent::RecentStore;
 use crate::theme::{self, Theme};
 use crate::tools::{Sample, Tools};
 
-const OPEN_EXTENSIONS: [&str; 7] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd"];
+const OPEN_EXTENSIONS: [&str; 8] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd", "psb"];
 const JPEG_QUALITY: u8 = 92;
 
 /// The file dialog's filter for Export for Web's format: its name and
@@ -76,6 +76,7 @@ enum Purpose {
     ExportTiff,
     ExportJpeg,
     ExportPng,
+    ExportPsd,
     ExportWeb,
     ExportLut,
     ProofProfile,
@@ -370,6 +371,8 @@ type Opened = Result<(Document, Option<String>), String>;
 /// A save or export running in the background.
 struct FileJob {
     label: String,
+    /// Added to what's said once it's written.
+    note: String,
     rx: Receiver<Written>,
 }
 
@@ -957,7 +960,7 @@ impl App {
             Purpose::Open => dialog
                 .set_title("Open")
                 .add_filter("Images", &OPEN_EXTENSIONS)
-                .add_filter("Photoshop", &["psd"]),
+                .add_filter("Photoshop", &["psd", "psb"]),
             Purpose::SaveAs => dialog
                 .set_title("Save As")
                 .add_filter("OpenRaster", &["ora"])
@@ -974,6 +977,11 @@ impl App {
                 .set_title("Export as PNG")
                 .add_filter("PNG", &["png"])
                 .set_file_name(format!("{stem}.png")),
+            Purpose::ExportPsd => dialog
+                .set_title("Export as PSD")
+                .add_filter("Photoshop", &["psd"])
+                .add_filter("Photoshop Large Document", &["psb"])
+                .set_file_name(format!("{stem}.psd")),
             Purpose::ExportWeb => {
                 let (name, extensions) = web_format(&self.filters.web_export);
                 dialog
@@ -1026,8 +1034,17 @@ impl App {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         let label = match purpose {
-            Purpose::ExportTiff | Purpose::ExportJpeg | Purpose::ExportPng | Purpose::ExportWeb => "Exporting",
+            Purpose::ExportTiff | Purpose::ExportJpeg | Purpose::ExportPng | Purpose::ExportPsd | Purpose::ExportWeb => {
+                "Exporting"
+            }
             _ => "Saving",
+        };
+        // What a Photoshop file is written without.
+        let adjustments = doc.layers.iter().filter(|l| l.adjustment.is_some()).count();
+        let note = match (purpose, adjustments) {
+            (Purpose::ExportPsd, 1) => " without its adjustment layer".into(),
+            (Purpose::ExportPsd, 2..) => format!(" without its {adjustments} adjustment layers"),
+            _ => String::new(),
         };
         let web = self.filters.web_export.clone();
         std::thread::spawn(move || {
@@ -1036,6 +1053,7 @@ impl App {
                 Purpose::ExportTiff => export::tiff(&doc, &path).map(|_| false),
                 Purpose::ExportJpeg => export::jpeg(&doc, &path, JPEG_QUALITY).map(|_| false),
                 Purpose::ExportPng => export::png(&doc, &path).map(|_| false),
+                Purpose::ExportPsd => psd::save(&doc, &path).map(|_| false),
                 Purpose::ExportWeb => {
                     web_export(&doc, &web).and_then(|bytes| export::write(&path, &bytes)).map(|_| false)
                 }
@@ -1054,6 +1072,7 @@ impl App {
         });
         self.file_job = Some(FileJob {
             label: label.into(),
+            note,
             rx,
         });
     }
@@ -1236,13 +1255,13 @@ impl App {
         if let Some(job) = &self.file_job
             && let Ok(result) = job.rx.try_recv()
         {
-            let label = job.label.clone();
+            let (label, note) = (job.label.clone(), job.note.clone());
             self.file_job = None;
             match result {
                 Ok((revision, path, native)) => {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     let verb = if native { "Saved" } else { "Exported" };
-                    let mut text = format!("{verb} {name}");
+                    let mut text = format!("{verb} {name}{note}");
                     // The image saved may be in another tab by now, or closed.
                     let parked = self.parked.iter_mut().map(|p| &mut p.editor);
                     let saved = self.editor.iter_mut().chain(parked).find(|e| native && e.owns(revision));
@@ -1514,6 +1533,7 @@ impl App {
             Command::ExportTiff,
             Command::ExportJpeg,
             Command::ExportPng,
+            Command::ExportPsd,
             Command::ExportForWeb,
             Command::Rotate180,
             Command::Rotate90Cw,
@@ -1571,6 +1591,7 @@ impl App {
             Command::ExportTiff => self.pick(Purpose::ExportTiff, ctx),
             Command::ExportJpeg => self.pick(Purpose::ExportJpeg, ctx),
             Command::ExportPng => self.pick(Purpose::ExportPng, ctx),
+            Command::ExportPsd => self.pick(Purpose::ExportPsd, ctx),
             Command::ExportAdjustmentLut => self.pick(Purpose::ExportLut, ctx),
             Command::ExportForWeb => {
                 self.dialog = Some(Dialog::ExportWeb {
@@ -2376,6 +2397,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::ExportTiff, None);
                 self.menu_item(ui, Command::ExportJpeg, None);
                 self.menu_item(ui, Command::ExportPng, None);
+                self.menu_item(ui, Command::ExportPsd, None);
                 self.menu_item(ui, Command::ExportForWeb, None);
                 self.menu_item(ui, Command::BatchExport, None);
                 ui.menu_button("Automate", |ui| {
@@ -8985,6 +9007,31 @@ mod tests {
     }
 
     #[test]
+    fn exporting_a_psd_keeps_the_layers_and_says_what_it_left_out() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        assert!(app.enabled(Command::ExportPsd));
+        app.run(Command::NewLayer, &ctx);
+        app.run(Command::NewCurves, &ctx);
+        app.run(Command::NewCurves, &ctx);
+        let dir = std::env::temp_dir().join(format!("omapix-app-psd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.psd");
+
+        app.write(Purpose::ExportPsd, path.clone(), &ctx);
+        while app.file_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        let back = omapix_engine::io::load(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!((back.width, back.height, back.layers.len()), (600, 400, 2));
+        assert_eq!(app.status.as_ref().unwrap().0, "Exported out.psd without its 2 adjustment layers");
+        // An export isn't a save.
+        assert!(app.editor.as_ref().unwrap().doc.saved_path.is_none());
+    }
+
+    #[test]
     fn export_for_web_shows_the_size_and_writes_what_its_settings_say() {
         let ctx = egui::Context::default();
         let mut app = test_app();
@@ -9340,7 +9387,7 @@ mod tests {
         assert_eq!((app.tab, width(&app)), (2, 500));
         let (tx, rx) = channel();
         tx.send(Ok((revision, PathBuf::from("/tmp/a.ora"), true))).unwrap();
-        app.file_job = Some(FileJob { label: "Saving".into(), rx });
+        app.file_job = Some(FileJob { label: "Saving".into(), note: String::new(), rx });
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.poll(ui.ctx()));
         output.textures_delta.clear();
         assert_eq!(tab_names(&app), ["a.ora", "b.tif", "c.tif"]);
