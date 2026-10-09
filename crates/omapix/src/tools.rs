@@ -9,6 +9,7 @@ use omapix_engine::toning::ToneRange;
 use omapix_engine::warp::Brush as LiquifyBrush;
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
 
+use crate::commands::Command;
 use crate::editor::Target;
 use crate::theme::Theme;
 
@@ -677,6 +678,13 @@ impl Tools {
         }
     }
 
+    /// Make the current tool's brush `brush`, from the brushes loaded.
+    pub fn use_brush(&mut self, brush: &omapix_engine::brushes::Preset) {
+        let settings = self.settings_mut();
+        brush.apply(settings);
+        settings.size = settings.size.clamp(MIN_SIZE, MAX_SIZE);
+    }
+
     pub fn set_size(&mut self, size: f32) {
         self.settings_mut().size = size.clamp(MIN_SIZE, MAX_SIZE);
     }
@@ -1033,20 +1041,31 @@ impl Tools {
         }
     }
 
-    /// The Brush Settings panel: the tip of the current tool's brush and
-    /// how its dabs vary along a stroke, as in Photoshop's panel (F5).
-    pub fn brush_settings(&mut self, ui: &mut Ui, theme: &Theme) {
+    /// The Brush Settings panel: the brushes loaded, to choose from, and
+    /// the tip of the current tool's brush and how its dabs vary along a
+    /// stroke, as in Photoshop's panel (F5). Gives back a command to run.
+    pub fn brush_settings(&mut self, ui: &mut Ui, theme: &Theme, brushes: &mut crate::brushes::Library) -> Option<Command> {
         // Tools without a brush show the Brush tool's.
         let name = if self.tool.has_brush() { self.tool.name() } else { Tool::Brush.name() };
-        let d = &mut self.settings_mut().dynamics;
+        let mut command = None;
+        let settings = self.settings_mut();
         ui.horizontal(|ui| {
             ui.label(RichText::new(name).color(theme.dark_foreground));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(*d != Dynamics::default(), Button::new("Reset")).on_hover_text("A plain round brush").clicked() {
-                    *d = Dynamics::default();
+                let plain = settings.dynamics == Dynamics::default() && settings.tip.is_none();
+                if ui.add_enabled(!plain, Button::new("Reset")).on_hover_text("A plain round brush").clicked() {
+                    (settings.dynamics, settings.tip) = (Dynamics::default(), None);
+                }
+                if ui.button("Load…").on_hover_text("Brushes from a Photoshop brush file (.abr)").clicked() {
+                    command = Some(Command::ImportBrushes);
                 }
             });
         });
+        let current = *settings;
+        if let Some(brush) = brushes.show(ui, theme, &current) {
+            self.use_brush(&brush);
+        }
+        let d = &mut self.settings_mut().dynamics;
         let heading = |ui: &mut Ui, text: &str| {
             ui.label(RichText::new(text).color(theme.foreground).strong());
             ui.end_row();
@@ -1099,6 +1118,7 @@ impl Tools {
                 percent(ui, "Flow Jitter", &mut d.flow_jitter, "How much lower a dab's flow can be at random");
             });
         });
+        command
     }
 
     /// The options bar: settings for the current tool.
@@ -2298,6 +2318,7 @@ mod tests {
         let ctx = egui::Context::default();
         let theme = Theme::default();
         let mut tools = Tools { tool: Tool::Eraser, ..Tools::default() };
+        let mut brushes = crate::brushes::Library::default();
         let mut time = 0.0;
         // Draw the panel, and give back where its texts are.
         let mut frame = |tools: &mut Tools, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
@@ -2308,7 +2329,9 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let mut out = ctx.run_ui(input, |ui| tools.brush_settings(ui, &theme));
+            let mut out = ctx.run_ui(input, |ui| {
+                tools.brush_settings(ui, &theme, &mut brushes);
+            });
             out.textures_delta.clear();
             fn texts(shape: &egui::Shape, found: &mut Vec<(String, Pos2)>) {
                 match shape {
@@ -2347,5 +2370,62 @@ mod tests {
         // A tool with no brush shows the Brush tool's.
         tools.tool = Tool::Move;
         at(&frame(&mut tools, vec![]), "Brush");
+    }
+
+    #[test]
+    fn clicking_a_loaded_brush_makes_it_the_current_tools() {
+        let ctx = egui::Context::default();
+        let theme = Theme::default();
+        let dir = std::env::temp_dir().join(format!("omapix-brush-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Nature.abr"), crate::brushes::tests::brush_file()).unwrap();
+        let mut brushes = crate::brushes::Library::default();
+        brushes.load(dir.clone(), None, &ctx);
+        crate::brushes::tests::loaded(&mut brushes);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let mut tools = Tools { tool: Tool::CloneStamp, ..Tools::default() };
+        tools.clone.opacity = 0.5;
+        let mut time = 0.0;
+        // Draw the panel: where its pictures are, and the command it asks for.
+        let mut frame = |tools: &mut Tools, brushes: &mut crate::brushes::Library, events: Vec<egui::Event>| -> (Vec<Pos2>, Option<Command>) {
+            time += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 900.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut command = None;
+            let mut out = ctx.run_ui(input, |ui| command = tools.brush_settings(ui, &theme, brushes));
+            out.textures_delta.clear();
+            fn pictures(shape: &egui::Shape, found: &mut Vec<Pos2>) {
+                match shape {
+                    egui::Shape::Rect(r) if r.fill_texture_id() != egui::TextureId::default() => found.push(r.rect.center()),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| pictures(s, found)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| pictures(&s.shape, &mut found));
+            (found, command)
+        };
+        let click = |pos: Pos2, pressed: bool| {
+            let button = egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            vec![egui::Event::PointerMoved(pos), button]
+        };
+        // The file's two brushes, the second the one with a sampled tip.
+        let (pictures, command) = frame(&mut tools, &mut brushes, vec![]);
+        assert_eq!((pictures.len(), command), (2, None));
+        frame(&mut tools, &mut brushes, click(pictures[1], true));
+        frame(&mut tools, &mut brushes, click(pictures[1], false));
+        let leaf = tools.clone;
+        assert!(leaf.tip.is_some() && brushes.tip(leaf.tip).is_some());
+        assert_eq!((leaf.size, leaf.dynamics.spacing, leaf.size_pressure), (60.0, 0.25, false));
+        assert_eq!((leaf.opacity, tools.brush.tip), (0.5, None), "the tool's opacity, and the other tools' brushes, are left alone");
+        // The round one takes the tip away again, and brings its hardness.
+        frame(&mut tools, &mut brushes, click(pictures[0], true));
+        frame(&mut tools, &mut brushes, click(pictures[0], false));
+        assert_eq!((tools.clone.tip, tools.clone.size, tools.clone.hardness), (None, 20.0, 0.5));
     }
 }
