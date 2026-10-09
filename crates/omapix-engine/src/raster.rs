@@ -39,6 +39,10 @@ impl Raster {
         &self.pixels
     }
 
+    pub(crate) fn pixels_mut(&mut self) -> &mut [Pixel] {
+        &mut self.pixels
+    }
+
     pub fn row(&self, y: u32) -> &[Pixel] {
         let start = y as usize * self.width as usize;
         &self.pixels[start..start + self.width as usize]

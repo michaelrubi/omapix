@@ -18,6 +18,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::Pixel;
 use crate::dynamics::{Dab, Dynamics, Step, grain, mix};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
@@ -28,6 +30,9 @@ const MAX: f32 = u16::MAX as f32;
 /// Added to both sides of a heal's ratios, so noise in near-black doesn't
 /// count as a pixel being several times lighter than another.
 const DARK: f32 = 0.01;
+/// A dab over at least this many pixels is laid a tile to a core: below
+/// it, starting the others up costs more than it saves.
+const PARALLEL: usize = 300 * 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -320,61 +325,80 @@ impl Stroke {
         let noise = self.settings.dynamics.noise;
         // A mirrored tip is read backwards.
         let (flip_x, flip_y) = (if dab.flip_x { -1.0 } else { 1.0 }, if dab.flip_y { -1.0 } else { 1.0 });
-        // A sampled tip: which of its sizes to read, how many of its pixels
-        // one of the image's is, and how far it reaches, since at an angle
-        // its corners stick out further than its sides.
+        // A sampled tip: which of its sizes to read, and how many of its
+        // pixels one of the image's is.
         let tip = self.tip.as_deref().map(|tip| {
             let (tw, th) = tip.size();
             let (tw, th, longer) = (tw as f32, th as f32, tw.max(th) as f32);
             (tip, tip.level_for(2.0 * r * roundness.max(0.25)), longer / (2.0 * r), tw, th)
         });
-        let reach = tip.map_or(r, |(_, _, _, tw, th)| r * tw.hypot(th) / tw.max(th));
-        let x0 = (cx - reach).floor().max(0.0) as u32;
-        let y0 = (cy - reach).floor().max(0.0) as u32;
-        let x1 = ((cx + reach).ceil() as u32).min(w);
-        let y1 = ((cy + reach).ceil() as u32).min(h);
+        // How far the dab reaches each way: a round one its radius, a
+        // sampled one half its width along its angle and half its height
+        // across (and the half pixel of its own it fades out over), which
+        // for a tall or wide tip is far less than a square round its
+        // longer side.
+        let (reach_x, reach_y) = tip.map_or((r, r), |(_, _, scale, tw, th)| {
+            let (along, across) = ((tw / 2.0 + 0.5) / scale, (th / 2.0 + 0.5) / scale * roundness);
+            (along * cos.abs() + across * sin.abs(), along * sin.abs() + across * cos.abs())
+        });
+        let x0 = (cx - reach_x).floor().max(0.0) as u32;
+        let y0 = (cy - reach_y).floor().max(0.0) as u32;
+        let x1 = ((cx + reach_x).ceil() as u32).min(w);
+        let y1 = ((cy + reach_y).ceil() as u32).min(h);
         if x0 >= x1 || y0 >= y1 {
             return;
         }
-        for row in y0 / TILE..=(y1 - 1) / TILE {
-            for col in x0 / TILE..=(x1 - 1) / TILE {
-                let cov = self
-                    .coverage
-                    .entry((col, row))
-                    .or_insert_with(|| vec![0.0; TILE_PIXELS]);
-                let (tx, ty) = (col * TILE, row * TILE);
-                let mut hit = false;
-                for py in y0.max(ty)..y1.min(ty + TILE) {
-                    for px in x0.max(tx)..x1.min(tx + TILE) {
-                        // The pixel's centre from the dab's, and how much of
-                        // the dab is there.
-                        let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
-                        let mut shape = if let Some((tip, level, scale, tw, th)) = tip {
-                            // Along the tip and across it, in its own pixels.
-                            let (along, across) = ((dx * cos - dy * sin) * flip_x, (dx * sin + dy * cos) / roundness * flip_y);
-                            tip.sample(level, 0.5 + along * scale / tw, 0.5 + across * scale / th)
-                        } else if roundness >= 1.0 {
-                            falloff((dx.powi(2) + dy.powi(2)).sqrt() / r.max(0.5), hardness)
-                        } else {
-                            // Along the tip, and across it, where it's narrower.
-                            falloff((dx * cos - dy * sin).hypot((dx * sin + dy * cos) / roundness) / r.max(0.5), hardness)
-                        };
-                        if shape <= 0.0 {
-                            continue;
-                        }
-                        if noise && shape < 1.0 {
-                            // Most of the way to all or nothing, as the
-                            // pixel's grain falls.
-                            let all = if grain(px, py) < shape { 1.0 } else { 0.0 };
-                            shape += (all - shape) * 0.7;
-                        }
-                        let c = &mut cov[((py - ty) * TILE + (px - tx)) as usize];
-                        *c += (most - *c).max(0.0) * flow * shape;
-                        hit = true;
+        // Add the dab to one tile's coverage. Whether any of it fell there.
+        let lay = |(col, row): (u32, u32), cov: &mut [f32]| {
+            let (tx, ty) = (col * TILE, row * TILE);
+            let mut hit = false;
+            for py in y0.max(ty)..y1.min(ty + TILE) {
+                for px in x0.max(tx)..x1.min(tx + TILE) {
+                    // The pixel's centre from the dab's, and how much of
+                    // the dab is there.
+                    let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+                    let mut shape = if let Some((tip, level, scale, tw, th)) = tip {
+                        // Along the tip and across it, in its own pixels.
+                        let (along, across) = ((dx * cos - dy * sin) * flip_x, (dx * sin + dy * cos) / roundness * flip_y);
+                        tip.sample(level, 0.5 + along * scale / tw, 0.5 + across * scale / th)
+                    } else if roundness >= 1.0 {
+                        falloff((dx.powi(2) + dy.powi(2)).sqrt() / r.max(0.5), hardness)
+                    } else {
+                        // Along the tip, and across it, where it's narrower.
+                        falloff((dx * cos - dy * sin).hypot((dx * sin + dy * cos) / roundness) / r.max(0.5), hardness)
+                    };
+                    if shape <= 0.0 {
+                        continue;
                     }
+                    if noise && shape < 1.0 {
+                        // Most of the way to all or nothing, as the
+                        // pixel's grain falls.
+                        let all = if grain(px, py) < shape { 1.0 } else { 0.0 };
+                        shape += (all - shape) * 0.7;
+                    }
+                    let c = &mut cov[((py - ty) * TILE + (px - tx)) as usize];
+                    *c += (most - *c).max(0.0) * flow * shape;
+                    hit = true;
                 }
+            }
+            hit
+        };
+        let tiles = (y0 / TILE..=(y1 - 1) / TILE).flat_map(|row| (x0 / TILE..=(x1 - 1) / TILE).map(move |col| (col, row)));
+        if (x1 - x0) as usize * (y1 - y0) as usize >= PARALLEL {
+            // A big dab: each tile on its own core. Their coverage is
+            // taken out of the stroke for the while.
+            let mut taken: Vec<_> = tiles.map(|at| (at, self.coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS]))).collect();
+            let hits: Vec<bool> = taken.par_iter_mut().map(|(at, cov)| lay(*at, cov)).collect();
+            for ((at, cov), hit) in taken.into_iter().zip(hits) {
+                self.coverage.insert(at, cov);
                 if hit {
-                    touched.push((col, row));
+                    touched.push(at);
+                }
+            }
+        } else {
+            for at in tiles {
+                if lay(at, self.coverage.entry(at).or_insert_with(|| vec![0.0; TILE_PIXELS])) {
+                    touched.push(at);
                 }
             }
         }
@@ -383,66 +407,74 @@ impl Stroke {
     /// Write the stroke's current result for the given tiles into `surface`.
     pub fn apply(&self, surface: &mut Surface, tiles: &[(u32, u32)]) {
         let opacity = self.settings.opacity;
-        for &(col, row) in tiles {
-            let Some(cov) = self.coverage.get(&(col, row)) else {
-                continue;
-            };
-            match (&mut *surface, &self.original) {
-                (Surface::Pixels(dst), Surface::Pixels(orig)) => {
-                    let base: Vec<Pixel> = orig
+        // Each tile is worked out on its own, then put in place.
+        match (surface, &self.original) {
+            (Surface::Pixels(dst), Surface::Pixels(orig)) => {
+                let copying = matches!(self.paint, Paint::Clone { .. } | Paint::Heal { .. });
+                let (w, h) = (orig.width(), orig.height());
+                let painted = |&(col, row): &(u32, u32)| {
+                    let cov = self.coverage.get(&(col, row))?;
+                    let mut out: Vec<Pixel> = orig
                         .tile(col, row)
                         .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
-                    let copying = matches!(self.paint, Paint::Clone { .. } | Paint::Heal { .. });
                     let (tx, ty) = (col * TILE, row * TILE);
-                    let (w, h) = (orig.width(), orig.height());
-                    let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
                         let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
                         out[i] = if self.paint == Paint::SpotHeal {
                             // Show where the stroke is until it heals on release.
-                            self.paint_onto(base[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
+                            self.paint_onto(out[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
                         } else if copying {
                             let (x, y) = (tx + i as u32 % TILE, ty + i as u32 / TILE);
                             if a <= 0.0 || x >= w || y >= h {
-                                base[i]
+                                out[i]
                             } else {
-                                self.paint_onto(base[i], a, Paint::Color(self.copied(x, y)))
+                                self.paint_onto(out[i], a, Paint::Color(self.copied(x, y)))
                             }
                         } else {
-                            self.paint_onto(base[i], a, self.paint)
+                            self.paint_onto(out[i], a, self.paint)
                         };
                     }
+                    Some(((col, row), out))
+                };
+                for ((col, row), out) in each(tiles, painted) {
+                    dst.set_tile(col, row, out);
                 }
-                (Surface::Mask(dst), Surface::Mask(orig)) => {
-                    let target = match self.paint {
-                        Paint::Mask(v) => f32::from(v),
-                        Paint::Color(c) => f32::from(c[1]),
-                        // Cloning isn't offered on masks; leave them alone.
-                        Paint::Erase
-                        | Paint::Clone { .. }
-                        | Paint::Heal { .. }
-                        | Paint::SpotHeal => MAX,
-                        // Worked out for each pixel below.
-                        Paint::Tone { .. } | Paint::Sponge { .. } => 0.0,
-                    };
-                    let base: Vec<u16> = orig
+            }
+            (Surface::Mask(dst), Surface::Mask(orig)) => {
+                let target = match self.paint {
+                    Paint::Mask(v) => f32::from(v),
+                    Paint::Color(c) => f32::from(c[1]),
+                    // Cloning isn't offered on masks; leave them alone.
+                    Paint::Erase
+                    | Paint::Clone { .. }
+                    | Paint::Heal { .. }
+                    | Paint::SpotHeal => MAX,
+                    // Worked out for each pixel below.
+                    Paint::Tone { .. } | Paint::Sponge { .. } => 0.0,
+                };
+                let painted = |&(col, row): &(u32, u32)| {
+                    let cov = self.coverage.get(&(col, row))?;
+                    let mut out: Vec<u16> = orig
                         .tile(col, row)
                         .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[u16]>::to_vec);
-                    let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
                         let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
-                        let v = f32::from(base[i]);
+                        let v = f32::from(out[i]);
                         out[i] = match self.paint {
                             Paint::Tone { range, burn, .. } => {
                                 (toning::tone_curve(v / MAX, a, range, burn) * MAX).round() as u16
                             }
-                            Paint::Sponge { .. } => base[i],
+                            Paint::Sponge { .. } => out[i],
                             _ => (v + (target - v) * a).round() as u16,
                         };
                     }
+                    Some(((col, row), out))
+                };
+                for ((col, row), out) in each(tiles, painted) {
+                    dst.set_tile(col, row, out);
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 }
@@ -711,6 +743,12 @@ fn rgb(p: Pixel) -> [f32; 3] {
         f32::from(p[1]) / MAX,
         f32::from(p[2]) / MAX,
     ]
+}
+
+/// What `f` makes of each of `tiles`: a tile to a core when there are
+/// enough of them to be worth starting the others up.
+fn each<T: Send>(tiles: &[(u32, u32)], f: impl Fn(&(u32, u32)) -> Option<T> + Sync) -> Vec<T> {
+    if tiles.len() < 4 { tiles.iter().filter_map(f).collect() } else { tiles.par_iter().filter_map(&f).collect() }
 }
 
 /// Dab shape at distance `d` (fraction of the radius) from the centre:

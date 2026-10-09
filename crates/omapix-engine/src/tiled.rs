@@ -111,6 +111,13 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
         Arc::make_mut(tile).as_mut_slice()
     }
 
+    /// Replace a tile with `pixels` (a full 256×256), without copying.
+    pub fn set_tile(&mut self, col: u32, row: u32, pixels: Vec<T>) {
+        debug_assert_eq!(pixels.len(), TILE_PIXELS);
+        let i = self.index(col, row);
+        self.tiles[i] = Some(Arc::new(pixels));
+    }
+
     pub fn get(&self, x: u32, y: u32) -> T {
         match self.tile(x / TILE, y / TILE) {
             Some(t) => t[((y % TILE) * TILE + x % TILE) as usize],

@@ -37,32 +37,35 @@ impl Pyramid {
     /// Recompute the part of every level that depends on the base image
     /// rectangle `[x0, x1) × [y0, y1)`, after the base changed there.
     pub fn update_region(&mut self, base: &Raster, region: (u32, u32, u32, u32)) {
-        self.update_from(base, 0, region);
+        self.update_from(base, 0, &[region]);
     }
 
     /// Recompute the levels above `level` where they depend on its
-    /// rectangle `[x0, x1) × [y0, y1)` (in that level's pixels), after it
+    /// rectangles `[x0, x1) × [y0, y1)` (in that level's pixels), after it
     /// changed there.
-    pub fn update_from(
-        &mut self,
-        base: &Raster,
-        level: usize,
-        (mut x0, mut y0, mut x1, mut y1): (u32, u32, u32, u32),
-    ) {
+    pub fn update_from(&mut self, base: &Raster, level: usize, areas: &[(u32, u32, u32, u32)]) {
+        let mut areas = areas.to_vec();
         for i in level..self.reduced.len() {
             let (before, rest) = self.reduced.split_at_mut(i);
             let src = before.last().unwrap_or(base);
             let dst = &mut rest[0];
-            x0 /= 2;
-            y0 /= 2;
-            x1 = x1.div_ceil(2).min(dst.width());
-            y1 = y1.div_ceil(2).min(dst.height());
-            for y in y0..y1 {
-                let row = dst.row_mut(y);
-                for x in x0..x1 {
-                    row[x as usize] = halved_pixel(src, x, y);
-                }
+            let (w, h) = (dst.width(), dst.height());
+            for (x0, y0, x1, y1) in &mut areas {
+                (*x0, *y0, *x1, *y1) = (*x0 / 2, *y0 / 2, x1.div_ceil(2).min(w), y1.div_ceil(2).min(h));
             }
+            let top = areas.iter().map(|a| a.1).min().unwrap_or(0);
+            let bottom = areas.iter().map(|a| a.3).max().unwrap_or(0).max(top);
+            // A row to a core: rectangles that meet can share a pixel high
+            // up, but a row is only ever one core's.
+            let rows = &mut dst.pixels_mut()[(top * w) as usize..(bottom * w) as usize];
+            rows.par_chunks_mut(w as usize).with_min_len(16).enumerate().for_each(|(dy, row)| {
+                let y = top + dy as u32;
+                for &(x0, _, x1, _) in areas.iter().filter(|a| a.1 <= y && y < a.3) {
+                    for x in x0..x1 {
+                        row[x as usize] = halved_pixel(src, x, y);
+                    }
+                }
+            });
         }
     }
 
@@ -171,7 +174,7 @@ mod tests {
                 *px = [60000, 100, 5000, 65535];
             }
         }
-        p.update_from(&base, 1, (166, 50, 201, 90));
+        p.update_from(&base, 1, &[(166, 50, 201, 90)]);
         let fresh = Pyramid::build(p.level(&base, 1));
         for i in 2..p.len() {
             assert_eq!(
