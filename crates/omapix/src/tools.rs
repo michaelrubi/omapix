@@ -4,6 +4,7 @@
 use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
 use omapix_engine::selection::Combine;
+use omapix_engine::toning::ToneRange;
 use omapix_engine::warp::Brush as LiquifyBrush;
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
 
@@ -28,6 +29,9 @@ const LASSO_ICON: &str = "\u{f0c4}";
 const GRADIENT_ICON: &str = "\u{f069b}";
 const CROP_ICON: &str = "\u{f125}";
 const BUCKET_ICON: &str = "\u{f0266}";
+const DODGE_ICON: &str = "\u{f185}";
+const BURN_ICON: &str = "\u{f06d}";
+const SPONGE_ICON: &str = "\u{f043}";
 
 const MIN_SIZE: f32 = 1.0;
 const MAX_SIZE: f32 = 5000.0;
@@ -45,6 +49,7 @@ pub enum ToolGroup {
     CloneStamp,
     Eraser,
     Gradient,
+    Dodge,
 }
 
 impl ToolGroup {
@@ -60,6 +65,7 @@ impl ToolGroup {
         ToolGroup::CloneStamp,
         ToolGroup::Eraser,
         ToolGroup::Gradient,
+        ToolGroup::Dodge,
     ];
 
     pub fn tools(self) -> &'static [Tool] {
@@ -75,6 +81,7 @@ impl ToolGroup {
             ToolGroup::CloneStamp => &[Tool::CloneStamp],
             ToolGroup::Eraser => &[Tool::Eraser],
             ToolGroup::Gradient => &[Tool::Gradient, Tool::PaintBucket],
+            ToolGroup::Dodge => &[Tool::Dodge, Tool::Burn, Tool::Sponge],
         }
     }
 
@@ -91,6 +98,7 @@ impl ToolGroup {
             ToolGroup::CloneStamp => Key::S,
             ToolGroup::Eraser => Key::E,
             ToolGroup::Gradient => Key::G,
+            ToolGroup::Dodge => Key::O,
         };
         Some(k)
     }
@@ -118,6 +126,9 @@ pub enum Tool {
     Gradient,
     PaintBucket,
     Crop,
+    Dodge,
+    Burn,
+    Sponge,
 }
 
 impl Tool {
@@ -139,6 +150,9 @@ impl Tool {
             Tool::Gradient => "Gradient",
             Tool::PaintBucket => "Paint Bucket",
             Tool::Crop => "Crop",
+            Tool::Dodge => "Dodge",
+            Tool::Burn => "Burn",
+            Tool::Sponge => "Sponge",
         }
     }
 
@@ -160,6 +174,9 @@ impl Tool {
             Tool::Gradient => GRADIENT_ICON,
             Tool::PaintBucket => BUCKET_ICON,
             Tool::Crop => CROP_ICON,
+            Tool::Dodge => DODGE_ICON,
+            Tool::Burn => BURN_ICON,
+            Tool::Sponge => SPONGE_ICON,
         }
     }
 
@@ -179,6 +196,7 @@ impl Tool {
             Tool::CloneStamp => ToolGroup::CloneStamp,
             Tool::Eraser => ToolGroup::Eraser,
             Tool::Gradient | Tool::PaintBucket => ToolGroup::Gradient,
+            Tool::Dodge | Tool::Burn | Tool::Sponge => ToolGroup::Dodge,
             Tool::Crop => ToolGroup::Crop,
         }
     }
@@ -215,7 +233,9 @@ impl Tool {
 
     /// Tools where holding Alt picks up a colour, as the Eyedropper does.
     pub fn alt_picks_colour(self) -> bool {
-        self.paints() && !self.copies()
+        self.paints()
+            && !self.copies()
+            && !matches!(self, Tool::Dodge | Tool::Burn | Tool::Sponge)
     }
 }
 
@@ -325,6 +345,25 @@ impl GradientColors {
         match self {
             GradientColors::ForegroundToBackground => "Foreground to Background",
             GradientColors::ForegroundToTransparent => "Foreground to Transparent",
+        }
+    }
+}
+
+/// Mode for the Sponge tool (desaturate or saturate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum SpongeMode {
+    #[default]
+    Desaturate,
+    Saturate,
+}
+
+impl SpongeMode {
+    pub const ALL: [SpongeMode; 2] = [SpongeMode::Desaturate, SpongeMode::Saturate];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SpongeMode::Desaturate => "Desaturate",
+            SpongeMode::Saturate => "Saturate",
         }
     }
 }
@@ -457,6 +496,8 @@ pub struct Tools {
     last_wand: Tool,
     #[serde(skip)]
     last_gradient: Tool,
+    #[serde(skip)]
+    last_dodge: Tool,
     /// The tool before the Crop tool, which Esc goes back to.
     #[serde(skip)]
     before_crop: Tool,
@@ -469,6 +510,15 @@ pub struct Tools {
     spot: BrushSettings,
     heal: BrushSettings,
     quick: BrushSettings,
+    dodge: BrushSettings,
+    burn: BrushSettings,
+    sponge: BrushSettings,
+    pub dodge_range: ToneRange,
+    pub dodge_protect: bool,
+    pub burn_range: ToneRange,
+    pub burn_protect: bool,
+    pub sponge_mode: SpongeMode,
+    pub sponge_vibrance: bool,
     /// Object and Quick Selection: where the model's confidence is cut off
     /// (0 is the model's own; lower selects more, higher less).
     pub ai_threshold: f32,
@@ -526,6 +576,7 @@ impl Default for Tools {
             last_healing: Tool::SpotHealing,
             last_wand: Tool::MagicWand,
             last_gradient: Tool::Gradient,
+            last_dodge: Tool::Dodge,
             before_crop: Tool::Marquee,
             held: None,
             kept_colours: None,
@@ -553,6 +604,24 @@ impl Default for Tools {
                 size: 60.0,
                 ..BrushSettings::default()
             },
+            dodge: BrushSettings {
+                opacity: 0.5,
+                ..BrushSettings::default()
+            },
+            burn: BrushSettings {
+                opacity: 0.5,
+                ..BrushSettings::default()
+            },
+            sponge: BrushSettings {
+                opacity: 0.5,
+                ..BrushSettings::default()
+            },
+            dodge_range: ToneRange::Midtones,
+            dodge_protect: true,
+            burn_range: ToneRange::Midtones,
+            burn_protect: true,
+            sponge_mode: SpongeMode::Desaturate,
+            sponge_vibrance: true,
             ai_threshold: 0.0,
             threshold_moved: None,
             source: None,
@@ -601,6 +670,9 @@ impl Tools {
             Tool::CloneStamp => self.clone,
             Tool::SpotHealing => self.spot,
             Tool::Healing => self.heal,
+            Tool::Dodge => self.dodge,
+            Tool::Burn => self.burn,
+            Tool::Sponge => self.sponge,
         }
     }
 
@@ -636,6 +708,9 @@ impl Tools {
             Tool::CloneStamp => &mut self.clone,
             Tool::SpotHealing => &mut self.spot,
             Tool::Healing => &mut self.heal,
+            Tool::Dodge => &mut self.dodge,
+            Tool::Burn => &mut self.burn,
+            Tool::Sponge => &mut self.sponge,
         }
     }
 
@@ -684,6 +759,29 @@ impl Tools {
             return Some(match self.tool {
                 Tool::Healing => Paint::Heal { dx, dy },
                 _ => Paint::Clone { dx, dy },
+            });
+        }
+        if self.tool == Tool::Dodge {
+            return Some(Paint::Tone {
+                range: self.dodge_range,
+                burn: false,
+                protect: self.dodge_protect,
+            });
+        }
+        if self.tool == Tool::Burn {
+            return Some(Paint::Tone {
+                range: self.burn_range,
+                burn: true,
+                protect: self.burn_protect,
+            });
+        }
+        if self.tool == Tool::Sponge {
+            if target == Target::Mask || target == Target::QuickMask {
+                return None;
+            }
+            return Some(Paint::Sponge {
+                saturate: self.sponge_mode == SpongeMode::Saturate,
+                vibrance: self.sponge_vibrance,
             });
         }
         Some(match (self.tool, target) {
@@ -741,6 +839,7 @@ impl Tools {
             Tool::SpotHealing | Tool::Healing => self.last_healing = self.tool,
             Tool::MagicWand | Tool::ObjectSelection | Tool::QuickSelection => self.last_wand = self.tool,
             Tool::Gradient | Tool::PaintBucket => self.last_gradient = self.tool,
+            Tool::Dodge | Tool::Burn | Tool::Sponge => self.last_dodge = self.tool,
             _ => {}
         }
         if self.tool != Tool::Crop {
@@ -763,6 +862,7 @@ impl Tools {
             ToolGroup::Healing => self.last_healing,
             ToolGroup::Wand => self.last_wand,
             ToolGroup::Gradient => self.last_gradient,
+            ToolGroup::Dodge => self.last_dodge,
             ToolGroup::Move => Tool::Move,
             ToolGroup::Lasso => Tool::Lasso,
             ToolGroup::Crop => Tool::Crop,
@@ -1086,6 +1186,108 @@ impl Tools {
                             from the centre) · drag inside to move it · drag outside for a new \
                             one · Enter crops · Esc resets";
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
+            if matches!(self.tool, Tool::Dodge | Tool::Burn) {
+                ui.label("Range");
+                let is_dodge = self.tool == Tool::Dodge;
+                let range = if is_dodge {
+                    &mut self.dodge_range
+                } else {
+                    &mut self.burn_range
+                };
+                ComboBox::from_id_salt("tone-range")
+                    .selected_text(range.label())
+                    .show_ui(ui, |ui| {
+                        for r in ToneRange::ALL {
+                            ui.selectable_value(range, r, r.label());
+                        }
+                    });
+                ui.separator();
+                let s = self.settings_mut();
+                percent(ui, "Exposure", &mut s.opacity);
+                ui.toggle_value(&mut s.opacity_pressure, "✒")
+                    .on_hover_text("A pen's pressure sets the exposure");
+                ui.separator();
+                let protect = if is_dodge {
+                    &mut self.dodge_protect
+                } else {
+                    &mut self.burn_protect
+                };
+                ui.checkbox(protect, "Protect Tones");
+                ui.separator();
+                let s = self.settings_mut();
+                ui.label("Size");
+                ui.add(
+                    egui::DragValue::new(&mut s.size)
+                        .range(MIN_SIZE..=MAX_SIZE)
+                        .speed(1.0)
+                        .suffix(" px")
+                        .fixed_decimals(0),
+                );
+                percent(ui, "Hardness", &mut s.hardness);
+                ui.toggle_value(&mut s.size_pressure, "⊙")
+                    .on_hover_text("A pen's pressure sets the size");
+                ui.separator();
+                let hint = if is_dodge {
+                    "Drag to lighten · Alt burns · 1–9 set exposure"
+                } else {
+                    "Drag to darken · Alt dodges · 1–9 set exposure"
+                };
+                let (text, colour) = match target {
+                    Target::QuickMask => (
+                        if is_dodge { "Dodging Quick Mask" } else { "Burning Quick Mask" },
+                        theme.accent,
+                    ),
+                    Target::Mask => (
+                        if is_dodge { "Dodging layer mask" } else { "Burning layer mask" },
+                        theme.accent,
+                    ),
+                    Target::Pixels => (hint, theme.dark_foreground),
+                };
+                ui.label(RichText::new(text).color(colour));
+                return;
+            }
+            if self.tool == Tool::Sponge {
+                ui.label("Mode");
+                ComboBox::from_id_salt("sponge-mode")
+                    .selected_text(self.sponge_mode.label())
+                    .show_ui(ui, |ui| {
+                        for m in SpongeMode::ALL {
+                            ui.selectable_value(&mut self.sponge_mode, m, m.label());
+                        }
+                    });
+                ui.separator();
+                let s = self.settings_mut();
+                percent(ui, "Flow", &mut s.opacity);
+                ui.toggle_value(&mut s.opacity_pressure, "✒")
+                    .on_hover_text("A pen's pressure sets the flow");
+                ui.separator();
+                ui.checkbox(&mut self.sponge_vibrance, "Vibrance");
+                ui.separator();
+                let s = self.settings_mut();
+                ui.label("Size");
+                ui.add(
+                    egui::DragValue::new(&mut s.size)
+                        .range(MIN_SIZE..=MAX_SIZE)
+                        .speed(1.0)
+                        .suffix(" px")
+                        .fixed_decimals(0),
+                );
+                percent(ui, "Hardness", &mut s.hardness);
+                ui.toggle_value(&mut s.size_pressure, "⊙")
+                    .on_hover_text("A pen's pressure sets the size");
+                ui.separator();
+                let (text, colour) = match target {
+                    Target::QuickMask | Target::Mask => {
+                        ("Sponge works on layer colours, not masks", theme.red)
+                    }
+                    Target::Pixels => (
+                        "Drag to saturate or desaturate · Alt swaps mode · 1–9 set flow",
+                        theme.dark_foreground,
+                    ),
+                };
+                ui.label(RichText::new(text).color(colour));
                 return;
             }
             let s = self.settings_mut();
@@ -1943,15 +2145,82 @@ mod tests {
             Tool::CloneStamp,
             Tool::SpotHealing,
             Tool::Healing,
+            Tool::Dodge,
+            Tool::Burn,
+            Tool::Sponge,
         ];
         for tool in other_tools {
             assert_eq!(cursor_badge(tool, none), None);
             assert_eq!(cursor_badge(tool, shift), None);
             assert_eq!(cursor_badge(tool, ctrl), None);
-            // Alt picks up a colour, except where it sets a clone source.
-            let alt_badge = (!tool.copies()).then_some(CursorBadge::Eyedropper);
+            // Alt picks up a colour, except where it sets a clone source or toggles tone modes.
+            let alt_badge = tool.alt_picks_colour().then_some(CursorBadge::Eyedropper);
             assert_eq!(cursor_badge(tool, alt), alt_badge);
             assert_eq!(cursor_badge(tool, shift_alt), alt_badge);
         }
+    }
+
+    #[test]
+    fn test_toning_tools_cycle_and_paint() {
+        let mut tools = Tools::default();
+        let srgb = ColorProfile::srgb();
+        assert_eq!(ToolGroup::Dodge.default_key(), Some(Key::O));
+        assert_eq!(ToolGroup::Dodge.tools(), &[Tool::Dodge, Tool::Burn, Tool::Sponge]);
+
+        // Select Dodge
+        tools.select(Tool::Dodge);
+        assert_eq!(tools.tool, Tool::Dodge);
+        assert_eq!(tools.group_tool(ToolGroup::Dodge), Tool::Dodge);
+        assert_eq!(
+            tools.paint(Target::Pixels, &srgb, Pos2::ZERO),
+            Some(Paint::Tone {
+                range: ToneRange::Midtones,
+                burn: false,
+                protect: true,
+            })
+        );
+        // On a mask, Dodge still works
+        assert_eq!(
+            tools.paint(Target::Mask, &srgb, Pos2::ZERO),
+            Some(Paint::Tone {
+                range: ToneRange::Midtones,
+                burn: false,
+                protect: true,
+            })
+        );
+
+        // Cycle to Burn
+        tools.cycle_group(ToolGroup::Dodge);
+        assert_eq!(tools.tool, Tool::Burn);
+        assert_eq!(
+            tools.paint(Target::Pixels, &srgb, Pos2::ZERO),
+            Some(Paint::Tone {
+                range: ToneRange::Midtones,
+                burn: true,
+                protect: true,
+            })
+        );
+
+        // Cycle to Sponge
+        tools.cycle_group(ToolGroup::Dodge);
+        assert_eq!(tools.tool, Tool::Sponge);
+        assert_eq!(
+            tools.paint(Target::Pixels, &srgb, Pos2::ZERO),
+            Some(Paint::Sponge {
+                saturate: false,
+                vibrance: true,
+            })
+        );
+        // Sponge is disabled on masks
+        assert_eq!(tools.paint(Target::Mask, &srgb, Pos2::ZERO), None);
+        assert_eq!(tools.paint(Target::QuickMask, &srgb, Pos2::ZERO), None);
+
+        // Cycle wraps back to Dodge
+        tools.cycle_group(ToolGroup::Dodge);
+        assert_eq!(tools.tool, Tool::Dodge);
+
+        // Number keys set exposure/opacity
+        tools.set_opacity(0.7);
+        assert_eq!(tools.settings().opacity, 0.7);
     }
 }

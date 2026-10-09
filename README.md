@@ -22,8 +22,8 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   Photoshop's blend modes. Undo with a History panel. Several images open
   in tabs.
 - **Tools:** Move, Brush, Eraser, Clone Stamp, Healing Brush, Spot Healing
-  Brush, Gradient, Paint Bucket, Eyedropper, Crop, marquees, Lasso, Magic
-  Wand, Quick Selection and Object Selection, with Free Transform,
+  Brush, Dodge, Burn, Sponge, Gradient, Paint Bucket, Eyedropper, Crop, marquees,
+  Lasso, Magic Wand, Quick Selection and Object Selection, with Free Transform,
   Auto-Align Layers, Liquify and Select and Mask. Pen pressure from a
   tablet. Photomerge for panoramas and Merge to HDR for brackets.
 - **Adjustment layers:** Curves, Levels, Hue/Saturation, Color Balance,
