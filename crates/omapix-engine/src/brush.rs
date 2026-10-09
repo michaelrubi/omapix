@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::Pixel;
-use crate::dynamics::{Dab, Dynamics, Step, mix};
+use crate::dynamics::{Dab, Dynamics, Step, grain, mix};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::tip::Tip;
 use crate::toning::{self, ToneRange};
@@ -194,6 +194,19 @@ impl Stroke {
         out
     }
 
+    /// How much paint a pixel gets where the stroke covers `c` of it. With
+    /// Wet Edges that's half where the stroke is solid and more towards its
+    /// edge, where coverage runs out, so that paint gathers along the edge
+    /// as watercolour does and a stroke crossing itself gets no darker.
+    #[inline]
+    fn laid(&self, c: f32) -> f32 {
+        if !self.settings.dynamics.wet_edges {
+            return c;
+        }
+        let t = ((c - 0.6) / 0.4).clamp(0.0, 1.0);
+        c * (1.0 - 0.5 * t * t * (3.0 - 2.0 * t))
+    }
+
     /// Selection coverage (0–1) of pixel `i` in tile (col, row).
     #[inline]
     fn limit_at(&self, col: u32, row: u32, i: usize) -> f32 {
@@ -304,6 +317,9 @@ impl Stroke {
         let Dab { x: cx, y: cy, radius: r, roundness, most, flow, .. } = *dab;
         let hardness = self.settings.hardness.clamp(0.0, 0.999);
         let (sin, cos) = dab.angle.sin_cos();
+        let noise = self.settings.dynamics.noise;
+        // A mirrored tip is read backwards.
+        let (flip_x, flip_y) = (if dab.flip_x { -1.0 } else { 1.0 }, if dab.flip_y { -1.0 } else { 1.0 });
         // A sampled tip: which of its sizes to read, how many of its pixels
         // one of the image's is, and how far it reaches, since at an angle
         // its corners stick out further than its sides.
@@ -333,9 +349,9 @@ impl Stroke {
                         // The pixel's centre from the dab's, and how much of
                         // the dab is there.
                         let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
-                        let shape = if let Some((tip, level, scale, tw, th)) = tip {
+                        let mut shape = if let Some((tip, level, scale, tw, th)) = tip {
                             // Along the tip and across it, in its own pixels.
-                            let (along, across) = (dx * cos - dy * sin, (dx * sin + dy * cos) / roundness);
+                            let (along, across) = ((dx * cos - dy * sin) * flip_x, (dx * sin + dy * cos) / roundness * flip_y);
                             tip.sample(level, 0.5 + along * scale / tw, 0.5 + across * scale / th)
                         } else if roundness >= 1.0 {
                             falloff((dx.powi(2) + dy.powi(2)).sqrt() / r.max(0.5), hardness)
@@ -345,6 +361,12 @@ impl Stroke {
                         };
                         if shape <= 0.0 {
                             continue;
+                        }
+                        if noise && shape < 1.0 {
+                            // Most of the way to all or nothing, as the
+                            // pixel's grain falls.
+                            let all = if grain(px, py) < shape { 1.0 } else { 0.0 };
+                            shape += (all - shape) * 0.7;
                         }
                         let c = &mut cov[((py - ty) * TILE + (px - tx)) as usize];
                         *c += (most - *c).max(0.0) * flow * shape;
@@ -375,7 +397,7 @@ impl Stroke {
                     let (w, h) = (orig.width(), orig.height());
                     let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
-                        let a = cov[i] * opacity * self.limit_at(col, row, i);
+                        let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
                         out[i] = if self.paint == Paint::SpotHeal {
                             // Show where the stroke is until it heals on release.
                             self.paint_onto(base[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
@@ -408,7 +430,7 @@ impl Stroke {
                         .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[u16]>::to_vec);
                     let out = dst.tile_mut(col, row);
                     for i in 0..TILE_PIXELS {
-                        let a = cov[i] * opacity * self.limit_at(col, row, i);
+                        let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
                         let v = f32::from(base[i]);
                         out[i] = match self.paint {
                             Paint::Tone { range, burn, .. } => {
@@ -517,7 +539,7 @@ impl Stroke {
                 .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
             let out = dst.tile_mut(col, row);
             for i in 0..TILE_PIXELS {
-                let a = cov[i] * opacity * self.limit_at(col, row, i);
+                let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
                 let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
                 if a <= 0.0 || x >= w || y >= h {
                     out[i] = base[i];
@@ -1365,5 +1387,49 @@ mod tests {
         // Half as round, it's half as high.
         let at = stamp(80.0, Dynamics { roundness: 0.5, ..Default::default() });
         assert!(at(120, 108) == 0 && at(120, 112) == 65535 && at(120, 92) == 0 && at(120, 88) == 65535);
+    }
+
+    #[test]
+    fn a_flipped_tip_is_stamped_mirrored() {
+        // Paint in the tip's top right quarter only.
+        let tip = Arc::new(Tip::new(40, 40, (0..1600).map(|i| if i % 40 >= 20 && i / 40 < 20 { 65535 } else { 0 }).collect()).unwrap());
+        let quarters = |dynamics: Dynamics| {
+            let settings = BrushSettings { size: 80.0, dynamics, ..Default::default() };
+            let mut out = Surface::Pixels(white(300, 200));
+            let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone()).with_tip(tip.clone());
+            let tiles = s.add_point(100.0, 100.0, 1.0);
+            s.apply(&mut out, &tiles);
+            let Surface::Pixels(out) = out else { unreachable!() };
+            // Top left, top right, bottom left, bottom right.
+            [(80, 80), (120, 80), (80, 120), (120, 120)].map(|(x, y)| out.get(x, y)[0] == 0)
+        };
+        let d = Dynamics::default();
+        assert_eq!(quarters(d), [false, true, false, false]);
+        assert_eq!(quarters(Dynamics { flip_x: true, ..d }), [true, false, false, false]);
+        assert_eq!(quarters(Dynamics { flip_y: true, ..d }), [false, false, false, true]);
+        assert_eq!(quarters(Dynamics { flip_x: true, flip_y: true, ..d }), [false, false, true, false]);
+    }
+
+    #[test]
+    fn noise_breaks_up_a_dabs_soft_edge_and_wet_edges_thin_its_middle() {
+        let dab = |hardness: f32, dynamics: Dynamics| stroked(BrushSettings { size: 120.0, hardness, dynamics, ..Default::default() }, &[(150.0, 100.0)], true);
+        let d = Dynamics::default();
+        // How much neighbours differ along a line out through the soft edge.
+        let rough = |out: &Tiled<Pixel>| (171..208).map(|x| u32::from(out.get(x, 100)[0].abs_diff(out.get(x + 1, 100)[0]))).sum::<u32>() / 37;
+        let (smooth, noisy) = (dab(0.3, d), dab(0.3, Dynamics { noise: true, ..d }));
+        assert!(rough(&smooth) < 2500 && rough(&noisy) > 10_000, "{} {}", rough(&smooth), rough(&noisy));
+        // The solid middle and what's outside are as they were, and it's
+        // the same grain each time.
+        assert_eq!((noisy.get(150, 100), noisy.get(160, 105), noisy.get(215, 100)), (smooth.get(150, 100), smooth.get(160, 105), [65535; 4]));
+        assert!(noisy.to_vec() == dab(0.3, Dynamics { noise: true, ..d }).to_vec());
+
+        // Wet Edges: half the paint where the stroke is solid, however
+        // many dabs land there, and more of it in a band along its edge.
+        let wet = stroked(BrushSettings { size: 120.0, hardness: 0.3, dynamics: Dynamics { wet_edges: true, ..d }, ..Default::default() }, &[(100.0, 100.0), (200.0, 100.0)], true);
+        let grey = |y: u32| wet.get(150, y)[0];
+        assert!(grey(100).abs_diff(32768) <= 1 && grey(110).abs_diff(32768) <= 1, "{} {}", grey(100), grey(110));
+        let darkest = (100..160).map(grey).min().unwrap();
+        assert!((22_000..24_500).contains(&darkest), "{darkest}");
+        assert_eq!(grey(161), 65535);
     }
 }

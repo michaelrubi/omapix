@@ -1,5 +1,6 @@
 //! Photoshop's Brush Settings: the shape of a brush's tip, and how its dabs
-//! vary along a stroke (Shape Dynamics, Scattering and Transfer).
+//! vary along a stroke (Shape Dynamics, Scattering, Transfer, Noise and
+//! Wet Edges).
 //! [`crate::brush`] lays the dabs this works out.
 //!
 //! Whatever varies at random comes from the stroke's seed and the dab's
@@ -44,6 +45,9 @@ pub struct Dynamics {
     pub angle: f32,
     /// The tip's height as a fraction of its width (1 is round).
     pub roundness: f32,
+    /// A sampled tip mirrored left to right, and top to bottom.
+    pub flip_x: bool,
+    pub flip_y: bool,
     /// Shape Dynamics: how much smaller a dab can be at random (0–1).
     pub size_jitter: f32,
     /// The smallest a dab gets, from jitter or a pen's pressure, as a
@@ -57,6 +61,9 @@ pub struct Dynamics {
     pub roundness_jitter: f32,
     /// The flattest that makes it, as a fraction of the tip's roundness.
     pub minimum_roundness: f32,
+    /// Each dab mirrored or not at random, left to right and top to bottom.
+    pub flip_x_jitter: bool,
+    pub flip_y_jitter: bool,
     /// Scattering: how far dabs stray from the stroke, in radii (Photoshop
     /// goes to 10, its 1000 %).
     pub scatter: f32,
@@ -70,6 +77,11 @@ pub struct Dynamics {
     pub opacity_jitter: f32,
     /// How much lower a dab's flow can be at random (0–1).
     pub flow_jitter: f32,
+    /// Noise: the soft parts of each dab broken up into grain.
+    pub noise: bool,
+    /// Wet Edges: paint gathers along the edge of the stroke, as
+    /// watercolour's does.
+    pub wet_edges: bool,
 }
 
 impl Default for Dynamics {
@@ -78,18 +90,24 @@ impl Default for Dynamics {
             spacing: 0.1,
             angle: 0.0,
             roundness: 1.0,
+            flip_x: false,
+            flip_y: false,
             size_jitter: 0.0,
             minimum_diameter: 0.0,
             angle_jitter: 0.0,
             angle_follows: false,
             roundness_jitter: 0.0,
             minimum_roundness: 0.25,
+            flip_x_jitter: false,
+            flip_y_jitter: false,
             scatter: 0.0,
             both_axes: false,
             count: 1,
             count_jitter: 0.0,
             opacity_jitter: 0.0,
             flow_jitter: 0.0,
+            noise: false,
+            wet_edges: false,
         }
     }
 }
@@ -108,7 +126,8 @@ pub(crate) struct Step {
 }
 
 /// One dab: its centre, radius, angle (radians, anticlockwise) and
-/// roundness, how far coverage can build up under it, and its flow.
+/// roundness, whether its tip is mirrored, how far coverage can build up
+/// under it, and its flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Dab {
     pub x: f32,
@@ -116,6 +135,8 @@ pub(crate) struct Dab {
     pub radius: f32,
     pub angle: f32,
     pub roundness: f32,
+    pub flip_x: bool,
+    pub flip_y: bool,
     pub most: f32,
     pub flow: f32,
 }
@@ -171,6 +192,9 @@ impl Dynamics {
                     radius,
                     angle: angle.to_radians(),
                     roundness,
+                    // Mirrored, or with jitter as often as not.
+                    flip_x: self.flip_x != (self.flip_x_jitter && r(FLIP_X) < 0.5),
+                    flip_y: self.flip_y != (self.flip_y_jitter && r(FLIP_Y) < 0.5),
                     most: at.most * (1.0 - unit(self.opacity_jitter) * r(OPACITY)),
                     flow: at.flow * (1.0 - unit(self.flow_jitter) * r(FLOW)),
                 }
@@ -184,6 +208,8 @@ impl Dynamics {
 const SIZE: u64 = 1;
 const ANGLE: u64 = 2;
 const ROUNDNESS: u64 = 3;
+const FLIP_X: u64 = 4;
+const FLIP_Y: u64 = 5;
 const SCATTER_X: u64 = 6;
 const SCATTER_Y: u64 = 7;
 const COUNT: u64 = 8;
@@ -196,6 +222,14 @@ pub(crate) fn mix(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+/// A number from 0 up to 1 for the image's pixel at (x, y): the same
+/// however often a stroke's dabs cross it, which is what keeps Noise's
+/// grain from averaging away.
+pub(crate) fn grain(x: u32, y: u32) -> f32 {
+    let at = u64::from(x) << 32 | u64::from(y);
+    (mix(at ^ 0x006E_6F69_7365u64.wrapping_mul(0xA24B_AED4_963E_E407)) >> 40) as f32 / (1u64 << 24) as f32
 }
 
 /// A number from 0 up to 1 that depends only on what it's given.
@@ -219,7 +253,7 @@ mod tests {
     #[test]
     fn a_plain_brush_lays_one_dab_where_the_step_is() {
         let dabs = many(&Dynamics::default(), &AT);
-        let plain = Dab { x: 100.0, y: 50.0, radius: 20.0, angle: 0.0, roundness: 1.0, most: 1.0, flow: 0.8 };
+        let plain = Dab { x: 100.0, y: 50.0, radius: 20.0, angle: 0.0, roundness: 1.0, flip_x: false, flip_y: false, most: 1.0, flow: 0.8 };
         assert_eq!(dabs.len(), 500);
         assert!(dabs.iter().all(|d| *d == plain));
     }
@@ -292,6 +326,30 @@ mod tests {
         assert!(dabs.iter().any(|d| d.most < 0.55) && dabs.iter().any(|d| d.flow < 0.05) && dabs.iter().any(|d| d.flow > 0.75));
         assert!(dabs.iter().all(|d| (d.angle.to_degrees() - 120.0).abs() < 1e-3));
         assert!(d.follows_direction());
+    }
+
+    #[test]
+    fn a_tip_is_mirrored_always_or_as_often_as_not() {
+        let always = many(&Dynamics { flip_x: true, ..Default::default() }, &AT);
+        assert!(always.iter().all(|d| d.flip_x && !d.flip_y));
+        // With jitter, about half of them each way, and not the same half.
+        let jitter = Dynamics { flip_x_jitter: true, flip_y_jitter: true, ..Default::default() };
+        let dabs = many(&jitter, &AT);
+        let (x, y) = (dabs.iter().filter(|d| d.flip_x).count(), dabs.iter().filter(|d| d.flip_y).count());
+        assert!((200..300).contains(&x) && (200..300).contains(&y), "{x} {y}");
+        assert!(dabs.iter().any(|d| d.flip_x != d.flip_y));
+        // A mirrored tip with jitter is still either way.
+        let both = many(&Dynamics { flip_x: true, ..jitter }, &AT);
+        assert!((200..300).contains(&both.iter().filter(|d| d.flip_x).count()));
+        assert!(dabs.iter().zip(&both).all(|(a, b)| a.flip_x != b.flip_x));
+    }
+
+    #[test]
+    fn grain_is_spread_evenly_and_fixed_to_the_images_pixels() {
+        assert_eq!(grain(10, 20), grain(10, 20));
+        assert!(grain(10, 20) != grain(11, 20) && grain(10, 20) != grain(20, 10));
+        let mean = (0..10_000).map(|i| grain(i % 100, i / 100)).sum::<f32>() / 10_000.0;
+        assert!((mean - 0.5).abs() < 0.02, "{mean}");
     }
 
     #[test]

@@ -1081,6 +1081,12 @@ impl Tools {
             ui.end_row();
         };
         let percent = |ui: &mut Ui, label: &str, value: &mut f32, hint: &str| row(ui, label, value, 0.0..=100.0, 100.0, "%", hint);
+        // Two tick boxes, one under the names and one under the sliders.
+        let pair = |ui: &mut Ui, a: (&mut bool, &str, &str), b: (&mut bool, &str, &str)| {
+            ui.checkbox(a.0, a.1).on_hover_text(a.2);
+            ui.checkbox(b.0, b.1).on_hover_text(b.2);
+            ui.end_row();
+        };
         // All of it if there's room, leaving the layers some.
         let height = (ui.available_height() - 220.0).max(120.0);
         egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
@@ -1091,6 +1097,8 @@ impl Tools {
                 row(ui, "Spacing", &mut d.spacing, 1.0..=300.0, 100.0, "%", "The distance between dabs, as a share of the brush's size");
                 row(ui, "Angle", &mut d.angle, -180.0..=180.0, 1.0, "°", "Turns a tip that isn't round, anticlockwise");
                 row(ui, "Roundness", &mut d.roundness, 1.0..=100.0, 100.0, "%", "The tip's height as a share of its width");
+                let (x, y) = ("A tip made from an image, mirrored left to right", "A tip made from an image, mirrored top to bottom");
+                pair(ui, (&mut d.flip_x, "Flip X", x), (&mut d.flip_y, "Flip Y", y));
 
                 heading(ui, "Shape Dynamics");
                 percent(ui, "Size Jitter", &mut d.size_jitter, "How much smaller a dab can be at random");
@@ -1102,6 +1110,8 @@ impl Tools {
                 ui.end_row();
                 percent(ui, "Roundness Jitter", &mut d.roundness_jitter, "How much flatter a dab can be at random");
                 percent(ui, "Minimum Roundness", &mut d.minimum_roundness, "The flattest that makes it");
+                let (x, y) = ("Each dab mirrored left to right or not, at random", "Each dab mirrored top to bottom or not, at random");
+                pair(ui, (&mut d.flip_x_jitter, "Flip X Jitter", x), (&mut d.flip_y_jitter, "Flip Y Jitter", y));
 
                 heading(ui, "Scattering");
                 row(ui, "Scatter", &mut d.scatter, 0.0..=1000.0, 100.0, "%", "How far dabs stray from the stroke, as a share of the brush's radius");
@@ -1116,6 +1126,10 @@ impl Tools {
                 heading(ui, "Transfer");
                 percent(ui, "Opacity Jitter", &mut d.opacity_jitter, "How much lower a dab's opacity can be at random");
                 percent(ui, "Flow Jitter", &mut d.flow_jitter, "How much lower a dab's flow can be at random");
+
+                heading(ui, "Other");
+                let (noise, wet) = ("Breaks up the soft parts of each dab into grain", "Paint gathers along the edge of the stroke, as watercolour's does");
+                pair(ui, (&mut d.noise, "Noise", noise), (&mut d.wet_edges, "Wet Edges", wet));
             });
         });
         command
@@ -2359,6 +2373,14 @@ mod tests {
         frame(&mut tools, click(follow, true));
         frame(&mut tools, click(follow, false));
         assert!(tools.eraser.dynamics.angle_follows);
+        // The tick boxes in pairs: one of each pair.
+        for text in ["Flip Y", "Flip X Jitter", "Wet Edges"] {
+            let tick = at(&drawn, text);
+            frame(&mut tools, click(tick, true));
+            frame(&mut tools, click(tick, false));
+        }
+        let d = tools.eraser.dynamics;
+        assert_eq!((d.flip_x, d.flip_y, d.flip_x_jitter, d.flip_y_jitter, d.noise, d.wet_edges), (false, true, true, false, false, true));
         assert_eq!(tools.brush.dynamics, Dynamics::default(), "the Brush tool's is its own");
 
         let drawn = frame(&mut tools, vec![]);

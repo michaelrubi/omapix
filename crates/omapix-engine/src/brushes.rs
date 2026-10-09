@@ -129,9 +129,7 @@ fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>
         // With Spacing unticked (`Intr`), Photoshop spaces dabs by speed.
         let spaced = !matches!(t.get("Intr"), Some(Value::Boolean(false)));
         v.spacing = fraction(t, "Spcn").filter(|_| spaced).unwrap_or(SPACING).clamp(0.01, 10.0);
-        if on(t, "flipX") || on(t, "flipY") {
-            left_out.insert("Flip");
-        }
+        (v.flip_x, v.flip_y) = (on(t, "flipX"), on(t, "flipY"));
     }
     if on(d, "useTipDynamics") {
         let (size, control) = varies(d, "szVr");
@@ -145,9 +143,7 @@ fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>
         v.roundness_jitter = roundness.min(1.0);
         other(control, &[]);
         v.minimum_roundness = fraction(d, "minimumRoundness").unwrap_or(v.minimum_roundness).clamp(0.0, 1.0);
-        if on(d, "flipX") || on(d, "flipY") {
-            left_out.insert("Flip Jitter");
-        }
+        (v.flip_x_jitter, v.flip_y_jitter) = (on(d, "flipX"), on(d, "flipY"));
     }
     if on(d, "useScatter") {
         let (scatter, control) = varies(d, "scatterDynamics");
@@ -166,14 +162,13 @@ fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>
         other(a, &[2]);
         other(b, &[2]);
     }
+    (v.wet_edges, v.noise) = (on(d, "Wtdg"), on(d, "Nose"));
     let dual = object(d, "dualBrush").is_some_and(|dual| on(dual, "useDualBrush"));
     let more = [
         (on(d, "useTexture"), "Texture"),
         (dual, "Dual Brush"),
         (on(d, "useColorDynamics"), "Color Dynamics"),
         (on(d, "useBrushPose"), "Brush Pose"),
-        (on(d, "Wtdg"), "Wet Edges"),
-        (on(d, "Nose"), "Noise"),
     ];
     let more = more.into_iter().chain([(others, "Fade, tilt and other controls")]);
     left_out.extend(more.filter(|(used, _)| *used).map(|(_, what)| what));
@@ -258,6 +253,7 @@ mod tests {
             .with("Rndn", percent(60.0))
             .with("Spcn", percent(45.0))
             .with("Intr", Value::Boolean(true))
+            .with("flipY", Value::Boolean(true))
             .with("sampledData", Value::Text(UnicodeString::new_nul("pores")));
         let brush = named("Skin Texture")
             .with("Brsh", Value::Descriptor(tip))
@@ -267,6 +263,8 @@ mod tests {
             .with("angleDynamics", vary(100.0, 6))
             .with("roundnessDynamics", vary(30.0, 0))
             .with("minimumRoundness", percent(40.0))
+            .with("flipX", Value::Boolean(true))
+            .with("Nose", Value::Boolean(true))
             .with("useScatter", Value::Boolean(true))
             .with("scatterDynamics", vary(350.0, 0))
             .with("bothAxes", Value::Boolean(true))
@@ -289,6 +287,7 @@ mod tests {
         assert!(close(d.roundness_jitter, 0.3) && close(d.minimum_roundness, 0.4));
         assert!(close(d.scatter, 3.5) && d.both_axes && d.count == 3 && close(d.count_jitter, 0.5));
         assert!(close(d.opacity_jitter, 0.25) && close(d.flow_jitter, 0.1));
+        assert_eq!((d.flip_x, d.flip_y, d.flip_x_jitter, d.flip_y_jitter, d.noise, d.wet_edges), (false, true, true, false, true, false));
 
         // Chosen, it changes the tool's brush but not its opacity or flow.
         let mut settings = BrushSettings { opacity: 0.4, flow: 0.3, hardness: 0.2, opacity_pressure: false, ..Default::default() };
@@ -314,11 +313,11 @@ mod tests {
         let lost = named("Lost").with("Brsh", Value::Descriptor(Descriptor::new("sampledBrush").with("sampledData", Value::Text(UnicodeString::new("gone")))));
         let file = AbrFile { version: 6, subversion: 2, samples: vec![sample("a", 4, 4), sample("b", 4, 4)], presets: vec![textured, lost], ..Default::default() };
         let (brushes, left_out) = presets(&file);
-        assert_eq!(left_out, ["Dual Brush", "Fade, tilt and other controls", "Flip", "Texture", "Wet Edges"]);
+        assert_eq!(left_out, ["Dual Brush", "Fade, tilt and other controls", "Texture"]);
         let [chalk] = &brushes[..] else { panic!("{}", brushes.len()) };
         assert_eq!((chalk.name.as_str(), chalk.size, chalk.hardness, chalk.size_pressure), ("Chalk", 12.0, Some(0.35), false));
         assert!(chalk.tip.is_none());
-        assert_eq!(chalk.dynamics, Dynamics { spacing: SPACING, ..Default::default() });
+        assert_eq!(chalk.dynamics, Dynamics { spacing: SPACING, flip_x: true, wet_edges: true, ..Default::default() });
     }
 
     #[test]
