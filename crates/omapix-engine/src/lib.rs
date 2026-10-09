@@ -1,6 +1,7 @@
 //! Omapix image engine: pixel storage, colour management, file IO and
 //! processing. Has no UI or GPU dependencies so it can be tested headless.
 
+pub mod abr;
 pub mod adjust;
 pub mod align;
 pub mod blemish;
@@ -11,6 +12,7 @@ pub mod clip;
 pub mod color;
 pub mod composite;
 pub mod denoise;
+pub mod descriptor;
 pub mod document;
 pub mod export;
 pub mod filters;
@@ -25,8 +27,10 @@ pub mod makeup;
 pub mod moving;
 pub mod ops;
 pub mod ora;
+pub mod patterns;
 pub mod poisson;
 pub mod psd;
+pub(crate) mod psd_io;
 pub mod pyramid;
 pub mod raster;
 pub mod refine;
@@ -46,9 +50,11 @@ pub mod upscale;
 pub mod warp;
 pub mod whiten;
 
+pub use abr::{AbrFile, AbrSample, LegacyBrush, LegacyTip};
 pub use blend::BlendMode;
 pub use clip::PasteKind;
 pub use color::{ColorProfile, DisplayTransform, Proof};
+pub use descriptor::{Descriptor, Id, UnicodeString, Value, VersionedDescriptor};
 pub use document::{AlphaChannel, Document};
 pub use filters::{
     generate_grain, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
@@ -57,6 +63,7 @@ pub use filters::{
 pub use histogram::{Histogram, HistogramStats};
 pub use layer::{Layer, Locks, Mask};
 pub use ops::{GradientParams, GradientType, add_noise_layer, grain_layer};
+pub use patterns::PsdPattern;
 pub use raster::{Pixel, Raster};
 pub use selection::{Channel, Combine, Selection};
 pub use tiled::Orientation;
