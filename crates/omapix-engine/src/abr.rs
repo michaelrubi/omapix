@@ -1,6 +1,26 @@
-// Borrowed from PhotoCraft (https://github.com/storytold/photocraft)
-// Copyright (c) 2026 storytold / PhotoCraft authors
-// Licensed under MIT or Apache-2.0
+// Ported from PhotoCraft's `crates/psd/src/abr.rs`
+// (<https://github.com/storytold/photocraft>, commit `ec477ca`), under its
+// MIT licence:
+//
+// Copyright (c) 2026 ArtCraft Team and the PhotoCraft contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 
 //! Photoshop brush files (`.abr`): legacy v1/v2 layout and modern sectioned v6+ layout.
 //!
@@ -59,10 +79,7 @@ impl AbrSample {
     /// Samples as normalized 0.0..=1.0 floating point paint amounts.
     pub fn to_unit(&self) -> Vec<f32> {
         if self.depth == 16 {
-            self.data
-                .chunks_exact(2)
-                .map(|c| f32::from(u16::from_be_bytes([c[0], c[1]])) / 65535.0)
-                .collect()
+            self.data.as_chunks::<2>().0.iter().map(|c| f32::from(u16::from_be_bytes(*c)) / 65535.0).collect()
         } else {
             self.data.iter().map(|&v| f32::from(v) / 255.0).collect()
         }
@@ -71,10 +88,7 @@ impl AbrSample {
     /// Samples scaled to 0..=65535 (16-bit raster standard in Omapix).
     pub fn to_u16(&self) -> Vec<u16> {
         if self.depth == 16 {
-            self.data
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect()
+            self.data.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect()
         } else {
             self.data
                 .iter()
@@ -214,11 +228,7 @@ fn read_ucs2(r: &mut ByteReader<'_>) -> Result<String> {
     if n > 4096 {
         return Err(bad("abr name length"));
     }
-    let units: Vec<u16> = r
-        .bytes(n * 2)?
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
-        .collect();
+    let units: Vec<u16> = r.bytes(n * 2)?.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
     Ok(String::from_utf16_lossy(&units)
         .trim_end_matches('\0')
         .to_string())

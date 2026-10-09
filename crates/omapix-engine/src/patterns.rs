@@ -1,6 +1,26 @@
-// Borrowed from PhotoCraft (https://github.com/storytold/photocraft)
-// Copyright (c) 2026 storytold / PhotoCraft authors
-// Licensed under MIT or Apache-2.0
+// Ported from PhotoCraft's `crates/psd/src/patterns.rs`
+// (<https://github.com/storytold/photocraft>, commit `ec477ca`), under its
+// MIT licence:
+//
+// Copyright (c) 2026 ArtCraft Team and the PhotoCraft contributors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 
 //! Patterns: the global `Patt` / `Pat2` / `Pat3` tagged blocks and standalone `.pat` files.
 //!
@@ -52,7 +72,7 @@ pub fn mode_channels(mode: u32) -> usize {
 
 pub(crate) fn row_bytes(width: usize, depth: u16) -> usize {
     match depth {
-        1 => (width + 7) / 8,
+        1 => width.div_ceil(8),
         8 => width,
         16 => width * 2,
         32 => width * 4,
@@ -117,11 +137,7 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
     if n > 65_536 {
         return Err(bad("pattern name length exceeds limit"));
     }
-    let units: Vec<u16> = r
-        .bytes(n * 2)?
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
-        .collect();
+    let units: Vec<u16> = r.bytes(n * 2)?.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
     let name = String::from_utf16_lossy(&units)
         .trim_end_matches('\0')
         .to_string();
@@ -129,7 +145,9 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
     let id = String::from_utf8_lossy(r.bytes(idl)?).to_string();
     let palette = if mode == 2 {
         let p = r.bytes(768)?.to_vec();
-        if r.remaining() >= 4 && r.peek_rest().starts_with(&[0, 0, 0, 3]) {
+        // Some writers follow the palette with 4 extra bytes: anything
+        // that isn't the version that comes next.
+        if r.peek_rest().get(..4).is_some_and(|v| v != [0, 0, 0, 3]) {
             r.skip(4)?;
         }
         Some(p)
@@ -253,7 +271,7 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
             }
             ch.data[..expected].to_vec()
         };
-        planes.push(place_channel_plane(plane, ch.width, ch.height, ch.depth, ch.x, ch.y, w as usize, h as usize)?);
+        planes.push(place_channel_plane(plane, (ch.width, ch.height), ch.depth, (ch.x, ch.y), (w as usize, h as usize))?);
     }
 
     let alpha = (planes.len() > nc).then(|| planes.remove(nc));
@@ -273,16 +291,13 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
 
 fn place_channel_plane(
     mut plane: Vec<u8>,
-    sw: usize,
-    sh: usize,
+    (sw, sh): (usize, usize),
     depth: u16,
-    x: usize,
-    y: usize,
-    dw: usize,
-    dh: usize,
+    (x, y): (usize, usize),
+    (dw, dh): (usize, usize),
 ) -> Result<Vec<u8>> {
     if x == 0 && y == 0 && sw == dw && sh == dh {
-        if depth == 1 && (sw % 8) != 0 {
+        if depth == 1 && !sw.is_multiple_of(8) {
             let mask = u8::MAX << (8 - sw % 8);
             for row in plane.chunks_exact_mut(row_bytes(sw, depth)) {
                 if let Some(last) = row.last_mut() {
@@ -437,8 +452,34 @@ mod tests {
             channels: vec![vec![100; 16], vec![150; 16], vec![200; 16]],
             alpha: Some(vec![255; 16]),
         };
-        let bytes = write_pattern_block(&[p.clone()]).unwrap();
+        let bytes = write_pattern_block(std::slice::from_ref(&p)).unwrap();
         let decoded = parse_pattern_block(&bytes).unwrap();
         assert_eq!(decoded, vec![p]);
+    }
+
+    #[test]
+    fn an_indexed_pattern_is_read_with_or_without_bytes_after_its_palette() {
+        let p = PsdPattern {
+            mode: 2,
+            width: 2,
+            height: 2,
+            name: "Indexed".into(),
+            id: "abc".into(),
+            palette: Some((0..768).map(|i| i as u8).collect()),
+            depth: 8,
+            channels: vec![vec![0, 1, 2, 3]],
+            alpha: None,
+        };
+        let bytes = write_pattern_block(std::slice::from_ref(&p)).unwrap();
+        assert_eq!(parse_pattern_block(&bytes).unwrap(), vec![p.clone()]);
+
+        // Four more bytes after the palette, as some writers leave: the
+        // pattern is 4 longer, and stays a multiple of 4.
+        let palette = bytes.windows(768).position(|w| w == &p.palette.as_ref().unwrap()[..]).unwrap() + 768;
+        let mut extra = bytes.clone();
+        extra.splice(palette..palette, [9, 9, 9, 9]);
+        let len = u32::from_be_bytes(extra[..4].try_into().unwrap()) + 4;
+        extra[..4].copy_from_slice(&len.to_be_bytes());
+        assert_eq!(parse_pattern_block(&extra).unwrap(), vec![p]);
     }
 }
