@@ -163,7 +163,8 @@ struct TileImage {
     /// Value of the canvas's generation counter when requested.
     stamp: u64,
     key: TileKey,
-    image: ColorImage,
+    /// `None` if the render was being written: the tile is asked for again.
+    image: Option<ColorImage>,
 }
 
 struct TileTexture {
@@ -1057,6 +1058,7 @@ impl Canvas {
     fn receive_tiles(&mut self, ctx: &egui::Context) {
         while let Ok(tile) = self.rx.try_recv() {
             self.in_flight.remove(&tile.key);
+            let Some(image) = tile.image else { continue };
             if !self.is_fresh(tile.key, tile.stamp) {
                 // Made before the area last changed; it will be requested again.
                 continue;
@@ -1077,12 +1079,12 @@ impl Canvas {
             match self.textures.get_mut(&tile.key) {
                 // Replace pixels in place, keeping the GPU texture.
                 Some(existing) => {
-                    existing.texture.set(tile.image, options);
+                    existing.texture.set(image, options);
                     existing.stamp = tile.stamp;
                 }
                 None => {
                     let name = format!("tile-{}-{}-{}", tile.key.level, tile.key.col, tile.key.row);
-                    let texture = ctx.load_texture(name, tile.image, options);
+                    let texture = ctx.load_texture(name, image, options);
                     self.textures.insert(
                         tile.key,
                         TileTexture {
@@ -1278,22 +1280,24 @@ impl Canvas {
         let tx = self.tx.clone();
         let stamp = self.generation;
         rayon::spawn(move || {
-            let rgba_and_size = {
-                let Ok(data) = render.data.read() else { return };
-                let level = data.level(key.level);
-                let b = tiles::bounds(level.width(), level.height(), key.col, key.row);
-                (
-                    tiles::render(level, &transform, b),
-                    [b.tex_w as usize, b.tex_h as usize],
-                )
-            };
-            let (rgba, size) = rgba_and_size;
-            let image = ColorImage::from_rgba_unmultiplied(size, &rgba);
+            let image = tile_image(&render, &transform, key);
             if tx.send(TileImage { stamp, key, image }).is_ok() {
                 ctx.request_repaint();
             }
         });
     }
+}
+
+/// Display tile `key` of `render`, or `None` while the render is being
+/// written. It must not wait for the writer: this runs on one of rayon's
+/// threads, and the writer, which brings the zoomed-out copies up to date
+/// on them with the render locked, may be waiting for this very thread.
+fn tile_image(render: &Render, transform: &DisplayTransform, key: TileKey) -> Option<ColorImage> {
+    let data = render.data.try_read().ok()?;
+    let level = data.level(key.level);
+    let b = tiles::bounds(level.width(), level.height(), key.col, key.row);
+    let rgba = tiles::render(level, transform, b);
+    Some(ColorImage::from_rgba_unmultiplied([b.tex_w as usize, b.tex_h as usize], &rgba))
 }
 
 /// Turn a polyline into dashed line segments with a phase offset.
@@ -1560,6 +1564,42 @@ mod tests {
         assert!(at_level(&canvas, 0) == 4 && shown > 0);
         settle(&mut canvas, 1.0 + UNUSED_FOR);
         assert_eq!((at_level(&canvas, 0), at_level(&canvas, 2)), (0, shown));
+    }
+
+    /// Waiting would hold up one of rayon's threads, which the writer may
+    /// itself be waiting for.
+    #[test]
+    fn a_tile_asked_for_while_the_render_is_written_is_asked_for_again() {
+        let ctx = egui::Context::default();
+        let transform = || DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
+        let render = Arc::new(Render::new(Raster::new(300, 300, vec![[0; 4]; 300 * 300])));
+        let key = TileKey { level: 0, col: 0, row: 0 };
+        let mut canvas = Canvas::new(300, 300, transform());
+        canvas.set_render(Arc::clone(&render));
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        canvas.lay_out_for_test(view, 1.0);
+        let frames = |canvas: &mut Canvas, count: usize| {
+            for _ in 0..count {
+                let input = egui::RawInput { screen_rect: Some(view), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| {
+                    canvas.show(ui, Color32::BLACK, Overlay::default());
+                });
+                out.textures_delta.clear();
+                if canvas.fresh {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+
+        let writing = render.data.write().unwrap();
+        assert!(tile_image(&render, &transform(), key).is_none());
+        frames(&mut canvas, 20);
+        assert!(!canvas.fresh && canvas.textures.is_empty());
+        drop(writing);
+        assert!(tile_image(&render, &transform(), key).is_some());
+        frames(&mut canvas, 500);
+        assert!(canvas.fresh && canvas.in_flight.is_empty());
     }
 
     #[test]
