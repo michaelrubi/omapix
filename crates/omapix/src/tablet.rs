@@ -4,8 +4,8 @@
 //! protocol itself, on a thread of its own sharing winit's connection (as
 //! the patched clipboard does). Once a client takes tablet events the
 //! compositor no longer moves the mouse pointer with the pen, so the pen is
-//! handed to egui here as pointer events, and its pressure kept for the
-//! brushes. Its cursor has to be set here too.
+//! handed to egui here as pointer events, with the pressure at each place
+//! it moved kept for the brushes. Its cursor has to be set here too.
 
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
@@ -31,7 +31,8 @@ const BTN_STYLUS2: u32 = 0x14c;
 /// What the pen did, in surface coordinates (logical pixels).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pen {
-    Moved(f32, f32),
+    /// Where it moved to, and its pressure there.
+    Moved(f32, f32, f32),
     Button(PointerButton, bool),
     Gone,
 }
@@ -110,10 +111,20 @@ impl Tablet {
     }
 
     /// Hands what the pen did since the last frame to egui, with the keys
-    /// held.
-    pub fn take(&mut self, raw: &mut egui::RawInput, zoom: f32, modifiers: egui::Modifiers) {
+    /// held. Returns where it moved (egui points) and its pressure at each,
+    /// so a stroke can take every place the pen reported, not only where it
+    /// ended up.
+    pub fn take(&mut self, raw: &mut egui::RawInput, zoom: f32, modifiers: egui::Modifiers) -> Vec<(egui::Pos2, f32)> {
         let pens = std::mem::take(&mut self.shared.lock().unwrap().events);
-        raw.events.extend(pens.into_iter().map(|pen| event(pen, &mut self.last, zoom, modifiers)));
+        let mut moves = Vec::new();
+        for pen in pens {
+            let event = event(pen, &mut self.last, zoom, modifiers);
+            if let (Pen::Moved(_, _, pressure), egui::Event::PointerMoved(at)) = (pen, &event) {
+                moves.push((*at, pressure));
+            }
+            raw.events.push(event);
+        }
+        moves
     }
 
     /// The pen's pressure, 0–1, or 1 when painting with a mouse.
@@ -150,7 +161,7 @@ impl Tablet {
 /// points, `zoom` logical pixels each).
 fn event(pen: Pen, last: &mut egui::Pos2, zoom: f32, modifiers: egui::Modifiers) -> egui::Event {
     match pen {
-        Pen::Moved(x, y) => {
+        Pen::Moved(x, y, _) => {
             *last = pos2(x / zoom, y / zoom);
             egui::Event::PointerMoved(*last)
         }
@@ -217,7 +228,9 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
                 shared.pressure = None;
                 state.frame.push(Pen::Gone);
             }
-            Event::Motion { x, y } => state.frame.push(Pen::Moved(x as f32, y as f32)),
+            // Its pressure is filled in at the frame's end, since the
+            // frame's pressure can come after its motion.
+            Event::Motion { x, y } => state.frame.push(Pen::Moved(x as f32, y as f32, 0.0)),
             Event::Pressure { pressure } => {
                 shared.pressure = Some(pressure as f32 / 65535.0);
             }
@@ -236,6 +249,12 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
                 }
             }
             Event::Frame { .. } => {
+                let pressure = shared.pressure.unwrap_or(0.0);
+                for pen in &mut state.frame {
+                    if let Pen::Moved(_, _, p) = pen {
+                        *p = pressure;
+                    }
+                }
                 shared.events.append(&mut state.frame);
                 state.ctx.request_repaint();
             }
@@ -344,7 +363,7 @@ mod tests {
     fn the_pen_moves_and_clicks_where_it_is_in_egui_points() {
         let mut last = egui::Pos2::ZERO;
         let alt = egui::Modifiers::ALT;
-        assert_eq!(event(Pen::Moved(300.0, 150.0), &mut last, 1.5, alt), egui::Event::PointerMoved(pos2(200.0, 100.0)));
+        assert_eq!(event(Pen::Moved(300.0, 150.0, 0.5), &mut last, 1.5, alt), egui::Event::PointerMoved(pos2(200.0, 100.0)));
         assert_eq!(
             event(Pen::Button(PointerButton::Primary, true), &mut last, 1.5, alt),
             egui::Event::PointerButton {
