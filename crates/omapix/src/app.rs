@@ -8613,6 +8613,78 @@ mod tests {
     }
 
     #[test]
+    fn the_refine_edge_brush_paints_on_the_image_while_select_and_mask_is_open() {
+        use egui::{Event, Modifiers, PointerButton, pos2};
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        // A warm subject left of x = 100, and warm strands in every 4th
+        // column from 120 to 160, on blue; the subject's selected.
+        let (w, h) = (300u32, 200u32);
+        let strand = |x: u32| x < 100 || ((120..160).contains(&x) && x.is_multiple_of(4));
+        let px = (0..w * h).map(|i| if strand(i % w) { [59000, 46000, 13000, 65535] } else { [6500, 19700, 52400, 65535] });
+        let image = omapix_engine::Raster::new(w, h, px.collect());
+        let doc = Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
+        let mut editor = Editor::new(doc).unwrap();
+        editor.edit("Rectangular Marquee", |doc, _| doc.selection = Some(Selection::rectangle(w, h, (0.0, 0.0), (100.0, 200.0))));
+        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(w as f32, h as f32)), 1.0);
+        app.editor = Some(editor);
+        app.filters.select_and_mask = omapix_engine::refine::EdgeOptions { radius: 4.0, ..Default::default() };
+
+        let run = |app: &mut App, events: Vec<Event>| {
+            let screen = egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1600.0, 1000.0));
+            let input = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+        };
+        // The refined selection, once it's ready.
+        let refined = |app: &mut App| {
+            for _ in 0..500 {
+                run(app, vec![]);
+                if let Some(Dialog::SelectAndMask(d)) = &app.dialog
+                    && let Some(s) = d.ready()
+                {
+                    return s.clone();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("no preview");
+        };
+        let size = |app: &App| match &app.dialog {
+            Some(Dialog::SelectAndMask(d)) => d.brush_size,
+            _ => panic!("closed"),
+        };
+        app.run(Command::SelectAndMask, &ctx);
+        assert!(refined(&mut app).at(140, 100) < 0.01, "the radius stops short of the strands");
+
+        // [ and ] change its size.
+        let press = |key| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        run(&mut app, vec![press(egui::Key::CloseBracket)]);
+        assert_eq!(size(&app), 125.0);
+        run(&mut app, vec![press(egui::Key::OpenBracket)]);
+        run(&mut app, vec![press(egui::Key::OpenBracket)]);
+        assert_eq!(size(&app), 90.0);
+
+        // A stroke down the strands picks them up, and not the blue
+        // between them, without a step to undo.
+        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let (top, bottom) = (pos2(140.0, 20.0), pos2(140.0, 180.0));
+        run(&mut app, vec![Event::PointerMoved(top), button(top, true)]);
+        run(&mut app, vec![Event::PointerMoved(bottom)]);
+        run(&mut app, vec![button(bottom, false)]);
+        let brushed = refined(&mut app);
+        assert!(brushed.at(140, 100) > 0.9 && brushed.at(152, 60) > 0.9, "strands: {}", brushed.at(140, 100));
+        assert!(brushed.at(142, 100) < 0.1 && brushed.at(250, 100) < 0.01, "blue: {}", brushed.at(142, 100));
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Rectangular Marquee"));
+
+        // OK'd, it's the selection, as one step.
+        run(&mut app, vec![press(egui::Key::Enter)]);
+        let editor = app.editor.as_ref().unwrap();
+        assert!(app.dialog.is_none());
+        assert_eq!(editor.undo_label(), Some("Select and Mask"));
+        assert!(editor.doc.selection.as_ref().unwrap().at(140, 100) > 0.9);
+    }
+
+    #[test]
     fn ctrl_click_with_the_move_tool_picks_the_layer_under_the_pointer() {
         let mut app = test_app();
         app.tools.tool = crate::tools::Tool::Move;
