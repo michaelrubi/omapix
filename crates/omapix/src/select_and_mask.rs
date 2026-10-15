@@ -10,7 +10,7 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, ComboBox, RichText, Slider, Stroke, vec2};
-use omapix_engine::refine::{EdgeBrush, EdgeOptions, colours, decontaminate_colours, refine_edge};
+use omapix_engine::refine::{EdgeBrush, EdgeOptions, colours, decontaminate_colours, refine_edge_again};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::Mask;
 
@@ -83,13 +83,16 @@ impl SelectAndMask {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let guide = colours(&doc.composite());
+            // The edge found last time, so painting only finds it again
+            // near where the brush went.
+            let mut last = None;
             while let Ok(mut request) = requests.recv() {
                 // Only the newest settings matter.
                 while let Ok(newer) = requests.try_recv() {
                     request = newer;
                 }
                 let (options, painted, brush) = request;
-                let refined = refine_edge(&selection, &guide, &options, Some(&brush));
+                let refined = refine_edge_again(&mut last, &selection, &guide, &options, Some(&brush));
                 if answers.send((options, painted, refined)).is_err() {
                     break;
                 }

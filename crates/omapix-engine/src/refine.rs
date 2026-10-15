@@ -204,9 +204,45 @@ pub fn colours(image: &Raster) -> Vec<[f32; 3]> {
 /// feathered, hardened, then shifted. Where `brush` is painted, the edge
 /// is found there too, or kept as it was.
 pub fn refine_edge(selection: &Selection, guide: &[[f32; 3]], o: &EdgeOptions, brush: Option<&EdgeBrush>) -> Selection {
+    refine_edge_again(&mut None, selection, guide, o, brush)
+}
+
+/// What [`refine_edge_again`] last found the edge for, and what it found.
+pub struct Snapped {
+    selection: Tiled<u16>,
+    radius: f32,
+    smart_radius: bool,
+    brush: Option<EdgeBrush>,
+    coverage: Tiled<u16>,
+}
+
+/// [`refine_edge`], keeping in `last` the edge it found, so that while the
+/// selection, Radius and Smart Radius stay the same it's found again only
+/// in the tiles near where `brush` has painted since.
+pub fn refine_edge_again(
+    last: &mut Option<Snapped>,
+    selection: &Selection,
+    guide: &[[f32; 3]],
+    o: &EdgeOptions,
+    brush: Option<&EdgeBrush>,
+) -> Selection {
     let mut coverage = selection.coverage.clone();
     if o.radius >= 0.5 || brush.is_some_and(|b| b.size > 0.0) {
-        coverage = snap(&coverage, guide, o.radius, o.smart_radius, brush);
+        let same = last.as_ref().filter(|l| {
+            (l.radius, l.smart_radius) == (o.radius, o.smart_radius)
+                && l.selection.same_tiles(&coverage)
+                && l.brush.is_some() == brush.is_some()
+        });
+        let redo = same.map(|l| (&l.coverage, near_painting(l, brush)));
+        let snapped = snap(&coverage, guide, o.radius, o.smart_radius, brush, redo.as_ref().map(|(c, r)| (*c, r.as_slice())));
+        *last = Some(Snapped {
+            selection: coverage,
+            radius: o.radius,
+            smart_radius: o.smart_radius,
+            brush: brush.cloned(),
+            coverage: snapped.clone(),
+        });
+        coverage = snapped;
     }
     if o.smooth > 0.0 {
         // Blurred, then cut again with a narrow ramp: corners round off
@@ -242,25 +278,49 @@ fn unit(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * MAX).round() as u16
 }
 
+/// Coverage (0–1) and colours round a tile, row by row from (`x0`, `y0`).
+struct Near {
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    input: Vec<f32>,
+    colour: Vec<[f32; 3]>,
+}
+
+impl Near {
+    fn at(&self, x: usize, y: usize) -> usize {
+        (y - self.y0) * self.w + (x - self.x0)
+    }
+}
+
 /// `coverage` with its edges found again in `guide`, within `radius` pixels of
 /// where they are: a simple matting. What's selected (or not) all the way
 /// round within `radius` is sure; each pixel nearer the edge than that is as
 /// selected as its colour is along the way from the sure unselected
 /// colour nearby to the sure selected one, so a strand of hair the colour of
 /// the hair round it is selected and the gaps between strands aren't. Tiles
-/// with no edge within reach stay as they are.
+/// with no edge within reach stay as they are. Given `before`, what it gave
+/// last time, only the tiles marked in `redo` (row by row) are found again.
 /// When `smart_radius` is true, the effective radius adapts to the sharpness
 /// of the image edge: narrower on sharp transitions and wider on soft ones.
 /// Where `brush` adds, each pixel is as selected as its colour is along
 /// the way from the sure unselected colour round it to the sure selected
 /// one, however far it is from the edge; where it restores, the edge is
 /// kept as it was.
-fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], radius: f32, smart_radius: bool, brush: Option<&EdgeBrush>) -> Tiled<u16> {
+fn snap(
+    coverage: &Tiled<u16>,
+    guide: &[[f32; 3]],
+    radius: f32,
+    smart_radius: bool,
+    brush: Option<&EdgeBrush>,
+    before: Option<(&Tiled<u16>, &[bool])>,
+) -> Tiled<u16> {
     let (w, h) = (coverage.width() as usize, coverage.height() as usize);
     let tile = TILE as usize;
     let r = radius.round() as usize;
     let window = brush.map_or(0, EdgeBrush::window);
-    Tiled::from_tiles(w as u32, h as u32, coverage.fill(), |col, row| {
+    let snapped = |col: u32, row: u32| {
         let own = || coverage.tile(col, row).map(<[u16]>::to_vec);
         let painted = brush.and_then(|b| b.painted.tile(col, row));
         let adds = painted.is_some_and(|t| t.iter().any(|&v| v > 0));
@@ -287,65 +347,67 @@ fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], radius: f32, smart_radius: bo
                 return own();
             }
         }
-        // Sure pixels are found `r` away, then their colours averaged over
-        // `2 * r` more; for the brush, over four times its window.
-        let reach = if adds { (3 * r).max(4 * window) } else { 3 * r };
-        let (x0, y0, x1, y1) = near(reach);
-        let (ww, wh) = (x1 - x0, y1 - y0);
-        let at = |x: usize, y: usize| (y - y0) * ww + (x - x0);
-        let input: Vec<f32> = (y0..y1)
-            .flat_map(|y| (x0..x1).map(move |x| f32::from(coverage.get(x as u32, y as u32)) / MAX))
-            .collect();
-        let colour: Vec<[f32; 3]> = (y0..y1).flat_map(|y| guide[y * w + x0..y * w + x1].iter().copied()).collect();
+        // The coverage and colours within `m` of the tile.
+        let gather = |m: usize| {
+            let (x0, y0, x1, y1) = near(m);
+            let input = (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| f32::from(coverage.get(x as u32, y as u32)) / MAX))
+                .collect();
+            let colour = (y0..y1).flat_map(|y| guide[y * w + x0..y * w + x1].iter().copied()).collect();
+            Near { x0, y0, w: x1 - x0, h: y1 - y0, input, colour }
+        };
         // Where the brush adds: the mean colours of what's surely selected
         // (not painted, and selected) and surely not, as count then red,
         // green and blue, within its window, then four times as far.
         let brushed = adds.then(|| {
             let painted = &brush.expect("adds").painted;
-            let unpainted: Vec<bool> =
-                (y0..y1).flat_map(|y| (x0..x1).map(move |x| painted.get(x as u32, y as u32) <= 0)).collect();
-            let known = |selected: bool| -> Vec<[f32; 4]> {
-                (0..ww * wh)
-                    .map(|i| {
-                        let (m, c) = (input[i], colour[i]);
-                        let sure = if selected { m >= 0.98 } else { m <= 0.02 };
-                        if sure && unpainted[i] { [1.0, c[0], c[1], c[2]] } else { [0.0; 4] }
-                    })
-                    .collect()
-            };
-            let (selected, unselected) = (known(true), known(false));
-            [
-                box_filter_2d(selected.clone(), ww, wh, window),
-                box_filter_2d(unselected.clone(), ww, wh, window),
-                box_filter_2d(selected, ww, wh, 4 * window),
-                box_filter_2d(unselected, ww, wh, 4 * window),
-            ]
+            [window, 4 * window].map(|m| {
+                let n = gather(m);
+                let known = |selected: bool| -> Vec<[f32; 4]> {
+                    (0..n.w * n.h)
+                        .map(|i| {
+                            let (v, c) = (n.input[i], n.colour[i]);
+                            let sure = if selected { v >= 0.98 } else { v <= 0.02 };
+                            let unpainted = || painted.get((n.x0 + i % n.w) as u32, (n.y0 + i / n.w) as u32) <= 0;
+                            if sure && unpainted() { [1.0, c[0], c[1], c[2]] } else { [0.0; 4] }
+                        })
+                        .collect()
+                };
+                let means = [known(true), known(false)].map(|k| box_filter_2d(k, n.w, n.h, m));
+                (n, means)
+            })
         });
         // The colour a mean over a box `across` pixels wide gives, if it
         // has at least half a pixel in it.
         let colour_of = |m: [f32; 4], across: usize| (m[0] * (across * across) as f32 >= 0.5).then(|| [1, 2, 3].map(|c| m[c] / m[0]));
-        let guess = |i: usize| {
-            let means = brushed.as_ref()?;
-            let (near, far) = (2 * window + 1, 8 * window + 1);
-            let fc = colour_of(means[0][i], near).or_else(|| colour_of(means[2][i], far))?;
-            let bc = colour_of(means[1][i], near).or_else(|| colour_of(means[3][i], far))?;
-            let d = [0, 1, 2].map(|c| fc[c] - bc[c]);
+        let guess = |x: usize, y: usize| {
+            let [(close, close_means), (far, far_means)] = brushed.as_ref()?;
+            let (i, k) = (close.at(x, y), far.at(x, y));
+            let (across, wide) = (2 * window + 1, 8 * window + 1);
+            let fc = colour_of(close_means[0][i], across).or_else(|| colour_of(far_means[0][k], wide))?;
+            let bc = colour_of(close_means[1][i], across).or_else(|| colour_of(far_means[1][k], wide))?;
+            let (d, colour) = ([0, 1, 2].map(|c| fc[c] - bc[c]), close.colour[i]);
             let length = d.iter().map(|v| v * v).sum::<f32>();
-            (length >= 4e-4).then(|| ((0..3).map(|c| (colour[i][c] - bc[c]) * d[c]).sum::<f32>() / length).clamp(0.0, 1.0))
+            (length >= 4e-4).then(|| ((0..3).map(|c| (colour[c] - bc[c]) * d[c]).sum::<f32>() / length).clamp(0.0, 1.0))
         };
         if r == 0 {
             let mut out = own().unwrap_or_else(|| vec![coverage.fill(); TILE_PIXELS]);
             for y in ty..(ty + tile).min(h) {
                 for x in tx..(tx + tile).min(w) {
-                    let (i, j) = (at(x, y), (y - ty) * tile + (x - tx));
-                    let p = painted.map_or(0.0, |t| f32::from(t[j]) / 127.0);
-                    if let Some(g) = guess(i).filter(|_| p > 0.0) {
-                        out[j] = unit(input[i] + (g - input[i]) * p);
+                    let j = (y - ty) * tile + (x - tx);
+                    let (v, p) = (f32::from(out[j]) / MAX, painted.map_or(0.0, |t| f32::from(t[j]) / 127.0));
+                    if let Some(g) = guess(x, y).filter(|_| p > 0.0) {
+                        out[j] = unit(v + (g - v) * p);
                     }
                 }
             }
             return Some(out);
         }
+        // Sure pixels are found `r` away, then their colours averaged over
+        // `2 * r` more.
+        let n = gather(3 * r);
+        let (ww, wh, input, colour) = (n.w, n.h, &n.input, &n.colour);
+        let at = |x: usize, y: usize| n.at(x, y);
         let around = box_filter_2d(input.iter().map(|&v| [v, 0.0, 0.0, 0.0]).collect(), ww, wh, r);
         let inside: Vec<bool> = around.iter().map(|m| m[0] > 0.9999).collect();
         let outside: Vec<bool> = around.iter().map(|m| m[0] < 0.0001).collect();
@@ -374,7 +436,7 @@ fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], radius: f32, smart_radius: bo
                 }
             }
             if any {
-                (Some(edt(&boundary, ww, wh)), Some(edge_width(&colour, ww, wh, r)))
+                (Some(edt(&boundary, ww, wh)), Some(edge_width(colour, ww, wh, r)))
             } else {
                 (None, None)
             }
@@ -411,14 +473,50 @@ fn snap(coverage: &Tiled<u16>, guide: &[[f32; 3]], radius: f32, smart_radius: bo
                 // colour has it.
                 if p < 0.0 {
                     v = input[i] + (v - input[i]) * (1.0 + p);
-                } else if let Some(g) = guess(i).filter(|_| p > 0.0) {
+                } else if let Some(g) = guess(x, y).filter(|_| p > 0.0) {
                     v += (g - v) * p;
                 }
                 out[(y - ty) * tile + (x - tx)] = unit(v);
             }
         }
         Some(out)
-    })
+    };
+    let Some((before, redo)) = before else {
+        return Tiled::from_tiles(w as u32, h as u32, coverage.fill(), snapped);
+    };
+    // The rest are shared with `before`.
+    let mut out = before.clone();
+    out.par_update(|col, row, _| {
+        redo[(row * coverage.cols() + col) as usize]
+            .then(|| snapped(col, row).unwrap_or_else(|| vec![coverage.fill(); TILE_PIXELS]))
+    });
+    out
+}
+
+/// Which tiles, row by row, [`snap`] finds the edge in again now `brush`
+/// has painted more than it had `before`: those it's changed, and those
+/// it adds to within four times its window of them, or anywhere once its
+/// window's grown.
+fn near_painting(before: &Snapped, brush: Option<&EdgeBrush>) -> Vec<bool> {
+    let (cols, rows) = (before.coverage.cols() as usize, before.coverage.rows() as usize);
+    let Some((before, brush)) = before.brush.as_ref().zip(brush) else {
+        return vec![false; cols * rows];
+    };
+    let changed: Vec<bool> =
+        (0..cols * rows).map(|i| !brush.painted.same_tile(&before.painted, (i % cols) as u32, (i / cols) as u32)).collect();
+    let grown = brush.window() != before.window();
+    let reach = (4 * brush.window()).div_ceil(TILE as usize);
+    (0..cols * rows)
+        .map(|i| {
+            let (col, row) = (i % cols, i / cols);
+            let near = || {
+                (row.saturating_sub(reach)..(row + reach + 1).min(rows))
+                    .any(|r| changed[r * cols + col.saturating_sub(reach)..r * cols + (col + reach + 1).min(cols)].contains(&true))
+            };
+            let adds = || brush.painted.tile(col as u32, row as u32).is_some_and(|t| t.iter().any(|&v| v > 0));
+            changed[i] || ((grown || near()) && adds())
+        })
+        .collect()
 }
 
 /// Per-pixel transition width (pixels) of the guide's luminance: local range / local max
@@ -783,6 +881,78 @@ mod tests {
         restore.paint((40.0, 0.0), (40.0, 60.0), 20.0, false);
         let restored = refine_edge(&rough, &blurred, &o, Some(&restore));
         assert!(restored.at(41, 30) < 0.01 && restored.at(38, 30) > 0.99, "{}", restored.at(41, 30));
+    }
+
+    /// Strands of a warm colour on blue, both mottled, `w` × `h`, and a
+    /// selection of the subject they come off.
+    fn strands(w: u32, h: u32) -> (Vec<[f32; 3]>, Selection) {
+        let strand = |x: u32, y: u32| x < w / 3 || (x + y / 7).is_multiple_of(5);
+        let px = (0..w * h).map(|i| {
+            let (x, y) = (i % w, i / w);
+            let d = ((x * 7919 + y * 104729) % 9000) as u16;
+            if strand(x, y) { [50000 + d, 40000 + d / 2, 13000, 65535] } else { [6500, 15700 + d, 46400 + d / 2, 65535] }
+        });
+        let guide = colours(&Raster::new(w, h, px.collect()));
+        (guide, Selection::rectangle(w, h, (0.0, 0.0), (w as f32 / 3.0, h as f32)))
+    }
+
+    #[test]
+    fn refining_again_after_painting_gives_what_refining_afresh_does() {
+        let (w, h) = (1500, 1100);
+        let (guide, rough) = strands(w, h);
+        let mut brush = EdgeBrush::new(w, h);
+        let mut last = None;
+        let strokes = [
+            ((480.0, 100.0), (560.0, 300.0), 60.0, true),
+            ((560.0, 300.0), (900.0, 320.0), 60.0, true),
+            ((700.0, 900.0), (720.0, 1000.0), 150.0, true),
+            ((520.0, 200.0), (520.0, 600.0), 40.0, false),
+            ((1400.0, 50.0), (1450.0, 60.0), 20.0, true),
+        ];
+        for smart_radius in [false, true] {
+            let o = EdgeOptions { radius: 12.0, smart_radius, ..Default::default() };
+            for (a, b, size, add) in strokes {
+                brush.paint(a, b, size, add);
+                let again = refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush));
+                let afresh = refine_edge(&rough, &guide, &o, Some(&brush));
+                assert!(again.coverage.to_vec() == afresh.coverage.to_vec(), "{a:?} → {b:?}, smart radius {smart_radius}");
+            }
+        }
+        // And with what comes after.
+        let o = EdgeOptions { radius: 12.0, smooth: 20.0, feather: 3.0, contrast: 30.0, ..Default::default() };
+        brush.paint((600.0, 600.0), (650.0, 700.0), 80.0, true);
+        let again = refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush));
+        assert!(again.coverage.to_vec() == refine_edge(&rough, &guide, &o, Some(&brush)).coverage.to_vec());
+    }
+
+    /// `cargo test --release -p omapix-engine refining_again_at_24_mp -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn refining_again_at_24_mp_keeps_up_with_the_brush() {
+        let (w, h) = (6000, 4000);
+        let (guide, rough) = strands(w, h);
+        let o = EdgeOptions { radius: 40.0, ..Default::default() };
+        let mut brush = EdgeBrush::new(w, h);
+        let mut last = None;
+        let time = |f: &mut dyn FnMut()| {
+            let start = std::time::Instant::now();
+            f();
+            start.elapsed().as_secs_f32()
+        };
+        println!("first: {:.3} s", time(&mut || drop(refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush)))));
+        // A 1500 px stroke of a 200 px brush, 20 px at a time.
+        let mut segments: Vec<f32> = (0..75)
+            .map(|i| {
+                let x = 1900.0 + 20.0 * i as f32;
+                brush.paint((x, 1500.0), (x + 20.0, 1500.0), 200.0, true);
+                time(&mut || drop(refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush))))
+            })
+            .collect();
+        segments.sort_by(f32::total_cmp);
+        let afresh = time(&mut || drop(refine_edge(&rough, &guide, &o, Some(&brush))));
+        let (median, slowest) = (segments[segments.len() / 2], segments[segments.len() - 1]);
+        println!("a segment: {median:.3} s, the slowest {slowest:.3} s; afresh: {afresh:.3} s");
+        assert!(median < 0.1, "{median}");
     }
 
     #[test]

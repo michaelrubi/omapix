@@ -510,9 +510,49 @@ pub(crate) fn box_filter_2d(mut buf: Vec<[f32; 4]>, w: usize, h: usize, r: usize
         return buf;
     }
     blur_rows(&mut buf, w, &[r]);
-    let mut t = transpose(&buf, w, h);
-    blur_rows(&mut t, h, &[r]);
-    transpose(&t, h, w)
+    blur_columns(&buf, w, h, r)
+}
+
+/// Box-blur every column, clamping at the edges, as [`blur_rows`] would
+/// the image turned on its side, but reading it a row at a time: strips
+/// of columns side by side.
+fn blur_columns(buf: &[[f32; 4]], w: usize, h: usize, r: usize) -> Vec<[f32; 4]> {
+    const STRIP: usize = 64;
+    let scale = 1.0 / (2 * r + 1) as f64;
+    let strips: Vec<Vec<[f32; 4]>> = (0..w.div_ceil(STRIP))
+        .into_par_iter()
+        .map(|strip| {
+            let (x0, x1) = (strip * STRIP, ((strip + 1) * STRIP).min(w));
+            let row = |y: isize| &buf[y.clamp(0, h as isize - 1) as usize * w..][x0..x1];
+            // f64 running sums, added to in the same order as box_row's.
+            let mut sum = vec![[0f64; 4]; x1 - x0];
+            for i in -(r as isize)..=(r as isize) {
+                for (s, p) in sum.iter_mut().zip(row(i)) {
+                    for c in 0..4 {
+                        s[c] += f64::from(p[c]);
+                    }
+                }
+            }
+            let mut out = Vec::with_capacity((x1 - x0) * h);
+            for y in 0..h as isize {
+                out.extend(sum.iter().map(|s| s.map(|v| (v * scale) as f32)));
+                for ((s, add), sub) in sum.iter_mut().zip(row(y + r as isize + 1)).zip(row(y - r as isize)) {
+                    for c in 0..4 {
+                        s[c] += f64::from(add[c]) - f64::from(sub[c]);
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+    let mut out = vec![[0f32; 4]; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, line)| {
+        for (i, strip) in strips.iter().enumerate() {
+            let n = strip.len() / h;
+            line[i * STRIP..i * STRIP + n].copy_from_slice(&strip[y * n..(y + 1) * n]);
+        }
+    });
+    out
 }
 
 /// Guided filter (He et al.) using box filters: `input` smoothed so its
