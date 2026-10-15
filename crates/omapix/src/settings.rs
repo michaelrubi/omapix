@@ -79,6 +79,8 @@ pub struct FilterSettings {
     pub mask_density: f32,
     pub select_and_mask: omapix_engine::refine::EdgeOptions,
     pub select_and_mask_output: crate::select_and_mask::Output,
+    /// Select and Mask's view; unset, it's Quick Mask's red.
+    pub select_and_mask_view: Option<crate::editor::Backdrop>,
     /// View › Proof Setup's ICC profile; unset, it's sRGB (the web).
     pub proof_profile: Option<PathBuf>,
     /// Frequency Separation's radius; unset, it's worked out from the
@@ -127,6 +129,7 @@ impl Default for FilterSettings {
             mask_density: 100.0,
             select_and_mask: Default::default(),
             select_and_mask_output: Default::default(),
+            select_and_mask_view: None,
             proof_profile: None,
             separation_radius: None,
             separation3_fine: None,

@@ -1,7 +1,9 @@
 //! Select › Select and Mask… (Ctrl+Alt+R): Photoshop's workspace cut down
 //! to its sliders. The refined selection is worked out on a thread of its
-//! own as they move, and shown over the image in Quick Mask's red; OK makes
-//! it the selection, a layer mask, or a new layer with it as its mask.
+//! own as they move, and shown over the image in Quick Mask's red, on black
+//! or white, or in black and white (F cycles them, and holding X shows the
+//! image as it is); OK makes it the selection, a layer mask, or a new layer
+//! with it as its mask.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -10,7 +12,7 @@ use omapix_engine::refine::{EdgeOptions, colours, decontaminate_colours, refine_
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::Mask;
 
-use crate::editor::Editor;
+use crate::editor::{Backdrop, Editor, View};
 use crate::theme::Theme;
 
 /// Where the refined selection goes.
@@ -34,9 +36,26 @@ impl Output {
     }
 }
 
+/// Photoshop's View Modes that Omapix has, in the order F goes through
+/// them, with the key for each: Quick Mask's red (`None`), then the
+/// backdrops.
+const VIEWS: [(Option<Backdrop>, &str, egui::Key); 4] = [
+    (None, "Overlay", egui::Key::V),
+    (Some(Backdrop::Black), "On Black", egui::Key::A),
+    (Some(Backdrop::White), "On White", egui::Key::T),
+    (Some(Backdrop::Grey), "Black & White", egui::Key::K),
+];
+
+/// What the canvas shows for each view.
+fn view(backdrop: Option<Backdrop>) -> View {
+    backdrop.map_or(View::QuickMask, View::Refined)
+}
+
 pub struct SelectAndMask {
     pub options: EdgeOptions,
     pub output: Output,
+    /// What the refined selection is shown on: `None` is Quick Mask's red.
+    pub backdrop: Option<Backdrop>,
     /// The options last sent to the worker.
     sent: Option<EdgeOptions>,
     tx: Sender<EdgeOptions>,
@@ -47,7 +66,7 @@ pub struct SelectAndMask {
 
 impl SelectAndMask {
     /// Starts refining `editor`'s selection, if it has one.
-    pub fn open(ctx: &egui::Context, editor: &Editor, options: EdgeOptions, output: Output) -> Option<Self> {
+    pub fn open(ctx: &egui::Context, editor: &Editor, options: EdgeOptions, output: Output, backdrop: Option<Backdrop>) -> Option<Self> {
         let selection = editor.doc.selection.clone()?;
         let doc = editor.doc.clone();
         let (tx, requests) = channel::<EdgeOptions>();
@@ -69,6 +88,7 @@ impl SelectAndMask {
         Some(Self {
             options,
             output,
+            backdrop,
             sent: None,
             tx,
             rx,
@@ -91,6 +111,24 @@ impl SelectAndMask {
             editor.preview_selection(answer.1.clone());
             self.latest = Some(answer);
         }
+        // The view's keys, unless a slider's number is being typed.
+        let mut original = false;
+        if !ctx.egui_wants_keyboard_input() {
+            ctx.input(|i| {
+                let at = VIEWS.iter().position(|v| v.0 == self.backdrop).unwrap_or(0);
+                if i.key_pressed(egui::Key::F) {
+                    let step = if i.modifiers.shift { VIEWS.len() - 1 } else { 1 };
+                    self.backdrop = VIEWS[(at + step) % VIEWS.len()].0;
+                }
+                if let Some(v) = VIEWS.iter().find(|v| i.key_pressed(v.2)) {
+                    self.backdrop = v.0;
+                }
+                original = i.key_down(egui::Key::X);
+            });
+        }
+        if editor.previewing_selection() {
+            editor.set_view(if original { View::Image } else { view(self.backdrop) });
+        }
         let has_pixels = editor.doc.layer(editor.active).is_some_and(|l| l.has_pixels());
         let mut result = None;
         let area = egui::Modal::default_area(egui::Id::new("select-and-mask"))
@@ -109,6 +147,16 @@ impl SelectAndMask {
                     ui.end_row();
                 };
                 egui::Grid::new("select-and-mask-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                    ui.label("View").on_hover_text("F goes through the views, and holding X shows the image as it is");
+                    let label = |b| VIEWS.iter().find(|v| v.0 == b).map_or("", |v| v.1);
+                    ComboBox::from_id_salt("select-and-mask-view")
+                        .selected_text(label(self.backdrop))
+                        .show_ui(ui, |ui| {
+                            for (backdrop, name, key) in VIEWS {
+                                ui.selectable_value(&mut self.backdrop, backdrop, format!("{name} ({key:?})"));
+                            }
+                        });
+                    ui.end_row();
                     slider(ui, "Radius", &mut o.radius, 0.0..=250.0, " px", "Edge Detection: how far either side of the edge to look for the photo's own, for hair and fur");
                     ui.label("");
                     ui.checkbox(&mut o.smart_radius, "Smart Radius")
@@ -147,7 +195,13 @@ impl SelectAndMask {
                 });
                 ui.add_space(8.0);
                 let ready = self.latest.as_ref().is_some_and(|(o, _)| *o == self.options);
-                let status = if ready { "Red shows what isn't selected" } else { "Refining…" };
+                let status = match (ready, self.backdrop) {
+                    (false, _) => "Refining…",
+                    (true, None) => "Red shows what isn't selected",
+                    (true, Some(Backdrop::Black)) => "Black shows what isn't selected",
+                    (true, Some(Backdrop::White)) => "White shows what isn't selected",
+                    (true, Some(Backdrop::Grey)) => "White is selected, black isn't",
+                };
                 ui.label(RichText::new(status).color(theme.dark_foreground));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
