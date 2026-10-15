@@ -586,6 +586,12 @@ pub struct App {
     v_down: bool,
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
+    /// Where the pen moved this frame (egui points), and its pressure at
+    /// each place.
+    pen_moves: Vec<(egui::Pos2, f32)>,
+    /// The pressure of the pen move being painted, while
+    /// [`Self::canvas_input`] goes through a frame's moves.
+    pen: Option<f32>,
     /// The monitor Omapix is on, for showing images in its colours.
     monitor: Option<crate::monitor::Watch>,
     proof: ProofView,
@@ -694,6 +700,8 @@ impl App {
             pending_drops: Vec::new(),
             v_down: false,
             tablet: Tablet::connect(cc),
+            pen_moves: Vec::new(),
+            pen: None,
             monitor: Some(crate::monitor::Watch::new()),
             proof,
             content_fill: ContentFill::default(),
@@ -3986,8 +3994,34 @@ self.filters.remember(&filter);
     /// Liquify's pressure, scaled by a pen's.
     fn liquify_pressure(&self) -> f32 {
         let options = self.tools.liquify;
-        let pen = self.tablet.as_ref().filter(|_| options.pen_pressure).map_or(1.0, Tablet::pressure);
+        let pen = if options.pen_pressure { self.pen_pressure() } else { 1.0 };
         options.pressure * pen
+    }
+
+    /// The pen's pressure, 0–1, at the move being painted, or 1 with a
+    /// mouse.
+    fn pen_pressure(&self) -> f32 {
+        self.pen.unwrap_or_else(|| self.tablet.as_ref().map_or(1.0, Tablet::pressure))
+    }
+
+    /// `input` from the canvas. A pen reports many places a frame: dragging
+    /// with it, each is a point of the stroke with its own pressure, rather
+    /// than the stroke going straight to where the pen ended up at the
+    /// pressure it ended with.
+    fn canvas_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let moves = std::mem::take(&mut self.pen_moves);
+        let (ToolInput::StrokeMove(_), Some(editor)) = (input, &self.editor) else {
+            return self.tool_input(input, modifiers);
+        };
+        if moves.is_empty() {
+            return self.tool_input(input, modifiers);
+        }
+        let points: Vec<_> = moves.iter().map(|&(at, pressure)| (editor.canvas.to_image(at), pressure)).collect();
+        for (p, pressure) in points {
+            self.pen = Some(pressure);
+            self.tool_input(ToolInput::StrokeMove(p), modifiers);
+        }
+        self.pen = None;
     }
 
     /// Reconstruct, Pucker and Bloat work a little every frame while the
@@ -4025,6 +4059,7 @@ self.filters.remember(&filter);
             self.tools.drag_brush(size, hardness);
             return;
         }
+        let pressure = self.pen_pressure();
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -4057,7 +4092,6 @@ self.filters.remember(&filter);
             self.paint_bucket_input(input);
             return;
         }
-        let pressure = self.tablet.as_ref().map_or(1.0, Tablet::pressure);
         match input {
             ToolInput::StrokeBegin(p) => {
                 let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p)
@@ -5399,7 +5433,7 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::drop::take(raw_input);
         if let Some(tablet) = &mut self.tablet {
-            tablet.take(raw_input, ctx.zoom_factor(), ctx.input(|i| i.modifiers));
+            self.pen_moves = tablet.take(raw_input, ctx.zoom_factor(), ctx.input(|i| i.modifiers));
         }
     }
 
@@ -5701,7 +5735,7 @@ impl eframe::App for App {
         });
         if let Some(input) = input {
             let modifiers = ui.input(|i| i.modifiers);
-            self.tool_input(input, modifiers);
+            self.canvas_input(input, modifiers);
         }
         if let Some(response) = menu_on {
             response.context_menu(|ui| self.canvas_menu(ui));
@@ -5978,6 +6012,42 @@ mod tests {
     }
 
     #[test]
+    fn each_place_the_pen_reports_in_a_frame_has_its_own_pressure() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().doc.selection = None;
+        app.tools.select(crate::tools::Tool::Brush);
+        app.tools.set_size(40.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| {
+            let editor = app.editor.as_mut().unwrap();
+            editor.canvas.show(ui, egui::Color32::BLACK, crate::canvas::Overlay::default());
+        });
+        output.textures_delta.clear();
+        // Where image point `p` is on screen.
+        let canvas = &app.editor.as_ref().unwrap().canvas;
+        let origin = canvas.to_image(egui::Pos2::ZERO);
+        let scale = canvas.to_image(egui::pos2(1.0, 0.0)).x - origin.x;
+        let screen = |x: f32, y: f32| egui::pos2((x - origin.x) / scale, (y - origin.y) / scale);
+
+        // In one frame the pen presses light, then hard, then light again.
+        app.pen = Some(0.2);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(120.0, 200.0)), egui::Modifiers::NONE);
+        app.pen = None;
+        app.pen_moves = [(200.0, 0.2), (240.0, 1.0), (280.0, 0.2)].map(|(x, p)| (screen(x, 200.0), p)).to_vec();
+        app.canvas_input(ToolInput::StrokeMove(egui::pos2(280.0, 200.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert!(app.pen_moves.is_empty() && app.pen.is_none());
+
+        // Thick where it pressed hard, though it ended light.
+        let editor = app.editor.as_ref().unwrap();
+        let painted = |x: u32, y: u32| editor.doc.layer(editor.active).unwrap().pixels.get(x, y)[0] < 30000;
+        assert!(painted(240, 200) && painted(240, 214), "wide where it pressed hard");
+        assert!(painted(160, 200) && !painted(160, 214), "thin where it pressed lightly");
+    }
+
+    #[test]
     fn image_locked_layer_refuses_stroke_and_fill_with_message() {
         let ctx = egui::Context::default();
         let mut app = test_app();
@@ -6233,6 +6303,8 @@ mod tests {
             pending_drops: Vec::new(),
             v_down: false,
             tablet: None,
+            pen_moves: Vec::new(),
+            pen: None,
             monitor: None,
             proof: Default::default(),
             content_fill: ContentFill::default(),

@@ -622,7 +622,7 @@ impl Canvas {
     }
 
     /// Screen position (points) to image pixels.
-    fn to_image(&self, p: Pos2) -> Pos2 {
+    pub fn to_image(&self, p: Pos2) -> Pos2 {
         ((p - self.rect.min - self.snapped_origin(self.ppp)) / (self.view.zoom / self.ppp))
             .to_pos2()
     }
