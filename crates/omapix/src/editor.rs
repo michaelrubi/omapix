@@ -43,6 +43,16 @@ pub enum SeparationBand {
     Tone,
 }
 
+/// What Select and Mask shows a refined selection on, besides Quick Mask's
+/// red (Photoshop's On Black, On White and Black & White views).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Backdrop {
+    Black,
+    White,
+    /// The selection itself, in grey.
+    Grey,
+}
+
 /// What the canvas shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum View {
@@ -76,9 +86,17 @@ pub enum View {
     Channel(Channel),
     /// A saved alpha channel, in grey.
     Alpha(u64),
+    /// The image where the selection selects it, on a backdrop where it
+    /// doesn't (Select and Mask's views besides Quick Mask's red).
+    Refined(Backdrop),
 }
 
 impl View {
+    /// Whether it shows the selection itself, so its outline isn't drawn.
+    pub fn shows_selection(self) -> bool {
+        matches!(self, View::QuickMask | View::Refined(_))
+    }
+
     /// Whether it's rendered whole by [`render_view`], rather than tile by
     /// tile, in place, by [`draw_tiles`].
     fn whole(self) -> bool {
@@ -2371,7 +2389,7 @@ pub(crate) fn render_view(
             };
             (Render::new(image), None)
         }
-        View::Mask(_) | View::MaskOverlay(_) | View::QuickMask | View::Channel(_) => {
+        View::Mask(_) | View::MaskOverlay(_) | View::QuickMask | View::Refined(_) | View::Channel(_) => {
             let mut image = Raster::new(
                 doc.width,
                 doc.height,
@@ -2436,18 +2454,20 @@ pub(crate) fn render_view(
 
 /// Tint tiles with `colour` where `coverage` is less than MAX (masked / unselected),
 /// fading to clear where revealed / selected.
+/// `colour` over `out` where `coverage` hides, at `opacity` (of 65535).
 fn apply_overlay(
     out: &mut [Vec<Pixel>],
     tiles: &[(u32, u32)],
     coverage: &Tiled<u16>,
     colour: Pixel,
+    opacity: u32,
 ) {
     const MAX: u32 = u16::MAX as u32;
     for (tile, &(col, row)) in out.iter_mut().zip(tiles) {
         let values = coverage.tile(col, row);
         for (i, pixel) in tile.iter_mut().enumerate() {
             let v = values.map_or(coverage.fill(), |t| t[i]);
-            let a = (MAX - v as u32) * OVERLAY_OPACITY / MAX;
+            let a = (MAX - v as u32) * opacity / MAX;
             // Opaque colour over the pixel, so it shows on
             // transparent areas too.
             for (c, k) in pixel.iter_mut().zip(colour) {
@@ -2474,12 +2494,12 @@ fn draw_tiles(
             .find(|l| l.id == id)
             .and_then(|l| l.mask.as_ref())
     };
-    match view {
-        // The mask as opaque grey.
-        View::Mask(id) => tiles
+    // `coverage` as opaque grey.
+    let grey = |coverage: Option<&Tiled<u16>>| {
+        tiles
             .iter()
             .map(|&(col, row)| {
-                let values = mask(id).map(|m| (m.pixels.tile(col, row), m.pixels.fill()));
+                let values = coverage.map(|c| (c.tile(col, row), c.fill()));
                 (0..TILE_PIXELS)
                     .map(|i| {
                         let v = values.map_or(0, |(t, fill)| t.map_or(fill, |t| t[i]));
@@ -2487,20 +2507,32 @@ fn draw_tiles(
                     })
                     .collect()
             })
-            .collect(),
+            .collect()
+    };
+    match view {
+        View::Mask(id) => grey(mask(id).map(|m| &m.pixels)),
         // Tinted with `colour` where the mask hides, fading to clear where
         // it reveals.
         View::MaskOverlay(id) => {
             let mut out = composite::composite_tiles(layers, tiles, groups);
             if let Some(mask) = mask(id) {
-                apply_overlay(&mut out, tiles, &mask.pixels, colour);
+                apply_overlay(&mut out, tiles, &mask.pixels, colour, OVERLAY_OPACITY);
             }
             out
         }
         View::QuickMask => {
             let mut out = composite::composite_tiles(layers, tiles, groups);
             if let Some(sel) = selection {
-                apply_overlay(&mut out, tiles, &sel.coverage, colour);
+                apply_overlay(&mut out, tiles, &sel.coverage, colour, OVERLAY_OPACITY);
+            }
+            out
+        }
+        View::Refined(Backdrop::Grey) => grey(selection.map(|s| &s.coverage)),
+        View::Refined(backdrop) => {
+            let mut out = composite::composite_tiles(layers, tiles, groups);
+            if let Some(sel) = selection {
+                let v = if backdrop == Backdrop::White { u16::MAX } else { 0 };
+                apply_overlay(&mut out, tiles, &sel.coverage, [v, v, v, u16::MAX], u16::MAX as u32);
             }
             out
         }
@@ -2547,7 +2579,7 @@ impl InPlace {
         let mut previewed = false;
         if let Some((level, (x0, y0, x1, y1))) = self
             .visible
-            .filter(|(level, _)| *level > 0 && self.view != View::QuickMask)
+            .filter(|(level, _)| *level > 0 && !self.view.shows_selection())
         {
             let layers = self
                 .reduced
@@ -2934,6 +2966,20 @@ mod tests {
         });
         e.update(&ctx);
         assert_eq!(e.view(), View::Image);
+    }
+
+    #[test]
+    fn a_refined_selection_shows_on_black_on_white_or_as_grey() {
+        let mut e = editor();
+        e.doc.selection = Some(Selection::rectangle(600, 400, (200.0, 200.0), (400.0, 400.0)));
+        let shown = |view| {
+            let (render, _) = render_view(&e.doc, view, RED, None);
+            (render.sample_for_test(100, 100), render.sample_for_test(300, 300))
+        };
+        let image = [30000, 30000, 30000, 65535];
+        assert_eq!(shown(View::Refined(Backdrop::Black)), ([0, 0, 0, 65535], image));
+        assert_eq!(shown(View::Refined(Backdrop::White)), ([65535; 4], image));
+        assert_eq!(shown(View::Refined(Backdrop::Grey)), ([0, 0, 0, 65535], [65535; 4]));
     }
 
     #[test]

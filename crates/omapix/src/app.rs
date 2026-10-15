@@ -1743,11 +1743,12 @@ impl App {
                 }
             }
             Command::SelectAndMask => {
-                let (options, output) = (self.filters.select_and_mask, self.filters.select_and_mask_output);
+                let f = &self.filters;
+                let (options, output, view) = (f.select_and_mask, f.select_and_mask_output, f.select_and_mask_view);
                 self.dialog = self
                     .editor
                     .as_ref()
-                    .and_then(|editor| crate::select_and_mask::SelectAndMask::open(ctx, editor, options, output))
+                    .and_then(|editor| crate::select_and_mask::SelectAndMask::open(ctx, editor, options, output, view))
                     .map(Dialog::SelectAndMask);
             }
             Command::SaveAdjustmentPreset => {
@@ -2739,8 +2740,8 @@ self.filters.remember(&filter);
                         Some("Viewing layer mask — Alt+click the mask or press Esc to return")
                     }
                     View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
-                    View::QuickMask if editor.previewing_selection() => {
-                        Some("Select and Mask — red shows what isn't selected")
+                    View::QuickMask | View::Refined(_) | View::Image if editor.previewing_selection() => {
+                        Some("Select and Mask — F changes the view, and holding X shows the image")
                     }
                     View::QuickMask => Some("Quick Mask — press Q to exit"),
                     View::Channel(_) | View::Alpha(_) => {
@@ -2883,6 +2884,7 @@ self.filters.remember(&filter);
                     dialog.apply(editor);
                     self.filters.select_and_mask = dialog.options;
                     self.filters.select_and_mask_output = dialog.output;
+                    self.filters.select_and_mask_view = dialog.backdrop;
                     self.filters.save();
                 }
                 Some(false) => dialog.cancel(editor),
@@ -5660,7 +5662,7 @@ impl eframe::App for App {
                 // An AI selection being painted or its threshold dragged
                 // shows as it will be.
                 let selection = self.objects.preview.as_ref().or(editor.doc.selection.as_ref());
-                let outlines = if editor.hide_selection_edges || editor.view() == View::QuickMask {
+                let outlines = if editor.hide_selection_edges || editor.view().shows_selection() || editor.previewing_selection() {
                     &[][..]
                 } else {
                     selection.map_or(&[][..], |s| &s.outlines[..])
@@ -8569,6 +8571,45 @@ mod tests {
         assert!(app.filters.select_and_mask.decontaminate);
         let active_layer = editor.doc.layer(editor.active).unwrap();
         assert!(active_layer.mask.is_some());
+    }
+
+    #[test]
+    fn select_and_mask_changes_view_with_its_keys_and_remembers_it() {
+        use crate::editor::Backdrop;
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let key = |key, pressed, modifiers| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+        let press = |k| key(k, true, egui::Modifiers::NONE);
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            app.editor.as_ref().unwrap().view()
+        };
+        app.run(Command::SelectAndMask, &ctx);
+        for _ in 0..500 {
+            if run(&mut app, vec![]) == View::QuickMask {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(run(&mut app, vec![]), View::QuickMask, "Overlay to start with");
+        assert_eq!(run(&mut app, vec![press(egui::Key::F)]), View::Refined(Backdrop::Black));
+        assert_eq!(run(&mut app, vec![press(egui::Key::F)]), View::Refined(Backdrop::White));
+        let shift = egui::Modifiers::SHIFT;
+        let back = vec![egui::Event::ModifiersChanged(shift), key(egui::Key::F, true, shift)];
+        assert_eq!(run(&mut app, back), View::Refined(Backdrop::Black), "Shift+F goes back");
+        let k = vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE), press(egui::Key::K)];
+        assert_eq!(run(&mut app, k), View::Refined(Backdrop::Grey));
+        assert_eq!(run(&mut app, vec![press(egui::Key::F)]), View::QuickMask, "round to Overlay");
+        assert_eq!(run(&mut app, vec![press(egui::Key::T)]), View::Refined(Backdrop::White));
+        // Holding X shows the image, until it's let go.
+        assert_eq!(run(&mut app, vec![press(egui::Key::X)]), View::Image);
+        assert_eq!(run(&mut app, vec![]), View::Image);
+        assert_eq!(run(&mut app, vec![key(egui::Key::X, false, egui::Modifiers::NONE)]), View::Refined(Backdrop::White));
+        // OK'd, the view's as it was and the choice is kept for next time.
+        assert_eq!(run(&mut app, vec![press(egui::Key::Enter)]), View::Image);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.filters.select_and_mask_view, Some(Backdrop::White));
     }
 
     #[test]
