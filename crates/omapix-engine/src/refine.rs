@@ -463,7 +463,7 @@ fn max_square(src: &[f32], w: usize, h: usize, r: usize, max: bool) -> Vec<f32> 
 
 /// Euclidean distance transform for binary seeds.
 /// Adapted from PhotoCraft (crates/algo/src/selection.rs).
-fn edt(seeds: &[bool], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn edt(seeds: &[bool], w: usize, h: usize) -> Vec<f32> {
     let mut g: Vec<f32> = seeds.iter().map(|&b| if b { 0.0 } else { 1e20 }).collect();
     let n = w.max(h).max(1);
     let (mut f, mut o, mut v, mut z) = (vec![0.0; n], vec![0.0; n], vec![0usize; n], vec![0.0f32; n + 1]);
@@ -645,7 +645,7 @@ mod tests {
         let step_widths = edge_width(&step_guide, w, h, 10);
         // At the step, transition width should be around 2.0 (sharp).
         let step_w = step_widths[10 * w + 50];
-        assert!(step_w >= 1.5 && step_w <= 2.5, "step width: {step_w}");
+        assert!((1.5..=2.5).contains(&step_w), "step width: {step_w}");
 
         // Linear ramp image over 20 pixels from x=40 to x=60.
         let ramp_guide: Vec<[f32; 3]> = (0..w * h)

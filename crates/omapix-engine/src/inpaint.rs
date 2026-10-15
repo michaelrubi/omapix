@@ -83,6 +83,10 @@ const TEXTURE: f32 = 10.0;
 const SEED: u64 = 1;
 /// How many sources the hole's first fill chooses between.
 const PEEL_SOURCES: usize = 4000;
+/// Most target pixels × sources the peel of a thin hole may compare.
+const PEEL_BUDGET: usize = 1 << 28;
+/// A hole at most `1 / THIN_RATIO` as thick as its bounds are long counts as thin.
+const THIN_RATIO: usize = 4;
 /// Smaller sizes than this aren't worth sharing between threads.
 const PARALLEL: usize = 128 * 128;
 /// Rows that one thread matches at a time.
@@ -176,14 +180,39 @@ fn count(s: &[u32], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: i32) -> u
     s[y1 * w1 + x1] + s[y0 * w1 + x0] - s[y0 * w1 + x1] - s[y1 * w1 + x0]
 }
 
-/// The hole's longer side.
-fn extent(w: usize, h: usize, hole: &[bool]) -> Option<usize> {
+/// Bounds of the hole pixels `(x0, y0, x1, y1)`.
+fn hole_bounds(w: usize, h: usize, hole: &[bool]) -> Option<(usize, usize, usize, usize)> {
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
     for (i, _) in hole.iter().enumerate().filter(|(_, hole)| **hole) {
         let (x, y) = (i % w, i / w);
         (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
     }
-    (x1 > x0).then(|| (x1 - x0).max(y1 - y0))
+    (x1 > x0).then_some((x0, y0, x1, y1))
+}
+
+/// How thick the hole is: twice the largest distance from a hole pixel to the
+/// nearest non-hole pixel (pixels outside the image count as non-hole).
+fn hole_thickness(w: usize, h: usize, hole: &[bool]) -> usize {
+    let Some((x0, y0, x1, y1)) = hole_bounds(w, h, hole) else {
+        return 0;
+    };
+    let (bw, bh) = (x1 - x0, y1 - y0);
+    let (gw, gh) = (bw + 2, bh + 2);
+    let mut outside = vec![true; gw * gh];
+    for y in 0..bh {
+        for x in 0..bw {
+            if hole[(y0 + y) * w + (x0 + x)] {
+                outside[(y + 1) * gw + (x + 1)] = false;
+            }
+        }
+    }
+    let deepest = crate::refine::edt(&outside, gw, gh).into_iter().fold(0.0f32, f32::max);
+    (2.0 * deepest).ceil() as usize
+}
+
+/// The hole's longer side.
+fn extent(w: usize, h: usize, hole: &[bool]) -> Option<usize> {
+    hole_bounds(w, h, hole).map(|(x0, y0, x1, y1)| (x1 - x0).max(y1 - y0))
 }
 
 /// Matching and averaging at one size.
@@ -424,6 +453,11 @@ impl Solver<'_> {
 /// there's nowhere outside it to fit a patch.
 fn complete(w: usize, h: usize, img: &[Px], hole: &[bool]) -> Option<Vec<Px>> {
     let mut across = extent(w, h, hole)?;
+    let thickness = hole_thickness(w, h, hole);
+    let thin = thickness.saturating_mul(THIN_RATIO) <= across;
+    if thin {
+        across = thickness;
+    }
     // Halve it until the hole is a couple of patches across.
     let mut levels = vec![Level { w, h, img: img.to_vec(), hole: hole.to_vec() }];
     let mut extents = vec![across];
@@ -445,7 +479,18 @@ fn complete(w: usize, h: usize, img: &[Px], hole: &[bool]) -> Option<Vec<Px>> {
         // The hole starts as the smooth fill at the smallest size, and as
         // the size below's fill after that.
         match &below {
-            None => img = membrane_fill(lw, lh, &img, &hole),
+            None => {
+                let unknown: Vec<bool> = if thin {
+                    let dist = crate::refine::edt(&hole, lw, lh);
+                    (0..lw * lh).map(|i| hole[i] || dist[i] <= RADIUS as f32).collect()
+                } else {
+                    hole.clone()
+                };
+                let m = membrane_fill(lw, lh, &img, &unknown);
+                for i in (0..lw * lh).filter(|&i| hole[i]) {
+                    img[i] = m[i];
+                }
+            }
             Some((bw, bh, filled)) => {
                 for i in (0..lw * lh).filter(|&i| hole[i]) {
                     img[i] = filled[(i / lw / 2).min(bh - 1) * bw + (i % lw / 2).min(bw - 1)];
@@ -501,8 +546,12 @@ fn complete(w: usize, h: usize, img: &[Px], hole: &[bool]) -> Option<Vec<Px>> {
             // soft patches only match soft ones.
             solver.average(&matches, &cost);
         } else {
-            for (i, from) in solver.peel(&source_list).into_iter().enumerate() {
-                matches[i] = from.unwrap_or(matches[i]);
+            let hole_pixels = hole.iter().filter(|&&h| h).count();
+            let sources_compared = source_list.len().min(PEEL_SOURCES);
+            if !thin || hole_pixels.saturating_mul(sources_compared) <= PEEL_BUDGET {
+                for (i, from) in solver.peel(&source_list).into_iter().enumerate() {
+                    matches[i] = from.unwrap_or(matches[i]);
+                }
             }
         }
         let refining = li < smallest && extents[li] > REFINE_EXTENT;
@@ -705,5 +754,96 @@ mod tests {
         let dirty: Vec<Rgb> = img.iter().zip(&hole).map(|(p, &hole)| if hole { [0.0; 3] } else { *p }).collect();
         let out = fill(w, h, &dirty, &hole, &vec![false; w * h]);
         assert!(error(&out, &img, &hole) < 0.01, "{}", error(&out, &img, &hole));
+    }
+
+    #[test]
+    fn a_hole_is_as_thick_as_it_is_through_not_along() {
+        let (w, h) = (240, 120);
+        // A band 200 px long and 9 px thick; a disc of radius 20; the band touching the edge
+        // counts the outside of the image as not hole.
+        let band: Vec<bool> = (0..w * h).map(|i| (20..220).contains(&(i % w)) && (50..59).contains(&(i / w))).collect();
+        let t_band = hole_thickness(w, h, &band);
+        assert!((9..=11).contains(&t_band), "{t_band}");
+
+        let t_disc = hole_thickness(w, h, &disc(w, h, 120.0, 60.0, 20.0));
+        assert!((39..=42).contains(&t_disc), "{t_disc}");
+
+        let edge: Vec<bool> = (0..w * h).map(|i| i / w < 9).collect();
+        let t_edge = hole_thickness(w, h, &edge);
+        assert!((9..=11).contains(&t_edge), "{t_edge}");
+    }
+
+    #[test]
+    fn a_thin_hair_across_texture_leaves_no_ghost() {
+        let (w, h) = (240, 120);
+        let clean = texture(w, h);
+        let y_hair = |x: usize| (h as f32 / 2.0) + (x as f32 * 0.05).sin() * (h as f32 * 0.1);
+        let len = 200;
+        let x0 = (w - len) / 2;
+        let x1 = x0 + len;
+
+        // Dark 1–2 px wavy line (a hair) with anti-aliasing.
+        let dirty: Vec<Rgb> = clean
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                let (x, y) = (i % w, i / w);
+                if (x0..x1).contains(&x) {
+                    let d = ((y as f32) - y_hair(x)).abs();
+                    let alpha = (1.0 - d / 1.0).clamp(0.0, 1.0);
+                    let dark = [0.02; 3];
+                    [
+                        p[0] * (1.0 - alpha) + dark[0] * alpha,
+                        p[1] * (1.0 - alpha) + dark[1] * alpha,
+                        p[2] * (1.0 - alpha) + dark[2] * alpha,
+                    ]
+                } else {
+                    p
+                }
+            })
+            .collect();
+
+        // Selected with a hole a few px thick (thickness <= 1/4 of length).
+        let hole: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                (x0..x1).contains(&x) && ((y as f32) - y_hair(x)).abs() <= 1.5
+            })
+            .collect();
+
+        let hair_core: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                (x0..x1).contains(&x) && ((y as f32) - y_hair(x)).abs() < 0.5
+            })
+            .collect();
+        let hole_rest: Vec<bool> = (0..w * h).map(|i| hole[i] && !hair_core[i]).collect();
+        let near: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                !hole[i] && (x0..x1).contains(&x) && ((y as f32) - y_hair(x)).abs() < 5.5
+            })
+            .collect();
+
+        let light = |p: Rgb| (p[0] + p[1] + p[2]) / 3.0;
+        let mean = |img: &[Rgb], mask: &[bool]| {
+            let (sum, n) = img
+                .iter()
+                .zip(mask)
+                .filter(|(_, m)| **m)
+                .fold((0.0f32, 0usize), |(s, n), (p, _)| (s + light(*p), n + 1));
+            sum / n.max(1) as f32
+        };
+
+        let out = fill(w, h, &dirty, &hole, &vec![false; w * h]);
+
+        let mean_hole = mean(&out, &hole);
+        let mean_near = mean(&out, &near);
+        let mean_core = mean(&out, &hair_core);
+        let mean_rest = mean(&out, &hole_rest);
+
+        let diff = (mean_hole - mean_near).abs();
+        assert!(diff < 0.008, "ghost in fill: mean hole {mean_hole:.4} vs near {mean_near:.4} (diff {diff:.4} >= 0.008)");
+        assert!(mean_core >= mean_rest - 0.002, "hair centre line visible: core {mean_core:.4} < rest {mean_rest:.4}");
     }
 }
