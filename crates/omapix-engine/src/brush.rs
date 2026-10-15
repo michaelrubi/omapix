@@ -320,7 +320,7 @@ impl Stroke {
     fn dab(&mut self, dab: &Dab, touched: &mut Vec<(u32, u32)>) {
         let (w, h) = self.original.size();
         let Dab { x: cx, y: cy, radius: r, roundness, most, flow, .. } = *dab;
-        let hardness = self.settings.hardness.clamp(0.0, 0.999);
+        let hardness = self.settings.hardness.clamp(0.0, 1.0);
         let (sin, cos) = dab.angle.sin_cos();
         let noise = self.settings.dynamics.noise;
         // A mirrored tip is read backwards.
@@ -332,12 +332,13 @@ impl Stroke {
             let (tw, th, longer) = (tw as f32, th as f32, tw.max(th) as f32);
             (tip, tip.level_for(2.0 * r * roundness.max(0.25)), longer / (2.0 * r), tw, th)
         });
-        // How far the dab reaches each way: a round one its radius, a
-        // sampled one half its width along its angle and half its height
-        // across (and the half pixel of its own it fades out over), which
-        // for a tall or wide tip is far less than a square round its
-        // longer side.
-        let (reach_x, reach_y) = tip.map_or((r, r), |(_, _, scale, tw, th)| {
+        // How far the dab reaches each way: a round one its reach (growing
+        // past its nominal radius when soft), a sampled one half its width along
+        // its angle and half its height across (and the half pixel of its own
+        // it fades out over), which for a tall or wide tip is far less than a
+        // square round its longer side.
+        let reach = tip_reach(r, hardness).max(r) + 0.5;
+        let (reach_x, reach_y) = tip.map_or((reach, reach), |(_, _, scale, tw, th)| {
             let (along, across) = ((tw / 2.0 + 0.5) / scale, (th / 2.0 + 0.5) / scale * roundness);
             (along * cos.abs() + across * sin.abs(), along * sin.abs() + across * cos.abs())
         });
@@ -362,10 +363,10 @@ impl Stroke {
                         let (along, across) = ((dx * cos - dy * sin) * flip_x, (dx * sin + dy * cos) / roundness * flip_y);
                         tip.sample(level, 0.5 + along * scale / tw, 0.5 + across * scale / th)
                     } else if roundness >= 1.0 {
-                        falloff((dx.powi(2) + dy.powi(2)).sqrt() / r.max(0.5), hardness)
+                        tip_falloff((dx.powi(2) + dy.powi(2)).sqrt(), r, hardness)
                     } else {
                         // Along the tip, and across it, where it's narrower.
-                        falloff((dx * cos - dy * sin).hypot((dx * sin + dy * cos) / roundness) / r.max(0.5), hardness)
+                        tip_falloff((dx * cos - dy * sin).hypot((dx * sin + dy * cos) / roundness), r, hardness)
                     };
                     if shape <= 0.0 {
                         continue;
@@ -751,17 +752,77 @@ fn each<T: Send>(tiles: &[(u32, u32)], f: impl Fn(&(u32, u32)) -> Option<T> + Sy
     if tiles.len() < 4 { tiles.iter().filter_map(f).collect() } else { tiles.par_iter().filter_map(&f).collect() }
 }
 
-/// Dab shape at distance `d` (fraction of the radius) from the centre:
-/// 1 inside the hard core, easing smoothly to 0 at the edge.
-fn falloff(d: f32, hardness: f32) -> f32 {
-    if d >= 1.0 {
-        0.0
-    } else if d <= hardness {
-        1.0
-    } else {
-        let t = (1.0 - d) / (1.0 - hardness);
-        t * t * (3.0 - 2.0 * t)
+/// Photoshop's measured round tip: a solid core of radius `r0 · R`, then a
+/// Gaussian shoulder `exp(-((d - r0) / s)^2)` of width `s · R`, both by
+/// hardness (0, 0.1, … 1). A soft tip reaches well past its nominal
+/// radius (hardness 0 is a Gaussian of σ ≈ 0.47 R).
+const TIP_SHAPE: [(f32, f32); 11] = [
+    (0.00, 0.664),
+    (0.14, 0.58),
+    (0.28, 0.50),
+    (0.40, 0.44),
+    (0.52, 0.36),
+    (0.63, 0.29),
+    (0.70, 0.24),
+    (0.78, 0.19),
+    (0.84, 0.15),
+    (0.89, 0.11),
+    (1.00, 0.0),
+];
+
+/// Anti-aliased edge: the shoulder never narrows below this many pixels, and
+/// the core stays this far inside the radius (a hardness-1 tip is a disc with
+/// a ~1 px soft edge at any size).
+const TIP_EDGE_PX: f32 = 1.2;
+
+/// Core radius and shoulder width (both in pixels) of a round tip of `radius`
+/// and `hardness`.
+#[inline]
+fn tip_shape(radius: f32, hardness: f32) -> (f32, f32) {
+    let h = if hardness.is_nan() { 0.0 } else { hardness.clamp(0.0, 1.0) } * 10.0;
+    let i = (h.floor() as usize).min(9);
+    let t = h - i as f32;
+    let (a, b) = (TIP_SHAPE[i], TIP_SHAPE[i + 1]);
+    let (r0, s) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+    let radius = if radius.is_finite() { radius.max(0.0) } else { 0.0 };
+    // A tip of a few pixels keeps a narrower edge, so a small hard dab stays
+    // solid in the middle.
+    let edge = TIP_EDGE_PX.min(0.3 * radius).max(0.25);
+    ((r0 * radius).min(radius - edge).max(0.0), (s * radius).max(edge).max(1e-3))
+}
+
+/// `exp(-u)` as `(1 - u/64)^64` by six squarings: exact arithmetic and 0 from `u = 64`.
+#[inline]
+fn soft_exp(u: f32) -> f32 {
+    let mut g = (1.0 - u / 64.0).clamp(0.0, 1.0);
+    for _ in 0..6 {
+        g *= g;
     }
+    g
+}
+
+/// Opacity of a round tip at distance `d` (in pixels) from its centre, edge included.
+#[inline]
+fn tip_falloff(d: f32, radius: f32, hardness: f32) -> f32 {
+    if d.is_nan() {
+        return 0.0;
+    }
+    let (core, shoulder) = tip_shape(radius, hardness);
+    if d <= core {
+        return 1.0;
+    }
+    if d > core + 2.6 * shoulder {
+        return 0.0;
+    }
+    let x = (d - core) / shoulder;
+    soft_exp(x * x)
+}
+
+/// How far from its centre a round tip still paints (where [`tip_falloff`] drops below ~0.1 %).
+#[inline]
+fn tip_reach(radius: f32, hardness: f32) -> f32 {
+    let (core, shoulder) = tip_shape(radius, hardness);
+    core + 2.6 * shoulder
 }
 
 fn paint_pixel(base: Pixel, a: f32, paint: Paint) -> Pixel {
@@ -1133,18 +1194,23 @@ mod tests {
         s.apply(&mut out, &tiles);
         s.finish(&mut out);
         let Surface::Pixels(out) = out else { unreachable!() };
-        // No step at the dab's edge: just inside it, the skin's nearly as it was.
+        // No step at the dab's edge: across it, what healing changed never
+        // jumps by more than a few percent from one pixel to the next. It
+        // fades out over the tip's anti-aliased edge, so on light this
+        // uneven it's about twice the 1 px edge's smoothstep tip had.
+        let change = |x: u32, y: u32, c: usize| i32::from(out.get(x, y)[c]) - i32::from(img.get(x, y)[c]);
         let mut worst = 0;
-        for i in 0..w * h {
-            let (x, y) = (i % w, i / w);
-            let d = (x as f32 + 0.5 - 200.0).hypot(y as f32 + 0.5 - 100.0);
-            if (29.0..30.0).contains(&d) {
-                for c in 0..3 {
-                    worst = worst.max(out.get(x, y)[c].abs_diff(img.get(x, y)[c]));
+        for y in 60..140 {
+            for x in 160..240 {
+                let d = (x as f32 + 0.5 - 200.0).hypot(y as f32 + 0.5 - 100.0);
+                if (24.0..tip_reach(30.0, 1.0) + 1.0).contains(&d) {
+                    for c in 0..3 {
+                        worst = worst.max(change(x, y, c).abs_diff(change(x + 1, y, c))).max(change(x, y, c).abs_diff(change(x, y + 1, c)));
+                    }
                 }
             }
         }
-        assert!(worst < 1500, "{worst}");
+        assert!(worst < 2000, "{worst}");
     }
 
     #[test]
@@ -1457,8 +1523,9 @@ mod tests {
         let (smooth, noisy) = (dab(0.3, d), dab(0.3, Dynamics { noise: true, ..d }));
         assert!(rough(&smooth) < 2500 && rough(&noisy) > 10_000, "{} {}", rough(&smooth), rough(&noisy));
         // The solid middle and what's outside are as they were, and it's
-        // the same grain each time.
-        assert_eq!((noisy.get(150, 100), noisy.get(160, 105), noisy.get(215, 100)), (smooth.get(150, 100), smooth.get(160, 105), [65535; 4]));
+        // the same grain each time (a soft tip reaches past its radius).
+        let reach = tip_reach(60.0, 0.3).ceil() as u32;
+        assert_eq!((noisy.get(150, 100), noisy.get(160, 105), noisy.get(150 + reach + 2, 100)), (smooth.get(150, 100), smooth.get(160, 105), [65535; 4]));
         assert!(noisy.to_vec() == dab(0.3, Dynamics { noise: true, ..d }).to_vec());
 
         // Wet Edges: half the paint where the stroke is solid, however
@@ -1468,6 +1535,113 @@ mod tests {
         assert!(grey(100).abs_diff(32768) <= 1 && grey(110).abs_diff(32768) <= 1, "{} {}", grey(100), grey(110));
         let darkest = (100..160).map(grey).min().unwrap();
         assert!((22_000..24_500).contains(&darkest), "{darkest}");
-        assert_eq!(grey(161), 65535);
+        assert_eq!(grey(100 + reach + 2), 65535);
+    }
+
+    #[test]
+    fn tip_falloff_profile_and_reach() {
+        // Hard tip (radius 10, hardness 1).
+        assert!(tip_falloff(8.5, 10.0, 1.0) > 0.99);
+        assert!(tip_falloff(9.5, 10.0, 1.0) > 0.5);
+        assert!(tip_falloff(11.0, 10.0, 1.0) < 0.05);
+
+        // Soft tip (hardness 0 at radius 20).
+        assert_eq!(tip_falloff(0.0, 20.0, 0.0), 1.0);
+        let exp_d = |d: f32| (-(d / (0.664 * 20.0)).powi(2)).exp();
+        let f_10 = tip_falloff(10.0, 20.0, 0.0);
+        assert!((f_10 - exp_d(10.0)).abs() < 0.01, "f(10)={f_10} vs {}", exp_d(10.0));
+        let f_20 = tip_falloff(20.0, 20.0, 0.0);
+        assert!((f_20 - exp_d(20.0)).abs() < 0.01, "f(20)={f_20} vs {}", exp_d(20.0));
+        let reach = tip_reach(20.0, 0.0);
+        assert_eq!(tip_falloff(reach + 0.1, 20.0, 0.0), 0.0);
+        assert_eq!(tip_falloff(reach + 5.0, 20.0, 0.0), 0.0);
+
+        // Coverage falls monotonically with distance at every hardness 0, 0.1 … 1.
+        for step in 0..=10 {
+            let h = step as f32 / 10.0;
+            let reach = tip_reach(20.0, h);
+            let prof: Vec<f32> = (0..=200)
+                .map(|i| tip_falloff(i as f32 * (reach + 5.0) / 200.0, 20.0, h))
+                .collect();
+            assert!(
+                prof.windows(2).all(|w| w[1] <= w[0]),
+                "hardness {h} not monotonic: {prof:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_tip_coverage_and_stroke() {
+        fn old_falloff(d: f32, hardness: f32) -> f32 {
+            if d >= 1.0 {
+                0.0
+            } else if d <= hardness {
+                1.0
+            } else {
+                let t = (1.0 - d) / (1.0 - hardness);
+                t * t * (3.0 - 2.0 * t)
+            }
+        }
+
+        let surface = Surface::Pixels(white(100, 100));
+        let settings = BrushSettings {
+            size: 40.0,
+            hardness: 0.0,
+            ..Default::default()
+        };
+
+        // One soft (hardness 0) 40 px dab's total coverage vs old falloff.
+        let Surface::Pixels(dab_out) = stroke(
+            settings,
+            Paint::Color([0, 0, 0, 65535]),
+            &surface,
+            &[(50.0, 50.0)],
+        ) else {
+            unreachable!()
+        };
+        let mut new_dab_total = 0.0f32;
+        let mut old_dab_total = 0.0f32;
+        for y in 0..100 {
+            for x in 0..100 {
+                new_dab_total += (65535 - dab_out.get(x, y)[0]) as f32 / 65535.0;
+                let (dx, dy) = (x as f32 + 0.5 - 50.0, y as f32 + 0.5 - 50.0);
+                let d = dx.hypot(dy) / 20.0;
+                old_dab_total += old_falloff(d, 0.0);
+            }
+        }
+        // Photoshop's Gaussian (shoulder 0.664 R, integral ~0.441 π R²) vs
+        // smoothstep (integral 0.3 π R²): ratio is ~1.45×.
+        assert!(
+            new_dab_total >= 1.4 * old_dab_total && new_dab_total <= 3.0 * old_dab_total,
+            "new={new_dab_total}, old={old_dab_total}, ratio={}",
+            new_dab_total / old_dab_total
+        );
+
+        // A soft stroke of overlapping dabs at 0.8 × radius from its middle.
+        let Surface::Pixels(stroke_out) = stroke(
+            settings,
+            Paint::Color([0, 0, 0, 65535]),
+            &surface,
+            &[(20.0, 50.0), (80.0, 50.0)],
+        ) else {
+            unreachable!()
+        };
+        let y_probe = 50 + (0.8f32 * 20.0).round() as u32; // y = 66
+        let new_val = stroke_out.get(50, y_probe)[0];
+
+        // Simulate stroke with old curve along the same dabs.
+        let mut old_cov = 0.0f32;
+        let mut t = 0.0f32;
+        while t <= 60.0 {
+            let cx = 20.0 + t;
+            let (dx, dy) = (50.0 + 0.5 - cx, y_probe as f32 + 0.5 - 50.0);
+            let d = dx.hypot(dy) / 20.0;
+            old_cov += (1.0 - old_cov) * old_falloff(d, 0.0);
+            t += 4.0; // 10 % of 40 px diameter
+        }
+        let old_val = ((1.0 - old_cov) * 65535.0).round() as u16;
+        // Darker: the measured tip's shoulder is wider and reaches past the
+        // radius, so a soft stroke is fuller than the smoothstep made it.
+        assert!(new_val < old_val, "{new_val} {old_val}");
     }
 }
