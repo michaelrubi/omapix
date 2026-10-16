@@ -3,12 +3,14 @@
 //! own as they move, and shown over the image in Quick Mask's red, on black
 //! or white, or in black and white (F cycles them, and holding X shows the
 //! image as it is); OK makes it the selection, a layer mask, or a new layer
-//! with it as its mask.
+//! with it as its mask. Painting on the image is the Refine Edge brush:
+//! the edge is looked for where it goes as well as within the Radius, and
+//! Alt paints that away.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use egui::{Color32, ComboBox, RichText, Slider, vec2};
-use omapix_engine::refine::{EdgeOptions, colours, decontaminate_colours, refine_edge};
+use egui::{Color32, ComboBox, RichText, Slider, Stroke, vec2};
+use omapix_engine::refine::{EdgeBrush, EdgeOptions, colours, decontaminate_colours, refine_edge};
 use omapix_engine::selection::{Combine, Selection};
 use omapix_engine::Mask;
 
@@ -56,12 +58,19 @@ pub struct SelectAndMask {
     pub output: Output,
     /// What the refined selection is shown on: `None` is Quick Mask's red.
     pub backdrop: Option<Backdrop>,
-    /// The options last sent to the worker.
-    sent: Option<EdgeOptions>,
-    tx: Sender<EdgeOptions>,
-    rx: Receiver<(EdgeOptions, Selection)>,
-    /// The newest refined selection, and the options it's for.
-    latest: Option<(EdgeOptions, Selection)>,
+    /// Where the Refine Edge brush has painted, and how many times.
+    brush: EdgeBrush,
+    painted: u64,
+    /// The brush's size in image pixels.
+    pub brush_size: f32,
+    /// Where the brush last painted, while it's held down.
+    last: Option<egui::Pos2>,
+    /// The options and painting last sent to the worker.
+    sent: Option<(EdgeOptions, u64)>,
+    tx: Sender<(EdgeOptions, u64, EdgeBrush)>,
+    rx: Receiver<(EdgeOptions, u64, Selection)>,
+    /// The newest refined selection, and the options and painting it's for.
+    latest: Option<(EdgeOptions, u64, Selection)>,
 }
 
 impl SelectAndMask {
@@ -69,17 +78,19 @@ impl SelectAndMask {
     pub fn open(ctx: &egui::Context, editor: &Editor, options: EdgeOptions, output: Output, backdrop: Option<Backdrop>) -> Option<Self> {
         let selection = editor.doc.selection.clone()?;
         let doc = editor.doc.clone();
-        let (tx, requests) = channel::<EdgeOptions>();
+        let (tx, requests) = channel::<(EdgeOptions, u64, EdgeBrush)>();
         let (answers, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let guide = colours(&doc.composite());
-            while let Ok(mut options) = requests.recv() {
+            while let Ok(mut request) = requests.recv() {
                 // Only the newest settings matter.
                 while let Ok(newer) = requests.try_recv() {
-                    options = newer;
+                    request = newer;
                 }
-                if answers.send((options, refine_edge(&selection, &guide, &options))).is_err() {
+                let (options, painted, brush) = request;
+                let refined = refine_edge(&selection, &guide, &options, Some(&brush));
+                if answers.send((options, painted, refined)).is_err() {
                     break;
                 }
                 ctx.request_repaint();
@@ -89,6 +100,10 @@ impl SelectAndMask {
             options,
             output,
             backdrop,
+            brush: EdgeBrush::new(editor.doc.width, editor.doc.height),
+            painted: 0,
+            brush_size: 100.0,
+            last: None,
             sent: None,
             tx,
             rx,
@@ -98,17 +113,18 @@ impl SelectAndMask {
 
     /// The refined selection for the current settings, once it's ready.
     pub fn ready(&self) -> Option<&Selection> {
-        self.latest.as_ref().filter(|(o, _)| *o == self.options).map(|(_, s)| s)
+        self.latest.as_ref().filter(|(o, p, _)| (*o, *p) == (self.options, self.painted)).map(|(_, _, s)| s)
     }
 
     /// Show the dialog, previewing on the canvas. Returns `Some(true)` once
     /// OK'd, `Some(false)` if cancelled.
     pub fn show(&mut self, ctx: &egui::Context, editor: &mut Editor, defaults: &EdgeOptions, theme: &Theme) -> Option<bool> {
-        if self.sent != Some(self.options) && self.tx.send(self.options).is_ok() {
-            self.sent = Some(self.options);
+        let now = (self.options, self.painted);
+        if self.sent != Some(now) && self.tx.send((self.options, self.painted, self.brush.clone())).is_ok() {
+            self.sent = Some(now);
         }
         if let Some(answer) = self.rx.try_iter().last() {
-            editor.preview_selection(answer.1.clone());
+            editor.preview_selection(answer.2.clone());
             self.latest = Some(answer);
         }
         // The view's keys, unless a slider's number is being typed.
@@ -124,6 +140,11 @@ impl SelectAndMask {
                     self.backdrop = v.0;
                 }
                 original = i.key_down(egui::Key::X);
+                for (key, bigger) in [(egui::Key::OpenBracket, false), (egui::Key::CloseBracket, true)] {
+                    if i.modifiers.is_none() && i.key_pressed(key) {
+                        self.brush_size = crate::tools::step_size(self.brush_size, bigger).clamp(1.0, 5000.0);
+                    }
+                }
             });
         }
         if editor.previewing_selection() {
@@ -133,7 +154,7 @@ impl SelectAndMask {
         let mut result = None;
         let area = egui::Modal::default_area(egui::Id::new("select-and-mask"))
             .anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
-        egui::Modal::new(egui::Id::new("select-and-mask"))
+        let modal = egui::Modal::new(egui::Id::new("select-and-mask"))
             .area(area)
             .backdrop_color(Color32::TRANSPARENT)
             .show(ctx, |ui| {
@@ -161,6 +182,11 @@ impl SelectAndMask {
                     ui.label("");
                     ui.checkbox(&mut o.smart_radius, "Smart Radius")
                         .on_hover_text("Automatically adapt the radius to the edge's sharpness: narrower on hard edges, wider on soft ones");
+                    ui.end_row();
+                    ui.label("Refine Edge Brush").on_hover_text(
+                        "Paint over hair on the image to look for its edge there too, and Alt to paint that away. [ and ] change the size",
+                    );
+                    ui.add(Slider::new(&mut self.brush_size, 1.0..=5000.0).logarithmic(true).suffix(" px").fixed_decimals(0));
                     ui.end_row();
                     slider(ui, "Smooth", &mut o.smooth, 0.0..=100.0, "", "Rounds off a jagged outline");
                     slider(ui, "Feather", &mut o.feather, 0.0..=250.0, " px", "Softens the edge");
@@ -194,7 +220,7 @@ impl SelectAndMask {
                     ui.end_row();
                 });
                 ui.add_space(8.0);
-                let ready = self.latest.as_ref().is_some_and(|(o, _)| *o == self.options);
+                let ready = self.latest.as_ref().is_some_and(|(o, p, _)| (*o, *p) == (self.options, self.painted));
                 let status = match (ready, self.backdrop) {
                     (false, _) => "Refining…",
                     (true, None) => "Red shows what isn't selected",
@@ -217,7 +243,38 @@ impl SelectAndMask {
                     }
                 });
             });
+        self.paint(ctx, editor, &modal.backdrop_response);
         result
+    }
+
+    /// The Refine Edge brush, on the image: what's outside the dialog, as
+    /// its backdrop takes the pointer from the canvas.
+    fn paint(&mut self, ctx: &egui::Context, editor: &Editor, backdrop: &egui::Response) {
+        let canvas = &editor.canvas;
+        let (pointer, origin, down, alt) =
+            ctx.input(|i| (i.pointer.interact_pos(), i.pointer.press_origin(), i.pointer.primary_down(), i.modifiers.alt));
+        let on_canvas = |p: Option<egui::Pos2>| p.is_some_and(|p| canvas.image_at(p).is_some());
+        if backdrop.is_pointer_button_down_on() && down && on_canvas(origin)
+            && let Some(p) = pointer.map(|p| canvas.to_image(p))
+        {
+            if self.last != Some(p) {
+                self.brush.paint(self.last.unwrap_or(p).into(), p.into(), self.brush_size, !alt);
+                self.painted += 1;
+                self.last = Some(p);
+                // Sent to the worker next frame.
+                ctx.request_repaint();
+            }
+        } else {
+            self.last = None;
+        }
+        // Its outline, dark and light so it shows on anything.
+        if let Some(at) = backdrop.hover_pos().filter(|&p| on_canvas(Some(p))) {
+            let radius = (self.brush_size / 2.0 / canvas.image_per_point()).max(2.0);
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("refine-edge-brush")));
+            painter.circle_stroke(at, radius, Stroke::new(1.5, Color32::from_black_alpha(160)));
+            painter.circle_stroke(at, radius, Stroke::new(0.75, Color32::from_white_alpha(200)));
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
     }
 
     /// Put the refined selection where it's meant to go, as one undo step.

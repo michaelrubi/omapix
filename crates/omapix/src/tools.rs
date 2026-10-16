@@ -1584,7 +1584,7 @@ pub fn grey([r, g, b]: [u8; 3]) -> u16 {
 }
 
 /// Photoshop-style bracket-key size steps: finer for small brushes.
-fn step_size(size: f32, bigger: bool) -> f32 {
+pub(crate) fn step_size(size: f32, bigger: bool) -> f32 {
     // Shrinking from a band's lower edge uses the band below (100 → 90).
     let basis = if bigger { size } else { size - 0.01 };
     let step = if basis < 10.0 {
