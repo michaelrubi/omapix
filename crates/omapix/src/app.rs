@@ -8519,7 +8519,9 @@ mod tests {
             app.filters.select_and_mask.feather = 5.0;
             app.filters.select_and_mask_output = output;
             app.run(Command::SelectAndMask, &ctx);
-            for _ in 0..500 {
+            // Generous, as the worker competes with the whole test suite.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while std::time::Instant::now() < deadline {
                 run(app, vec![]);
                 if let Some(Dialog::SelectAndMask(d)) = &app.dialog
                     && d.ready().is_some()
@@ -8586,7 +8588,8 @@ mod tests {
             app.editor.as_ref().unwrap().view()
         };
         app.run(Command::SelectAndMask, &ctx);
-        for _ in 0..500 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             if run(&mut app, vec![]) == View::QuickMask {
                 break;
             }
@@ -8638,7 +8641,8 @@ mod tests {
         };
         // The refined selection, once it's ready.
         let refined = |app: &mut App| {
-            for _ in 0..500 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while std::time::Instant::now() < deadline {
                 run(app, vec![]);
                 if let Some(Dialog::SelectAndMask(d)) = &app.dialog
                     && let Some(s) = d.ready()
