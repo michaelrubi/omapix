@@ -119,6 +119,22 @@ impl SelectAndMask {
         self.latest.as_ref().filter(|(o, p, _)| (*o, *p) == (self.options, self.painted)).map(|(_, _, s)| s)
     }
 
+    fn receive(&mut self, editor: &mut Editor, answer: (EdgeOptions, u64, Selection)) {
+        editor.preview_selection(answer.2.clone());
+        self.latest = Some(answer);
+    }
+
+    /// Waits for the worker to refine the selection for the settings
+    /// `show` last sent, and previews it.
+    #[cfg(test)]
+    pub fn wait(&mut self, editor: &mut Editor) {
+        while self.ready().is_none() {
+            // Only a safety net: the worker competes with the whole test suite.
+            let answer = self.rx.recv_timeout(std::time::Duration::from_secs(60)).expect("a preview");
+            self.receive(editor, answer);
+        }
+    }
+
     /// Show the dialog, previewing on the canvas. Returns `Some(true)` once
     /// OK'd, `Some(false)` if cancelled.
     pub fn show(&mut self, ctx: &egui::Context, editor: &mut Editor, defaults: &EdgeOptions, theme: &Theme) -> Option<bool> {
@@ -127,8 +143,7 @@ impl SelectAndMask {
             self.sent = Some(now);
         }
         if let Some(answer) = self.rx.try_iter().last() {
-            editor.preview_selection(answer.2.clone());
-            self.latest = Some(answer);
+            self.receive(editor, answer);
         }
         // The view's keys, unless a slider's number is being typed.
         let mut original = false;
