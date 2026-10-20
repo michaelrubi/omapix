@@ -534,7 +534,7 @@ What Omapix needs before people other than Michael can install it, rely on it an
   - ~~ONNX Runtime found on other distributions~~ (done): after `OMAPIX_ORT_LIBRARY`, `libonnxruntime.so` in `/usr/lib`, `/usr/lib64`, `/usr/lib/x86_64-linux-gnu` and `/usr/local/lib`, then wherever `dlopen` finds it.
   - Only CUDA is asked for, so AMD and Intel GPUs run the models on the CPU. ONNX Runtime's ROCm, MIGraphX and OpenVINO providers could be tried by someone with the hardware.
 - **Other hardware and desktops.** Omapix has only run on Hyprland with an NVIDIA GPU. To try, and write down what happens: AMD and Intel GPUs, GNOME, KDE, Sway and niri, X11 (the tablet and clipboard code is Wayland's), and a desktop with no Omarchy theme (it falls back to Catppuccin Mocha).
-- **Screenshots** in the README: the window with a portrait open, and Auto Retouch's layers.
+- ~~**Screenshots** in the README~~ (done): the window with a portrait open, and Auto Retouch's layers (`docs/images/`, an Unsplash studio portrait).
 - ~~**Issue templates**~~ (done): `.github/ISSUE_TEMPLATE/bug_report.yml` asks for what CONTRIBUTING.md lists.
 - ~~**A user guide**~~ (done): `docs/guide/` has a page for each of the main workflows, the darktable round trip, frequency separation and Auto Retouch, linked from the README.
 

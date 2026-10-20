@@ -10,6 +10,15 @@ lightweight, and look native to your Omarchy theme.
 It's built for one workflow: a base edit in darktable, retouching in
 Omapix, then export.
 
+![Omapix with a studio portrait open](docs/images/window.jpg)
+
+Auto Retouch's result is ordinary layers, one for each step, in a group
+for each face:
+
+![The layers Auto Retouch makes](docs/images/auto-retouch.jpg)
+
+<sub>Photo by [Zoran Borojevic](https://unsplash.com/photos/s55Di5cdiSM) on Unsplash.</sub>
+
 **Status:** pre-release (0.1.0, nothing tagged yet). It's used for real
 portrait work, but so far on one machine: Omarchy (Arch, Hyprland) with an
 NVIDIA GPU. Other Wayland desktops and other GPUs should work and haven't
