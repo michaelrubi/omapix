@@ -32,8 +32,8 @@ use rayon::prelude::*;
 use crate::blend::BlendMode;
 use crate::layer::{BlendIf, BlendIfChannel, Layer, Locks, Mask};
 use crate::ora::{uncrop, used_area};
-use crate::tiled::Tiled;
 use crate::raster::{Pixel, Raster, widen};
+use crate::tiled::Tiled;
 use crate::{ColorProfile, Document, Error, Result};
 
 fn bad(what: impl std::fmt::Display) -> Error {
@@ -94,7 +94,11 @@ impl<'a> Reader<'a> {
 
     /// A length: 64 bits where a .psb has `long` ones.
     fn len(&mut self, long: bool) -> Result<usize> {
-        if long { self.array().map(|b| u64::from_be_bytes(b) as usize) } else { Ok(self.u32()? as usize) }
+        if long {
+            self.array().map(|b| u64::from_be_bytes(b) as usize)
+        } else {
+            Ok(self.u32()? as usize)
+        }
     }
 
     /// A block preceded by its length.
@@ -120,8 +124,8 @@ impl<'a> Reader<'a> {
 /// Keys of the blocks whose lengths are 64-bit in a .psb: those in Adobe's
 /// specification, then those PhotoCraft found Photoshop also writes so.
 const LONG: [&[u8; 4]; 21] = [
-    b"LMsk", b"Lr16", b"Lr32", b"Layr", b"Mt16", b"Mt32", b"Mtrn", b"Alph", b"FMsk", b"lnk2", b"FEid",
-    b"FXid", b"PxSD", b"lnk3", b"lnkE", b"pths", b"extd", b"extn", b"FELS", b"cinf", b"artd",
+    b"LMsk", b"Lr16", b"Lr32", b"Layr", b"Mt16", b"Mt32", b"Mtrn", b"Alph", b"FMsk", b"lnk2", b"FEid", b"FXid", b"PxSD", b"lnk3", b"lnkE", b"pths", b"extd",
+    b"extn", b"FELS", b"cinf", b"artd",
 ];
 
 /// Tagged blocks (`8BIM` + key + length + data), as `(key, data)`.
@@ -154,8 +158,8 @@ fn rect_size((top, left, bottom, right): Rect) -> (usize, usize) {
 
 /// Keys of adjustment and fill layers, which Omapix doesn't read.
 const ADJUSTMENTS: [&[u8; 4]; 20] = [
-    b"levl", b"curv", b"brit", b"blnc", b"hue ", b"hue2", b"expA", b"vibA", b"selc", b"mixr",
-    b"clrL", b"grdm", b"phfl", b"nvrt", b"post", b"thrs", b"blwh", b"SoCo", b"GdFl", b"PtFl",
+    b"levl", b"curv", b"brit", b"blnc", b"hue ", b"hue2", b"expA", b"vibA", b"selc", b"mixr", b"clrL", b"grdm", b"phfl", b"nvrt", b"post", b"thrs", b"blwh",
+    b"SoCo", b"GdFl", b"PtFl",
 ];
 
 /// One layer record, and its channels' compressed data.
@@ -186,9 +190,7 @@ fn records(info: &[u8], psb: bool) -> Result<Vec<Record<'_>>> {
     let mut lengths = Vec::with_capacity(count);
     for _ in 0..count {
         let rect = read_rect(&mut r)?;
-        let channels: Vec<(i16, usize)> = (0..r.u16()?)
-            .map(|_| Ok((r.i16()?, r.len(psb)?)))
-            .collect::<Result<_>>()?;
+        let channels: Vec<(i16, usize)> = (0..r.u16()?).map(|_| Ok((r.i16()?, r.len(psb)?))).collect::<Result<_>>()?;
         if r.take(4)? != b"8BIM" {
             return Err(bad("a layer record is damaged"));
         }
@@ -211,7 +213,11 @@ fn records(info: &[u8], psb: bool) -> Result<Vec<Record<'_>>> {
         let of = [BlendIfChannel::Gray, BlendIfChannel::Red, BlendIfChannel::Green, BlendIfChannel::Blue];
         let blend_if = ranges.zip(of).find(|(r, _)| **r != NO_BLEND_IF).map(|(r, channel)| {
             let points = |at: usize| [0, 1, 2, 3].map(|i| f32::from(r[at + i]) / 255.0);
-            BlendIf { channel, this: points(0), underlying: points(4) }
+            BlendIf {
+                channel,
+                this: points(0),
+                underlying: points(4),
+            }
         });
         // A Pascal string padded to 4 bytes, replaced by `luni` if there.
         let name_start = extra.pos;
@@ -229,7 +235,12 @@ fn records(info: &[u8], psb: bool) -> Result<Vec<Record<'_>>> {
                 b"lsct" => section = d.u32()?,
                 b"lspf" => {
                     let bits = d.u32()?;
-                    locks = Locks { transparency: bits & 1 != 0, pixels: bits & 2 != 0, position: bits & 4 != 0, all: false };
+                    locks = Locks {
+                        transparency: bits & 1 != 0,
+                        pixels: bits & 2 != 0,
+                        position: bits & 4 != 0,
+                        all: false,
+                    };
                     if bits & LOCK_ALL != 0 {
                         locks.set_all(true);
                     }
@@ -353,9 +364,14 @@ fn crop<T: Copy>(rect: Rect, values: &[T], width: u32, height: u32) -> ((u32, u3
 /// A record's layer mask.
 fn mask(rec: &Record, (depth, psb): (u16, bool), (width, height): (u32, u32)) -> Result<Option<Mask>> {
     let data = rec.channels.iter().find(|(c, _)| *c == -2);
-    let (Some((rect, outside, enabled)), Some((_, data))) = (rec.mask, data) else { return Ok(None) };
+    let (Some((rect, outside, enabled)), Some((_, data))) = (rec.mask, data) else {
+        return Ok(None);
+    };
     let (area, cropped) = crop(rect, &channel_samples(data, rect, depth, psb)?, width, height);
-    Ok(Some(Mask { pixels: uncrop(width, height, widen(outside), area, &cropped), enabled }))
+    Ok(Some(Mask {
+        pixels: uncrop(width, height, widen(outside), area, &cropped),
+        enabled,
+    }))
 }
 
 /// A pixel layer, with its mask, from its record.
@@ -601,7 +617,9 @@ fn content(t: &Tiled<Pixel>) -> (Rect, Vec<Pixel>) {
     let (w, h) = (w as usize, h as usize);
     let row = |r: &usize| values[r * w..(r + 1) * w].iter().any(|p| p[3] != 0);
     let column = |c: &usize| (0..h).any(|r| values[r * w + c][3] != 0);
-    let (Some(top), Some(left)) = ((0..h).find(row), (0..w).find(column)) else { return nothing };
+    let (Some(top), Some(left)) = ((0..h).find(row), (0..w).find(column)) else {
+        return nothing;
+    };
     let (bottom, right) = ((0..h).rfind(row).unwrap_or(top) + 1, (0..w).rfind(column).unwrap_or(left) + 1);
     let trimmed = (top..bottom).flat_map(|r| values[r * w + left..r * w + right].iter().copied()).collect();
     let (x, y) = (x as usize, y as usize);
@@ -654,8 +672,10 @@ fn record(layer: &Layer, section: u32, id: u32) -> Written {
     };
     let w = rect_size(rect).0;
     // Transparency first, as Photoshop has them.
-    let mut channels: Vec<(i16, Vec<u8>)> =
-        [(-1, 3), (0, 0), (1, 1), (2, 2)].into_par_iter().map(|(id, c)| (id, zipped(&plane(c), w))).collect();
+    let mut channels: Vec<(i16, Vec<u8>)> = [(-1, 3), (0, 0), (1, 1), (2, 2)]
+        .into_par_iter()
+        .map(|(id, c)| (id, zipped(&plane(c), w)))
+        .collect();
 
     let mut extra = Vec::new();
     match &layer.mask {
@@ -727,7 +747,11 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
     for layer in doc.layers.iter().filter(|l| l.adjustment.is_none()) {
         // The groups this layer is in that haven't begun, innermost first.
         let mut begin = Vec::new();
-        let mut group = if layer.is_group { Some(layer) } else { layer.parent.and_then(|id| doc.layer(id)) };
+        let mut group = if layer.is_group {
+            Some(layer)
+        } else {
+            layer.parent.and_then(|id| doc.layer(id))
+        };
         while let Some(g) = group.filter(|g| !open.contains(&g.id)) {
             begin.push(g.id);
             group = g.parent.and_then(|id| doc.layer(id));
@@ -741,8 +765,11 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
         }
         listed.push((layer, u32::from(layer.is_group)));
     }
-    let records: Vec<Written> =
-        listed.par_iter().enumerate().map(|(i, (layer, section))| record(layer, *section, i as u32 + 1)).collect();
+    let records: Vec<Written> = listed
+        .par_iter()
+        .enumerate()
+        .map(|(i, (layer, section))| record(layer, *section, i as u32 + 1))
+        .collect();
 
     // With any transparency, the flattened image has a fourth channel
     // for it, and the layer count says so by being negative.
@@ -815,7 +842,10 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
         return Err(bad("this is too big for a .psd (2 GB, or 30,000 pixels a side): export it as a .psb"));
     }
 
-    let failed = |source| Error::Read { path: path.display().to_string(), source };
+    let failed = |source| Error::Read {
+        path: path.display().to_string(),
+        source,
+    };
     let mut file = BufWriter::new(File::create(path).map_err(failed)?);
     let mut write = |bytes: &[u8]| file.write_all(bytes).map_err(failed);
     write(&head)?;
@@ -833,7 +863,11 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
     for c in 0..planes {
         let value = |p: &Pixel| {
             let a = u32::from(p[3]);
-            if c == 3 || opaque { p[c] } else { ((u32::from(p[c]) * a + 32767) / 65535 + 65535 - a) as u16 }
+            if c == 3 || opaque {
+                p[c]
+            } else {
+                ((u32::from(p[c]) * a + 32767) / 65535 + 65535 - a) as u16
+            }
         };
         let plane: Vec<u8> = merged.pixels().par_iter().flat_map_iter(|p| value(p).to_be_bytes()).collect();
         write(&plane)?;
@@ -850,8 +884,7 @@ mod tests {
         // The example from Apple's PackBits technote.
         let packed = [0xFE, 0xAA, 0x02, 0x80, 0x00, 0x2A, 0xFD, 0xAA, 0x03, 0x80, 0x00, 0x2A, 0x22, 0xF7, 0xAA];
         let unpacked = [
-            0xAA, 0xAA, 0xAA, 0x80, 0x00, 0x2A, 0xAA, 0xAA, 0xAA, 0xAA, 0x80, 0x00, 0x2A, 0x22, 0xAA, 0xAA,
-            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+            0xAA, 0xAA, 0xAA, 0x80, 0x00, 0x2A, 0xAA, 0xAA, 0xAA, 0xAA, 0x80, 0x00, 0x2A, 0x22, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
         ];
         assert_eq!(unpack_bits(&packed, unpacked.len()).unwrap(), unpacked);
     }
@@ -962,14 +995,17 @@ mod tests {
         let colours = |r: u16, g: u16, b: u16, n: usize| vec![(0, vec![r; n]), (1, vec![g; n]), (2, vec![b; n])];
         let mut patch = vec![(0, vec![60000, 60001]), (1, vec![1, 2]), (2, vec![3, 4]), (-1, vec![65535, 0])];
         patch.push((-2, vec![0, 1000, 2000, 3000]));
-        let file = sixteen_bit_file(&[
-            ("Background", (0, 0, 2, 4), b"norm", 0, colours(10000, 20000, 30000, 8), None, 0),
-            // A hidden group: the divider, a layer in it, the group's record.
-            ("</Layer group>", (0, 0, 0, 0), b"norm", 0, vec![], None, 3),
-            ("Patch ✓", (1, 1, 2, 3), b"sLit", 0, patch, Some(((0, 0, 1, 4), 255)), 0),
-            ("Dodge", (0, 0, 0, 0), b"pass", 2, vec![], None, 1),
-            ("Curves 1", (0, 0, 0, 0), b"norm", 0, vec![], None, 0),
-        ], psb);
+        let file = sixteen_bit_file(
+            &[
+                ("Background", (0, 0, 2, 4), b"norm", 0, colours(10000, 20000, 30000, 8), None, 0),
+                // A hidden group: the divider, a layer in it, the group's record.
+                ("</Layer group>", (0, 0, 0, 0), b"norm", 0, vec![], None, 3),
+                ("Patch ✓", (1, 1, 2, 3), b"sLit", 0, patch, Some(((0, 0, 1, 4), 255)), 0),
+                ("Dodge", (0, 0, 0, 0), b"pass", 2, vec![], None, 1),
+                ("Curves 1", (0, 0, 0, 0), b"norm", 0, vec![], None, 0),
+            ],
+            psb,
+        );
         let doc = parse(&file, Path::new("retouch.psd")).unwrap();
         assert_eq!((doc.width, doc.height, doc.source_bits), (4, 2, 16));
         let summary: Vec<_> = doc.layers.iter().map(|l| (l.name.as_str(), l.is_group, l.blend, l.visible)).collect();
@@ -1022,11 +1058,18 @@ mod tests {
         let patch: Vec<Pixel> = (0..40 * 30).map(|i| [60000, i as u16, 3, (i * 50) as u16 + 1]).collect();
         let mut patch = Layer::from_pixels(2, "Patch ✓", uncrop(w, h, [0; 4], (300, 100, 40, 30), &patch));
         (patch.blend, patch.opacity, patch.parent) = (BlendMode::SoftLight, 0.6, Some(4));
-        patch.mask = Some(Mask { pixels: uncrop(w, h, 0, (290, 90, 20, 20), &[40000; 400]), enabled: false });
+        patch.mask = Some(Mask {
+            pixels: uncrop(w, h, 0, (290, 90, 20, 20), &[40000; 400]),
+            enabled: false,
+        });
         patch.locks.position = true;
         let mut clipped = Layer::from_pixels(3, "Clipped", uncrop(w, h, [0; 4], (0, 0, 600, 2), &[[1, 2, 3, 65535]; 1200]));
         (clipped.blend, clipped.clipped, clipped.visible, clipped.parent) = (BlendMode::Multiply, true, false, Some(4));
-        clipped.blend_if = Some(BlendIf { channel: BlendIfChannel::Green, this: [0.0, 0.2, 0.8, 1.0], underlying: [0.2, 0.2, 1.0, 1.0] });
+        clipped.blend_if = Some(BlendIf {
+            channel: BlendIfChannel::Green,
+            this: [0.0, 0.2, 0.8, 1.0],
+            underlying: [0.2, 0.2, 1.0, 1.0],
+        });
         let mut inner = Layer::group(4, "Inner", w, h);
         (inner.blend, inner.opacity, inner.parent) = (BlendMode::Normal, 0.8, Some(5));
         let mut white = Mask::white(w, h);
@@ -1054,7 +1097,10 @@ mod tests {
                 if let (Some(a), Some(b)) = (&a.mask, &b.mask) {
                     assert!(a.enabled == b.enabled && a.pixels.to_vec() == b.pixels.to_vec());
                 }
-                let points = |l: &Layer| l.blend_if.map(|b| [b.this, b.underlying].concat().iter().map(|v| (v * 255.0).round()).sum::<f32>());
+                let points = |l: &Layer| {
+                    l.blend_if
+                        .map(|b| [b.this, b.underlying].concat().iter().map(|v| (v * 255.0).round()).sum::<f32>())
+                };
                 assert_eq!((a.blend_if.map(|b| b.channel), points(a)), (b.blend_if.map(|b| b.channel), points(b)));
             }
             assert!(back.composite().pixels() == doc.composite().pixels());
@@ -1077,7 +1123,12 @@ mod tests {
             assert_eq!(b.blend, if grain { BlendMode::LinearLight } else { a.blend }, "{}", a.name);
         }
         let (before, after) = (doc.composite(), back.composite());
-        let worst = before.pixels().iter().zip(after.pixels()).flat_map(|(a, b)| (0..4).map(|c| a[c].abs_diff(b[c]))).max();
+        let worst = before
+            .pixels()
+            .iter()
+            .zip(after.pixels())
+            .flat_map(|(a, b)| (0..4).map(|c| a[c].abs_diff(b[c])))
+            .max();
         assert!(worst.unwrap() <= 2, "{worst:?}");
     }
 

@@ -30,11 +30,7 @@ pub fn prepare_for_editing(doc: &mut Document) -> crate::Result<Option<String>> 
 
 /// Keep `changed` only where `selection` covers, and `original` elsewhere
 /// (blending partially selected pixels), so filters respect the selection.
-pub fn within_selection(
-    original: &Tiled<crate::Pixel>,
-    changed: Tiled<crate::Pixel>,
-    selection: Option<&crate::selection::Selection>,
-) -> Tiled<crate::Pixel> {
+pub fn within_selection(original: &Tiled<crate::Pixel>, changed: Tiled<crate::Pixel>, selection: Option<&crate::selection::Selection>) -> Tiled<crate::Pixel> {
     let Some(sel) = selection else { return changed };
     let sel = &sel.coverage;
     let mut out = changed;
@@ -51,10 +47,7 @@ pub fn within_selection(
                     let k = f32::from(s.map_or(sel.fill(), |t| t[i])) / 65535.0;
                     let a = o.map_or(original.fill(), |t| t[i]);
                     let b = c.map_or(original.fill(), |t| t[i]);
-                    std::array::from_fn(|ch| {
-                        (f32::from(a[ch]) + (f32::from(b[ch]) - f32::from(a[ch])) * k).round()
-                            as u16
-                    })
+                    std::array::from_fn(|ch| (f32::from(a[ch]) + (f32::from(b[ch]) - f32::from(a[ch])) * k).round() as u16)
                 })
                 .collect(),
         )
@@ -65,15 +58,9 @@ pub fn within_selection(
 /// Fill a layer with a colour where selected (everywhere without a
 /// selection), like Photoshop's Alt+Backspace. `None` clears to
 /// transparency instead (Delete).
-pub fn fill_pixels(
-    pixels: &Tiled<crate::Pixel>,
-    colour: Option<crate::Pixel>,
-    selection: Option<&crate::selection::Selection>,
-) -> Tiled<crate::Pixel> {
+pub fn fill_pixels(pixels: &Tiled<crate::Pixel>, colour: Option<crate::Pixel>, selection: Option<&crate::selection::Selection>) -> Tiled<crate::Pixel> {
     let filled = match colour {
-        Some(c) => Tiled::from_tiles(pixels.width(), pixels.height(), [0; 4], |_, _| {
-            Some(vec![c; crate::tiled::TILE_PIXELS])
-        }),
+        Some(c) => Tiled::from_tiles(pixels.width(), pixels.height(), [0; 4], |_, _| Some(vec![c; crate::tiled::TILE_PIXELS])),
         None => Tiled::new(pixels.width(), pixels.height(), [0; 4]),
     };
     within_selection(pixels, filled, selection)
@@ -81,10 +68,7 @@ pub fn fill_pixels(
 
 /// `edited` with the alpha of `original`, for layers with Lock Transparent
 /// Pixels: only the colour changes.
-pub fn keep_alpha(
-    original: &Tiled<crate::Pixel>,
-    mut edited: Tiled<crate::Pixel>,
-) -> Tiled<crate::Pixel> {
+pub fn keep_alpha(original: &Tiled<crate::Pixel>, mut edited: Tiled<crate::Pixel>) -> Tiled<crate::Pixel> {
     let (fill, alpha_fill) = (edited.fill(), original.fill()[3]);
     edited.par_update(|col, row, tile| {
         let alpha = original.tile(col, row);
@@ -103,11 +87,7 @@ pub fn keep_alpha(
 }
 
 /// Fill a mask with a grey level where selected.
-pub fn fill_mask(
-    mask: &Tiled<u16>,
-    value: u16,
-    selection: Option<&crate::selection::Selection>,
-) -> Tiled<u16> {
+pub fn fill_mask(mask: &Tiled<u16>, value: u16, selection: Option<&crate::selection::Selection>) -> Tiled<u16> {
     let Some(sel) = selection else {
         return Tiled::new(mask.width(), mask.height(), value);
     };
@@ -196,13 +176,7 @@ impl GradientParams {
 }
 
 /// A tiled raster filled with a gradient from `c0` to `c1`.
-fn gradient_pixels(
-    width: u32,
-    height: u32,
-    params: GradientParams,
-    c0: crate::Pixel,
-    c1: crate::Pixel,
-) -> Tiled<crate::Pixel> {
+fn gradient_pixels(width: u32, height: u32, params: GradientParams, c0: crate::Pixel, c1: crate::Pixel) -> Tiled<crate::Pixel> {
     Tiled::from_tiles(width, height, c0, |col, row| {
         let mut pixels = Vec::with_capacity(crate::tiled::TILE_PIXELS);
         let base_x = col * crate::tiled::TILE;
@@ -224,11 +198,7 @@ fn gradient_pixels(
 }
 
 /// Blend `top` over `original` with opacity using straight alpha source-over.
-fn blend_pixels(
-    original: &Tiled<crate::Pixel>,
-    top: Tiled<crate::Pixel>,
-    opacity: f32,
-) -> Tiled<crate::Pixel> {
+fn blend_pixels(original: &Tiled<crate::Pixel>, top: Tiled<crate::Pixel>, opacity: f32) -> Tiled<crate::Pixel> {
     if opacity <= 0.0 {
         return original.clone();
     }
@@ -268,20 +238,10 @@ pub fn apply_gradient_pixels(
     lock_alpha: bool,
     selection: Option<&crate::selection::Selection>,
 ) -> Tiled<crate::Pixel> {
-    let gradient = gradient_pixels(
-        original.width(),
-        original.height(),
-        params,
-        c0,
-        c1,
-    );
+    let gradient = gradient_pixels(original.width(), original.height(), params, c0, c1);
     let blended = blend_pixels(original, gradient, opacity);
     let filled = within_selection(original, blended, selection);
-    if lock_alpha {
-        keep_alpha(original, filled)
-    } else {
-        filled
-    }
+    if lock_alpha { keep_alpha(original, filled) } else { filled }
 }
 
 /// Fill a mask with a gradient. If `v1` is `None`, the gradient fades to
@@ -378,12 +338,7 @@ pub fn frequency_separation(doc: &mut Document, above: usize, radius: f32) -> (u
 /// (texture) bands that recombine exactly to the original, in a "Frequency
 /// Separation (3 Bands)" group placed above layer index `above`. Returns
 /// (low id, mid id, high id).
-pub fn frequency_separation_3(
-    doc: &mut Document,
-    above: usize,
-    fine: f32,
-    coarse: f32,
-) -> (u64, u64, u64) {
+pub fn frequency_separation_3(doc: &mut Document, above: usize, fine: f32, coarse: f32) -> (u64, u64, u64) {
     let visible = Tiled::from_raster(&doc.composite());
     let fine_pixels = gaussian_blur(&visible, fine);
     let coarse_pixels = gaussian_blur(&visible, coarse);
@@ -440,11 +395,7 @@ pub fn filtered(doc: &Document, id: u64, filter: &crate::filters::LayerFilter) -
 
 /// Layer `id`'s mask after `filter`, which sees it as a grey image, within
 /// the selection if there is one. `None` if there's no such mask.
-pub fn filtered_mask(
-    doc: &Document,
-    id: u64,
-    filter: &crate::filters::LayerFilter,
-) -> Option<Tiled<u16>> {
+pub fn filtered_mask(doc: &Document, id: u64, filter: &crate::filters::LayerFilter) -> Option<Tiled<u16>> {
     let mask = &doc.layer(id)?.mask.as_ref()?.pixels;
     let grey = mask.map(|v| [v, v, v, u16::MAX]);
     let out = within_selection(&grey, filter.apply(&grey), doc.selection.as_ref());
@@ -490,11 +441,7 @@ fn new_setup_group(doc: &mut Document, above: usize, name: &str) -> usize {
 /// darker. Returns the new layer's id.
 pub fn dodge_and_burn_layer(doc: &mut Document, above: usize) -> u64 {
     let (w, h) = (doc.width, doc.height);
-    let grey = Raster::new(
-        w,
-        h,
-        vec![[32768, 32768, 32768, 65535]; w as usize * h as usize],
-    );
+    let grey = Raster::new(w, h, vec![[32768, 32768, 32768, 65535]; w as usize * h as usize]);
     let id = doc.next_layer_id();
     let mut layer = Layer::from_raster(id, "Dodge & Burn", &grey);
     layer.blend = BlendMode::SoftLight;
@@ -533,13 +480,7 @@ pub fn finish(doc: &mut Document, sharpen: Option<&crate::filters::LayerFilter>,
 }
 
 /// Create a Grain layer filled with 50 % grey in Overlay mode carrying grain.
-pub fn grain_layer(
-    id: u64,
-    width: u32,
-    height: u32,
-    options: &NoiseOptions,
-    base: Option<&Tiled<crate::Pixel>>,
-) -> Layer {
+pub fn grain_layer(id: u64, width: u32, height: u32, options: &NoiseOptions, base: Option<&Tiled<crate::Pixel>>) -> Layer {
     let pixels = filters::generate_grain(width, height, options, base);
     let mut layer = Layer::from_pixels(id, "Grain", pixels);
     layer.blend = BlendMode::Overlay;
@@ -675,12 +616,7 @@ mod tests {
     use crate::ColorProfile;
 
     fn doc_with(pixels: Vec<crate::Pixel>, w: u32, h: u32) -> Document {
-        Document::from_image(
-            "t.tif".into(),
-            &Raster::new(w, h, pixels),
-            ColorProfile::srgb(),
-            16,
-        )
+        Document::from_image("t.tif".into(), &Raster::new(w, h, pixels), ColorProfile::srgb(), 16)
     }
 
     #[test]
@@ -691,12 +627,7 @@ mod tests {
                 // Smooth gradients plus fine, skin-like texture.
                 let (x, y) = (i % w, i / w);
                 let grain = ((x * 7 + y * 3) % 11) * 300;
-                [
-                    (15000 + x * 60 + grain) as u16,
-                    (20000 + y * 50 + grain) as u16,
-                    (30000 + grain) as u16,
-                    65535,
-                ]
+                [(15000 + x * 60 + grain) as u16, (20000 + y * 50 + grain) as u16, (30000 + grain) as u16, 65535]
             })
             .collect();
         let mut doc = doc_with(px, w, h);
@@ -731,12 +662,7 @@ mod tests {
             .map(|i| {
                 let (x, y) = (i % w, i / w);
                 let grain = ((x * 7 + y * 3) % 11) * 300;
-                [
-                    (15000 + x * 60 + grain) as u16,
-                    (20000 + y * 50 + grain) as u16,
-                    (30000 + grain) as u16,
-                    65535,
-                ]
+                [(15000 + x * 60 + grain) as u16, (20000 + y * 50 + grain) as u16, (30000 + grain) as u16, 65535]
             })
             .collect();
         let mut doc = doc_with(px, w, h);
@@ -906,9 +832,7 @@ mod tests {
     fn keep_alpha_fills_only_what_is_there() {
         let (w, h) = (300, 10);
         // Opaque on the left, transparent on the right (a whole empty tile).
-        let px = (0..w * h)
-            .map(|i| if i % w < 100 { [65535; 4] } else { [0; 4] })
-            .collect();
+        let px = (0..w * h).map(|i| if i % w < 100 { [65535; 4] } else { [0; 4] }).collect();
         let pixels = doc_with(px, w, h).layers.remove(0).pixels;
         let filled = fill_pixels(&pixels, Some([0, 0, 0, 65535]), None);
         let locked = keep_alpha(&pixels, filled);
@@ -934,14 +858,7 @@ mod tests {
     fn grain_layer_leaves_image_unchanged_at_amount_zero() {
         let (w, h) = (300, 200);
         let px: Vec<crate::Pixel> = (0..w * h)
-            .map(|i| {
-                [
-                    ((i * 17) % 65535) as u16,
-                    ((i * 31) % 65535) as u16,
-                    ((i * 53) % 65535) as u16,
-                    65535,
-                ]
-            })
+            .map(|i| [((i * 17) % 65535) as u16, ((i * 31) % 65535) as u16, ((i * 53) % 65535) as u16, 65535])
             .collect();
         let mut doc = doc_with(px, w, h);
         let before = doc.composite();
@@ -972,8 +889,7 @@ mod tests {
         // Black masks: no change until painted.
         assert_eq!(doc.composite().pixels()[0], grey);
         let paint = |doc: &mut Document, id| {
-            doc.layer_mut(id).unwrap().mask.as_mut().unwrap().pixels =
-                Tiled::new(10, 10, crate::layer::MASK_WHITE);
+            doc.layer_mut(id).unwrap().mask.as_mut().unwrap().pixels = Tiled::new(10, 10, crate::layer::MASK_WHITE);
         };
         paint(&mut doc, dodge);
         let lighter = doc.composite().pixels()[0][0];
@@ -987,11 +903,7 @@ mod tests {
     #[test]
     fn merging_stays_within_groups_and_merges_whole_groups() {
         let mut doc = doc_with(vec![[40000, 40000, 40000, 65535]; 100], 10, 10);
-        let mut top = Layer::from_raster(
-            doc.next_layer_id(),
-            "top",
-            &Raster::new(10, 10, vec![[65535, 0, 0, 65535]; 100]),
-        );
+        let mut top = Layer::from_raster(doc.next_layer_id(), "top", &Raster::new(10, 10, vec![[65535, 0, 0, 65535]; 100]));
         top.opacity = 0.5;
         let top_id = top.id;
         doc.insert_above(0, top);
@@ -1189,4 +1101,3 @@ mod tests {
         assert_eq!(applied.get(45, 5), 65535);
     }
 }
-

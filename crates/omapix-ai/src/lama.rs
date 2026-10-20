@@ -20,8 +20,7 @@ pub struct Lama {
 
 impl Lama {
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL)
-            .ok_or_else(|| format!("Content-Aware Fill needs the {MODEL} model: run scripts/fetch-models.sh"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Content-Aware Fill needs the {MODEL} model: run scripts/fetch-models.sh"))?;
         Ok(Self {
             session: session(&files["lama_fp32.onnx"])?,
         })
@@ -31,9 +30,7 @@ impl Lama {
     /// `mask`'s 1s filled in, in the same form.
     pub fn fill(&mut self, image: &[f32], mask: &[f32]) -> Result<Vec<f32>> {
         let side = SIZE as i64;
-        let tensor = |channels: i64, data: &[f32]| {
-            Tensor::from_array((vec![1, channels, side, side], data.to_vec())).map_err(|e| e.to_string())
-        };
+        let tensor = |channels: i64, data: &[f32]| Tensor::from_array((vec![1, channels, side, side], data.to_vec())).map_err(|e| e.to_string());
         let outputs = self
             .session
             .run(ort::inputs!["image" => tensor(3, image)?, "mask" => tensor(1, mask)?])

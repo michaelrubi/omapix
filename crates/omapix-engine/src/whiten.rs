@@ -82,9 +82,16 @@ pub fn whites(srgb: &[[u8; 4]], within: &Selection, soften: f32) -> Selection {
     }
     let nth = lights.len() * 9 / 10;
     let lightest = *lights.select_nth_unstable_by(nth, f32::total_cmp).1;
-    let white: Vec<_> = seen.iter().map(|&(light, pale)| [pale * step(LIGHT.map(|k| k * lightest), light), 0.0, 0.0, 0.0]).collect();
+    let white: Vec<_> = seen
+        .iter()
+        .map(|&(light, pale)| [pale * step(LIGHT.map(|k| k * lightest), light), 0.0, 0.0, 0.0])
+        .collect();
     let white = blur_buffer(white, bw as usize, bh as usize, soften);
-    let coverage: Vec<u16> = white.iter().zip(&inside).map(|(white, &inside)| (white[0].clamp(0.0, 1.0) * f32::from(inside)).round() as u16).collect();
+    let coverage: Vec<u16> = white
+        .iter()
+        .zip(&inside)
+        .map(|(white, &inside)| (white[0].clamp(0.0, 1.0) * f32::from(inside)).round() as u16)
+        .collect();
     Selection::from_coverage(Tiled::from_slice(bw, bh, 0, &coverage).reframed(w, h, bx as i32, by as i32, 0))
 }
 
@@ -144,8 +151,18 @@ mod tests {
     #[test]
     fn the_whites_of_a_mouth_are_its_teeth_not_its_gums_or_the_dark() {
         let teeth = whites(&mouth(), &opening(), 0.0);
-        assert!(teeth.at(140, 100) > 0.99 && teeth.at(190, 100) > 0.99, "{} {}", teeth.at(140, 100), teeth.at(190, 100));
-        assert!(teeth.at(140, 84) < 0.01 && teeth.at(140, 115) < 0.01, "{} {}", teeth.at(140, 84), teeth.at(140, 115));
+        assert!(
+            teeth.at(140, 100) > 0.99 && teeth.at(190, 100) > 0.99,
+            "{} {}",
+            teeth.at(140, 100),
+            teeth.at(190, 100)
+        );
+        assert!(
+            teeth.at(140, 84) < 0.01 && teeth.at(140, 115) < 0.01,
+            "{} {}",
+            teeth.at(140, 84),
+            teeth.at(140, 115)
+        );
         // Softened, the edge between tooth and gum is a ramp.
         let soft = whites(&mouth(), &opening(), 2.0);
         assert!((0.3..0.7).contains(&soft.at(140, 90)), "{}", soft.at(140, 90));

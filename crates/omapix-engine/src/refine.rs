@@ -142,7 +142,10 @@ pub struct EdgeBrush {
 
 impl EdgeBrush {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { painted: Tiled::new(width, height, 0), size: 0.0 }
+        Self {
+            painted: Tiled::new(width, height, 0),
+            size: 0.0,
+        }
     }
 
     /// Paint a round brush `size` pixels across from `a` to `b`, adding to
@@ -189,7 +192,11 @@ impl EdgeBrush {
 fn capsule(p: (f32, f32), a: (f32, f32), b: (f32, f32), r: f32) -> f32 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len2 = dx * dx + dy * dy;
-    let t = if len2 > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if len2 > 0.0 {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let d = (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy);
     (r + 0.5 - d).clamp(0.0, 1.0)
 }
@@ -219,22 +226,21 @@ pub struct Snapped {
 /// [`refine_edge`], keeping in `last` the edge it found, so that while the
 /// selection, Radius and Smart Radius stay the same it's found again only
 /// in the tiles near where `brush` has painted since.
-pub fn refine_edge_again(
-    last: &mut Option<Snapped>,
-    selection: &Selection,
-    guide: &[[f32; 3]],
-    o: &EdgeOptions,
-    brush: Option<&EdgeBrush>,
-) -> Selection {
+pub fn refine_edge_again(last: &mut Option<Snapped>, selection: &Selection, guide: &[[f32; 3]], o: &EdgeOptions, brush: Option<&EdgeBrush>) -> Selection {
     let mut coverage = selection.coverage.clone();
     if o.radius >= 0.5 || brush.is_some_and(|b| b.size > 0.0) {
-        let same = last.as_ref().filter(|l| {
-            (l.radius, l.smart_radius) == (o.radius, o.smart_radius)
-                && l.selection.same_tiles(&coverage)
-                && l.brush.is_some() == brush.is_some()
-        });
+        let same = last
+            .as_ref()
+            .filter(|l| (l.radius, l.smart_radius) == (o.radius, o.smart_radius) && l.selection.same_tiles(&coverage) && l.brush.is_some() == brush.is_some());
         let redo = same.map(|l| (&l.coverage, near_painting(l, brush)));
-        let snapped = snap(&coverage, guide, o.radius, o.smart_radius, brush, redo.as_ref().map(|(c, r)| (*c, r.as_slice())));
+        let snapped = snap(
+            &coverage,
+            guide,
+            o.radius,
+            o.smart_radius,
+            brush,
+            redo.as_ref().map(|(c, r)| (*c, r.as_slice())),
+        );
         *last = Some(Snapped {
             selection: coverage,
             radius: o.radius,
@@ -325,9 +331,7 @@ fn snap(
         let painted = brush.and_then(|b| b.painted.tile(col, row));
         let adds = painted.is_some_and(|t| t.iter().any(|&v| v > 0));
         let (tx, ty) = (col as usize * tile, row as usize * tile);
-        let near = |m: usize| {
-            (tx.saturating_sub(m), ty.saturating_sub(m), (tx + tile + m).min(w), (ty + tile + m).min(h))
-        };
+        let near = |m: usize| (tx.saturating_sub(m), ty.saturating_sub(m), (tx + tile + m).min(w), (ty + tile + m).min(h));
         // Nothing to find unless the brush adds here or the coverage
         // changes somewhere within `r`.
         if !adds {
@@ -354,7 +358,14 @@ fn snap(
                 .flat_map(|y| (x0..x1).map(move |x| f32::from(coverage.get(x as u32, y as u32)) / MAX))
                 .collect();
             let colour = (y0..y1).flat_map(|y| guide[y * w + x0..y * w + x1].iter().copied()).collect();
-            Near { x0, y0, w: x1 - x0, h: y1 - y0, input, colour }
+            Near {
+                x0,
+                y0,
+                w: x1 - x0,
+                h: y1 - y0,
+                input,
+                colour,
+            }
         };
         // Where the brush adds: the mean colours of what's surely selected
         // (not painted, and selected) and surely not, as count then red,
@@ -414,7 +425,11 @@ fn snap(
         // The sure selected, then unselected, colours nearby: their count,
         // then red, green and blue, averaged.
         let mean = |sure: &[bool]| {
-            let sums = colour.iter().zip(sure).map(|(c, &s)| if s { [1.0, c[0], c[1], c[2]] } else { [0.0; 4] }).collect();
+            let sums = colour
+                .iter()
+                .zip(sure)
+                .map(|(c, &s)| if s { [1.0, c[0], c[1], c[2]] } else { [0.0; 4] })
+                .collect();
             box_filter_2d(sums, ww, wh, 2 * r)
         };
         let (f, b) = (mean(&inside), mean(&outside));
@@ -427,10 +442,7 @@ fn snap(
                 for x in 0..ww {
                     let i = y * ww + x;
                     let v = bin[i];
-                    let diff = (x > 0 && bin[i - 1] != v)
-                        || (x + 1 < ww && bin[i + 1] != v)
-                        || (y > 0 && bin[i - ww] != v)
-                        || (y + 1 < wh && bin[i + ww] != v);
+                    let diff = (x > 0 && bin[i - 1] != v) || (x + 1 < ww && bin[i + 1] != v) || (y > 0 && bin[i - ww] != v) || (y + 1 < wh && bin[i + ww] != v);
                     boundary[i] = diff;
                     any |= diff;
                 }
@@ -486,10 +498,7 @@ fn snap(
     };
     // The rest are shared with `before`.
     let mut out = before.clone();
-    out.par_update(|col, row, _| {
-        redo[(row * coverage.cols() + col) as usize]
-            .then(|| snapped(col, row).unwrap_or_else(|| vec![coverage.fill(); TILE_PIXELS]))
-    });
+    out.par_update(|col, row, _| redo[(row * coverage.cols() + col) as usize].then(|| snapped(col, row).unwrap_or_else(|| vec![coverage.fill(); TILE_PIXELS])));
     out
 }
 
@@ -502,8 +511,9 @@ fn near_painting(before: &Snapped, brush: Option<&EdgeBrush>) -> Vec<bool> {
     let Some((before, brush)) = before.brush.as_ref().zip(brush) else {
         return vec![false; cols * rows];
     };
-    let changed: Vec<bool> =
-        (0..cols * rows).map(|i| !brush.painted.same_tile(&before.painted, (i % cols) as u32, (i / cols) as u32)).collect();
+    let changed: Vec<bool> = (0..cols * rows)
+        .map(|i| !brush.painted.same_tile(&before.painted, (i % cols) as u32, (i / cols) as u32))
+        .collect();
     let grown = brush.window() != before.window();
     let reach = (4 * brush.window()).div_ceil(TILE as usize);
     (0..cols * rows)
@@ -544,12 +554,7 @@ pub fn edge_width(guide: &[[f32; 3]], w: usize, h: usize, r: usize) -> Vec<f32> 
 /// convolution with a box of radius `max(radius, 3)`, widened ×4 where no such pixel
 /// is near), by `amount`% scaled by its transparency.
 /// Adapted from PhotoCraft (crates/algo/src/matting.rs), MIT / Apache-2.0.
-pub fn decontaminate_colours(
-    pixels: &Tiled<[u16; 4]>,
-    coverage: &Tiled<u16>,
-    radius: f32,
-    amount: f32,
-) -> Tiled<[u16; 4]> {
+pub fn decontaminate_colours(pixels: &Tiled<[u16; 4]>, coverage: &Tiled<u16>, radius: f32, amount: f32) -> Tiled<[u16; 4]> {
     let (w, h) = (pixels.width() as usize, pixels.height() as usize);
     let tile = TILE as usize;
     let rad = (radius.max(3.0)).ceil() as usize;
@@ -624,19 +629,9 @@ pub fn decontaminate_colours(
                         };
                         rgb[c] = orig[c] + (f - orig[c]) * k;
                     }
-                    [
-                        unit(rgb[0]),
-                        unit(rgb[1]),
-                        unit(rgb[2]),
-                        unit(orig[3]),
-                    ]
+                    [unit(rgb[0]), unit(rgb[1]), unit(rgb[2]), unit(orig[3])]
                 } else {
-                    [
-                        unit(orig[0]),
-                        unit(orig[1]),
-                        unit(orig[2]),
-                        unit(orig[3]),
-                    ]
+                    [unit(orig[0]), unit(orig[1]), unit(orig[2]), unit(orig[3])]
                 };
                 out[(y - ty) * tile + (x - tx)] = out_px;
             }
@@ -789,7 +784,13 @@ mod tests {
         // A bright square from x = 200 to 400 on a dark 600 × 400 image.
         let (w, h) = (600u32, 400u32);
         let px = (0..w * h)
-            .map(|i| if (200..400).contains(&(i % w)) && (100..300).contains(&(i / w)) { [60000; 4] } else { [8000, 8000, 8000, 65535] })
+            .map(|i| {
+                if (200..400).contains(&(i % w)) && (100..300).contains(&(i / w)) {
+                    [60000; 4]
+                } else {
+                    [8000, 8000, 8000, 65535]
+                }
+            })
             .collect();
         let image = Raster::new(w, h, px);
         // The model's 64 × 64 guess is a little too wide on the left: its
@@ -798,7 +799,11 @@ mod tests {
         let logits: Vec<f32> = (0..lw * lh)
             .map(|i| {
                 let (x, y) = ((i % lw) as f32 * 600.0 / 64.0, (i / lw) as f32 * 400.0 / 64.0);
-                if (190.0..400.0).contains(&x) && (100.0..300.0).contains(&y) { 5.0 } else { -5.0 }
+                if (190.0..400.0).contains(&x) && (100.0..300.0).contains(&y) {
+                    5.0
+                } else {
+                    -5.0
+                }
             })
             .collect();
         let coverage = mask_coverage(&logits, lw, lh, 0.0, &image);
@@ -817,32 +822,64 @@ mod tests {
         // that's too wide on the left, from x = 185.
         let (w, h) = (600u32, 400u32);
         let px = (0..w * h)
-            .map(|i| if (200..400).contains(&(i % w)) && (100..300).contains(&(i / w)) { [60000; 4] } else { [8000, 8000, 8000, 65535] })
+            .map(|i| {
+                if (200..400).contains(&(i % w)) && (100..300).contains(&(i / w)) {
+                    [60000; 4]
+                } else {
+                    [8000, 8000, 8000, 65535]
+                }
+            })
             .collect();
         let guide = colours(&Raster::new(w, h, px));
         let rough = Selection::rectangle(w, h, (185.0, 100.0), (400.0, 300.0));
         let refine = |o: EdgeOptions| refine_edge(&rough, &guide, &o, None);
 
         assert_eq!(refine(EdgeOptions::default()).coverage.get(190, 200), 65535);
-        let snapped = refine(EdgeOptions { radius: 20.0, ..Default::default() });
+        let snapped = refine(EdgeOptions {
+            radius: 20.0,
+            ..Default::default()
+        });
         assert!(snapped.at(190, 200) < 0.25, "{}", snapped.at(190, 200));
         assert!(snapped.at(210, 200) > 0.75, "{}", snapped.at(210, 200));
         assert_eq!((snapped.at(300, 200), snapped.at(50, 50)), (1.0, 0.0));
 
         // Feathered, the edge is soft; hardened again, it isn't.
-        let soft = refine(EdgeOptions { feather: 5.0, ..Default::default() });
+        let soft = refine(EdgeOptions {
+            feather: 5.0,
+            ..Default::default()
+        });
         let edge = soft.at(183, 200);
         assert!(edge > 0.2 && edge < 0.5, "{edge}");
-        let hard = refine(EdgeOptions { feather: 5.0, contrast: 100.0, ..Default::default() });
+        let hard = refine(EdgeOptions {
+            feather: 5.0,
+            contrast: 100.0,
+            ..Default::default()
+        });
         assert_eq!((hard.at(183, 200), hard.at(187, 200)), (0.0, 1.0));
         // Shifted out, the soft edge reaches further; in, less far.
-        let out = refine(EdgeOptions { feather: 5.0, shift_edge: 50.0, ..Default::default() });
-        let inwards = refine(EdgeOptions { feather: 5.0, shift_edge: -50.0, ..Default::default() });
+        let out = refine(EdgeOptions {
+            feather: 5.0,
+            shift_edge: 50.0,
+            ..Default::default()
+        });
+        let inwards = refine(EdgeOptions {
+            feather: 5.0,
+            shift_edge: -50.0,
+            ..Default::default()
+        });
         assert!(out.at(183, 200) > edge && inwards.at(183, 200) < edge);
 
         // Smooth clears a speck and keeps the rest.
         let speck = rough.combine(&Selection::rectangle(w, h, (50.0, 50.0), (52.0, 52.0)), crate::selection::Combine::Add);
-        let smoothed = refine_edge(&speck, &guide, &EdgeOptions { smooth: 30.0, ..Default::default() }, None);
+        let smoothed = refine_edge(
+            &speck,
+            &guide,
+            &EdgeOptions {
+                smooth: 30.0,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!((smoothed.at(51, 51), smoothed.at(300, 200)), (0.0, 1.0));
     }
 
@@ -855,7 +892,10 @@ mod tests {
         let strand = |x: u32| x < 40 || ((60..84).contains(&x) && x.is_multiple_of(4));
         let guide = colours(&Raster::new(w, h, (0..w * h).map(|i| if strand(i % w) { warm } else { blue }).collect()));
         let rough = Selection::rectangle(w, h, (0.0, 0.0), (40.0, 60.0));
-        let o = EdgeOptions { radius: 4.0, ..Default::default() };
+        let o = EdgeOptions {
+            radius: 4.0,
+            ..Default::default()
+        };
         assert!(refine_edge(&rough, &guide, &o, None).at(64, 30) < 0.01, "the radius stops short of the strands");
 
         let mut brush = EdgeBrush::new(w, h);
@@ -872,10 +912,16 @@ mod tests {
         assert!(refine_edge(&rough, &guide, &o, Some(&brush)).at(64, 30) < 0.01);
 
         // A blurred edge, which the radius softens: restored, it's as it was.
-        let blurred = colours(&Raster::new(w, h, (0..w * h).map(|i| {
-            let t = ((((i % w) as f32) - 36.0) / 8.0).clamp(0.0, 1.0);
-            [0, 1, 2, 3].map(|c| (f32::from(warm[c]) * (1.0 - t) + f32::from(blue[c]) * t) as u16)
-        }).collect()));
+        let blurred = colours(&Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let t = ((((i % w) as f32) - 36.0) / 8.0).clamp(0.0, 1.0);
+                    [0, 1, 2, 3].map(|c| (f32::from(warm[c]) * (1.0 - t) + f32::from(blue[c]) * t) as u16)
+                })
+                .collect(),
+        ));
         assert!(refine_edge(&rough, &blurred, &o, None).at(41, 30) > 0.1, "the radius softens it");
         let mut restore = EdgeBrush::new(w, h);
         restore.paint((40.0, 0.0), (40.0, 60.0), 20.0, false);
@@ -890,7 +936,11 @@ mod tests {
         let px = (0..w * h).map(|i| {
             let (x, y) = (i % w, i / w);
             let d = ((x * 7919 + y * 104729) % 9000) as u16;
-            if strand(x, y) { [50000 + d, 40000 + d / 2, 13000, 65535] } else { [6500, 15700 + d, 46400 + d / 2, 65535] }
+            if strand(x, y) {
+                [50000 + d, 40000 + d / 2, 13000, 65535]
+            } else {
+                [6500, 15700 + d, 46400 + d / 2, 65535]
+            }
         });
         let guide = colours(&Raster::new(w, h, px.collect()));
         (guide, Selection::rectangle(w, h, (0.0, 0.0), (w as f32 / 3.0, h as f32)))
@@ -910,16 +960,29 @@ mod tests {
             ((1400.0, 50.0), (1450.0, 60.0), 20.0, true),
         ];
         for smart_radius in [false, true] {
-            let o = EdgeOptions { radius: 12.0, smart_radius, ..Default::default() };
+            let o = EdgeOptions {
+                radius: 12.0,
+                smart_radius,
+                ..Default::default()
+            };
             for (a, b, size, add) in strokes {
                 brush.paint(a, b, size, add);
                 let again = refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush));
                 let afresh = refine_edge(&rough, &guide, &o, Some(&brush));
-                assert!(again.coverage.to_vec() == afresh.coverage.to_vec(), "{a:?} → {b:?}, smart radius {smart_radius}");
+                assert!(
+                    again.coverage.to_vec() == afresh.coverage.to_vec(),
+                    "{a:?} → {b:?}, smart radius {smart_radius}"
+                );
             }
         }
         // And with what comes after.
-        let o = EdgeOptions { radius: 12.0, smooth: 20.0, feather: 3.0, contrast: 30.0, ..Default::default() };
+        let o = EdgeOptions {
+            radius: 12.0,
+            smooth: 20.0,
+            feather: 3.0,
+            contrast: 30.0,
+            ..Default::default()
+        };
         brush.paint((600.0, 600.0), (650.0, 700.0), 80.0, true);
         let again = refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush));
         assert!(again.coverage.to_vec() == refine_edge(&rough, &guide, &o, Some(&brush)).coverage.to_vec());
@@ -931,7 +994,10 @@ mod tests {
     fn refining_again_at_24_mp_keeps_up_with_the_brush() {
         let (w, h) = (6000, 4000);
         let (guide, rough) = strands(w, h);
-        let o = EdgeOptions { radius: 40.0, ..Default::default() };
+        let o = EdgeOptions {
+            radius: 40.0,
+            ..Default::default()
+        };
         let mut brush = EdgeBrush::new(w, h);
         let mut last = None;
         let time = |f: &mut dyn FnMut()| {
@@ -939,7 +1005,10 @@ mod tests {
             f();
             start.elapsed().as_secs_f32()
         };
-        println!("first: {:.3} s", time(&mut || drop(refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush)))));
+        println!(
+            "first: {:.3} s",
+            time(&mut || drop(refine_edge_again(&mut last, &rough, &guide, &o, Some(&brush))))
+        );
         // A 1500 px stroke of a 200 px brush, 20 px at a time.
         let mut segments: Vec<f32> = (0..75)
             .map(|i| {
@@ -997,7 +1066,13 @@ mod tests {
         let ramp_guide: Vec<[f32; 3]> = (0..w * h)
             .map(|i| {
                 let x = i % w;
-                let v = if x < 40 { 0.0 } else if x >= 60 { 1.0 } else { (x - 40) as f32 / 20.0 };
+                let v = if x < 40 {
+                    0.0
+                } else if x >= 60 {
+                    1.0
+                } else {
+                    (x - 40) as f32 / 20.0
+                };
                 [v, v, v]
             })
             .collect();
@@ -1012,14 +1087,38 @@ mod tests {
         let (w, h) = (600u32, 400u32);
         // Sharp square from x=200 to 400.
         let px = (0..w * h)
-            .map(|i| if (200..400).contains(&(i % w)) && (100..300).contains(&(i / w)) { [60000; 4] } else { [8000, 8000, 8000, 65535] })
+            .map(|i| {
+                if (200..400).contains(&(i % w)) && (100..300).contains(&(i / w)) {
+                    [60000; 4]
+                } else {
+                    [8000, 8000, 8000, 65535]
+                }
+            })
             .collect();
         let guide = colours(&Raster::new(w, h, px));
         // A selection starting at x=198 (2 pixels outside the square edge at 200).
         let rough = Selection::rectangle(w, h, (198.0, 100.0), (400.0, 300.0));
 
-        let standard = refine_edge(&rough, &guide, &EdgeOptions { radius: 20.0, smart_radius: false, ..Default::default() }, None);
-        let smart = refine_edge(&rough, &guide, &EdgeOptions { radius: 20.0, smart_radius: true, ..Default::default() }, None);
+        let standard = refine_edge(
+            &rough,
+            &guide,
+            &EdgeOptions {
+                radius: 20.0,
+                smart_radius: false,
+                ..Default::default()
+            },
+            None,
+        );
+        let smart = refine_edge(
+            &rough,
+            &guide,
+            &EdgeOptions {
+                radius: 20.0,
+                smart_radius: true,
+                ..Default::default()
+            },
+            None,
+        );
 
         // Both refine the edge inside the square:
         assert!(standard.at(205, 200) > 0.8, "{}", standard.at(205, 200));

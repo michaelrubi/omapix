@@ -144,15 +144,10 @@ enum End {
 fn stack(doc: &Document, id: u64, moving: bool) -> Option<Vec<Step>> {
     let index = doc.index_of(id)?;
     let subject = &doc.layers[index];
-    let plain = |l: &Layer| {
-        !l.clipped && !doc.is_clip_base(l.id) && l.blend_if.is_none_or(|b| b.is_neutral())
-    };
+    let plain = |l: &Layer| !l.clipped && !doc.is_clip_base(l.id) && l.blend_if.is_none_or(|b| b.is_neutral());
     let through = |l: &Layer| l.is_group && l.blend == BlendMode::PassThrough;
     let kind = subject.has_pixels() || !moving && (subject.adjustment.is_some() || through(subject));
-    let groups_shown = |l: &Layer| {
-        std::iter::successors(l.parent, |&g| doc.layer(g)?.parent)
-            .all(|g| doc.layer(g).is_some_and(|g| g.visible))
-    };
+    let groups_shown = |l: &Layer| std::iter::successors(l.parent, |&g| doc.layer(g)?.parent).all(|g| doc.layer(g).is_some_and(|g| g.visible));
     // What's below the subject is composited without the groups round it
     // (the loop below checks they're Pass Through). That's wrong if one is
     // hidden, or if a clipped layer in one has nothing there to clip to: it
@@ -234,10 +229,8 @@ pub fn only_settings_changed(before: &[Layer], after: &[Layer], id: u64) -> bool
                     (Some(x), Some(y)) => x.enabled == y.enabled && x.pixels.same_tiles(&y.pixels),
                     _ => false,
                 };
-            let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group, a.blend_if)
-                == (b.id, b.parent, b.visible, b.clipped, b.is_group, b.blend_if);
-            let same_settings =
-                (a.opacity, a.blend, &a.adjustment) == (b.opacity, b.blend, &b.adjustment);
+            let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group, a.blend_if) == (b.id, b.parent, b.visible, b.clipped, b.is_group, b.blend_if);
+            let same_settings = (a.opacity, a.blend, &a.adjustment) == (b.opacity, b.blend, &b.adjustment);
             same_pixels && same_place && (same_settings || a.id == id)
         })
 }
@@ -246,14 +239,7 @@ pub fn only_settings_changed(before: &[Layer], after: &[Layer], id: u64) -> bool
 /// layer `id` live: `layers` are the document's layers at pyramid level
 /// `level` (shrunk, or the originals at level 0), and `region` the area of
 /// that level on screen.
-pub fn build(
-    doc: &Document,
-    layers: &[Layer],
-    id: u64,
-    moving: bool,
-    level: usize,
-    region: (u32, u32, u32, u32),
-) -> Option<LiveStack> {
+pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usize, region: (u32, u32, u32, u32)) -> Option<LiveStack> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let steps = stack(doc, id, moving)?;
     let index = doc.index_of(id)?;
@@ -287,11 +273,7 @@ pub fn build(
             };
             LiveLayer {
                 source,
-                mask: layer
-                    .mask
-                    .as_ref()
-                    .filter(|m| m.enabled)
-                    .map(|m| Plane::crop(&m.pixels, area)),
+                mask: layer.mask.as_ref().filter(|m| m.enabled).map(|m| Plane::crop(&m.pixels, area)),
                 mode: layer.blend,
                 opacity: layer.opacity,
                 subject,
@@ -398,7 +380,9 @@ mod tests {
         assert_eq!(live.layers.len(), 5);
         assert_eq!(live.slots, 0);
         for end in [1, 3] {
-            let Source::Group(Before::Plane(before)) = &live.layers[end].source else { panic!() };
+            let Source::Group(Before::Plane(before)) = &live.layers[end].source else {
+                panic!()
+            };
             assert_eq!(before.data, live.below.data);
         }
 

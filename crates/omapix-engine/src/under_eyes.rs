@@ -146,7 +146,12 @@ mod tests {
         assert!(mask.at(150, 72) > 0.5, "{}", mask.at(150, 72));
         // Less towards the shadow's edge, nothing where the skin is as
         // light as the cheek, and nothing outside.
-        assert!(mask.at(150, 72) > mask.at(170, 80) && mask.at(105, 95) < 0.02, "{} {}", mask.at(170, 80), mask.at(105, 95));
+        assert!(
+            mask.at(150, 72) > mask.at(170, 80) && mask.at(105, 95) < 0.02,
+            "{} {}",
+            mask.at(170, 80),
+            mask.at(105, 95)
+        );
         assert!(mask.at(150, 120) < 0.01 && mask.at(150, 40) < 0.01);
         // The lash is too dark to be skin in shadow.
         assert!(mask.at(150, 60) < 0.01, "{}", mask.at(150, 60));
@@ -183,7 +188,10 @@ mod tests {
         // At full opacity the shadow's nearly gone, and not past the cheek.
         doc.layer_mut(id).unwrap().opacity = 1.0;
         let full = red(&doc, 150, 75);
-        assert!(full > half && (cheek_level - full) < (cheek_level - was) / 3 && full <= cheek_level + 300, "{was} {full} {cheek_level}");
+        assert!(
+            full > half && (cheek_level - full) < (cheek_level - was) / 3 && full <= cheek_level + 300,
+            "{was} {full} {cheek_level}"
+        );
 
         let none = Selection::from_coverage(Tiled::new(W, H, 0));
         assert_eq!(add_layer(&mut doc, 0, &none, 50.0), None);

@@ -1,6 +1,5 @@
 use lcms2::{
-    CIExyY, CIExyYTRIPLE, DisallowCache, Flags, GlobalContext, InfoType, Intent, Locale, MLU,
-    PixelFormat, Profile, Tag, TagSignature, ToneCurve, Transform,
+    CIExyY, CIExyYTRIPLE, DisallowCache, Flags, GlobalContext, InfoType, Intent, Locale, MLU, PixelFormat, Profile, Tag, TagSignature, ToneCurve, Transform,
 };
 
 use crate::tiled::Tiled;
@@ -8,11 +7,7 @@ use crate::{Error, Pixel, Result};
 
 /// The ICC reference white (D50), which matrix profiles' colorants are
 /// relative to.
-const D50: CIExyY = CIExyY {
-    x: 0.3457,
-    y: 0.3585,
-    Y: 1.0,
-};
+const D50: CIExyY = CIExyY { x: 0.3457, y: 0.3585, Y: 1.0 };
 
 /// The colour space a document's pixel values are in.
 #[derive(Clone)]
@@ -32,13 +27,8 @@ impl ColorProfile {
 
     pub fn from_icc(icc: Vec<u8>) -> Result<Self> {
         let profile = Profile::new_icc(&icc)?;
-        let description = profile
-            .info(InfoType::Description, Locale::none())
-            .unwrap_or_else(|| "Embedded profile".into());
-        Ok(Self {
-            icc: Some(icc),
-            description,
-        })
+        let description = profile.info(InfoType::Description, Locale::none()).unwrap_or_else(|| "Embedded profile".into());
+        Ok(Self { icc: Some(icc), description })
     }
 
     pub fn description(&self) -> &str {
@@ -62,18 +52,12 @@ impl ColorProfile {
         let Ok(profile) = self.lcms_profile() else {
             return false;
         };
-        [
-            TagSignature::RedTRCTag,
-            TagSignature::GreenTRCTag,
-            TagSignature::BlueTRCTag,
-        ]
-        .into_iter()
-        .all(|sig| match profile.read_tag(sig) {
-            Tag::ToneCurve(curve) => curve
-                .estimated_gamma(0.01)
-                .is_some_and(|g| (g - 1.0).abs() < 0.02),
-            _ => false,
-        })
+        [TagSignature::RedTRCTag, TagSignature::GreenTRCTag, TagSignature::BlueTRCTag]
+            .into_iter()
+            .all(|sig| match profile.read_tag(sig) {
+                Tag::ToneCurve(curve) => curve.estimated_gamma(0.01).is_some_and(|g| (g - 1.0).abs() < 0.02),
+                _ => false,
+            })
     }
 
     /// The same colour space (primaries and white) with a gamma-encoded tone
@@ -89,10 +73,7 @@ impl ColorProfile {
             colorant(TagSignature::GreenColorantTag),
             colorant(TagSignature::BlueColorantTag),
         ) else {
-            return Err(Error::Unsupported(format!(
-                "{} is not a matrix RGB profile",
-                self.description
-            )));
+            return Err(Error::Unsupported(format!("{} is not a matrix RGB profile", self.description)));
         };
         let curve = ToneCurve::new(gamma);
         let primaries = CIExyYTRIPLE {
@@ -101,10 +82,7 @@ impl ColorProfile {
             Blue: blue,
         };
         let mut out = Profile::new_rgb(&D50, &primaries, &[&curve, &curve, &curve])?;
-        let base = self
-            .description
-            .trim_start_matches("Linear ")
-            .trim_start_matches("linear ");
+        let base = self.description.trim_start_matches("Linear ").trim_start_matches("linear ");
         let description = format!("{base} (gamma {gamma})");
         let mut mlu = MLU::new(1);
         mlu.set_text(&description, Locale::none());
@@ -193,21 +171,16 @@ impl ColorProfile {
 }
 
 /// Convert an image between colour spaces, keeping alpha as it is.
-pub fn convert(
-    image: &Tiled<Pixel>,
-    from: &ColorProfile,
-    to: &ColorProfile,
-) -> Result<Tiled<Pixel>> {
-    let transform: Transform<Pixel, Pixel, GlobalContext, DisallowCache> =
-        Transform::new_flags_context(
-            GlobalContext::new(),
-            &from.lcms_profile()?,
-            PixelFormat::RGBA_16,
-            &to.lcms_profile()?,
-            PixelFormat::RGBA_16,
-            Intent::RelativeColorimetric,
-            Flags::NO_CACHE | Flags::BLACKPOINT_COMPENSATION,
-        )?;
+pub fn convert(image: &Tiled<Pixel>, from: &ColorProfile, to: &ColorProfile) -> Result<Tiled<Pixel>> {
+    let transform: Transform<Pixel, Pixel, GlobalContext, DisallowCache> = Transform::new_flags_context(
+        GlobalContext::new(),
+        &from.lcms_profile()?,
+        PixelFormat::RGBA_16,
+        &to.lcms_profile()?,
+        PixelFormat::RGBA_16,
+        Intent::RelativeColorimetric,
+        Flags::NO_CACHE | Flags::BLACKPOINT_COMPENSATION,
+    )?;
     let mut out = image.clone();
     out.par_update(|_, _, tile| {
         let tile = tile?;
@@ -367,21 +340,9 @@ pub(crate) mod tests {
     pub(crate) fn linear_prophoto() -> ColorProfile {
         let curve = ToneCurve::new(1.0);
         let primaries = CIExyYTRIPLE {
-            Red: CIExyY {
-                x: 0.7347,
-                y: 0.2653,
-                Y: 1.0,
-            },
-            Green: CIExyY {
-                x: 0.1596,
-                y: 0.8404,
-                Y: 1.0,
-            },
-            Blue: CIExyY {
-                x: 0.0366,
-                y: 0.0001,
-                Y: 1.0,
-            },
+            Red: CIExyY { x: 0.7347, y: 0.2653, Y: 1.0 },
+            Green: CIExyY { x: 0.1596, y: 0.8404, Y: 1.0 },
+            Blue: CIExyY { x: 0.0366, y: 0.0001, Y: 1.0 },
         };
         let mut p = Profile::new_rgb(&D50, &primaries, &[&curve, &curve, &curve]).unwrap();
         let mut mlu = MLU::new(1);
@@ -575,11 +536,7 @@ pub(crate) mod tests {
     #[test]
     fn srgb_to_srgb_is_identity_within_rounding() {
         let t = DisplayTransform::to_srgb(&ColorProfile::srgb()).unwrap();
-        let src = [
-            [0, 0, 0, 65535],
-            [65535, 65535, 65535, 65535],
-            [32896, 16448, 49344, 32896],
-        ];
+        let src = [[0, 0, 0, 65535], [65535, 65535, 65535, 65535], [32896, 16448, 49344, 32896]];
         let mut dst = [[0u8; 4]; 3];
         t.convert(&src, &mut dst);
         assert_eq!(dst[0], [0, 0, 0, 255]);

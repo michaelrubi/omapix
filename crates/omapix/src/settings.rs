@@ -40,7 +40,15 @@ pub struct BatchExport {
 
 impl Default for BatchExport {
     fn default() -> Self {
-        Self { resize: true, long_edge: 2048, sharpen: true, grain: true, jpeg: true, quality: 92, folder: None }
+        Self {
+            resize: true,
+            long_edge: 2048,
+            sharpen: true,
+            grain: true,
+            jpeg: true,
+            quality: 92,
+            folder: None,
+        }
     }
 }
 
@@ -60,7 +68,13 @@ pub struct WebExport {
 
 impl Default for WebExport {
     fn default() -> Self {
-        Self { jpeg: true, quality: 85, resize: true, long_edge: 2048, metadata: true }
+        Self {
+            jpeg: true,
+            quality: 85,
+            resize: true,
+            long_edge: 2048,
+            metadata: true,
+        }
     }
 }
 
@@ -352,7 +366,13 @@ mod tests {
         let path = dir.join("filters.toml");
         let defaults = FilterSettings::default();
         let mut settings = FilterSettings::load_from(&path, &defaults);
-        assert_eq!(settings, FilterSettings { path: Some(path.clone()), ..FilterSettings::default() });
+        assert_eq!(
+            settings,
+            FilterSettings {
+                path: Some(path.clone()),
+                ..FilterSettings::default()
+            }
+        );
         settings.blur_radius = 7.5;
         settings.separation_radius = Some(12.0);
         settings.expand_radius = 8.0;
@@ -373,7 +393,11 @@ mod tests {
         assert_eq!((old.high_pass_radius, old.blur_radius), (3.0, 2.0));
         assert_eq!((old.unsharp_mask.amount, old.unsharp_mask.radius), (1.2, 1.5));
         // As the first version wrote them.
-        std::fs::write(&path, "[smart_blur.SmartBlur]\nradius = 2.4\nthreshold = 25.0\nquality = \"High\"\nmode = \"Normal\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[smart_blur.SmartBlur]\nradius = 2.4\nthreshold = 25.0\nquality = \"High\"\nmode = \"Normal\"\n",
+        )
+        .unwrap();
         let first = FilterSettings::load_from(&path, &defaults);
         assert_eq!((first.smart_blur.radius, first.smart_blur.quality), (2.4, SmartBlurQuality::High));
         std::fs::write(&path, "blur_radius = \"wide\"\n").unwrap();
@@ -400,10 +424,7 @@ mod tests {
         let edited = template
             .replace("# blur_radius = 2.0", "blur_radius = 4.0")
             .replace("# expand_radius = 5.0", "expand_radius = 12.0")
-            .replace(
-                "# separation_radius = 8.6  (unset: from the image's size)",
-                "separation_radius = 9.5",
-            );
+            .replace("# separation_radius = 8.6  (unset: from the image's size)", "separation_radius = 9.5");
         std::fs::write(&path, edited).unwrap();
         let defaults = FilterSettings::load_defaults(&path);
         assert_eq!(
@@ -419,9 +440,23 @@ mod tests {
     #[test]
     fn filters_take_and_give_their_settings() {
         let mut settings = FilterSettings::default();
-        let sharper = LayerFilter::UnsharpMask { amount: 2.0, radius: 0.8, threshold: 4.0 };
+        let sharper = LayerFilter::UnsharpMask {
+            amount: 2.0,
+            radius: 0.8,
+            threshold: 4.0,
+        };
         settings.remember(&sharper);
-        assert_eq!(settings.filter(&LayerFilter::UnsharpMask { amount: 0.0, radius: 0.0, threshold: 0.0 }), sharper);
-        assert_eq!(settings.filter(&LayerFilter::GaussianBlur { radius: 9.0 }), LayerFilter::GaussianBlur { radius: 2.0 });
+        assert_eq!(
+            settings.filter(&LayerFilter::UnsharpMask {
+                amount: 0.0,
+                radius: 0.0,
+                threshold: 0.0
+            }),
+            sharper
+        );
+        assert_eq!(
+            settings.filter(&LayerFilter::GaussianBlur { radius: 9.0 }),
+            LayerFilter::GaussianBlur { radius: 2.0 }
+        );
     }
 }

@@ -15,16 +15,8 @@ pub struct Raster {
 
 impl Raster {
     pub fn new(width: u32, height: u32, pixels: Vec<Pixel>) -> Self {
-        assert_eq!(
-            pixels.len(),
-            width as usize * height as usize,
-            "pixel count must match size"
-        );
-        Self {
-            width,
-            height,
-            pixels,
-        }
+        assert_eq!(pixels.len(), width as usize * height as usize, "pixel count must match size");
+        Self { width, height, pixels }
     }
 
     pub fn width(&self) -> u32 {

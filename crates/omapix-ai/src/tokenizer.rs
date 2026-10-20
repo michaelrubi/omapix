@@ -60,8 +60,8 @@ impl Tokenizer {
             .unwrap_or_default();
         // The file's own pattern, less its `\s+(?!\S)` (whitespace up to
         // the last before a word), which `regex` can't say: `ids` does it.
-        let words = Regex::new(r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+")
-            .map_err(|e| e.to_string())?;
+        let words =
+            Regex::new(r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+").map_err(|e| e.to_string())?;
         Ok(Self { vocab, merges, added, words })
     }
 
@@ -95,7 +95,11 @@ impl Tokenizer {
 
     /// The id of a single token, such as `<|endoftext|>`.
     pub fn id(&self, token: &str) -> Option<u32> {
-        self.added.iter().find(|(t, _)| t == token).map(|&(_, id)| id).or_else(|| self.vocab.get(token).copied())
+        self.added
+            .iter()
+            .find(|(t, _)| t == token)
+            .map(|&(_, id)| id)
+            .or_else(|| self.vocab.get(token).copied())
     }
 
     /// Text with no added tokens in it.
@@ -114,7 +118,10 @@ impl Tokenizer {
     }
 
     fn word(&self, word: &str, ids: &mut Vec<u32>) {
-        let mut pieces: Vec<u32> = word.bytes().filter_map(|b| self.vocab.get(byte_piece(b).encode_utf8(&mut [0; 4])).copied()).collect();
+        let mut pieces: Vec<u32> = word
+            .bytes()
+            .filter_map(|b| self.vocab.get(byte_piece(b).encode_utf8(&mut [0; 4])).copied())
+            .collect();
         while let Some((_, joined, pair)) = pieces
             .windows(2)
             .filter_map(|w| self.merges.get(&(w[0], w[1])).map(|&(rank, joined)| (rank, joined, (w[0], w[1]))))
@@ -191,12 +198,38 @@ mod tests {
         let files = crate::find_model(crate::flux::MODEL).unwrap();
         let t = Tokenizer::load(&files["tokenizer.json"]).unwrap();
         let expected = [
-            ("<|im_start|>user\na bare wall<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", &[151644, 872, 198, 64, 12461, 7002, 151645, 198, 151644, 77091, 198, 151667, 271, 151668, 271][..]),
-            ("Remove the person, and fill with more of the backdrop.", &[13021, 279, 1697, 11, 323, 5155, 448, 803, 315, 279, 38477, 13][..]),
-            ("A red fox in snow, 35mm photo; it's 12:45pm!  Two  spaces\tand tabs\n\nnew paragraph   ", &[32, 2518, 38835, 304, 11794, 11, 220, 18, 20, 3821, 6548, 26, 432, 594, 220, 16, 17, 25, 19, 20, 5187, 0, 220, 9043, 220, 12621, 52477, 22398, 271, 931, 14311, 262][..]),
-            ("don't I'LL café naïve — “quoted” 1234567 3.14 e-mail@x.org https://a.b/c?d=e", &[15007, 944, 358, 6, 4086, 51950, 94880, 586, 1959, 1036, 63725, 854, 220, 16, 17, 18, 19, 20, 21, 22, 220, 18, 13, 16, 19, 384, 11468, 31, 87, 2659, 3703, 1110, 64, 948, 2899, 30, 67, 40391][..]),
-            ("grauer Hintergrund, 写真 スタジオ, фон без людей 😀", &[901, 27097, 472, 2245, 59785, 11, 68739, 247, 88051, 78950, 46207, 75328, 89862, 11, 140406, 91357, 131007, 90316][..]),
-            ("   leading spaces\r\nCRLF line\n  indented", &[256, 6388, 12621, 319, 34, 80658, 1555, 198, 220, 1257, 15864][..]),
+            (
+                "<|im_start|>user\na bare wall<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                &[151644, 872, 198, 64, 12461, 7002, 151645, 198, 151644, 77091, 198, 151667, 271, 151668, 271][..],
+            ),
+            (
+                "Remove the person, and fill with more of the backdrop.",
+                &[13021, 279, 1697, 11, 323, 5155, 448, 803, 315, 279, 38477, 13][..],
+            ),
+            (
+                "A red fox in snow, 35mm photo; it's 12:45pm!  Two  spaces\tand tabs\n\nnew paragraph   ",
+                &[
+                    32, 2518, 38835, 304, 11794, 11, 220, 18, 20, 3821, 6548, 26, 432, 594, 220, 16, 17, 25, 19, 20, 5187, 0, 220, 9043, 220, 12621, 52477,
+                    22398, 271, 931, 14311, 262,
+                ][..],
+            ),
+            (
+                "don't I'LL café naïve — “quoted” 1234567 3.14 e-mail@x.org https://a.b/c?d=e",
+                &[
+                    15007, 944, 358, 6, 4086, 51950, 94880, 586, 1959, 1036, 63725, 854, 220, 16, 17, 18, 19, 20, 21, 22, 220, 18, 13, 16, 19, 384, 11468, 31,
+                    87, 2659, 3703, 1110, 64, 948, 2899, 30, 67, 40391,
+                ][..],
+            ),
+            (
+                "grauer Hintergrund, 写真 スタジオ, фон без людей 😀",
+                &[
+                    901, 27097, 472, 2245, 59785, 11, 68739, 247, 88051, 78950, 46207, 75328, 89862, 11, 140406, 91357, 131007, 90316,
+                ][..],
+            ),
+            (
+                "   leading spaces\r\nCRLF line\n  indented",
+                &[256, 6388, 12621, 319, 34, 80658, 1555, 198, 220, 1257, 15864][..],
+            ),
         ];
         for (text, ids) in expected {
             assert_eq!(t.ids(text), ids, "{text:?}");

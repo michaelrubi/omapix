@@ -9,12 +9,7 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: bench <image>");
     let t = Instant::now();
     let mut doc = io::load(path.as_ref()).expect("load");
-    println!(
-        "load            {:>8.0?}  {}x{}",
-        t.elapsed(),
-        doc.width,
-        doc.height
-    );
+    println!("load            {:>8.0?}  {}x{}", t.elapsed(), doc.width, doc.height);
 
     let t = Instant::now();
     let _ = doc.composite();
@@ -85,15 +80,8 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let t = Instant::now();
     ora::save(&doc, &dir.join("bench.ora")).expect("save");
-    let size = std::fs::metadata(dir.join("bench.ora"))
-        .map(|m| m.len())
-        .unwrap_or(0);
-    println!(
-        "save .ora       {:>8.0?}  {} MB, {} layers",
-        t.elapsed(),
-        size / 1_000_000,
-        doc.layers.len()
-    );
+    let size = std::fs::metadata(dir.join("bench.ora")).map(|m| m.len()).unwrap_or(0);
+    println!("save .ora       {:>8.0?}  {} MB, {} layers", t.elapsed(), size / 1_000_000, doc.layers.len());
     let t = Instant::now();
     let _ = ora::load(&dir.join("bench.ora")).expect("load");
     println!("open .ora       {:>8.0?}", t.elapsed());
@@ -104,7 +92,11 @@ fn main() {
     export::jpeg(&doc, &dir.join("bench.jpg"), 92).expect("jpeg");
     println!("export jpeg     {:>8.0?}", t.elapsed());
     let t = Instant::now();
-    let sharpen = filters::LayerFilter::UnsharpMask { amount: 1.0, radius: 1.0, threshold: 0.0 };
+    let sharpen = filters::LayerFilter::UnsharpMask {
+        amount: 1.0,
+        radius: 1.0,
+        threshold: 0.0,
+    };
     let grain = omapix_engine::NoiseOptions::default();
     export::batch_file(path.as_ref(), &dir, Some(2048), Some(&sharpen), Some(&grain), Some(92)).expect("batch");
     println!("batch export    {:>8.0?}", t.elapsed());

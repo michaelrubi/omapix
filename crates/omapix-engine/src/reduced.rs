@@ -36,8 +36,7 @@ impl Reduced {
             self.layers.clear();
             self.level = level;
         }
-        self.layers
-            .retain(|id, _| layers.iter().any(|l| l.id == *id));
+        self.layers.retain(|id, _| layers.iter().any(|l| l.id == *id));
         layers
             .iter()
             .map(|layer| {
@@ -49,14 +48,10 @@ impl Reduced {
                 });
                 let mut small = layer.clone();
                 small.pixels = pixels.clone();
-                small.mask = layer
-                    .mask
-                    .as_ref()
-                    .zip(mask.as_ref())
-                    .map(|(m, (_, s))| Mask {
-                        pixels: s.clone(),
-                        enabled: m.enabled,
-                    });
+                small.mask = layer.mask.as_ref().zip(mask.as_ref()).map(|(m, (_, s))| Mask {
+                    pixels: s.clone(),
+                    enabled: m.enabled,
+                });
                 let entry = Entry {
                     pixels: (layer.pixels.clone(), pixels),
                     mask,
@@ -113,10 +108,7 @@ impl Average for Pixel {
 /// it covers. `old` is what `src` was last shrunk from, and the result:
 /// tiles made only from source tiles that haven't changed are reused.
 fn shrink<T: Average>(src: &Tiled<T>, level: u32, old: Option<&(Tiled<T>, Tiled<T>)>) -> Tiled<T> {
-    let (w, h) = (
-        src.width().div_ceil(1 << level),
-        src.height().div_ceil(1 << level),
-    );
+    let (w, h) = (src.width().div_ceil(1 << level), src.height().div_ceil(1 << level));
     let span = 1u32 << level;
     // Source tiles under output tile (col, row).
     let sources = move |col: u32, row: u32| {
@@ -171,15 +163,7 @@ fn shrink_tile<T: Average>(src: &Tiled<T>, level: u32, col: u32, row: u32) -> Ve
             x = end;
         }
     }
-    sums.into_iter()
-        .map(|(sum, n)| {
-            if n == 0 {
-                src.fill()
-            } else {
-                T::average(sum, n)
-            }
-        })
-        .collect()
+    sums.into_iter().map(|(sum, n)| if n == 0 { src.fill() } else { T::average(sum, n) }).collect()
 }
 
 #[cfg(test)]
@@ -192,15 +176,7 @@ mod tests {
     fn shrinks_by_averaging_blocks_weighted_by_alpha() {
         let (w, h) = (600, 300);
         // Opaque red columns alternating with transparent green ones.
-        let pixels = (0..w * h)
-            .map(|i| {
-                if i % 2 == 0 {
-                    [60000, 0, 0, 65535]
-                } else {
-                    [0, 60000, 0, 0]
-                }
-            })
-            .collect();
+        let pixels = (0..w * h).map(|i| if i % 2 == 0 { [60000, 0, 0, 65535] } else { [0, 60000, 0, 0] }).collect();
         let layer = Layer::from_raster(1, "l", &Raster::new(w, h, pixels));
         let small = Reduced::default().layers(&[layer], 1).remove(0);
         assert_eq!((small.pixels.width(), small.pixels.height()), (300, 150));
@@ -247,11 +223,7 @@ mod tests {
             })
             .collect();
         let bottom = Layer::from_raster(1, "b", &Raster::new(w, h, ramp));
-        let mut top = Layer::from_raster(
-            2,
-            "t",
-            &Raster::new(w, h, vec![[65535, 0, 0, 40000]; (w * h) as usize]),
-        );
+        let mut top = Layer::from_raster(2, "t", &Raster::new(w, h, vec![[65535, 0, 0, 40000]; (w * h) as usize]));
         top.opacity = 0.5;
         let layers = [bottom, top];
         let full = composite(&layers, w, h);

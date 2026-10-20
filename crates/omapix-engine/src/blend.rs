@@ -43,18 +43,8 @@ impl BlendMode {
     /// In Photoshop's menu order, with separators between groups.
     pub const MENU: &[&[BlendMode]] = &[
         &[BlendMode::Normal],
-        &[
-            BlendMode::Darken,
-            BlendMode::Multiply,
-            BlendMode::ColorBurn,
-            BlendMode::LinearBurn,
-        ],
-        &[
-            BlendMode::Lighten,
-            BlendMode::Screen,
-            BlendMode::ColorDodge,
-            BlendMode::LinearDodge,
-        ],
+        &[BlendMode::Darken, BlendMode::Multiply, BlendMode::ColorBurn, BlendMode::LinearBurn],
+        &[BlendMode::Lighten, BlendMode::Screen, BlendMode::ColorDodge, BlendMode::LinearDodge],
         &[
             BlendMode::Overlay,
             BlendMode::SoftLight,
@@ -63,19 +53,9 @@ impl BlendMode {
             BlendMode::LinearLight,
             BlendMode::PinLight,
         ],
-        &[
-            BlendMode::Difference,
-            BlendMode::Exclusion,
-            BlendMode::Subtract,
-            BlendMode::Divide,
-        ],
+        &[BlendMode::Difference, BlendMode::Exclusion, BlendMode::Subtract, BlendMode::Divide],
         &[BlendMode::GrainExtract, BlendMode::GrainMerge],
-        &[
-            BlendMode::Hue,
-            BlendMode::Saturation,
-            BlendMode::Color,
-            BlendMode::Luminosity,
-        ],
+        &[BlendMode::Hue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity],
     ];
 
     pub fn name(self) -> &'static str {
@@ -147,11 +127,7 @@ impl BlendMode {
         if name == "svg:add" {
             return Some(BlendMode::LinearDodge);
         }
-        Self::MENU
-            .iter()
-            .flat_map(|g| g.iter())
-            .copied()
-            .find(|m| m.ora_name() == name)
+        Self::MENU.iter().flat_map(|g| g.iter()).copied().find(|m| m.ora_name() == name)
     }
 
     /// Blend a source colour onto a backdrop colour, both 0–1.
@@ -171,31 +147,13 @@ impl BlendMode {
             BlendMode::Overlay => sep(|b, s| hard_light(s, b)),
             BlendMode::SoftLight => sep(soft_light),
             BlendMode::HardLight => sep(hard_light),
-            BlendMode::VividLight => sep(|b, s| {
-                if s <= 0.5 {
-                    color_burn(b, 2.0 * s)
-                } else {
-                    color_dodge(b, 2.0 * s - 1.0)
-                }
-            }),
+            BlendMode::VividLight => sep(|b, s| if s <= 0.5 { color_burn(b, 2.0 * s) } else { color_dodge(b, 2.0 * s - 1.0) }),
             BlendMode::LinearLight => sep(|b, s| (b + 2.0 * s - 1.0).clamp(0.0, 1.0)),
-            BlendMode::PinLight => sep(|b, s| {
-                if s <= 0.5 {
-                    b.min(2.0 * s)
-                } else {
-                    b.max(2.0 * s - 1.0)
-                }
-            }),
+            BlendMode::PinLight => sep(|b, s| if s <= 0.5 { b.min(2.0 * s) } else { b.max(2.0 * s - 1.0) }),
             BlendMode::Difference => sep(|b, s| (b - s).abs()),
             BlendMode::Exclusion => sep(|b, s| b + s - 2.0 * b * s),
             BlendMode::Subtract => sep(|b, s| (b - s).max(0.0)),
-            BlendMode::Divide => sep(|b, s| {
-                if s <= 0.0 {
-                    if b <= 0.0 { 0.0 } else { 1.0 }
-                } else {
-                    (b / s).min(1.0)
-                }
-            }),
+            BlendMode::Divide => sep(|b, s| if s <= 0.0 { if b <= 0.0 { 0.0 } else { 1.0 } } else { (b / s).min(1.0) }),
             BlendMode::GrainExtract => sep(|b, s| (b - s + 0.5).clamp(0.0, 1.0)),
             BlendMode::GrainMerge => sep(|b, s| (b + s - 0.5).clamp(0.0, 1.0)),
             BlendMode::Hue => set_lum(set_sat(cs, sat(cb)), lum(cb)),
@@ -211,11 +169,7 @@ fn screen(b: f32, s: f32) -> f32 {
 }
 
 fn hard_light(b: f32, s: f32) -> f32 {
-    if s <= 0.5 {
-        b * 2.0 * s
-    } else {
-        screen(b, 2.0 * s - 1.0)
-    }
+    if s <= 0.5 { b * 2.0 * s } else { screen(b, 2.0 * s - 1.0) }
 }
 
 fn color_dodge(b: f32, s: f32) -> f32 {

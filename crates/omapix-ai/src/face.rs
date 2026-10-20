@@ -29,26 +29,18 @@ pub const FACE_SKIN: usize = 3;
 /// Outlines of the features, as indices into the landmarker's points, in
 /// order round each one. "Left" is the left of the image.
 pub mod outline {
-    pub const LEFT_EYE: [usize; 16] = [
-        33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7,
-    ];
-    pub const RIGHT_EYE: [usize; 16] = [
-        263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249,
-    ];
+    pub const LEFT_EYE: [usize; 16] = [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7];
+    pub const RIGHT_EYE: [usize; 16] = [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249];
     pub const LEFT_BROW: [usize; 10] = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46];
     pub const RIGHT_BROW: [usize; 10] = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276];
     /// Round the outside of the lips.
-    pub const LIPS: [usize; 20] = [
-        61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146,
-    ];
+    pub const LIPS: [usize; 20] = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146];
     /// Between the lips: the mouth, and the teeth when they show.
-    pub const MOUTH: [usize; 20] = [
-        78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95,
-    ];
+    pub const MOUTH: [usize; 20] = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95];
     /// Round the face, from the top of the forehead.
     pub const FACE: [usize; 36] = [
-        10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149,
-        150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109,
+        10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162,
+        21, 54, 103, 67, 109,
     ];
     /// Round the bottom of the nose: its wings, nostrils and tip
     /// (MediaPipe's nose outline).
@@ -169,8 +161,7 @@ fn error(e: impl std::fmt::Display) -> String {
 }
 
 fn load(id: &str, file: &str) -> Result<Session> {
-    let files =
-        find_model(id).ok_or_else(|| format!("Face analysis needs the {id} model: run scripts/fetch-models.sh"))?;
+    let files = find_model(id).ok_or_else(|| format!("Face analysis needs the {id} model: run scripts/fetch-models.sh"))?;
     session(&files[file])
 }
 
@@ -200,10 +191,7 @@ impl Faces {
         };
         let pixels = image.sample(&crop, DETECT_SIZE);
         // Blue, green, red planes, 0–255.
-        let planar: Vec<f32> = [2, 1, 0]
-            .iter()
-            .flat_map(|&c| pixels.iter().map(move |p| p[c] * 255.0))
-            .collect();
+        let planar: Vec<f32> = [2, 1, 0].iter().flat_map(|&c| pixels.iter().map(move |p| p[c] * 255.0)).collect();
         let n = DETECT_SIZE as i64;
         let input = Tensor::from_array((vec![1, 3, n, n], planar)).map_err(error)?;
         let outputs = self.detector.run(ort::inputs!["input" => input]).map_err(error)?;
@@ -211,9 +199,7 @@ impl Faces {
         let mut found = Vec::new();
         for stride in [8usize, 16, 32] {
             let get = |name: &str| -> Result<Vec<f32>> {
-                let (_, data) = outputs[format!("{name}_{stride}").as_str()]
-                    .try_extract_tensor::<f32>()
-                    .map_err(error)?;
+                let (_, data) = outputs[format!("{name}_{stride}").as_str()].try_extract_tensor::<f32>().map_err(error)?;
                 Ok(data.to_vec())
             };
             let (cls, obj, bbox, kps) = (get("cls")?, get("obj")?, get("bbox")?, get("kps")?);
@@ -232,8 +218,7 @@ impl Faces {
                 found.push(Detection {
                     score,
                     bounds: [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0].map(|v| v * to_image),
-                    points: [0, 1, 2, 3, 4]
-                        .map(|p| [(k[2 * p] + col) * s * to_image, (k[2 * p + 1] + row) * s * to_image]),
+                    points: [0, 1, 2, 3, 4].map(|p| [(k[2 * p] + col) * s * to_image, (k[2 * p + 1] + row) * s * to_image]),
                 });
             }
         }
@@ -261,8 +246,7 @@ impl Faces {
         for _ in 0..2 {
             let pixels = image.sample(&crop, LANDMARK_SIZE);
             let n = LANDMARK_SIZE as i64;
-            let input = Tensor::from_array((vec![1, n, n, 3], pixels.into_iter().flatten().collect::<Vec<f32>>()))
-                .map_err(error)?;
+            let input = Tensor::from_array((vec![1, n, n, 3], pixels.into_iter().flatten().collect::<Vec<f32>>())).map_err(error)?;
             let outputs = self.landmarker.run(ort::inputs![input]).map_err(error)?;
             let (_, raw) = outputs[0].try_extract_tensor::<f32>().map_err(error)?;
             let (_, presence) = outputs[1].try_extract_tensor::<f32>().map_err(error)?;
@@ -348,10 +332,7 @@ impl Analysis {
     pub fn logits(&self, classes: &[usize]) -> (Vec<f32>, usize, usize) {
         // The image's part of the square the segmenter saw.
         let longest = self.width.max(self.height);
-        let (lw, lh) = (
-            (SEGMENT_SIZE * self.width / longest).max(1),
-            (SEGMENT_SIZE * self.height / longest).max(1),
-        );
+        let (lw, lh) = ((SEGMENT_SIZE * self.width / longest).max(1), (SEGMENT_SIZE * self.height / longest).max(1));
         let (ox, oy) = ((SEGMENT_SIZE - lw) / 2, (SEGMENT_SIZE - lh) / 2);
         let logits = (0..lw * lh)
             .map(|i| {

@@ -18,8 +18,8 @@ use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, event_created_chi
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{self, Shape};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1;
 use wayland_protocols::wp::tablet::zv2::client::{
-    zwp_tablet_manager_v2, zwp_tablet_pad_group_v2, zwp_tablet_pad_ring_v2, zwp_tablet_pad_strip_v2,
-    zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2, zwp_tablet_v2,
+    zwp_tablet_manager_v2, zwp_tablet_pad_group_v2, zwp_tablet_pad_ring_v2, zwp_tablet_pad_strip_v2, zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2,
+    zwp_tablet_v2,
 };
 
 use zwp_tablet_tool_v2::ZwpTabletToolV2;
@@ -101,11 +101,7 @@ impl Tablet {
             .ok()?;
         Some(Self {
             shared,
-            wayland: ManuallyDrop::new(Wayland {
-                connection,
-                shapes,
-                queue: qh,
-            }),
+            wayland: ManuallyDrop::new(Wayland { connection, shapes, queue: qh }),
             last: egui::Pos2::ZERO,
         })
     }
@@ -207,14 +203,7 @@ struct State {
 }
 
 impl Dispatch<ZwpTabletToolV2, ()> for State {
-    fn event(
-        state: &mut Self,
-        tool: &ZwpTabletToolV2,
-        event: zwp_tablet_tool_v2::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
+    fn event(state: &mut Self, tool: &ZwpTabletToolV2, event: zwp_tablet_tool_v2::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         use zwp_tablet_tool_v2::Event;
         let mut shared = state.shared.lock().unwrap();
         match event {
@@ -236,11 +225,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
             }
             Event::Down { .. } => state.frame.push(Pen::Button(PointerButton::Primary, true)),
             Event::Up => state.frame.push(Pen::Button(PointerButton::Primary, false)),
-            Event::Button {
-                button,
-                state: pressed,
-                ..
-            } => {
+            Event::Button { button, state: pressed, .. } => {
                 let pressed = pressed == WEnum::Value(zwp_tablet_tool_v2::ButtonState::Pressed);
                 match button {
                     BTN_STYLUS => state.frame.push(Pen::Button(PointerButton::Secondary, pressed)),
@@ -265,15 +250,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
 }
 
 impl Dispatch<zwp_tablet_seat_v2::ZwpTabletSeatV2, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &zwp_tablet_seat_v2::ZwpTabletSeatV2,
-        _: zwp_tablet_seat_v2::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
+    fn event(_: &mut Self, _: &zwp_tablet_seat_v2::ZwpTabletSeatV2, _: zwp_tablet_seat_v2::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 
     event_created_child!(State, zwp_tablet_seat_v2::ZwpTabletSeatV2, [
         zwp_tablet_seat_v2::EVT_TABLET_ADDED_OPCODE => (zwp_tablet_v2::ZwpTabletV2, ()),
@@ -283,15 +260,7 @@ impl Dispatch<zwp_tablet_seat_v2::ZwpTabletSeatV2, ()> for State {
 }
 
 impl Dispatch<zwp_tablet_pad_v2::ZwpTabletPadV2, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &zwp_tablet_pad_v2::ZwpTabletPadV2,
-        _: zwp_tablet_pad_v2::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
+    fn event(_: &mut Self, _: &zwp_tablet_pad_v2::ZwpTabletPadV2, _: zwp_tablet_pad_v2::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 
     event_created_child!(State, zwp_tablet_pad_v2::ZwpTabletPadV2, [
         zwp_tablet_pad_v2::EVT_GROUP_OPCODE => (zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, ()),
@@ -299,14 +268,7 @@ impl Dispatch<zwp_tablet_pad_v2::ZwpTabletPadV2, ()> for State {
 }
 
 impl Dispatch<zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
-        _: zwp_tablet_pad_group_v2::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
+    fn event(_: &mut Self, _: &zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, _: zwp_tablet_pad_group_v2::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
     }
 
     event_created_child!(State, zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2, [
@@ -344,15 +306,7 @@ ignore!(
 );
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
-    fn event(
-        _: &mut Self,
-        _: &wl_registry::WlRegistry,
-        _: wl_registry::Event,
-        _: &GlobalListContents,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
+    fn event(_: &mut Self, _: &wl_registry::WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 #[cfg(test)]
@@ -363,7 +317,10 @@ mod tests {
     fn the_pen_moves_and_clicks_where_it_is_in_egui_points() {
         let mut last = egui::Pos2::ZERO;
         let alt = egui::Modifiers::ALT;
-        assert_eq!(event(Pen::Moved(300.0, 150.0, 0.5), &mut last, 1.5, alt), egui::Event::PointerMoved(pos2(200.0, 100.0)));
+        assert_eq!(
+            event(Pen::Moved(300.0, 150.0, 0.5), &mut last, 1.5, alt),
+            egui::Event::PointerMoved(pos2(200.0, 100.0))
+        );
         assert_eq!(
             event(Pen::Button(PointerButton::Primary, true), &mut last, 1.5, alt),
             egui::Event::PointerButton {

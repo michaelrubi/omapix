@@ -65,9 +65,9 @@ impl Preset {
     pub fn from_layers(doc: &Document, ids: &[u64]) -> Option<Self> {
         let mut kept: Vec<&Layer> = Vec::new();
         for (i, layer) in doc.layers.iter().enumerate() {
-            let chosen = ids.iter().any(|&id| {
-                layer.id == id || doc.index_of(id).is_some_and(|g| doc.layers[g].is_group && doc.span(g).contains(&i))
-            });
+            let chosen = ids
+                .iter()
+                .any(|&id| layer.id == id || doc.index_of(id).is_some_and(|g| doc.layers[g].is_group && doc.span(g).contains(&i)));
             if chosen && (layer.is_group || layer.adjustment.is_some()) {
                 kept.push(layer);
             }
@@ -96,11 +96,7 @@ impl Preset {
     pub fn apply(&self, doc: &mut Document, index: usize) -> Option<u64> {
         let (w, h) = (doc.width, doc.height);
         let below = &doc.layers[index];
-        let (at, parent) = if below.is_group {
-            (index, Some(below.id))
-        } else {
-            (index + 1, below.parent)
-        };
+        let (at, parent) = if below.is_group { (index, Some(below.id)) } else { (index + 1, below.parent) };
         let ids: Vec<u64> = self.layers.iter().map(|_| doc.next_layer_id()).collect();
         let layers: Vec<Layer> = self
             .layers
@@ -134,9 +130,7 @@ impl Preset {
         let n = size as u32;
         let level = |v: u32| (v * u32::from(u16::MAX) / (n - 1)) as u16;
         let colours = n * n * n;
-        let pixels = (0..colours)
-            .map(|i| [level(i % n), level(i / n % n), level(i / (n * n)), u16::MAX])
-            .collect();
+        let pixels = (0..colours).map(|i| [level(i % n), level(i / n % n), level(i / (n * n)), u16::MAX]).collect();
         let image = Raster::new(n * n, n, pixels);
         let mut doc = Document::from_image(title.into(), &image, profile.clone(), 16);
         self.apply(&mut doc, 0);

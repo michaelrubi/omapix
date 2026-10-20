@@ -140,8 +140,7 @@ impl BlendIf {
     /// colour below it.
     #[inline]
     pub fn factor(&self, this: [f32; 3], underlying: [f32; 3]) -> f32 {
-        Self::range(self.this, self.pick(this))
-            * Self::range(self.underlying, self.pick(underlying))
+        Self::range(self.this, self.pick(this)) * Self::range(self.underlying, self.pick(underlying))
     }
 }
 

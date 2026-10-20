@@ -340,44 +340,32 @@ impl Descriptor {
 
     /// Returns the sampled tip UUID if this is a sampled brush (`"sampledData"` in `"Brsh"`).
     pub fn sampled_tip_id(&self) -> Option<String> {
-        self.brush_tip_descriptor()
-            .and_then(|b| b.get("sampledData"))
-            .and_then(Value::as_str)
+        self.brush_tip_descriptor().and_then(|b| b.get("sampledData")).and_then(Value::as_str)
     }
 
     /// Returns diameter in pixels (`"Dmtr"` in `"Brsh"`).
     pub fn diameter(&self) -> Option<f64> {
-        self.brush_tip_descriptor()
-            .and_then(|b| b.get("Dmtr"))
-            .and_then(Value::as_f64)
+        self.brush_tip_descriptor().and_then(|b| b.get("Dmtr")).and_then(Value::as_f64)
     }
 
     /// Returns hardness 0..=100 (`"Hrdn"` in `"Brsh"`).
     pub fn hardness(&self) -> Option<f64> {
-        self.brush_tip_descriptor()
-            .and_then(|b| b.get("Hrdn"))
-            .and_then(Value::as_f64)
+        self.brush_tip_descriptor().and_then(|b| b.get("Hrdn")).and_then(Value::as_f64)
     }
 
     /// Returns angle in degrees (`"Angl"` in `"Brsh"`).
     pub fn angle(&self) -> Option<f64> {
-        self.brush_tip_descriptor()
-            .and_then(|b| b.get("Angl"))
-            .and_then(Value::as_f64)
+        self.brush_tip_descriptor().and_then(|b| b.get("Angl")).and_then(Value::as_f64)
     }
 
     /// Returns roundness 0..=100 (`"Rndn"` in `"Brsh"`).
     pub fn roundness(&self) -> Option<f64> {
-        self.brush_tip_descriptor()
-            .and_then(|b| b.get("Rndn"))
-            .and_then(Value::as_f64)
+        self.brush_tip_descriptor().and_then(|b| b.get("Rndn")).and_then(Value::as_f64)
     }
 
     /// Returns spacing percentage (`"Spcn"` in `"Brsh"`).
     pub fn spacing(&self) -> Option<f64> {
-        self.brush_tip_descriptor()
-            .and_then(|b| b.get("Spcn"))
-            .and_then(Value::as_f64)
+        self.brush_tip_descriptor().and_then(|b| b.get("Spcn")).and_then(Value::as_f64)
     }
 }
 
@@ -393,10 +381,7 @@ pub struct VersionedDescriptor {
 impl VersionedDescriptor {
     /// Wraps a descriptor with version 16.
     pub fn new(descriptor: Descriptor) -> Self {
-        VersionedDescriptor {
-            version: 16,
-            descriptor,
-        }
+        VersionedDescriptor { version: 16, descriptor }
     }
 
     /// Parses from bytes (must be fully consumed).
@@ -455,11 +440,7 @@ fn read_descriptor(r: &mut ByteReader<'_>, depth: usize) -> Result<Descriptor> {
         let v = read_value(r, depth + 1)?;
         items.push((key, v));
     }
-    Ok(Descriptor {
-        name,
-        class_id,
-        items,
-    })
+    Ok(Descriptor { name, class_id, items })
 }
 
 fn read_value(r: &mut ByteReader<'_>, depth: usize) -> Result<Value> {
@@ -537,10 +518,7 @@ fn read_typed_value(r: &mut ByteReader<'_>, ty: &[u8; 4], depth: usize) -> Resul
             })
         }
         other => {
-            return Err(bad(format!(
-                "descriptor OSType {:?}",
-                String::from_utf8_lossy(other)
-            )));
+            return Err(bad(format!("descriptor OSType {:?}", String::from_utf8_lossy(other))));
         }
     })
 }
@@ -569,10 +547,7 @@ fn read_reference_item(r: &mut ByteReader<'_>) -> Result<ReferenceItem> {
             name: UnicodeString::read(r)?,
         },
         other => {
-            return Err(bad(format!(
-                "reference item type {:?}",
-                String::from_utf8_lossy(other)
-            )));
+            return Err(bad(format!("reference item type {:?}", String::from_utf8_lossy(other))));
         }
     })
 }
@@ -667,11 +642,7 @@ fn write_reference_item(it: &ReferenceItem, out: &mut Vec<u8>) {
             out.put(b"Clss");
             class.write(out);
         }
-        ReferenceItem::Enumerated {
-            class,
-            type_id,
-            value,
-        } => {
+        ReferenceItem::Enumerated { class, type_id, value } => {
             out.put(b"Enmr");
             class.write(out);
             type_id.write(out);
@@ -728,10 +699,7 @@ mod tests {
                 "artboardRect",
                 Value::Descriptor(Descriptor::new("classFloatRect").with("Top ", Value::Double(1.0))),
             )
-            .with(
-                "list",
-                Value::List(vec![Value::Integer(1), Value::Text(UnicodeString::new("x"))]),
-            )
+            .with("list", Value::List(vec![Value::Integer(1), Value::Text(UnicodeString::new("x"))]))
             .with(
                 "null",
                 Value::Reference(vec![
@@ -841,10 +809,7 @@ mod tests {
     #[test]
     fn unicode_lossy() {
         assert_eq!(UnicodeString::new_nul("ab").to_string_lossy(), "ab");
-        assert_eq!(
-            UnicodeString(vec![0xd800, 0x41]).to_string_lossy(),
-            "\u{fffd}A"
-        );
+        assert_eq!(UnicodeString(vec![0xd800, 0x41]).to_string_lossy(), "\u{fffd}A");
     }
 
     #[test]

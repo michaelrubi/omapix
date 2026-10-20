@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use omapix_ai::lama::{Lama, SIZE};
 use omapix_engine::fill;
-use omapix_engine::{ColorProfile, Layer};
 use omapix_engine::selection::Selection;
+use omapix_engine::{ColorProfile, Layer};
 
 use crate::canvas::Render;
 use crate::editor::Editor;
@@ -45,7 +45,11 @@ impl ContentFill {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let layer = if texture { copied(name, &image, &selection) } else { layer(&image, &selection, &profile) };
+            let layer = if texture {
+                copied(name, &image, &selection)
+            } else {
+                layer(&image, &selection, &profile)
+            };
             let _ = tx.send(layer);
             ctx.request_repaint();
         });
@@ -123,7 +127,9 @@ mod tests {
         let layers = editor.doc.layers.len();
 
         let (tx, rx) = channel();
-        let mut content = ContentFill { running: Some((rx, "Content-Aware Fill")) };
+        let mut content = ContentFill {
+            running: Some((rx, "Content-Aware Fill")),
+        };
         assert_eq!(content.poll(&mut editor), None);
         assert!(content.busy());
         tx.send(layer.map_err(|e| e.to_string())).unwrap();
@@ -146,7 +152,9 @@ mod tests {
     fn texture_fill_needs_no_model_and_covers_the_selection_with_what_is_round_it() {
         // Grey with a red square, which is selected.
         let red = |i: usize| (250..300).contains(&(i % 600)) && (150..200).contains(&(i / 600));
-        let pixels = (0..600 * 400).map(|i| if red(i) { [65535, 0, 0, 65535] } else { [30000, 30000, 30000, 65535] }).collect();
+        let pixels = (0..600 * 400)
+            .map(|i| if red(i) { [65535, 0, 0, 65535] } else { [30000, 30000, 30000, 65535] })
+            .collect();
         let image = Raster::new(600, 400, pixels);
         let doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
         let mut editor = Editor::new(doc).unwrap();

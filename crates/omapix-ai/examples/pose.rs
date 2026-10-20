@@ -45,13 +45,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (w, h) = (raster.width() as usize, raster.height() as usize);
         let mut srgb = vec![[0u8; 4]; raster.pixels().len()];
         DisplayTransform::to_srgb(&doc.profile)?.convert(raster.pixels(), &mut srgb);
-        let image = Image { pixels: &srgb, width: w, height: h };
+        let image = Image {
+            pixels: &srgb,
+            width: w,
+            height: h,
+        };
         let t = Instant::now();
         let crops = poses.detect(&image)?;
         let detect = t.elapsed();
         let t = Instant::now();
         let found = poses.find(&image)?;
-        println!("{}: {w}×{h}, {} detected in {detect:?}, {} found in {:?}", path.display(), crops.len(), found.len(), t.elapsed());
+        println!(
+            "{}: {w}×{h}, {} detected in {detect:?}, {} found in {:?}",
+            path.display(),
+            crops.len(),
+            found.len(),
+            t.elapsed()
+        );
 
         let scale = w.max(h) as f32 / 1400.0;
         let (ow, oh) = ((w as f32 / scale) as u32, (h as f32 / scale) as u32);
@@ -79,7 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 line(&mut img, [a[0], a[1]], [b[0], b[1]], scale, colour, 1);
             }
             for p in &pose.points {
-                dot(&mut img, [p[0] / scale, p[1] / scale], if p[3] > 0.5 { [255, 255, 255] } else { [90, 90, 90] }, 2);
+                dot(
+                    &mut img,
+                    [p[0] / scale, p[1] / scale],
+                    if p[3] > 0.5 { [255, 255, 255] } else { [90, 90, 90] },
+                    2,
+                );
             }
         }
         img.save(out.join(path.file_stem().unwrap()).with_extension("png"))?;
@@ -116,7 +131,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let before = Tiled::from_slice(w as u32, h as u32, [0; 4], raster.pixels());
         let mut after = vec![[0u8; 4]; srgb.len()];
         DisplayTransform::to_srgb(&doc.profile)?.convert(&warped(&before, &field).to_vec(), &mut after);
-        println!("  {sliders}: the lines behind in {lines:?}, the warp in {made:?}, the image warped in {:?}", t.elapsed());
+        println!(
+            "  {sliders}: the lines behind in {lines:?}, the warp in {made:?}, the image warped in {:?}",
+            t.elapsed()
+        );
         let mut img = image::RgbImage::new(ow * 2, oh);
         for (x, y, pixel) in img.enumerate_pixels_mut() {
             let from = if x < ow { &srgb } else { &after };

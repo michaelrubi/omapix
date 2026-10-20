@@ -105,7 +105,17 @@ fn longer(tip: &Tip) -> f32 {
 /// The brush a `brushPreset` describes, with `tips` those of the file's
 /// samples. `None` if its tip isn't in the file.
 fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>], left_out: &mut BTreeSet<&'static str>) -> Option<Preset> {
-    let mut out = Preset { name, size: 30.0, hardness: Some(1.0), size_pressure: false, dynamics: Dynamics { spacing: SPACING, ..Default::default() }, tip: None };
+    let mut out = Preset {
+        name,
+        size: 30.0,
+        hardness: Some(1.0),
+        size_pressure: false,
+        dynamics: Dynamics {
+            spacing: SPACING,
+            ..Default::default()
+        },
+        tip: None,
+    };
     let v = &mut out.dynamics;
     // Whether anything is set by a control Omapix doesn't have: one other
     // than a pen's pressure on size, opacity and flow, and the stroke's
@@ -193,7 +203,12 @@ pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
         let spacing = if brush.spacing == 0 { SPACING } else { f32::from(brush.spacing) / 100.0 };
         let name = brush.name.trim();
         match &brush.tip {
-            LegacyTip::Computed { diameter, hardness, angle, roundness } => {
+            LegacyTip::Computed {
+                diameter,
+                hardness,
+                angle,
+                roundness,
+            } => {
                 let name = if name.is_empty() { format!("{diameter} px Round") } else { name.into() };
                 let mut round = plain(name, f32::from(*diameter), spacing);
                 round.hardness = Some((f32::from(*hardness) / 100.0).clamp(0.0, 1.0));
@@ -203,7 +218,10 @@ pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
             LegacyTip::Sampled(sample) => {
                 let Some(tip) = tip(sample) else { continue };
                 let name = if name.is_empty() { format!("Sampled Brush {}", i + 1) } else { name.into() };
-                out.push(Preset { tip: Some(tip.clone()), ..plain(name, longer(&tip), spacing) });
+                out.push(Preset {
+                    tip: Some(tip.clone()),
+                    ..plain(name, longer(&tip), spacing)
+                });
             }
         }
     }
@@ -215,7 +233,10 @@ pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
     // Tips alone, as early files of the current layout have: a brush each.
     if file.legacy.is_empty() && file.presets.is_empty() {
         for (i, tip) in tips.iter().flatten().enumerate() {
-            out.push(Preset { tip: Some(tip.clone()), ..plain(format!("Sampled Brush {}", i + 1), longer(tip), SPACING) });
+            out.push(Preset {
+                tip: Some(tip.clone()),
+                ..plain(format!("Sampled Brush {}", i + 1), longer(tip), SPACING)
+            });
         }
     }
     (out, left_out.into_iter().collect())
@@ -224,12 +245,18 @@ pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abr::{LegacyBrush, parse, write_v12, write_v6};
+    use crate::abr::{LegacyBrush, parse, write_v6, write_v12};
     use crate::descriptor::UnicodeString;
 
     fn sample(id: &str, width: u32, height: u32) -> AbrSample {
         let data = (0..width * height).map(|i| (i % 251) as u8).collect();
-        AbrSample { id: id.into(), width, height, depth: 8, data }
+        AbrSample {
+            id: id.into(),
+            width,
+            height,
+            depth: 8,
+            data,
+        }
     }
 
     fn percent(v: f64) -> Value {
@@ -278,7 +305,10 @@ mod tests {
         let (brushes, left_out) = presets(&parse(&bytes).unwrap());
         assert!(left_out.is_empty(), "{left_out:?}");
         let [brush] = &brushes[..] else { panic!("{}", brushes.len()) };
-        assert_eq!((brush.name.as_str(), brush.size, brush.hardness, brush.size_pressure), ("Skin Texture", 80.0, None, true));
+        assert_eq!(
+            (brush.name.as_str(), brush.size, brush.hardness, brush.size_pressure),
+            ("Skin Texture", 80.0, None, true)
+        );
         assert_eq!(brush.tip.as_ref().unwrap().size(), (40, 20));
         let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
         let d = brush.dynamics;
@@ -287,22 +317,43 @@ mod tests {
         assert!(close(d.roundness_jitter, 0.3) && close(d.minimum_roundness, 0.4));
         assert!(close(d.scatter, 3.5) && d.both_axes && d.count == 3 && close(d.count_jitter, 0.5));
         assert!(close(d.opacity_jitter, 0.25) && close(d.flow_jitter, 0.1));
-        assert_eq!((d.flip_x, d.flip_y, d.flip_x_jitter, d.flip_y_jitter, d.noise, d.wet_edges), (false, true, true, false, true, false));
+        assert_eq!(
+            (d.flip_x, d.flip_y, d.flip_x_jitter, d.flip_y_jitter, d.noise, d.wet_edges),
+            (false, true, true, false, true, false)
+        );
 
         // Chosen, it changes the tool's brush but not its opacity or flow.
-        let mut settings = BrushSettings { opacity: 0.4, flow: 0.3, hardness: 0.2, opacity_pressure: false, ..Default::default() };
+        let mut settings = BrushSettings {
+            opacity: 0.4,
+            flow: 0.3,
+            hardness: 0.2,
+            opacity_pressure: false,
+            ..Default::default()
+        };
         brush.apply(&mut settings);
-        assert_eq!((settings.size, settings.tip, settings.dynamics), (80.0, Some(brush.tip.as_ref().unwrap().id()), d));
-        assert_eq!((settings.opacity, settings.flow, settings.hardness, settings.opacity_pressure), (0.4, 0.3, 0.2, false));
+        assert_eq!(
+            (settings.size, settings.tip, settings.dynamics),
+            (80.0, Some(brush.tip.as_ref().unwrap().id()), d)
+        );
+        assert_eq!(
+            (settings.opacity, settings.flow, settings.hardness, settings.opacity_pressure),
+            (0.4, 0.3, 0.2, false)
+        );
     }
 
     #[test]
     fn what_omapix_does_not_have_is_named_and_a_missing_tip_skips_the_brush() {
-        let round = Descriptor::new("computedBrush").with("Dmtr", Value::Double(12.0)).with("Hrdn", percent(35.0)).with("flipX", Value::Boolean(true));
+        let round = Descriptor::new("computedBrush")
+            .with("Dmtr", Value::Double(12.0))
+            .with("Hrdn", percent(35.0))
+            .with("flipX", Value::Boolean(true));
         let textured = named("Chalk")
             .with("Brsh", Value::Descriptor(round))
             .with("useTexture", Value::Boolean(true))
-            .with("dualBrush", Value::Descriptor(Descriptor::new("dualBrush").with("useDualBrush", Value::Boolean(true))))
+            .with(
+                "dualBrush",
+                Value::Descriptor(Descriptor::new("dualBrush").with("useDualBrush", Value::Boolean(true))),
+            )
             .with("useColorDynamics", Value::Boolean(false))
             .with("Wtdg", Value::Boolean(true))
             .with("useTipDynamics", Value::Boolean(true))
@@ -310,20 +361,55 @@ mod tests {
             // Unticked: its settings aren't used.
             .with("useScatter", Value::Boolean(false))
             .with("scatterDynamics", vary(500.0, 0));
-        let lost = named("Lost").with("Brsh", Value::Descriptor(Descriptor::new("sampledBrush").with("sampledData", Value::Text(UnicodeString::new("gone")))));
-        let file = AbrFile { version: 6, subversion: 2, samples: vec![sample("a", 4, 4), sample("b", 4, 4)], presets: vec![textured, lost], ..Default::default() };
+        let lost = named("Lost").with(
+            "Brsh",
+            Value::Descriptor(Descriptor::new("sampledBrush").with("sampledData", Value::Text(UnicodeString::new("gone")))),
+        );
+        let file = AbrFile {
+            version: 6,
+            subversion: 2,
+            samples: vec![sample("a", 4, 4), sample("b", 4, 4)],
+            presets: vec![textured, lost],
+            ..Default::default()
+        };
         let (brushes, left_out) = presets(&file);
         assert_eq!(left_out, ["Dual Brush", "Fade, tilt and other controls", "Texture"]);
         let [chalk] = &brushes[..] else { panic!("{}", brushes.len()) };
-        assert_eq!((chalk.name.as_str(), chalk.size, chalk.hardness, chalk.size_pressure), ("Chalk", 12.0, Some(0.35), false));
+        assert_eq!(
+            (chalk.name.as_str(), chalk.size, chalk.hardness, chalk.size_pressure),
+            ("Chalk", 12.0, Some(0.35), false)
+        );
         assert!(chalk.tip.is_none());
-        assert_eq!(chalk.dynamics, Dynamics { spacing: SPACING, flip_x: true, wet_edges: true, ..Default::default() });
+        assert_eq!(
+            chalk.dynamics,
+            Dynamics {
+                spacing: SPACING,
+                flip_x: true,
+                wet_edges: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
     fn old_brush_files_and_files_of_tips_alone_give_a_brush_each() {
-        let round = LegacyBrush { name: String::new(), spacing: 0, anti_alias: true, tip: LegacyTip::Computed { diameter: 19, hardness: 50, angle: 45, roundness: 30 } };
-        let leaf = LegacyBrush { name: "Leaf".into(), spacing: 120, anti_alias: true, tip: LegacyTip::Sampled(sample("", 30, 50)) };
+        let round = LegacyBrush {
+            name: String::new(),
+            spacing: 0,
+            anti_alias: true,
+            tip: LegacyTip::Computed {
+                diameter: 19,
+                hardness: 50,
+                angle: 45,
+                roundness: 30,
+            },
+        };
+        let leaf = LegacyBrush {
+            name: "Leaf".into(),
+            spacing: 120,
+            anti_alias: true,
+            tip: LegacyTip::Sampled(sample("", 30, 50)),
+        };
         let old = parse(&write_v12(2, &[round, leaf], true).unwrap()).unwrap();
         let (brushes, left_out) = presets(&old);
         assert!(left_out.is_empty());
@@ -333,7 +419,12 @@ mod tests {
         assert_eq!((leaf.name.as_str(), leaf.size, leaf.hardness, leaf.dynamics.spacing), ("Leaf", 50.0, None, 1.2));
         assert_eq!(leaf.tip.as_ref().unwrap().size(), (30, 50));
 
-        let tips = AbrFile { version: 6, subversion: 1, samples: vec![sample("a", 8, 4), sample("b", 2, 6)], ..Default::default() };
+        let tips = AbrFile {
+            version: 6,
+            subversion: 1,
+            samples: vec![sample("a", 8, 4), sample("b", 2, 6)],
+            ..Default::default()
+        };
         let names: Vec<_> = presets(&tips).0.iter().map(|b| (b.name.clone(), b.size)).collect();
         assert_eq!(names, [("Sampled Brush 1".to_owned(), 8.0), ("Sampled Brush 2".to_owned(), 6.0)]);
     }

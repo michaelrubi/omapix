@@ -50,7 +50,11 @@ impl Plane {
     }
 
     fn blurred(&self, sigma: f32) -> Plane {
-        Plane { w: self.w, h: self.h, v: blur(&self.v, self.w, self.h, sigma) }
+        Plane {
+            w: self.w,
+            h: self.h,
+            v: blur(&self.v, self.w, self.h, sigma),
+        }
     }
 
     /// Shrunk to `w` × `h`, somewhat smaller.
@@ -237,8 +241,7 @@ fn corners(plane: &Plane) -> Vec<(usize, usize, f64, f64)> {
             for y in y0..(y0 + CELL).min(h - BORDER) {
                 for x in x0..(x0 + CELL).min(w - BORDER) {
                     let v = s(x, y);
-                    let peak = v > 1e-10
-                        && (0..9).all(|i| i == 4 || v > s(x + i % 3 - 1, y + i / 3 - 1) || (i > 4 && v == s(x + i % 3 - 1, y + i / 3 - 1)));
+                    let peak = v > 1e-10 && (0..9).all(|i| i == 4 || v > s(x + i % 3 - 1, y + i / 3 - 1) || (i > 4 && v == s(x + i % 3 - 1, y + i / 3 - 1)));
                     if peak {
                         peaks.push((v, x, y));
                     }
@@ -249,7 +252,11 @@ fn corners(plane: &Plane) -> Vec<(usize, usize, f64, f64)> {
             // Between pixels: the top of the curve through its neighbours.
             let top = |before: f32, v: f32, after: f32| {
                 let bend = 2.0 * v - before - after;
-                if bend > 0.0 { f64::from((after - before) / (2.0 * bend)).clamp(-0.5, 0.5) } else { 0.0 }
+                if bend > 0.0 {
+                    f64::from((after - before) / (2.0 * bend)).clamp(-0.5, 0.5)
+                } else {
+                    0.0
+                }
             };
             peaks
                 .into_iter()
@@ -279,7 +286,10 @@ fn pairs(a: &[Feature], b: &[Feature]) -> Vec<(usize, usize)> {
             .collect()
     };
     let (ab, ba) = (nearest(a, b), nearest(b, a));
-    ab.iter().enumerate().filter_map(|(i, j)| j.filter(|&j| ba[j] == Some(i)).map(|j| (i, j))).collect()
+    ab.iter()
+        .enumerate()
+        .filter_map(|(i, j)| j.filter(|&j| ba[j] == Some(i)).map(|j| (i, j)))
+        .collect()
 }
 
 /// The perspective transform that best takes each pair's first point to
@@ -455,8 +465,12 @@ pub fn auto_align(doc: &mut Document, ids: &[u64]) -> Option<Vec<String>> {
         .collect();
     let reference = layers.iter().position(|&i| !doc.layers[i].can_move()).unwrap_or(0);
     // Others that are locked stay out of it.
-    let layers: Vec<usize> =
-        layers.iter().enumerate().filter(|&(n, &i)| n == reference || doc.layers[i].can_move()).map(|(_, &i)| i).collect();
+    let layers: Vec<usize> = layers
+        .iter()
+        .enumerate()
+        .filter(|&(n, &i)| n == reference || doc.layers[i].can_move())
+        .map(|(_, &i)| i)
+        .collect();
     if layers.len() < 2 {
         return None;
     }
@@ -522,8 +536,7 @@ pub fn photomerge(frames: &[(String, Tiled<Pixel>)], profile: ColorProfile) -> R
 
     // How far inside each frame a point of the canvas is: the frame it's
     // furthest inside shows there.
-    let back: Vec<(Projective, Point)> =
-        placed.iter().map(|&(i, t)| (t.inverse().unwrap_or(Projective::IDENTITY), size(i))).collect();
+    let back: Vec<(Projective, Point)> = placed.iter().map(|&(i, t)| (t.inverse().unwrap_or(Projective::IDENTITY), size(i))).collect();
     let inside = |k: usize, p: Point| {
         let (from, (w, h)) = &back[k];
         from.apply(p).map_or(0.0, |(x, y)| x.min(w - x).min(y).min(h - y).max(0.0))
@@ -564,7 +577,11 @@ pub fn photomerge(frames: &[(String, Tiled<Pixel>)], profile: ColorProfile) -> R
                     let deepest = depths.iter().copied().fold(0.0, f64::max);
                     let share = |d: f64| if d > 0.0 { (d - deepest + fade).max(0.0) } else { 0.0 };
                     let below: f64 = depths[..=at].iter().map(|&d| share(d)).sum();
-                    *v = if below > 0.0 { (share(depths[at]) / below * 65535.0).round() as u16 } else { 0 };
+                    *v = if below > 0.0 {
+                        (share(depths[at]) / below * 65535.0).round() as u16
+                    } else {
+                        0
+                    };
                 }
                 tile.iter().any(|&v| v != 0).then_some(tile)
             });

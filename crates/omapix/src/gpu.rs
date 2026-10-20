@@ -38,14 +38,10 @@ pub fn display_lut(transform: &DisplayTransform) -> Vec<[f32; 4]> {
     let n = DISPLAY_LUT_SIZE;
     let step = 65535.0 / (n - 1) as f32;
     let at = |k: usize| (k as f32 * step).round() as u16;
-    let src: Vec<Pixel> = (0..n * n * n)
-        .map(|i| [at(i % n), at(i / n % n), at(i / (n * n)), u16::MAX])
-        .collect();
+    let src: Vec<Pixel> = (0..n * n * n).map(|i| [at(i % n), at(i / n % n), at(i / (n * n)), u16::MAX]).collect();
     let mut out = vec![[0u8; 4]; src.len()];
     transform.convert(&src, &mut out);
-    out.iter()
-        .map(|c| [c[0], c[1], c[2], 255].map(|v| f32::from(v) / 255.0))
-        .collect()
+    out.iter().map(|c| [c[0], c[1], c[2], 255].map(|v| f32::from(v) / 255.0)).collect()
 }
 
 /// What to draw this frame: a stack, where its subject is (in level
@@ -112,14 +108,7 @@ impl Params {
     /// `inverse` of a transform (both in level pixels).
     fn bytes(&self, offset: [i32; 2], inverse: Option<[f64; 6]>) -> Vec<u8> {
         let mut words: Vec<u32> = Vec::with_capacity(32);
-        for v in [
-            self.region_origin,
-            offset,
-            self.plane.0,
-            self.plane.1,
-            self.mask.0,
-            self.mask.1,
-        ] {
+        for v in [self.region_origin, offset, self.plane.0, self.plane.1, self.mask.0, self.mask.1] {
             words.extend(v.map(|x| x as u32));
         }
         words.extend(self.pixel_fill.map(f32::to_bits));
@@ -178,10 +167,7 @@ impl LiveGpu {
             label: Some("live display"),
             entries: &[texture(0, float, d2), texture(1, float, d3), uniform(2)],
         });
-        let pipeline = |layouts: &[Option<&wgpu::BindGroupLayout>],
-                        entry: &str,
-                        format: wgpu::TextureFormat,
-                        blend: Option<wgpu::BlendState>| {
+        let pipeline = |layouts: &[Option<&wgpu::BindGroupLayout>], entry: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(entry),
                 bind_group_layouts: layouts,
@@ -220,10 +206,7 @@ impl LiveGpu {
             target_format,
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
-        let empty = |format, dimension| {
-            texture_2d_or_3d(device, format, dimension, (1, 1, 1))
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        };
+        let empty = |format, dimension| texture_2d_or_3d(device, format, dimension, (1, 1, 1)).create_view(&wgpu::TextureViewDescriptor::default());
         Self {
             layer_pipeline,
             display_pipeline,
@@ -321,11 +304,7 @@ impl LiveGpu {
                 });
                 let view = |v: Option<wgpu::TextureView>, empty: &wgpu::TextureView| v.unwrap_or_else(|| empty.clone());
                 let lut_view = lut.as_ref().map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
-                let (pixels, mask, lut_view) = (
-                    view(pixels, &self.empty_pixels),
-                    view(mask, &self.empty_mask),
-                    view(lut_view, &self.empty_lut),
-                );
+                let (pixels, mask, lut_view) = (view(pixels, &self.empty_pixels), view(mask, &self.empty_mask), view(lut_view, &self.empty_lut));
                 let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("live layer"),
                     layout: &self.layer_layout,
@@ -358,7 +337,13 @@ impl LiveGpu {
             mapped_at_creation: false,
         });
         let display_lut = lut_texture(device, DISPLAY_LUT_SIZE);
-        write(queue, &display_lut, bytemuck::cast_slice(draw.display_lut.as_slice()), DISPLAY_LUT_SIZE as u32 * 16, (DISPLAY_LUT_SIZE as u32, DISPLAY_LUT_SIZE as u32, DISPLAY_LUT_SIZE as u32));
+        write(
+            queue,
+            &display_lut,
+            bytemuck::cast_slice(draw.display_lut.as_slice()),
+            DISPLAY_LUT_SIZE as u32 * 16,
+            (DISPLAY_LUT_SIZE as u32, DISPLAY_LUT_SIZE as u32, DISPLAY_LUT_SIZE as u32),
+        );
         let display_lut = display_lut.create_view(&wgpu::TextureViewDescriptor::default());
         let display_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("live display"),
@@ -456,12 +441,7 @@ impl CallbackTrait for LiveDraw {
         Vec::new()
     }
 
-    fn paint(
-        &self,
-        _info: egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'static>,
-        resources: &CallbackResources,
-    ) {
+    fn paint(&self, _info: egui::PaintCallbackInfo, render_pass: &mut wgpu::RenderPass<'static>, resources: &CallbackResources) {
         let Some(gpu) = resources.get::<LiveGpu>() else {
             return;
         };
@@ -500,12 +480,7 @@ fn extent((w, h, d): (u32, u32, u32)) -> wgpu::Extent3d {
     }
 }
 
-fn texture_2d_or_3d(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    dimension: wgpu::TextureDimension,
-    size: (u32, u32, u32),
-) -> wgpu::Texture {
+fn texture_2d_or_3d(device: &wgpu::Device, format: wgpu::TextureFormat, dimension: wgpu::TextureDimension, size: (u32, u32, u32)) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("live source"),
         size: extent(size),
@@ -519,13 +494,7 @@ fn texture_2d_or_3d(
 }
 
 /// A 2D texture of `size` holding `data`, row-major.
-fn upload<T: bytemuck::Pod>(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    format: wgpu::TextureFormat,
-    (w, h): (u32, u32),
-    data: &[T],
-) -> wgpu::TextureView {
+fn upload<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, (w, h): (u32, u32), data: &[T]) -> wgpu::TextureView {
     let texture = texture_2d_or_3d(device, format, wgpu::TextureDimension::D2, (w, h, 1));
     if w > 0 && h > 0 {
         write(queue, &texture, bytemuck::cast_slice(data), w * size_of::<T>() as u32, (w, h, 1));
@@ -642,7 +611,11 @@ mod tests {
             .map(|i| {
                 let (x, y) = (i % w, i / w);
                 let inside = (10..40).contains(&x) && (8..30).contains(&y);
-                if inside { [60000, (x * 900) as u16, 20000, 30000 + (y * 800) as u16] } else { [0; 4] }
+                if inside {
+                    [60000, (x * 900) as u16, 20000, 30000 + (y * 800) as u16]
+                } else {
+                    [0; 4]
+                }
             })
             .collect();
         let id = doc.next_layer_id();
@@ -674,13 +647,7 @@ mod tests {
     /// The largest difference between the live composite of `doc`'s patch
     /// moved by `offset` (or transformed by `transform`, as Free Transform's
     /// bilinear preview) and the CPU's composite of it.
-    fn worst_difference(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        doc: &Document,
-        offset: (i32, i32),
-        transform: Option<Affine>,
-    ) -> f32 {
+    fn worst_difference(device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document, offset: (i32, i32), transform: Option<Affine>) -> f32 {
         let (w, h) = (doc.width, doc.height);
         let patch = doc.layers[1].id;
         let stack = live::build(doc, &doc.layers, patch, true, 0, (0, 0, w, h)).expect("shown live");
@@ -923,12 +890,7 @@ mod tests {
         let flat = composite::composite(&doc.layers, w, h);
         let mut cpu = vec![[0u8; 4]; (w * h) as usize];
         transform.convert(flat.pixels(), &mut cpu);
-        let worst = cpu
-            .iter()
-            .zip(&gpu)
-            .flat_map(|(c, g)| (0..4).map(move |i| c[i].abs_diff(g[i])))
-            .max()
-            .unwrap();
+        let worst = cpu.iter().zip(&gpu).flat_map(|(c, g)| (0..4).map(move |i| c[i].abs_diff(g[i]))).max().unwrap();
         // The lookup table is interpolated between 65 points a side.
         assert!(worst <= 2, "off by {worst} levels");
     }

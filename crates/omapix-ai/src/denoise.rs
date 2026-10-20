@@ -21,8 +21,7 @@ pub struct Nind {
 
 impl Nind {
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL)
-            .ok_or_else(|| format!("Denoise needs the {MODEL} model, which darktable installs"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Denoise needs the {MODEL} model, which darktable installs"))?;
         Ok(Self {
             session: session(&files["model.onnx"])?,
         })
@@ -61,4 +60,3 @@ mod tests {
         assert!(spread(&out) < spread(&noisy) / 3.0, "{} {}", spread(&out), spread(&noisy));
     }
 }
-

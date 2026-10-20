@@ -11,8 +11,8 @@
 //! threshold, change the same object for as long as the selection is the
 //! one the session made.
 
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
 
 use egui::Pos2;
 use omapix_ai::sam::{Encoded, MASK_SIZE, Prompt, Sam};
@@ -109,9 +109,10 @@ impl ObjectSelection {
     /// the one it made; otherwise it starts a new one (added with Shift,
     /// subtracted with Alt).
     pub fn begin_stroke(&mut self, editor: &Editor, p: Pos2, how: Combine, threshold: f32) {
-        let going_on = self.session.as_ref().is_some_and(|s| {
-            s.label == "Quick Selection" && s.committed == Some(editor.revision())
-        });
+        let going_on = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.label == "Quick Selection" && s.committed == Some(editor.revision()));
         if going_on {
             if let Some(session) = &mut self.session {
                 session.inside = how != Combine::Subtract;
@@ -144,7 +145,10 @@ impl ObjectSelection {
 
     /// Quick Selection: the stroke's over; its answer becomes the selection.
     pub fn end_stroke(&mut self, threshold: f32) {
-        if let Some(Session { prompt: Prompt::Points(points), .. }) = &self.session
+        if let Some(Session {
+            prompt: Prompt::Points(points),
+            ..
+        }) = &self.session
             && !points.is_empty()
         {
             let prompt = Prompt::Points(sparse(points));
@@ -284,11 +288,7 @@ fn spawn() -> Worker {
     (tx, rx)
 }
 
-fn find(
-    encoded: &mut Option<(u64, Encoded)>,
-    logits: &mut Option<Vec<f32>>,
-    request: &Request,
-) -> Result<Tiled<u16>, String> {
+fn find(encoded: &mut Option<(u64, Encoded)>, logits: &mut Option<Vec<f32>>, request: &Request) -> Result<Tiled<u16>, String> {
     if let Job::Select(prompt, refine) = &request.job {
         let mut sam = SAM.lock().map_err(|e| e.to_string())?;
         let sam = match &mut *sam {

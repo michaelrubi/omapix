@@ -642,11 +642,7 @@ impl Command {
     }
 
     /// [`Self::pressed`] with these shortcuts.
-    pub fn pressed_with(
-        ctx: &egui::Context,
-        v_down: &mut bool,
-        hotkeys: &crate::hotkeys::Hotkeys,
-    ) -> Vec<Command> {
+    pub fn pressed_with(ctx: &egui::Context, v_down: &mut bool, hotkeys: &crate::hotkeys::Hotkeys) -> Vec<Command> {
         ctx.input_mut(|i| {
             // With Shift held, egui reports [ and ] as the { and } they
             // type, so Ctrl+Shift+[ and Shift+[ (brush hardness, read
@@ -677,9 +673,9 @@ impl Command {
             // released: a V released without being pressed was Ctrl+V.
             // Whether `command`'s shortcut is `key` with the Shift and Alt held now.
             let held = |command: Command, key: Key| {
-                hotkeys.command(command).is_some_and(|s| {
-                    s.logical_key == key && s.modifiers.alt == i.modifiers.alt && s.modifiers.shift == i.modifiers.shift
-                })
+                hotkeys
+                    .command(command)
+                    .is_some_and(|s| s.logical_key == key && s.modifiers.alt == i.modifiers.alt && s.modifiers.shift == i.modifiers.shift)
             };
             for event in &i.events {
                 match event {
@@ -701,9 +697,7 @@ impl Command {
                             let held = |m: Modifiers| modifiers.shift == m.shift && modifiers.alt == m.alt;
                             let paste = [Command::Paste, Command::PasteInPlace, Command::PasteInto]
                                 .into_iter()
-                                .find(|&c| {
-                                    hotkeys.command(c).is_some_and(|s| s.logical_key == Key::V && held(s.modifiers))
-                                });
+                                .find(|&c| hotkeys.command(c).is_some_and(|s| s.logical_key == Key::V && held(s.modifiers)));
                             if let Some(paste) = paste.filter(|p| !pressed.contains(p)) {
                                 pressed.push(paste);
                             }
@@ -713,12 +707,7 @@ impl Command {
                     _ => {}
                 }
             }
-            i.events.retain(|e| {
-                !matches!(
-                    e,
-                    egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
-                )
-            });
+            i.events.retain(|e| !matches!(e, egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)));
             pressed
         })
     }
@@ -732,10 +721,7 @@ mod tests {
     fn every_shortcut_is_in_keyboard_order() {
         for &c in Command::ALL {
             if c.shortcut().is_some() {
-                assert!(
-                    Command::KEYBOARD_ORDER.contains(&c),
-                    "{c:?} missing from KEYBOARD_ORDER"
-                );
+                assert!(Command::KEYBOARD_ORDER.contains(&c), "{c:?} missing from KEYBOARD_ORDER");
             }
         }
     }
@@ -748,17 +734,9 @@ mod tests {
     }
 
     /// Commands pressed in a frame with these events and modifiers held.
-    fn press(
-        ctx: &egui::Context,
-        v_down: &mut bool,
-        modifiers: Modifiers,
-        mut events: Vec<egui::Event>,
-    ) -> Vec<Command> {
+    fn press(ctx: &egui::Context, v_down: &mut bool, modifiers: Modifiers, mut events: Vec<egui::Event>) -> Vec<Command> {
         events.insert(0, egui::Event::ModifiersChanged(modifiers));
-        let input = egui::RawInput {
-            events,
-            ..Default::default()
-        };
+        let input = egui::RawInput { events, ..Default::default() };
         let mut pressed = Vec::new();
         let mut output = ctx.run_ui(input, |ui| pressed = Command::pressed(ui.ctx(), v_down));
         // There's no renderer to upload textures to.
@@ -783,10 +761,7 @@ mod tests {
         let none = Modifiers::NONE;
         let copy = vec![egui::Event::Copy];
         assert_eq!(press(&ctx, &mut v_down, CMD, copy.clone()), [Command::Copy]);
-        assert_eq!(
-            press(&ctx, &mut v_down, CMD_SHIFT, copy),
-            [Command::CopyMerged]
-        );
+        assert_eq!(press(&ctx, &mut v_down, CMD_SHIFT, copy), [Command::CopyMerged]);
         // Ctrl+Alt+C comes as a Copy with Alt held.
         let copy = vec![egui::Event::Copy];
         assert_eq!(press(&ctx, &mut v_down, CMD_ALT, copy), [Command::CanvasSize]);
@@ -797,27 +772,15 @@ mod tests {
         // Ctrl+V with an image on the clipboard: only the release arrives,
         // even if Ctrl was let go first.
         assert_eq!(press(&ctx, &mut v_down, CMD, vec![]), []);
-        assert_eq!(
-            press(&ctx, &mut v_down, none, vec![v(false, none)]),
-            [Command::Paste]
-        );
+        assert_eq!(press(&ctx, &mut v_down, none, vec![v(false, none)]), [Command::Paste]);
         // With text on the clipboard, a Paste event comes first.
         let paste = vec![egui::Event::Paste("text".into())];
         assert_eq!(press(&ctx, &mut v_down, CMD, paste), []);
-        assert_eq!(
-            press(&ctx, &mut v_down, CMD, vec![v(false, CMD)]),
-            [Command::Paste]
-        );
+        assert_eq!(press(&ctx, &mut v_down, CMD, vec![v(false, CMD)]), [Command::Paste]);
         // Ctrl+Shift+V (Paste in Place)
-        assert_eq!(
-            press(&ctx, &mut v_down, CMD_SHIFT, vec![v(false, CMD_SHIFT)]),
-            [Command::PasteInPlace]
-        );
+        assert_eq!(press(&ctx, &mut v_down, CMD_SHIFT, vec![v(false, CMD_SHIFT)]), [Command::PasteInPlace]);
         // Ctrl+Alt+Shift+V (Paste Into)
-        assert_eq!(
-            press(&ctx, &mut v_down, CMD_ALT_SHIFT, vec![v(false, CMD_ALT_SHIFT)]),
-            [Command::PasteInto]
-        );
+        assert_eq!(press(&ctx, &mut v_down, CMD_ALT_SHIFT, vec![v(false, CMD_ALT_SHIFT)]), [Command::PasteInto]);
         // V on its own isn't pasting, however long it's held.
         assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);
         assert_eq!(press(&ctx, &mut v_down, none, vec![v(true, none)]), []);
@@ -837,14 +800,8 @@ mod tests {
         };
         let front = vec![brace(Key::CloseCurlyBracket, Key::CloseBracket)];
         let back = vec![brace(Key::OpenCurlyBracket, Key::OpenBracket)];
-        assert_eq!(
-            press(&ctx, &mut v_down, CMD_SHIFT, front),
-            [Command::BringToFront]
-        );
-        assert_eq!(
-            press(&ctx, &mut v_down, CMD_SHIFT, back),
-            [Command::SendToBack]
-        );
+        assert_eq!(press(&ctx, &mut v_down, CMD_SHIFT, front), [Command::BringToFront]);
+        assert_eq!(press(&ctx, &mut v_down, CMD_SHIFT, back), [Command::SendToBack]);
     }
 
     #[test]
@@ -877,9 +834,6 @@ mod tests {
             repeat: false,
             modifiers: CMD,
         };
-        assert_eq!(
-            press(&ctx, &mut v_down, CMD, vec![event]),
-            [Command::SelectionEdges]
-        );
+        assert_eq!(press(&ctx, &mut v_down, CMD, vec![event]), [Command::SelectionEdges]);
     }
 }

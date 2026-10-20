@@ -208,7 +208,8 @@ mod tests {
         assert_eq!(whitening.busy(), Some(Part::Makeup));
         let lips = Selection::rectangle(600, 400, (250.0, 300.0), (350.0, 330.0));
         let cheeks = Selection::ellipse(600, 400, (100.0, 150.0), (200.0, 250.0));
-        tx.send(Ok(Made::Makeup(vec![(makeup::Product::Blush, cheeks), (makeup::Product::Lipstick, lips)]))).unwrap();
+        tx.send(Ok(Made::Makeup(vec![(makeup::Product::Blush, cheeks), (makeup::Product::Lipstick, lips)])))
+            .unwrap();
         assert_eq!(whitening.poll(&mut editor), None);
 
         // The group's selected, to fade all of it; its layers are painted
@@ -289,7 +290,9 @@ mod tests {
                 }
             };
             let t = std::time::Instant::now();
-            let Some(matte) = Matte::new(&found.image, &found.skin, found.iod) else { continue };
+            let Some(matte) = Matte::new(&found.image, &found.skin, found.iod) else {
+                continue;
+            };
             eprintln!("{name}: iod {:.0}, skin {:?}, shine found in {:?}", found.iod, found.skin.bounds(), t.elapsed());
             let Some(id) = shine::add_layer(&mut doc, 0, &matte, amount) else {
                 eprintln!("{name}: no shine");
@@ -321,7 +324,10 @@ mod tests {
             }
             let ppm_path = format!("{out}/{name}-shine.ppm");
             std::fs::write(&ppm_path, ppm).unwrap();
-            std::process::Command::new("magick").args([&ppm_path, &format!("{out}/{name}-shine.png")]).status().unwrap();
+            std::process::Command::new("magick")
+                .args([&ppm_path, &format!("{out}/{name}-shine.png")])
+                .status()
+                .unwrap();
             std::fs::remove_file(ppm_path).unwrap();
         }
     }
@@ -382,7 +388,10 @@ mod tests {
             }
             let ppm_path = format!("{out}/{name}-makeup.ppm");
             std::fs::write(&ppm_path, ppm).unwrap();
-            std::process::Command::new("magick").args([&ppm_path, &format!("{out}/{name}-makeup.png")]).status().unwrap();
+            std::process::Command::new("magick")
+                .args([&ppm_path, &format!("{out}/{name}-makeup.png")])
+                .status()
+                .unwrap();
             std::fs::remove_file(ppm_path).unwrap();
         }
     }
@@ -451,7 +460,10 @@ mod tests {
                 let ppm_path = format!("{out}/{name}-{part}.ppm");
                 std::fs::write(&ppm_path, ppm).unwrap();
                 let png = format!("{out}/{name}-{part}.png");
-                std::process::Command::new("magick").args([&ppm_path, "-filter", "point", "-resize", "1800x>", &png]).status().unwrap();
+                std::process::Command::new("magick")
+                    .args([&ppm_path, "-filter", "point", "-resize", "1800x>", &png])
+                    .status()
+                    .unwrap();
                 std::fs::remove_file(ppm_path).unwrap();
             }
         }

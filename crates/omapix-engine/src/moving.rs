@@ -41,11 +41,7 @@ impl Lifted<Pixel> {
     /// original stays whole.
     pub fn pixels(pixels: &Tiled<Pixel>, selection: &Tiled<u16>, copy: bool) -> Self {
         let (w, h, fill) = (pixels.width(), pixels.height(), pixels.fill());
-        let tile = |col, row| {
-            pixels
-                .tile(col, row)
-                .map_or_else(|| vec![fill; TILE_PIXELS], <[Pixel]>::to_vec)
-        };
+        let tile = |col, row| pixels.tile(col, row).map_or_else(|| vec![fill; TILE_PIXELS], <[Pixel]>::to_vec);
         let alpha = |keep: bool| {
             move |col, row| {
                 let s = selected(selection, col, row)?;
@@ -86,11 +82,7 @@ impl Lifted<Pixel> {
         let fill = out.fill();
         out.par_update(|col, row, below| {
             let top = moved.tile(col, row)?;
-            Some(
-                (0..TILE_PIXELS)
-                    .map(|i| over(top[i], below.map_or(fill, |t| t[i])))
-                    .collect(),
-            )
+            Some((0..TILE_PIXELS).map(|i| over(top[i], below.map_or(fill, |t| t[i]))).collect())
         });
         out
     }
@@ -138,13 +130,8 @@ impl Lifted<u16> {
             Some(
                 (0..TILE_PIXELS)
                     .map(|i| {
-                        let (a, b) = (
-                            below.map_or(fill, |t| t[i]),
-                            m.map_or(moved.fill(), |t| t[i]),
-                        );
-                        (i64::from(a)
-                            + (i64::from(b) - i64::from(a)) * i64::from(k[i]) / i64::from(MAX))
-                            as u16
+                        let (a, b) = (below.map_or(fill, |t| t[i]), m.map_or(moved.fill(), |t| t[i]));
+                        (i64::from(a) + (i64::from(b) - i64::from(a)) * i64::from(k[i]) / i64::from(MAX)) as u16
                     })
                     .collect(),
             )
@@ -184,9 +171,7 @@ mod tests {
     /// Blue on the left half, red on the right, 600 × 300 (several tiles).
     fn halves() -> Tiled<Pixel> {
         let (w, h) = (600, 300);
-        let px: Vec<Pixel> = (0..w * h)
-            .map(|i| if i % w < w / 2 { BLUE } else { RED })
-            .collect();
+        let px: Vec<Pixel> = (0..w * h).map(|i| if i % w < w / 2 { BLUE } else { RED }).collect();
         Tiled::from_slice(w, h, [0; 4], &px)
     }
 
@@ -195,14 +180,7 @@ mod tests {
         let t = halves();
         for (dx, dy) in [(37, -5), (-300, 0), (256, 256), (-1, 299)] {
             let moved = t.translated(dx, dy, [0; 4]);
-            for (x, y) in [
-                (0, 0),
-                (299, 10),
-                (300, 150),
-                (599, 299),
-                (255, 256),
-                (400, 100),
-            ] {
+            for (x, y) in [(0, 0), (299, 10), (300, 150), (599, 299), (255, 256), (400, 100)] {
                 let (sx, sy) = (x as i32 - dx, y as i32 - dy);
                 let expected = if sx < 0 || sy < 0 || sx >= 600 || sy >= 300 {
                     [0; 4]
@@ -287,9 +265,6 @@ mod tests {
         let half_red = [65535, 0, 0, 32768];
         let p = over(half_red, BLUE);
         assert_eq!(p[3], 65535);
-        assert!(
-            p[0].abs_diff(32768) <= 1 && p[2].abs_diff(32767) <= 1,
-            "{p:?}"
-        );
+        assert!(p[0].abs_diff(32768) <= 1 && p[2].abs_diff(32767) <= 1, "{p:?}");
     }
 }

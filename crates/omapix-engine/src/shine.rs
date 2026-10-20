@@ -216,7 +216,11 @@ mod tests {
         // Still a little lighter than the skin round it, and than its own
         // edge: a highlight, not a hole.
         assert!(full < half && full > skin + 500 && full < skin + 4000, "{full} {skin}");
-        assert!(full >= level(&after, (HOT.0 + 14, HOT.1), 0), "{full} {}", level(&after, (HOT.0 + 14, HOT.1), 0));
+        assert!(
+            full >= level(&after, (HOT.0 + 14, HOT.1), 0),
+            "{full} {}",
+            level(&after, (HOT.0 + 14, HOT.1), 0)
+        );
         // Its paleness goes with it: blue comes down by more of what it
         // was over the skin than red does.
         let over = |image: &Raster, c: usize| (level(image, HOT, c) - level(image, (200, 60), c)) as f32;

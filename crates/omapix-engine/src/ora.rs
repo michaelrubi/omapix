@@ -66,10 +66,7 @@ pub(crate) fn used_area<T: Copy + PartialEq + Send + Sync>(t: &Tiled<T>) -> Opti
 }
 
 /// Copy a rectangle out of a tiled image, row-major.
-fn crop<T: Copy + PartialEq + Send + Sync>(
-    t: &Tiled<T>,
-    (x, y, w, h): (u32, u32, u32, u32),
-) -> Vec<T> {
+fn crop<T: Copy + PartialEq + Send + Sync>(t: &Tiled<T>, (x, y, w, h): (u32, u32, u32, u32)) -> Vec<T> {
     let mut out = Vec::with_capacity(w as usize * h as usize);
     for py in y..y + h {
         for px in x..x + w {
@@ -80,13 +77,7 @@ fn crop<T: Copy + PartialEq + Send + Sync>(
 }
 
 /// Paste a row-major rectangle into a new tiled image of the given size.
-pub(crate) fn uncrop<T: Copy + PartialEq + Send + Sync>(
-    width: u32,
-    height: u32,
-    fill: T,
-    (x, y, w, h): (u32, u32, u32, u32),
-    pixels: &[T],
-) -> Tiled<T> {
+pub(crate) fn uncrop<T: Copy + PartialEq + Send + Sync>(width: u32, height: u32, fill: T, (x, y, w, h): (u32, u32, u32, u32), pixels: &[T]) -> Tiled<T> {
     Tiled::from_tiles(width, height, fill, |col, row| {
         let (tx, ty) = (col * TILE, row * TILE);
         let overlaps = tx < x + w && tx + TILE > x && ty < y + h && ty + TILE > y;
@@ -113,8 +104,7 @@ pub(crate) fn uncrop<T: Copy + PartialEq + Send + Sync>(
 
 fn encode_png(data: &[u16], w: u32, h: u32, channels: u8, icc: Option<&[u8]>) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    let mut encoder =
-        PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive);
+    let mut encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive);
     if let Some(icc) = icc {
         // Only fails for encoders without ICC support; PNG has it.
         let _ = encoder.set_icc_profile(icc.to_vec());
@@ -130,10 +120,7 @@ fn encode_png(data: &[u16], w: u32, h: u32, channels: u8, icc: Option<&[u8]>) ->
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 /// An encoded PNG: archive path, bytes, and top-left position.
@@ -160,11 +147,7 @@ fn write_stack(xml: &mut String, doc: &Document, encoded: &[Encoded], parent: Op
     let layers = doc.layers.iter().zip(encoded).enumerate().rev();
     for (i, (layer, enc)) in layers.filter(|(_, (l, _))| l.parent == parent) {
         if layer.is_group {
-            let isolation = if layer.blend == BlendMode::PassThrough {
-                "auto"
-            } else {
-                "isolate"
-            };
+            let isolation = if layer.blend == BlendMode::PassThrough { "auto" } else { "isolate" };
             xml.push_str(&format!("<stack isolation=\"{isolation}\""));
         } else {
             let (src, x, y) = match &enc.layer_png {
@@ -200,10 +183,7 @@ fn write_stack(xml: &mut String, doc: &Document, encoded: &[Encoded], parent: Op
             xml.push_str(&format!(" omapix:blend-if=\"{}\"", xml_escape(&json)));
         }
         if let Some(adjustment) = &layer.adjustment {
-            xml.push_str(&format!(
-                " omapix:adjustment=\"{}\"",
-                xml_escape(&adjustment.to_json())
-            ));
+            xml.push_str(&format!(" omapix:adjustment=\"{}\"", xml_escape(&adjustment.to_json())));
         }
         if let Some(((name, _, (mx, my)), fill)) = &enc.mask_png {
             let enabled = layer.mask.as_ref().is_some_and(|m| m.enabled);
@@ -244,10 +224,7 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
                 Some(mask) => Some(encode_grey(&mask.pixels, format!("data/mask{i}.png"))?),
                 None => None,
             };
-            Ok(Encoded {
-                layer_png,
-                mask_png,
-            })
+            Ok(Encoded { layer_png, mask_png })
         })
         .collect::<Result<_>>()?;
     let channels: Vec<(Png, u16)> = doc
@@ -270,11 +247,7 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
         format!(" omapix:round-trip=\"{}\"", xml_escape(&name.to_string_lossy()))
     });
     let round_trip = round_trip.unwrap_or_default();
-    let exif_attr = if doc.exif.is_some() {
-        " omapix:exif=\"metadata/exif.bin\""
-    } else {
-        ""
-    };
+    let exif_attr = if doc.exif.is_some() { " omapix:exif=\"metadata/exif.bin\"" } else { "" };
     let mut xml = format!(
         "<?xml version='1.0' encoding='UTF-8'?>\n<image version=\"0.0.5\" w=\"{w}\" h=\"{h}\" xmlns:omapix=\"{NAMESPACE}\"{round_trip}{exif_attr}>\n<stack>\n"
     );
@@ -295,11 +268,10 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
     let mut zip = ZipWriter::new(BufWriter::new(file));
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let write =
-        |zip: &mut ZipWriter<BufWriter<File>>, name: &str, data: &[u8], opts| -> Result<()> {
-            zip.start_file(name, opts).map_err(zip_error)?;
-            zip.write_all(data).map_err(|e| io_error(path, e))
-        };
+    let write = |zip: &mut ZipWriter<BufWriter<File>>, name: &str, data: &[u8], opts| -> Result<()> {
+        zip.start_file(name, opts).map_err(zip_error)?;
+        zip.write_all(data).map_err(|e| io_error(path, e))
+    };
     // The spec requires the uncompressed mimetype entry first.
     write(&mut zip, "mimetype", b"image/openraster", stored)?;
     write(&mut zip, "stack.xml", xml.as_bytes(), deflated)?;
@@ -308,12 +280,7 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
             Some((name, png, _)) => write(&mut zip, name, png, stored)?,
             None if layer.is_group => {}
             // Empty layers still need a file: one transparent pixel.
-            None => write(
-                &mut zip,
-                &format!("data/layer{i}.png"),
-                &encode_png(&[0; 4], 1, 1, 4, icc)?,
-                stored,
-            )?,
+            None => write(&mut zip, &format!("data/layer{i}.png"), &encode_png(&[0; 4], 1, 1, 4, icc)?, stored)?,
         }
         if let Some(((name, png, _), _)) = &enc.mask_png {
             write(&mut zip, name, png, stored)?;
@@ -337,17 +304,11 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
 fn thumbnail_png(merged: &crate::Raster, profile: &ColorProfile) -> Result<Vec<u8>> {
     let (w, h) = (merged.width(), merged.height());
     let scale = 256.0 / w.max(h) as f32;
-    let (tw, th) = (
-        ((w as f32 * scale) as u32).max(1),
-        ((h as f32 * scale) as u32).max(1),
-    );
+    let (tw, th) = (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1));
     let small: Vec<Pixel> = (0..tw * th)
         .map(|i| {
             let (x, y) = (i % tw, i / tw);
-            merged.get(
-                ((x as f32 / scale) as u32).min(w - 1),
-                ((y as f32 / scale) as u32).min(h - 1),
-            )
+            merged.get(((x as f32 / scale) as u32).min(w - 1), ((y as f32 / scale) as u32).min(h - 1))
         })
         .collect();
     let transform = crate::DisplayTransform::to_srgb(profile)?;
@@ -404,9 +365,7 @@ fn parse_stack(xml: &str) -> Result<Stack> {
     // entry of a group.
     let mut open: Vec<Option<usize>> = Vec::new();
     loop {
-        let event = reader
-            .read_event()
-            .map_err(|e| Error::Unsupported(format!("stack.xml: {e}")))?;
+        let event = reader.read_event().map_err(|e| Error::Unsupported(format!("stack.xml: {e}")))?;
         let (e, has_children) = match event {
             Event::Start(e) => (e, true),
             Event::Empty(e) => (e, false),
@@ -420,10 +379,7 @@ fn parse_stack(xml: &str) -> Result<Stack> {
         let mut attrs = std::collections::HashMap::new();
         for a in e.attributes().flatten() {
             let key = a.key.0.to_owned();
-            let value = a
-                .normalized_value(XmlVersion::Implicit1_0)
-                .map(|v| v.into_owned())
-                .unwrap_or_default();
+            let value = a.normalized_value(XmlVersion::Implicit1_0).map(|v| v.into_owned()).unwrap_or_default();
             attrs.insert(key, value);
         }
         let num = |k: &str| attrs.get(k).and_then(|v| v.parse::<f64>().ok());
@@ -458,14 +414,10 @@ fn parse_stack(xml: &str) -> Result<Stack> {
                 num("omapix:mask-x").unwrap_or(0.0) as u32,
                 num("omapix:mask-y").unwrap_or(0.0) as u32,
                 num("omapix:mask-fill").unwrap_or(65535.0) as u16,
-                attrs
-                    .get("omapix:mask-enabled")
-                    .is_none_or(|v| v != "false"),
+                attrs.get("omapix:mask-enabled").is_none_or(|v| v != "false"),
             )
         });
-        let blend = attrs
-            .get("composite-op")
-            .and_then(|op| BlendMode::from_ora_name(op));
+        let blend = attrs.get("composite-op").and_then(|op| BlendMode::from_ora_name(op));
         // A group that isn't isolated and has no mode of its own passes
         // through.
         let isolated = attrs.get("isolation").is_some_and(|v| v == "isolate");
@@ -474,9 +426,7 @@ fn parse_stack(xml: &str) -> Result<Stack> {
             _ => blend.unwrap_or_default(),
         };
         layers.push(LayerEntry {
-            name: attrs.get("name").cloned().unwrap_or_else(|| {
-                if is_group { "Group" } else { "Layer" }.into()
-            }),
+            name: attrs.get("name").cloned().unwrap_or_else(|| if is_group { "Group" } else { "Layer" }.into()),
             src: (!is_group).then(|| attrs.get("src").cloned().unwrap_or_default()),
             x: num("x").unwrap_or(0.0).max(0.0) as u32,
             y: num("y").unwrap_or(0.0).max(0.0) as u32,
@@ -484,12 +434,8 @@ fn parse_stack(xml: &str) -> Result<Stack> {
             visible: attrs.get("visibility").is_none_or(|v| v != "hidden"),
             blend,
             mask,
-            adjustment: attrs
-                .get("omapix:adjustment")
-                .and_then(|json| crate::adjust::Adjustment::from_json(json)),
-            blend_if: attrs
-                .get("omapix:blend-if")
-                .and_then(|json| serde_json::from_str(json).ok()),
+            adjustment: attrs.get("omapix:adjustment").and_then(|json| crate::adjust::Adjustment::from_json(json)),
+            blend_if: attrs.get("omapix:blend-if").and_then(|json| serde_json::from_str(json).ok()),
             clipped: attrs.get("omapix:clipped").is_some_and(|v| v == "true"),
             locks: Locks {
                 transparency: attrs.get("omapix:lock-alpha").is_some_and(|v| v == "true"),
@@ -519,9 +465,7 @@ fn parse_stack(xml: &str) -> Result<Stack> {
 fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec<u8>> {
     let mut entry = zip.by_name(name).map_err(zip_error)?;
     let mut data = Vec::new();
-    entry
-        .read_to_end(&mut data)
-        .map_err(|e| Error::Unsupported(format!("{name}: {e}")))?;
+    entry.read_to_end(&mut data).map_err(|e| Error::Unsupported(format!("{name}: {e}")))?;
     Ok(data)
 }
 
@@ -585,50 +529,44 @@ pub fn load(path: &Path) -> Result<Document> {
         .par_iter()
         .zip(files.par_iter())
         .enumerate()
-        .map(
-            |(i, (e, (png, mask_png)))| -> Result<(Layer, Option<Vec<u8>>)> {
-                // Stack lists top first; ids count from the bottom.
-                let id_of = |entry: usize| (entries.len() - entry) as u64;
-                let (tiled, icc) = if e.src.is_some() {
-                    let (w, h, samples, icc) = decode_png(png, true)?;
-                    let pixels: Vec<Pixel> = samples.as_chunks::<4>().0.to_vec();
-                    // Layers may be placed partly outside the canvas; clip them.
-                    let area = (
-                        e.x.min(width),
-                        e.y.min(height),
-                        w.min(width.saturating_sub(e.x)),
-                        h.min(height.saturating_sub(e.y)),
-                    );
-                    let clipped: Vec<Pixel> = (0..area.3)
-                        .flat_map(|row| {
-                            pixels[(row * w) as usize..(row * w + area.2) as usize]
-                                .iter()
-                                .copied()
-                        })
-                        .collect();
-                    (uncrop(width, height, [0; 4], area, &clipped), icc)
-                } else {
-                    (Tiled::new(width, height, [0; 4]), None)
-                };
-                let mut layer = Layer::from_pixels(id_of(i), e.name.clone(), tiled);
-                layer.is_group = e.src.is_none();
-                layer.parent = e.parent.map(id_of);
-                layer.opacity = e.opacity.clamp(0.0, 1.0);
-                layer.visible = e.visible;
-                layer.blend = e.blend;
-                layer.adjustment = e.adjustment.clone();
-                layer.blend_if = e.blend_if;
-                layer.clipped = e.clipped;
-                layer.locks = e.locks;
-                if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
-                    layer.mask = Some(Mask {
-                        pixels: decode_grey(mask_png, (*mx, *my), *fill, width, height)?,
-                        enabled: *enabled,
-                    });
-                }
-                Ok((layer, icc))
-            },
-        )
+        .map(|(i, (e, (png, mask_png)))| -> Result<(Layer, Option<Vec<u8>>)> {
+            // Stack lists top first; ids count from the bottom.
+            let id_of = |entry: usize| (entries.len() - entry) as u64;
+            let (tiled, icc) = if e.src.is_some() {
+                let (w, h, samples, icc) = decode_png(png, true)?;
+                let pixels: Vec<Pixel> = samples.as_chunks::<4>().0.to_vec();
+                // Layers may be placed partly outside the canvas; clip them.
+                let area = (
+                    e.x.min(width),
+                    e.y.min(height),
+                    w.min(width.saturating_sub(e.x)),
+                    h.min(height.saturating_sub(e.y)),
+                );
+                let clipped: Vec<Pixel> = (0..area.3)
+                    .flat_map(|row| pixels[(row * w) as usize..(row * w + area.2) as usize].iter().copied())
+                    .collect();
+                (uncrop(width, height, [0; 4], area, &clipped), icc)
+            } else {
+                (Tiled::new(width, height, [0; 4]), None)
+            };
+            let mut layer = Layer::from_pixels(id_of(i), e.name.clone(), tiled);
+            layer.is_group = e.src.is_none();
+            layer.parent = e.parent.map(id_of);
+            layer.opacity = e.opacity.clamp(0.0, 1.0);
+            layer.visible = e.visible;
+            layer.blend = e.blend;
+            layer.adjustment = e.adjustment.clone();
+            layer.blend_if = e.blend_if;
+            layer.clipped = e.clipped;
+            layer.locks = e.locks;
+            if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
+                layer.mask = Some(Mask {
+                    pixels: decode_grey(mask_png, (*mx, *my), *fill, width, height)?,
+                    enabled: *enabled,
+                });
+            }
+            Ok((layer, icc))
+        })
         .collect::<Result<_>>()?;
 
     let icc = decoded.iter().find_map(|(_, icc)| icc.clone());
@@ -660,15 +598,8 @@ mod tests {
     #[test]
     fn round_trips_layers_modes_and_masks() {
         let (w, h) = (600, 300);
-        let px: Vec<Pixel> = (0..w * h)
-            .map(|i| [(i % 65000) as u16, (i / 3 % 65000) as u16, 1234, 65535])
-            .collect();
-        let mut doc = Document::from_image(
-            "in.tif".into(),
-            &Raster::new(w, h, px),
-            ColorProfile::srgb(),
-            16,
-        );
+        let px: Vec<Pixel> = (0..w * h).map(|i| [(i % 65000) as u16, (i / 3 % 65000) as u16, 1234, 65535]).collect();
+        let mut doc = Document::from_image("in.tif".into(), &Raster::new(w, h, px), ColorProfile::srgb(), 16);
         ops::frequency_separation(&mut doc, 0, 3.0);
         ops::dodge_and_burn_layer(&mut doc, 2);
         doc.layers[1].opacity = 0.5;
@@ -685,12 +616,7 @@ mod tests {
         let id = doc.next_layer_id();
         let mut curves = crate::adjust::Curves::default();
         curves.master.points.insert(1, (0.4, 0.5));
-        doc.layers.push(Layer::adjustment(
-            id,
-            crate::adjust::Adjustment::Curves(curves),
-            w,
-            h,
-        ));
+        doc.layers.push(Layer::adjustment(id, crate::adjust::Adjustment::Curves(curves), w, h));
         doc.layers.last_mut().unwrap().clipped = true;
         doc.layers[0].locks.transparency = true;
         doc.layers[1].locks.pixels = true;
@@ -742,15 +668,8 @@ mod tests {
     #[test]
     fn round_trips_nested_groups() {
         let (w, h) = (300, 200);
-        let px: Vec<Pixel> = (0..w * h)
-            .map(|i| [(i % 65000) as u16, 20000, (i / 7 % 65000) as u16, 65535])
-            .collect();
-        let mut doc = Document::from_image(
-            "in.tif".into(),
-            &Raster::new(w, h, px),
-            ColorProfile::srgb(),
-            16,
-        );
+        let px: Vec<Pixel> = (0..w * h).map(|i| [(i % 65000) as u16, 20000, (i / 7 % 65000) as u16, 65535]).collect();
+        let mut doc = Document::from_image("in.tif".into(), &Raster::new(w, h, px), ColorProfile::srgb(), 16);
         // Background, then an isolated Multiply group holding a grey layer
         // and a Curves layer, inside a pass-through group at 60 % with a
         // mask, then an empty group on top.
@@ -781,9 +700,7 @@ mod tests {
         let back = load(&path).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
-        let parent_name = |d: &Document, l: &Layer| {
-            l.parent.and_then(|p| d.layer(p)).map(|p| p.name.clone())
-        };
+        let parent_name = |d: &Document, l: &Layer| l.parent.and_then(|p| d.layer(p)).map(|p| p.name.clone());
         assert_eq!(back.layers.len(), doc.layers.len());
         for (a, b) in doc.layers.iter().zip(&back.layers) {
             assert_eq!(a.name, b.name);
@@ -808,10 +725,7 @@ mod tests {
             <layer name="Bottom" src="data/2.png"/>
         </stack></image>"#;
         let entries = parse_stack(xml).unwrap().layers;
-        let summary: Vec<_> = entries
-            .iter()
-            .map(|e| (e.name.as_str(), e.src.is_none(), e.blend, e.parent))
-            .collect();
+        let summary: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.src.is_none(), e.blend, e.parent)).collect();
         assert_eq!(
             summary,
             [

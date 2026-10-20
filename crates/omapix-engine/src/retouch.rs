@@ -277,7 +277,12 @@ mod tests {
     }
 
     fn spot(x: f32) -> [Spot; 1] {
-        [Spot { x, y: 100.0, radius: 4.0, score: 20.0 }]
+        [Spot {
+            x,
+            y: 100.0,
+            radius: 4.0,
+            score: 20.0,
+        }]
     }
 
     /// The left and right halves, with eyes 80 px apart.
@@ -412,7 +417,10 @@ mod tests {
         add_layers(&mut doc, 0, &[whitened, closed]).unwrap();
         let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names[1..3], ["Whiten Eyes", "Face 2"]);
-        assert_eq!(names[3..], ["Burn", "Dodge", "Dodge & Burn", "Whiten Eyes", "Whiten Teeth", "Face 1", "Retouch"]);
+        assert_eq!(
+            names[3..],
+            ["Burn", "Dodge", "Dodge & Burn", "Whiten Eyes", "Whiten Teeth", "Face 1", "Retouch"]
+        );
         let layer = |name: &str| doc.layers.iter().rfind(|l| l.name == name).unwrap();
         assert_eq!(layer("Whiten Teeth").parent, Some(layer("Face 1").id));
         assert_eq!((layer("Whiten Eyes").opacity, layer("Whiten Teeth").opacity), (0.4, 0.5));
@@ -481,7 +489,10 @@ mod tests {
         add_layers(&mut doc, 0, &[shiny(1, &left, &spots), shiny(2, &right, &[])]).unwrap();
         let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
         // The second face has no shine, so no layer for it.
-        assert_eq!(names[1..], ["Smooth Skin", "Face 2", "Blemishes", "Reduce Shine", "Smooth Skin", "Face 1", "Retouch"]);
+        assert_eq!(
+            names[1..],
+            ["Smooth Skin", "Face 2", "Blemishes", "Reduce Shine", "Smooth Skin", "Face 1", "Retouch"]
+        );
         let shine = doc.layers.iter().find(|l| l.name == "Reduce Shine").unwrap();
         assert_eq!(shine.opacity, 0.5);
         // Made from the image with the spot healed, and the hot spot's

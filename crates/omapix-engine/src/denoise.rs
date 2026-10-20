@@ -107,7 +107,12 @@ pub fn run(
     }
     // The change the model made, less its broad part.
     let mut change: Vec<Vec<f32>> = (0..3)
-        .map(|c| (0..w * h).into_par_iter().map(|i| sum[i][c] / weights[i] - f32::from(srgb.pixels()[i][c]) / 65535.0).collect())
+        .map(|c| {
+            (0..w * h)
+                .into_par_iter()
+                .map(|i| sum[i][c] / weights[i] - f32::from(srgb.pixels()[i][c]) / 65535.0)
+                .collect()
+        })
         .collect();
     let broad: Vec<Vec<f32>> = change.iter().map(|plane| blur(plane, w, h, BROAD)).collect();
     for (plane, broad) in change.iter_mut().zip(&broad) {
@@ -150,13 +155,7 @@ pub(crate) fn blur(plane: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
 /// between `before` (the image in sRGB) and `after` (the model's answer).
 /// It goes on as a change to `image`, so colours outside sRGB change as
 /// much as their clipped selves did, rather than being clipped.
-pub fn finish(
-    image: &Raster,
-    profile: &ColorProfile,
-    before: &Raster,
-    after: &[[f32; 3]],
-    amounts: Amounts,
-) -> Result<Raster, String> {
+pub fn finish(image: &Raster, profile: &ColorProfile, before: &Raster, after: &[[f32; 3]], amounts: Amounts) -> Result<Raster, String> {
     let (w, h) = (image.width(), image.height());
     let mixed: Vec<_> = before
         .pixels()
@@ -265,7 +264,10 @@ mod tests {
         let p = image.pixels();
         let w = image.width() as usize;
         let n = p.len() - w - 1;
-        (0..n).map(|i| (0..3).map(|c| (f32::from(p[i][c]) - f32::from(p[i + 1][c])).abs()).sum::<f32>()).sum::<f32>() / n as f32
+        (0..n)
+            .map(|i| (0..3).map(|c| (f32::from(p[i][c]) - f32::from(p[i + 1][c])).abs()).sum::<f32>())
+            .sum::<f32>()
+            / n as f32
     }
 
     #[test]
@@ -312,9 +314,22 @@ mod tests {
         let with = |luminance, color| finish(&image, &srgb, &before, &after, Amounts { luminance, color }).unwrap();
         // How far each pixel's channels are apart (colour), and how much
         // their luma changes between neighbours (luminance).
-        let colour = |r: &Raster| r.pixels().iter().map(|p| f32::from(p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]))).sum::<f32>() / r.pixels().len() as f32;
+        let colour = |r: &Raster| {
+            r.pixels()
+                .iter()
+                .map(|p| f32::from(p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])))
+                .sum::<f32>()
+                / r.pixels().len() as f32
+        };
         let grey = |r: &Raster| {
-            let pixels = r.pixels().iter().map(|p| { let v = (0..3).map(|c| f32::from(p[c]) * LUMA[c]).sum::<f32>() as u16; [v, v, v, 65535] }).collect();
+            let pixels = r
+                .pixels()
+                .iter()
+                .map(|p| {
+                    let v = (0..3).map(|c| f32::from(p[c]) * LUMA[c]).sum::<f32>() as u16;
+                    [v, v, v, 65535]
+                })
+                .collect();
             spread(&Raster::new(r.width(), r.height(), pixels))
         };
         let (none, all) = (with(0.0, 0.0), with(1.0, 1.0));
@@ -332,7 +347,10 @@ mod tests {
         let amounts = Amounts { luminance: 1.0, color: 1.0 };
         let tint = |s: &[f32]| {
             let plane = s.len() / 3;
-            Ok(s.iter().enumerate().map(|(i, v)| v + if i < plane { 0.03 } else { 0.0 } - 0.02 * ((i % plane) as f32 / plane as f32)).collect())
+            Ok(s.iter()
+                .enumerate()
+                .map(|(i, v)| v + if i < plane { 0.03 } else { 0.0 } - 0.02 * ((i % plane) as f32 / plane as f32))
+                .collect())
         };
         let out = denoise(&image, &ColorProfile::srgb(), 64, amounts, tint, |_, _| {}).unwrap();
         let mean = |r: &Raster, c: usize| r.pixels().iter().map(|p| f32::from(p[c])).sum::<f32>() / r.pixels().len() as f32;
@@ -354,7 +372,12 @@ mod tests {
         // Changed: every other pixel lighter, the rest darker, a fine
         // pattern the blur of the change doesn't take away.
         let image2 = image.clone();
-        let checker = |s: &[f32]| Ok(s.iter().enumerate().map(|(i, v)| v + if (i % 16 + i / 16) % 2 == 0 { 0.02 } else { -0.02 }).collect());
+        let checker = |s: &[f32]| {
+            Ok(s.iter()
+                .enumerate()
+                .map(|(i, v)| v + if (i % 16 + i / 16) % 2 == 0 { 0.02 } else { -0.02 })
+                .collect())
+        };
         let out = denoise(&image2, &prophoto, 16, amounts, checker, |_, _| {}).unwrap();
         let (a, b) = (out.get(4, 4), out.get(5, 4));
         assert!(a[1] > 40300 && b[1] < 39700, "{a:?} {b:?}");

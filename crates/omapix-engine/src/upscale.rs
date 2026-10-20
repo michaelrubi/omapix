@@ -31,7 +31,11 @@ pub fn upscale(
     let fit = |r: &Raster| resized(&Tiled::from_raster(r), width, height, Bicubic).to_raster();
     let plain = fit(image);
     let before = denoise::srgb(&plain, profile)?;
-    let after: Vec<[f32; 3]> = fit(&enlarged).pixels().par_iter().map(|p| [0, 1, 2].map(|c| f32::from(p[c]) / 65535.0)).collect();
+    let after: Vec<[f32; 3]> = fit(&enlarged)
+        .pixels()
+        .par_iter()
+        .map(|p| [0, 1, 2].map(|c| f32::from(p[c]) / 65535.0))
+        .collect();
     drop(enlarged);
     denoise::finish(&plain, profile, &before, &after, Amounts { luminance: 1.0, color: 1.0 })
 }
@@ -143,7 +147,9 @@ mod tests {
 
     /// A gradient across and down, a different one in each channel.
     fn gradient(w: u32, h: u32) -> Raster {
-        let pixels = (0..w * h).map(|i| [10000 + (i % w) * 200, 20000 + (i / w) * 150, 30000, 65535].map(|v| v as u16)).collect();
+        let pixels = (0..w * h)
+            .map(|i| [10000 + (i % w) * 200, 20000 + (i / w) * 150, 30000, 65535].map(|v| v as u16))
+            .collect();
         Raster::new(w, h, pixels)
     }
 

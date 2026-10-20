@@ -26,8 +26,7 @@ pub struct Upscaler {
 impl Upscaler {
     /// The model that enlarges by `factor`: 2 or 4.
     pub fn load(factor: usize) -> Result<Self> {
-        let files = find_model(MODEL)
-            .ok_or_else(|| format!("AI upscaling needs the {MODEL} model, which darktable installs"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("AI upscaling needs the {MODEL} model, which darktable installs"))?;
         let (file, size) = if factor == 2 { ("model_x2.onnx", 512) } else { ("model_x4.onnx", 256) };
         let session = session(&files[file])?;
         let input = session.inputs()[0].name().to_owned();

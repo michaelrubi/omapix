@@ -13,29 +13,28 @@ use omapix_engine::layer::{Layer, Locks, Mask};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{Orientation, Tiled};
 use omapix_engine::{
-    ColorProfile, DisplayTransform, Document, NoiseDistribution, NoiseOptions, Proof,
-    ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions, SmartBlurQuality,
-    SmartSharpenOptions, align, export, fusion, ops, ora, psd,
+    ColorProfile, DisplayTransform, Document, NoiseDistribution, NoiseOptions, Proof, ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions,
+    SmartBlurQuality, SmartSharpenOptions, align, export, fusion, ops, ora, psd,
 };
 
 use crate::brushes;
 use crate::canvas::ToolInput;
-use crate::settings::{FilterSettings, WebExport};
-use crate::tablet::Tablet;
-use crate::content_fill::ContentFill;
-use crate::select_subject::SelectSubject;
-use crate::face_selection::{FaceSelection, Part};
-use crate::preview_box::PreviewBox;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
+use crate::content_fill::ContentFill;
 use crate::editor::{Editor, SeparationBand, Target, View};
+use crate::face_selection::{FaceSelection, Part};
 use crate::histogram_panel::HistogramPanel;
 use crate::history_panel::HistoryPanel;
 use crate::layers_panel::LayersPanel;
-use crate::presets::Preset;
 use crate::navigator_panel::NavigatorPanel;
+use crate::presets::Preset;
+use crate::preview_box::PreviewBox;
 use crate::properties_panel::PropertiesPanel;
 use crate::recent::RecentStore;
+use crate::select_subject::SelectSubject;
+use crate::settings::{FilterSettings, WebExport};
+use crate::tablet::Tablet;
 use crate::theme::{self, Theme};
 use crate::tools::{Sample, Tools};
 
@@ -57,7 +56,11 @@ fn web_export(doc: &Document, settings: &WebExport) -> omapix_engine::Result<Vec
 /// A file's size as it's shown: "412 KB", "3.5 MB".
 fn file_size(bytes: usize) -> String {
     let kb = bytes as f64 / 1024.0;
-    if kb < 1000.0 { format!("{kb:.0} KB") } else { format!("{:.1} MB", kb / 1024.0) }
+    if kb < 1000.0 {
+        format!("{kb:.0} KB")
+    } else {
+        format!("{:.1} MB", kb / 1024.0)
+    }
 }
 /// Points a side of an exported LUT (33 is the usual size).
 const LUT_SIZE: usize = 33;
@@ -473,10 +476,7 @@ impl ScriptStep {
                 }),
                 ("noise", &[amount]) => ScriptStep::View(View::AddNoise {
                     layer: 0,
-                    options: NoiseOptions {
-                        amount,
-                        ..Default::default()
-                    },
+                    options: NoiseOptions { amount, ..Default::default() },
                 }),
                 ("noise", _) => ScriptStep::View(View::AddNoise {
                     layer: 0,
@@ -492,9 +492,7 @@ impl ScriptStep {
                 "Heal" => ScriptStep::Tool(crate::tools::Tool::Healing),
                 "SpotHeal" => ScriptStep::Tool(crate::tools::Tool::SpotHealing),
                 "Marquee" => ScriptStep::Tool(crate::tools::Tool::Marquee),
-                "EllipticalMarquee" | "Ellipse" => {
-                    ScriptStep::Tool(crate::tools::Tool::EllipticalMarquee)
-                }
+                "EllipticalMarquee" | "Ellipse" => ScriptStep::Tool(crate::tools::Tool::EllipticalMarquee),
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 "Wand" | "MagicWand" => ScriptStep::Tool(crate::tools::Tool::MagicWand),
                 "Eyedropper" => ScriptStep::Tool(crate::tools::Tool::Eyedropper),
@@ -882,12 +880,7 @@ impl App {
 
     /// Open `path` with `load` in the background, in a new tab. An image
     /// that's already open is shown instead.
-    fn open_with(
-        &mut self,
-        path: PathBuf,
-        load: fn(&Path) -> omapix_engine::Result<Document>,
-        ctx: &egui::Context,
-    ) {
+    fn open_with(&mut self, path: PathBuf, load: fn(&Path) -> omapix_engine::Result<Document>, ctx: &egui::Context) {
         let open = |e: &Editor| [Some(&e.doc.path), e.doc.saved_path.as_ref(), e.doc.round_trip.as_ref()].contains(&Some(&path));
         let open = self.tabs().position(open);
         if let Some(index) = open {
@@ -1014,9 +1007,7 @@ impl App {
                 .set_title("Export Adjustments as LUT")
                 .add_filter("Cube LUT", &["cube"])
                 .set_file_name(format!("{}.cube", self.preset_name())),
-            Purpose::Merge(cmd) => {
-                dialog.set_title(cmd.label().trim_end_matches('…')).add_filter("Images", &OPEN_EXTENSIONS)
-            }
+            Purpose::Merge(cmd) => dialog.set_title(cmd.label().trim_end_matches('…')).add_filter("Images", &OPEN_EXTENSIONS),
             Purpose::ProofProfile => {
                 // Where the last one was, or where profiles are installed.
                 let last = self.filters.proof_profile.as_deref().and_then(Path::parent);
@@ -1056,9 +1047,7 @@ impl App {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         let label = match purpose {
-            Purpose::ExportTiff | Purpose::ExportJpeg | Purpose::ExportPng | Purpose::ExportPsd | Purpose::ExportWeb => {
-                "Exporting"
-            }
+            Purpose::ExportTiff | Purpose::ExportJpeg | Purpose::ExportPng | Purpose::ExportPsd | Purpose::ExportWeb => "Exporting",
             _ => "Saving",
         };
         // What a Photoshop file is written without.
@@ -1076,27 +1065,17 @@ impl App {
                 Purpose::ExportJpeg => export::jpeg(&doc, &path, JPEG_QUALITY).map(|_| false),
                 Purpose::ExportPng => export::png(&doc, &path).map(|_| false),
                 Purpose::ExportPsd => psd::save(&doc, &path).map(|_| false),
-                Purpose::ExportWeb => {
-                    web_export(&doc, &web).and_then(|bytes| export::write(&path, &bytes)).map(|_| false)
-                }
+                Purpose::ExportWeb => web_export(&doc, &web).and_then(|bytes| export::write(&path, &bytes)).map(|_| false),
                 // A round trip from darktable also updates its TIFF.
                 _ => ora::save(&doc, &path)
                     .and_then(|_| doc.round_trip.as_ref().map_or(Ok(()), |tiff| export::tiff(&doc, tiff)))
                     .map(|_| true),
             };
             log::info!("wrote {} in {:?}", path.display(), started.elapsed());
-            let _ = tx.send(
-                result
-                    .map(|native| (revision, path, native))
-                    .map_err(|e| e.to_string()),
-            );
+            let _ = tx.send(result.map(|native| (revision, path, native)).map_err(|e| e.to_string()));
             ctx.request_repaint();
         });
-        self.file_job = Some(FileJob {
-            label: label.into(),
-            note,
-            rx,
-        });
+        self.file_job = Some(FileJob { label: label.into(), note, rx });
     }
 
     fn save(&mut self, ctx: &egui::Context) {
@@ -1351,11 +1330,7 @@ impl App {
         }
         let (dropped_paths, shift) = ctx.input(|i| {
             (
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .map(|f| f.path().to_path_buf())
-                    .collect::<Vec<PathBuf>>(),
+                i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect::<Vec<PathBuf>>(),
                 i.modifiers.shift,
             )
         });
@@ -1420,13 +1395,9 @@ impl App {
                     | Command::MergeToHdr
                     | Command::AiModels
                     | Command::ImportBrushes
-            )
-                || (cmd == Command::ReopenLast && self.recent.last().is_some());
+            ) || (cmd == Command::ReopenLast && self.recent.last().is_some());
         };
-        let view = matches!(
-            cmd,
-            Command::ZoomIn | Command::ZoomOut | Command::FitOnScreen | Command::ActualPixels
-        );
+        let view = matches!(cmd, Command::ZoomIn | Command::ZoomOut | Command::FitOnScreen | Command::ActualPixels);
         if editor.busy().is_some() && !view && !matches!(cmd, Command::Quit) {
             return false;
         }
@@ -1452,9 +1423,7 @@ impl App {
             | Command::ShowBrushSettings
             | Command::ImportBrushes => true,
             Command::SaveSelection => editor.doc.selection.is_some(),
-            Command::SaveAdjustmentPreset | Command::ExportAdjustmentLut => {
-                Preset::from_layers(doc, &editor.selected()).is_some()
-            }
+            Command::SaveAdjustmentPreset | Command::ExportAdjustmentLut => Preset::from_layers(doc, &editor.selected()).is_some(),
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
             Command::FreeTransform => layer.is_some() && editor.transform().is_none(),
@@ -1465,14 +1434,9 @@ impl App {
             Command::Redo => editor.redo_label().is_some(),
             // Something must be left, and layer must be deletable.
             Command::DeleteLayer => {
-                doc.removed_count(&editor.selected()) < doc.layers.len()
-                    && !editor.selected().iter().any(|&id| doc.layer(id).is_some_and(|l| !l.can_delete()))
+                doc.removed_count(&editor.selected()) < doc.layers.len() && !editor.selected().iter().any(|&id| doc.layer(id).is_some_and(|l| !l.can_delete()))
             }
-            Command::MergeDown => {
-                is_group
-                    || editor.several_selected()
-                    || index.is_some_and(|i| ops::can_merge_down(doc, i))
-            }
+            Command::MergeDown => is_group || editor.several_selected() || index.is_some_and(|i| ops::can_merge_down(doc, i)),
             Command::RaiseLayer => doc.raise_place(editor.active).is_some(),
             Command::LowerLayer => doc.lower_place(editor.active).is_some(),
             Command::BringToFront => doc.front_place(&editor.selected(), editor.active).is_some(),
@@ -1480,9 +1444,7 @@ impl App {
             Command::SelectLayerAbove => self.layers.row_beside(doc, editor.active, true).is_some(),
             Command::SelectLayerBelow => self.layers.row_beside(doc, editor.active, false).is_some(),
             Command::UngroupLayers => is_group,
-            Command::ClippingMask => {
-                layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i))
-            }
+            Command::ClippingMask => layer.is_some_and(|l| l.clipped) || index.is_some_and(|i| doc.can_clip(i)),
             Command::AddMask | Command::AddMaskHideAll => !has_mask,
             Command::LockTransparent | Command::LockPixels => !no_pixels,
             Command::LockPosition | Command::LockAll => layer.is_some(),
@@ -1494,55 +1456,29 @@ impl App {
             | Command::SmoothSelection
             | Command::ExpandSelection
             | Command::ContractSelection
-            | Command::Feather => {
-                editor.doc.selection.is_some()
-            }
+            | Command::Feather => editor.doc.selection.is_some(),
             Command::ContentAwareFill | Command::TextureFill => editor.doc.selection.is_some() && !self.content_fill.busy(),
             Command::Denoise => self.denoising.busy().is_none(),
             Command::ImageSize => self.upscaling.busy().is_none(),
             Command::SelectSubject => !self.select_subject.busy(),
-            Command::SelectSkin
-            | Command::SelectHair
-            | Command::SelectEyes
-            | Command::SelectLips
-            | Command::SelectTeeth => self.face_selection.busy().is_none(),
-            Command::ReduceShine
-            | Command::LightenUnderEyes
-            | Command::WhitenTeeth
-            | Command::WhitenEyes
-            | Command::Makeup => self.whitening.busy().is_none(),
+            Command::SelectSkin | Command::SelectHair | Command::SelectEyes | Command::SelectLips | Command::SelectTeeth => {
+                self.face_selection.busy().is_none()
+            }
+            Command::ReduceShine | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes | Command::Makeup => self.whitening.busy().is_none(),
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
-            Command::FillForeground
-            | Command::FillBackground
-            | Command::Clear
-            | Command::Cut
-            | Command::Copy => {
+            Command::FillForeground | Command::FillBackground | Command::Clear | Command::Cut | Command::Copy => {
                 editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels
             }
             Command::Paste | Command::PasteInPlace => self.pasting.is_none(),
             Command::PasteInto => editor.doc.selection.is_some() && self.pasting.is_none(),
-            Command::DeleteMask
-            | Command::ToggleMask
-            | Command::MaskOverlay
-            | Command::MaskDensity => has_mask,
-            Command::GaussianBlur
-            | Command::SmartBlur
-            | Command::HighPass
-            | Command::UnsharpMask
-            | Command::SmartSharpen
-            | Command::ReduceNoise => {
-                if editor.target == Target::Mask {
-                    has_mask
-                } else {
-                    !no_pixels
-                }
+            Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay | Command::MaskDensity => has_mask,
+            Command::GaussianBlur | Command::SmartBlur | Command::HighPass | Command::UnsharpMask | Command::SmartSharpen | Command::ReduceNoise => {
+                if editor.target == Target::Mask { has_mask } else { !no_pixels }
             }
             Command::AddNoise => editor.target == Target::Pixels || has_mask,
-            Command::Invert => {
-                editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels
-            }
+            Command::Invert => editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels,
             _ => true,
         }
     }
@@ -1580,7 +1516,14 @@ impl App {
         ];
         // Liquify is applied before anything but zooming, and undoes its
         // own strokes.
-        let zoom = [Command::ZoomIn, Command::ZoomOut, Command::FitOnScreen, Command::ActualPixels, Command::Undo, Command::Redo];
+        let zoom = [
+            Command::ZoomIn,
+            Command::ZoomOut,
+            Command::FitOnScreen,
+            Command::ActualPixels,
+            Command::Undo,
+            Command::Redo,
+        ];
         if !zoom.contains(&cmd)
             && let Some(editor) = &mut self.editor
         {
@@ -1677,9 +1620,19 @@ impl App {
                 };
                 let (width, height) = (doc.width, doc.height);
                 self.dialog = Some(if cmd == Command::ImageSize {
-                    Dialog::ImageSize { width, height, constrain: true, ai: false }
+                    Dialog::ImageSize {
+                        width,
+                        height,
+                        constrain: true,
+                        ai: false,
+                    }
                 } else {
-                    Dialog::CanvasSize { width, height, anchor: (1, 1), extension: Extension::Background }
+                    Dialog::CanvasSize {
+                        width,
+                        height,
+                        anchor: (1, 1),
+                        extension: Extension::Background,
+                    }
                 });
             }
             Command::MaskDensity => {
@@ -1693,12 +1646,7 @@ impl App {
                     preview: true,
                 });
             }
-            Command::GaussianBlur
-            | Command::SmartBlur
-            | Command::HighPass
-            | Command::UnsharpMask
-            | Command::SmartSharpen
-            | Command::ReduceNoise => {
+            Command::GaussianBlur | Command::SmartBlur | Command::HighPass | Command::UnsharpMask | Command::SmartSharpen | Command::ReduceNoise => {
                 if let Some(editor) = &self.editor
                     && editor.target == Target::Pixels
                     && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
@@ -1710,22 +1658,17 @@ impl App {
                 let filter = match cmd {
                     Command::GaussianBlur => LayerFilter::GaussianBlur { radius: settings.blur_radius },
                     Command::SmartBlur => LayerFilter::SmartBlur(settings.smart_blur),
-                    Command::HighPass => LayerFilter::HighPass { radius: settings.high_pass_radius },
+                    Command::HighPass => LayerFilter::HighPass {
+                        radius: settings.high_pass_radius,
+                    },
                     Command::UnsharpMask => settings.unsharp_mask.into(),
                     Command::SmartSharpen => LayerFilter::SmartSharpen(settings.smart_sharpen),
                     Command::ReduceNoise => LayerFilter::ReduceNoise(settings.reduce_noise),
                     _ => unreachable!(),
                 };
-                self.dialog = Some(Dialog::Filter {
-                    filter,
-                    preview: true,
-                });
+                self.dialog = Some(Dialog::Filter { filter, preview: true });
             }
-            Command::BorderSelection
-            | Command::SmoothSelection
-            | Command::ExpandSelection
-            | Command::ContractSelection
-            | Command::Feather => {
+            Command::BorderSelection | Command::SmoothSelection | Command::ExpandSelection | Command::ContractSelection | Command::Feather => {
                 let radius = modify_radius(&mut self.filters, cmd).map_or(1.0, |r| *r);
                 self.dialog = Some(Dialog::Radius {
                     command: cmd,
@@ -1737,9 +1680,7 @@ impl App {
             Command::BlendingOptions => {
                 if let Some(editor) = &mut self.editor {
                     editor.begin_group("Blending Options");
-                    self.dialog = Some(Dialog::BlendingOptions(
-                        crate::blending_options::BlendingOptions::new(editor.active),
-                    ));
+                    self.dialog = Some(Dialog::BlendingOptions(crate::blending_options::BlendingOptions::new(editor.active)));
                 }
             }
             Command::SelectAndMask => {
@@ -1752,9 +1693,7 @@ impl App {
                     .map(Dialog::SelectAndMask);
             }
             Command::SaveAdjustmentPreset => {
-                self.dialog = Some(Dialog::SavePreset {
-                    name: self.preset_name(),
-                });
+                self.dialog = Some(Dialog::SavePreset { name: self.preset_name() });
             }
             Command::ContentAwareFill | Command::TextureFill => {
                 if let Some(editor) = &self.editor
@@ -1777,11 +1716,7 @@ impl App {
                     self.message(e, true);
                 }
             }
-            Command::SelectSkin
-            | Command::SelectHair
-            | Command::SelectEyes
-            | Command::SelectLips
-            | Command::SelectTeeth => {
+            Command::SelectSkin | Command::SelectHair | Command::SelectEyes | Command::SelectLips | Command::SelectTeeth => {
                 let part = match cmd {
                     Command::SelectSkin => Part::Skin,
                     Command::SelectHair => Part::Hair,
@@ -1803,9 +1738,7 @@ impl App {
                 let Some(editor) = &mut self.editor else {
                     return;
                 };
-                if editor.target == Target::Pixels
-                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
-                {
+                if editor.target == Target::Pixels && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels()) {
                     let msg = match cmd {
                         Command::Clear => "Could not clear because the layer is locked",
                         _ => "Could not fill because the layer is locked",
@@ -1826,10 +1759,7 @@ impl App {
                 let Some(editor) = &mut self.editor else {
                     return;
                 };
-                if cmd == Command::Cut
-                    && editor.target == Target::Pixels
-                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
-                {
+                if cmd == Command::Cut && editor.target == Target::Pixels && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels()) {
                     self.message("Could not cut because the layer is locked", true);
                     return;
                 }
@@ -1857,11 +1787,7 @@ impl App {
                         let (tx, rx) = channel();
                         let ctx = ctx.clone();
                         std::thread::spawn(move || {
-                            let res = crate::clipboard::read_system().map(|clip| PendingClip {
-                                clip,
-                                name: None,
-                                kind,
-                            });
+                            let res = crate::clipboard::read_system().map(|clip| PendingClip { clip, name: None, kind });
                             let _ = tx.send(res);
                             ctx.request_repaint();
                         });
@@ -1913,11 +1839,7 @@ impl App {
                     Err(e) => self.message(e, true),
                 }
             }
-            Command::ReduceShine
-            | Command::LightenUnderEyes
-            | Command::WhitenTeeth
-            | Command::WhitenEyes
-            | Command::Makeup => {
+            Command::ReduceShine | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes | Command::Makeup => {
                 use crate::whiten::Part;
                 use omapix_engine::whiten::Whiten;
                 let part = match cmd {
@@ -2108,7 +2030,12 @@ impl App {
         });
         self.filters.batch_export = settings;
         self.filters.save();
-        self.batch_export = Some(BatchJob { total, done: 0, failed: Vec::new(), rx });
+        self.batch_export = Some(BatchJob {
+            total,
+            done: 0,
+            failed: Vec::new(),
+            rx,
+        });
     }
 
     fn apply_add_noise(&mut self, options: NoiseOptions, ctx: &egui::Context) {
@@ -2131,7 +2058,7 @@ impl App {
     /// Apply a Filter menu filter to the active layer (within the
     /// selection), remembering its settings for next time.
     fn apply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
-self.filters.remember(&filter);
+        self.filters.remember(&filter);
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -2163,11 +2090,7 @@ self.filters.remember(&filter);
         };
         let index = editor.active_index().unwrap_or(0);
         match command {
-            Command::BorderSelection
-            | Command::SmoothSelection
-            | Command::ExpandSelection
-            | Command::ContractSelection
-            | Command::Feather => {
+            Command::BorderSelection | Command::SmoothSelection | Command::ExpandSelection | Command::ContractSelection | Command::Feather => {
                 if let Some(remembered) = modify_radius(&mut self.filters, command) {
                     *remembered = radius;
                 }
@@ -2245,17 +2168,11 @@ self.filters.remember(&filter);
     }
 
     fn active_is_group(&self) -> bool {
-        self.editor
-            .as_ref()
-            .and_then(|e| e.doc.layer(e.active))
-            .is_some_and(|l| l.is_group)
+        self.editor.as_ref().and_then(|e| e.doc.layer(e.active)).is_some_and(|l| l.is_group)
     }
 
     fn active_is_clipped(&self) -> bool {
-        self.editor
-            .as_ref()
-            .and_then(|e| e.doc.layer(e.active))
-            .is_some_and(|l| l.clipped)
+        self.editor.as_ref().and_then(|e| e.doc.layer(e.active)).is_some_and(|l| l.clipped)
     }
 
     fn menu_item(&mut self, ui: &mut Ui, cmd: Command, label: Option<String>) {
@@ -2365,8 +2282,7 @@ self.filters.remember(&filter);
 
     fn save_preset(&mut self, name: &str) {
         let Some(editor) = &self.editor else { return };
-        let (Some(preset), Some(path)) = (Preset::from_layers(&editor.doc, &editor.selected()), crate::presets::path(name))
-        else {
+        let (Some(preset), Some(path)) = (Preset::from_layers(&editor.doc, &editor.selected()), crate::presets::path(name)) else {
             return;
         };
         match preset.save(&path) {
@@ -2411,11 +2327,7 @@ self.filters.remember(&filter);
                             let name = path.file_name().unwrap_or_default().to_string_lossy();
                             let button = Button::new(name.as_ref());
                             let parent = path.parent().map(|p| p.to_string_lossy());
-                            let item = if let Some(p) = parent {
-                                button.shortcut_text(p)
-                            } else {
-                                button
-                            };
+                            let item = if let Some(p) = parent { button.shortcut_text(p) } else { button };
                             if ui.add(item).clicked() {
                                 to_open = Some(path.clone());
                                 ui.close();
@@ -2453,12 +2365,8 @@ self.filters.remember(&filter);
             });
             ui.menu_button("Edit", |ui| {
                 let editor = self.editor.as_ref();
-                let undo = editor
-                    .and_then(|e| e.undo_label())
-                    .map(|l| format!("Undo {l}"));
-                let redo = editor
-                    .and_then(|e| e.redo_label())
-                    .map(|l| format!("Redo {l}"));
+                let undo = editor.and_then(|e| e.undo_label()).map(|l| format!("Undo {l}"));
+                let redo = editor.and_then(|e| e.redo_label()).map(|l| format!("Redo {l}"));
                 self.menu_item(ui, Command::Undo, undo);
                 self.menu_item(ui, Command::Redo, redo);
                 ui.separator();
@@ -2587,16 +2495,9 @@ self.filters.remember(&filter);
                 });
                 self.menu_item(ui, Command::SaveSelection, None);
                 ui.separator();
-                let in_qm = self
-                    .editor
-                    .as_ref()
-                    .is_some_and(|e| e.view() == View::QuickMask);
+                let in_qm = self.editor.as_ref().is_some_and(|e| e.view() == View::QuickMask);
                 let tick = if in_qm { "✓" } else { "  " };
-                self.menu_item(
-                    ui,
-                    Command::QuickMask,
-                    Some(format!("{tick} {}", Command::QuickMask.label())),
-                );
+                self.menu_item(ui, Command::QuickMask, Some(format!("{tick} {}", Command::QuickMask.label())));
             });
             ui.menu_button("Filter", |ui| {
                 self.menu_item(ui, Command::Liquify, None);
@@ -2642,11 +2543,7 @@ self.filters.remember(&filter);
                 self.menu_item(ui, Command::ActualPixels, None);
                 ui.separator();
                 let hidden = self.editor.as_ref().is_some_and(|e| e.hide_selection_edges);
-                let edges_label = if hidden {
-                    "Show Selection Edges"
-                } else {
-                    "Hide Selection Edges"
-                };
+                let edges_label = if hidden { "Show Selection Edges" } else { "Hide Selection Edges" };
                 self.menu_item(ui, Command::SelectionEdges, Some(edges_label.to_string()));
                 self.menu_item(ui, Command::MaskOverlay, None);
                 ui.separator();
@@ -2736,17 +2633,13 @@ self.filters.remember(&filter);
             if let Some(editor) = &self.editor {
                 let doc = &editor.doc;
                 let showing = match editor.view() {
-                    View::Mask(_) => {
-                        Some("Viewing layer mask — Alt+click the mask or press Esc to return")
-                    }
+                    View::Mask(_) => Some("Viewing layer mask — Alt+click the mask or press Esc to return"),
                     View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
                     View::QuickMask | View::Refined(_) | View::Image if editor.previewing_selection() => {
                         Some("Select and Mask — F changes the view, and holding X shows the image")
                     }
                     View::QuickMask => Some("Quick Mask — press Q to exit"),
-                    View::Channel(_) | View::Alpha(_) => {
-                        Some("Viewing one channel — click RGB in Channels, or press Ctrl+2 or Esc to return")
-                    }
+                    View::Channel(_) | View::Alpha(_) => Some("Viewing one channel — click RGB in Channels, or press Ctrl+2 or Esc to return"),
                     _ => None,
                 };
                 if let Some(text) = showing {
@@ -2806,10 +2699,7 @@ self.filters.remember(&filter);
                     ui.separator();
                 }
                 if editor.hide_selection_edges && doc.selection.is_some() {
-                    ui.label(
-                        RichText::new("Selection edges hidden — press Ctrl+H to show")
-                            .color(self.theme.accent),
-                    );
+                    ui.label(RichText::new("Selection edges hidden — press Ctrl+H to show").color(self.theme.accent));
                     ui.separator();
                 }
                 ui.label(editor.canvas.zoom_label());
@@ -2839,15 +2729,9 @@ self.filters.remember(&filter);
                     ui.spinner();
                     ui.label(text);
                 } else if let Some((text, error, _)) = &self.status {
-                    let colour = if *error {
-                        self.theme.red
-                    } else {
-                        self.theme.accent
-                    };
+                    let colour = if *error { self.theme.red } else { self.theme.accent };
                     ui.label(RichText::new(text).color(colour));
-                } else if let Some(((x, y), [r, g, b, _])) =
-                    self.editor.as_ref().and_then(|e| e.canvas.hovered_value())
-                {
+                } else if let Some(((x, y), [r, g, b, _])) = self.editor.as_ref().and_then(|e| e.canvas.hovered_value()) {
                     let v = |c: u16| c >> 8;
                     let rgb = format!("R {:>3}  G {:>3}  B {:>3}", v(r), v(g), v(b));
                     ui.label(RichText::new(rgb).color(dim));
@@ -2858,9 +2742,7 @@ self.filters.remember(&filter);
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
-        if let (Some(Dialog::BlendingOptions(panel)), Some(editor)) =
-            (&mut self.dialog, &mut self.editor)
-        {
+        if let (Some(Dialog::BlendingOptions(panel)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
             let closed = match panel.show(ctx, editor, &self.theme) {
                 Some(keep) => {
                     editor.end_group(keep);
@@ -2986,18 +2868,13 @@ self.filters.remember(&filter);
         let mut action: Option<DialogAction> = None;
         let hint = self.theme.dark_foreground;
         let warning = self.theme.red;
-        let name = self
-            .editor
-            .as_ref()
-            .map(|e| e.doc.file_name())
-            .unwrap_or_default();
+        let name = self.editor.as_ref().map(|e| e.doc.file_name()).unwrap_or_default();
         let (now_w, now_h) = self.editor.as_ref().map_or((1, 1), |e| (e.doc.width, e.doc.height));
         let upscaler_missing = !missing(&[omapix_ai::upscale::MODEL], &self.models).is_empty();
         let mut modal = egui::Modal::new(egui::Id::new("dialog"));
         if matches!(dialog, Dialog::Radius { .. }) {
             // Keep the image visible while choosing a radius.
-            let area = egui::Modal::default_area(egui::Id::new("dialog"))
-                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-320.0, 90.0));
+            let area = egui::Modal::default_area(egui::Id::new("dialog")).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-320.0, 90.0));
             modal = modal.area(area).backdrop_color(egui::Color32::TRANSPARENT);
         }
         let response = modal.show(ctx, |ui| {
@@ -3051,9 +2928,7 @@ self.filters.remember(&filter);
                     } else {
                         let (label, range) = match command {
                             Command::BorderSelection => ("Width", 1.0..=200.0),
-                            Command::SmoothSelection
-                            | Command::ExpandSelection
-                            | Command::ContractSelection => ("Radius", 1.0..=100.0),
+                            Command::SmoothSelection | Command::ExpandSelection | Command::ContractSelection => ("Radius", 1.0..=100.0),
                             _ => ("Radius", 0.1..=250.0),
                         };
                         radius_field(ui, radius, label, range);
@@ -3067,8 +2942,7 @@ self.filters.remember(&filter);
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.button("OK").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
@@ -3082,9 +2956,7 @@ self.filters.remember(&filter);
                                 Command::SmoothSelection => defaults.smooth_radius,
                                 Command::ExpandSelection => defaults.expand_radius,
                                 Command::ContractSelection => defaults.contract_radius,
-                                Command::FrequencySeparation => {
-                                    defaults.separation_radius.or(auto_separation).unwrap_or(*radius)
-                                }
+                                Command::FrequencySeparation => defaults.separation_radius.or(auto_separation).unwrap_or(*radius),
                                 Command::FrequencySeparation3 => {
                                     let auto = auto_separation.map(three_band_radii);
                                     if let Some(c) = coarse {
@@ -3097,9 +2969,7 @@ self.filters.remember(&filter);
                         }
                         if ok {
                             let (command, radius, coarse) = (*command, *radius, *coarse);
-                            action = Some(Box::new(move |app, ctx| {
-                                app.apply_radius(command, radius, coarse, ctx)
-                            }));
+                            action = Some(Box::new(move |app, ctx| app.apply_radius(command, radius, coarse, ctx)));
                             close = true;
                         }
                     });
@@ -3114,32 +2984,21 @@ self.filters.remember(&filter);
                         LayerFilter::GaussianBlur { radius } | LayerFilter::HighPass { radius } => {
                             radius_field(ui, radius, "Radius", 0.1..=250.0);
                         }
-                        LayerFilter::UnsharpMask {
-                            amount,
-                            radius,
-                            threshold,
-                        } => {
+                        LayerFilter::UnsharpMask { amount, radius, threshold } => {
                             let mut percent = *amount * 100.0;
                             ui.horizontal(|ui| {
                                 ui.label("Amount");
-                                let slider = egui::Slider::new(&mut percent, 1.0..=500.0)
-                                    .suffix(" %")
-                                    .fixed_decimals(0);
+                                let slider = egui::Slider::new(&mut percent, 1.0..=500.0).suffix(" %").fixed_decimals(0);
                                 ui.add(slider);
                             });
                             *amount = percent / 100.0;
                             radius_field(ui, radius, "Radius", 0.1..=250.0);
                             ui.horizontal(|ui| {
                                 ui.label("Threshold");
-                                let slider = egui::Slider::new(threshold, 0.0..=255.0)
-                                    .suffix(" levels")
-                                    .fixed_decimals(0);
+                                let slider = egui::Slider::new(threshold, 0.0..=255.0).suffix(" levels").fixed_decimals(0);
                                 ui.add(slider);
                             });
-                            ui.label(
-                                RichText::new("Sharpens luminance only. Judge it at 100 %.")
-                                    .color(hint),
-                            );
+                            ui.label(RichText::new("Sharpens luminance only. Judge it at 100 %.").color(hint));
                         }
                         LayerFilter::AddNoise(options) => noise_controls(ui, options),
                         LayerFilter::SmartSharpen(options) => {
@@ -3151,11 +3010,7 @@ self.filters.remember(&filter);
                         LayerFilter::MaskDensity { density } => {
                             ui.horizontal(|ui| {
                                 ui.label("Density");
-                                ui.add(
-                                    egui::Slider::new(density, 0.0..=100.0)
-                                        .suffix(" %")
-                                        .fixed_decimals(0),
-                                );
+                                ui.add(egui::Slider::new(density, 0.0..=100.0).suffix(" %").fixed_decimals(0));
                             });
                         }
                         LayerFilter::SmartBlur(options) => {
@@ -3166,8 +3021,7 @@ self.filters.remember(&filter);
                     ui.checkbox(preview, "Preview");
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.button("OK").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
@@ -3189,8 +3043,7 @@ self.filters.remember(&filter);
                     ui.checkbox(preview, "Preview");
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.button("OK").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
@@ -3206,7 +3059,14 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::BlendingOptions(_) | Dialog::SelectAndMask(_) | Dialog::AutoRetouch(_) | Dialog::HealBlemishes(_) | Dialog::SmoothSkin(_) | Dialog::EvenTone(_) | Dialog::Denoise(_) | Dialog::GenerativeFill(_) => {}
+                Dialog::BlendingOptions(_)
+                | Dialog::SelectAndMask(_)
+                | Dialog::AutoRetouch(_)
+                | Dialog::HealBlemishes(_)
+                | Dialog::SmoothSkin(_)
+                | Dialog::EvenTone(_)
+                | Dialog::Denoise(_)
+                | Dialog::GenerativeFill(_) => {}
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -3221,7 +3081,7 @@ self.filters.remember(&filter);
                         if ui.button("Don't Save").clicked() {
                             action = Some(Box::new(move |app, ctx| {
                                 if let Some(e) = &mut app.editor {
-                                     e.modified = false;
+                                    e.modified = false;
                                 }
                                 // Quitting asks about the next image.
                                 app.guard(then, ctx);
@@ -3280,8 +3140,7 @@ self.filters.remember(&filter);
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.button("OK").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
@@ -3300,9 +3159,7 @@ self.filters.remember(&filter);
                     let before = (*width, *height);
                     size_field(ui, "Width", width, now_w);
                     size_field(ui, "Height", height, now_h);
-                    let scaled = |v: u32, to: u32, from: u32| {
-                        ((f64::from(v) * f64::from(to) / f64::from(from)).round() as u32).clamp(1, MAX_SIDE)
-                    };
+                    let scaled = |v: u32, to: u32, from: u32| ((f64::from(v) * f64::from(to) / f64::from(from)).round() as u32).clamp(1, MAX_SIDE);
                     if *constrain && *width != before.0 {
                         *height = scaled(*width, now_h, now_w);
                     } else if *constrain && *height != before.1 {
@@ -3311,8 +3168,13 @@ self.filters.remember(&filter);
                     ui.checkbox(constrain, "Constrain Proportions");
                     // The model only enlarges.
                     let larger = *width > now_w || *height > now_h;
-                    let why = if upscaler_missing { "Needs the RealPLKSR model: see Help › AI Models" } else { "For a larger size" };
-                    ui.add_enabled(larger && !upscaler_missing, egui::Checkbox::new(ai, "Enlarge with AI")).on_disabled_hover_text(why);
+                    let why = if upscaler_missing {
+                        "Needs the RealPLKSR model: see Help › AI Models"
+                    } else {
+                        "For a larger size"
+                    };
+                    ui.add_enabled(larger && !upscaler_missing, egui::Checkbox::new(ai, "Enlarge with AI"))
+                        .on_disabled_hover_text(why);
                     let with_ai = *ai && larger && !upscaler_missing;
                     if with_ai {
                         ui.label(
@@ -3326,8 +3188,7 @@ self.filters.remember(&filter);
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.button("OK").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
@@ -3344,7 +3205,12 @@ self.filters.remember(&filter);
                         }
                     });
                 }
-                Dialog::CanvasSize { width, height, anchor, extension } => {
+                Dialog::CanvasSize {
+                    width,
+                    height,
+                    anchor,
+                    extension,
+                } => {
                     ui.heading("Canvas Size");
                     ui.add_space(8.0);
                     ui.label(RichText::new(format!("Now {now_w} × {now_h} px")).color(hint));
@@ -3383,8 +3249,7 @@ self.filters.remember(&filter);
                         });
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        let ok = ui.button("OK").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
@@ -3573,8 +3438,7 @@ self.filters.remember(&filter);
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let ready = !files.is_empty() && settings.folder.is_some();
-                        let ok = ui.add_enabled(ready, Button::new("Export")).clicked()
-                            || (ready && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                        let ok = ui.add_enabled(ready, Button::new("Export")).clicked() || (ready && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
@@ -3633,9 +3497,7 @@ self.filters.remember(&filter);
                     };
                     editor.set_view(view);
                 }
-                _ if matches!(editor.view(), View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }) => {
-                    editor.set_view(View::Image)
-                }
+                _ if matches!(editor.view(), View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }) => editor.set_view(View::Image),
                 _ => {}
             }
         }
@@ -3669,11 +3531,7 @@ self.filters.remember(&filter);
                     }
                     if let Some(last) = self.recent.last() {
                         let name = last.file_name().unwrap_or_default().to_string_lossy();
-                        if ui
-                            .button(format!("Reopen {name}"))
-                            .on_hover_text(last.to_string_lossy())
-                            .clicked()
-                        {
+                        if ui.button(format!("Reopen {name}")).on_hover_text(last.to_string_lossy()).clicked() {
                             self.run(Command::ReopenLast, &ctx);
                         }
                     }
@@ -3693,15 +3551,9 @@ self.filters.remember(&filter);
                             ui.set_max_width(450.0);
                             for path in self.recent.files().iter().take(6) {
                                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                                let parent = path
-                                    .parent()
-                                    .map(|p| p.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
+                                let parent = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
 
-                                let (rect, response) = ui.allocate_exact_size(
-                                    vec2(ui.available_width(), 26.0),
-                                    Sense::click(),
-                                );
+                                let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
                                 if response.hovered() {
                                     ui.painter().rect_filled(rect, 2.0, self.theme.lighter_background);
                                 }
@@ -3766,10 +3618,7 @@ self.filters.remember(&filter);
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let mask_view = matches!(
-            editor.view(),
-            View::Mask(_) | View::MaskOverlay(_) | View::Channel(_) | View::Alpha(_)
-        );
+        let mask_view = matches!(editor.view(), View::Mask(_) | View::MaskOverlay(_) | View::Channel(_) | View::Alpha(_));
         let escape = (mask_view || self.properties.eyedropper.is_some())
             && self.dialog.is_none()
             && !ctx.egui_wants_keyboard_input()
@@ -3845,10 +3694,13 @@ self.filters.remember(&filter);
     /// The Crop tool's box, until it's changed round the selection's
     /// bounds, as in Photoshop, or else the whole image.
     fn crop_box(&self) -> [f64; 4] {
-        let start = self.editor.as_ref().map_or([0.0; 4], |e| match e.doc.selection.as_ref().and_then(|s| s.bounds()) {
-            Some([x, y, w, h]) => [x, y, x + w, y + h].map(f64::from),
-            None => [0.0, 0.0, e.doc.width.into(), e.doc.height.into()],
-        });
+        let start = self
+            .editor
+            .as_ref()
+            .map_or([0.0; 4], |e| match e.doc.selection.as_ref().and_then(|s| s.bounds()) {
+                Some([x, y, w, h]) => [x, y, x + w, y + h].map(f64::from),
+                None => [0.0, 0.0, e.doc.width.into(), e.doc.height.into()],
+            });
         self.crop.unwrap_or(start)
     }
 
@@ -4096,8 +3948,7 @@ self.filters.remember(&filter);
         }
         match input {
             ToolInput::StrokeBegin(p) => {
-                let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p)
-                else {
+                let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p) else {
                     return;
                 };
                 if modifiers.alt {
@@ -4111,9 +3962,7 @@ self.filters.remember(&filter);
                         _ => {}
                     }
                 }
-                if editor.target == Target::Pixels
-                    && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
-                {
+                if editor.target == Target::Pixels && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels()) {
                     let name = self.tools.tool.name().to_lowercase();
                     self.message(format!("Could not use the {name} because the layer is locked"), true);
                     return;
@@ -4138,12 +3987,7 @@ self.filters.remember(&filter);
             ToolInput::Sample(p) => {
                 if p.x >= 0.0
                     && p.y >= 0.0
-                    && let Some(pixel) = editor.sample(
-                        p.x as u32,
-                        p.y as u32,
-                        self.tools.sample_size,
-                        self.tools.sample_from(),
-                    )
+                    && let Some(pixel) = editor.sample(p.x as u32, p.y as u32, self.tools.sample_size, self.tools.sample_from())
                 {
                     let is_bg = self.tools.tool == crate::tools::Tool::Eyedropper && modifiers.alt;
                     self.tools.sample(pixel, &editor.doc.profile, is_bg);
@@ -4236,11 +4080,7 @@ self.filters.remember(&filter);
                 };
                 let p0 = points[0];
                 let p1 = if points.len() >= 2 { points[1] } else { p0 };
-                let p1 = if modifiers.shift {
-                    p0 + constrain_45(p1 - p0)
-                } else {
-                    p1
-                };
+                let p1 = if modifiers.shift { p0 + constrain_45(p1 - p0) } else { p1 };
                 let id = editor.active;
                 let target = editor.target;
                 let kind = self.tools.gradient_type;
@@ -4251,8 +4091,7 @@ self.filters.remember(&filter);
                 let bg = self.tools.background;
                 let profile = editor.doc.profile.clone();
 
-                let params =
-                    ops::GradientParams::new((p0.x, p0.y), (p1.x, p1.y), kind, reverse);
+                let params = ops::GradientParams::new((p0.x, p0.y), (p1.x, p1.y), kind, reverse);
                 // On a mask, the colours' grey levels; to transparent keeps
                 // the mask as it is at the far end.
                 let v0 = crate::tools::grey(fg);
@@ -4266,28 +4105,14 @@ self.filters.remember(&filter);
                         Target::QuickMask => {
                             let (w, h) = (doc.width, doc.height);
                             let sel = doc.selection.get_or_insert_with(|| Selection::all(w, h));
-                            sel.coverage = ops::apply_gradient_mask(
-                                &sel.coverage,
-                                params,
-                                v0,
-                                v1,
-                                opacity,
-                                None,
-                            );
+                            sel.coverage = ops::apply_gradient_mask(&sel.coverage, params, v0, v1, opacity, None);
                         }
                         Target::Mask => {
                             let Some(layer) = doc.layer_mut(id) else {
                                 return;
                             };
                             if let Some(mask) = layer.mask.as_mut() {
-                                mask.pixels = ops::apply_gradient_mask(
-                                    &mask.pixels,
-                                    params,
-                                    v0,
-                                    v1,
-                                    opacity,
-                                    selection.as_ref(),
-                                );
+                                mask.pixels = ops::apply_gradient_mask(&mask.pixels, params, v0, v1, opacity, selection.as_ref());
                             }
                         }
                         Target::Pixels => {
@@ -4299,22 +4124,12 @@ self.filters.remember(&filter);
                             }
                             let c0 = profile.from_srgb8(fg).unwrap_or([0, 0, 0, u16::MAX]);
                             let c1 = match colors {
-                                crate::tools::GradientColors::ForegroundToBackground => profile
-                                    .from_srgb8(bg)
-                                    .unwrap_or([u16::MAX, u16::MAX, u16::MAX, u16::MAX]),
-                                crate::tools::GradientColors::ForegroundToTransparent => {
-                                    [c0[0], c0[1], c0[2], 0]
+                                crate::tools::GradientColors::ForegroundToBackground => {
+                                    profile.from_srgb8(bg).unwrap_or([u16::MAX, u16::MAX, u16::MAX, u16::MAX])
                                 }
+                                crate::tools::GradientColors::ForegroundToTransparent => [c0[0], c0[1], c0[2], 0],
                             };
-                            layer.pixels = ops::apply_gradient_pixels(
-                                &layer.pixels,
-                                params,
-                                c0,
-                                c1,
-                                opacity,
-                                layer.lock_alpha(),
-                                selection.as_ref(),
-                            );
+                            layer.pixels = ops::apply_gradient_pixels(&layer.pixels, params, c0, c1, opacity, layer.lock_alpha(), selection.as_ref());
                         }
                     }
                 });
@@ -4342,8 +4157,7 @@ self.filters.remember(&filter);
         let sample = if t.bucket_all_layers { Sample::All } else { Sample::Current };
         let tolerance = omapix_engine::raster::widen(t.bucket_tolerance);
         let start = (p.x as u32, p.y as u32);
-        let Some(mut area) = editor.wand_region(start, tolerance, t.bucket_contiguous, t.bucket_anti_alias, sample)
-        else {
+        let Some(mut area) = editor.wand_region(start, tolerance, t.bucket_contiguous, t.bucket_anti_alias, sample) else {
             return;
         };
         if let Some(selection) = &editor.doc.selection
@@ -4381,9 +4195,7 @@ self.filters.remember(&filter);
             ToolInput::StrokeMove(p) => {
                 if let Some((points, _)) = &mut self.drawing {
                     match self.tools.tool {
-                        crate::tools::Tool::Marquee
-                        | crate::tools::Tool::EllipticalMarquee
-                        | crate::tools::Tool::ObjectSelection => {
+                        crate::tools::Tool::Marquee | crate::tools::Tool::EllipticalMarquee | crate::tools::Tool::ObjectSelection => {
                             points.truncate(1);
                             points.push(p);
                         }
@@ -4429,8 +4241,7 @@ self.filters.remember(&filter);
                 }
                 // A click without a real drag.
                 let tiny = points.iter().all(|q| q.distance(points[0]) < 2.0);
-                let p1 = if (self.tools.tool == crate::tools::Tool::Marquee
-                    || self.tools.tool == crate::tools::Tool::EllipticalMarquee)
+                let p1 = if (self.tools.tool == crate::tools::Tool::Marquee || self.tools.tool == crate::tools::Tool::EllipticalMarquee)
                     && modifiers.shift
                     && points.len() >= 2
                 {
@@ -4443,19 +4254,9 @@ self.filters.remember(&filter);
                 let shape = if tiny {
                     None
                 } else if self.tools.tool == crate::tools::Tool::Marquee {
-                    Some(Selection::rectangle(
-                        w,
-                        h,
-                        (points[0].x, points[0].y),
-                        (p1.x, p1.y),
-                    ))
+                    Some(Selection::rectangle(w, h, (points[0].x, points[0].y), (p1.x, p1.y)))
                 } else if self.tools.tool == crate::tools::Tool::EllipticalMarquee {
-                    Some(Selection::ellipse(
-                        w,
-                        h,
-                        (points[0].x, points[0].y),
-                        (p1.x, p1.y),
-                    ))
+                    Some(Selection::ellipse(w, h, (points[0].x, points[0].y), (p1.x, p1.y)))
                 } else {
                     let pts: Vec<(f32, f32)> = points.iter().map(|p| (p.x, p.y)).collect();
                     Some(Selection::polygon(w, h, &pts))
@@ -4487,10 +4288,7 @@ self.filters.remember(&filter);
             && self.dialog.is_none()
             && self.face_selection.busy().is_none()
             && self.whitening.busy().is_none()
-            && self
-                .editor
-                .as_ref()
-                .is_some_and(|e| e.busy().is_none() && e.canvas.ready());
+            && self.editor.as_ref().is_some_and(|e| e.busy().is_none() && e.canvas.ready());
         if !idle {
             return;
         }
@@ -4502,13 +4300,7 @@ self.filters.remember(&filter);
             ScriptStep::Command(cmd) => {
                 self.run(cmd, ctx);
                 // Radius commands open a dialog; accept its default.
-                if let Some(Dialog::Radius {
-                    command,
-                    radius,
-                    coarse,
-                    ..
-                }) = self.dialog.take()
-                {
+                if let Some(Dialog::Radius { command, radius, coarse, .. }) = self.dialog.take() {
                     self.apply_radius(command, radius, coarse, ctx);
                 }
                 match self.dialog.take() {
@@ -4518,10 +4310,7 @@ self.filters.remember(&filter);
                 }
             }
             ScriptStep::Stroke([x0, y0, x1, y1]) => {
-                self.tool_input(
-                    ToolInput::StrokeBegin(egui::pos2(x0, y0)),
-                    egui::Modifiers::NONE,
-                );
+                self.tool_input(ToolInput::StrokeBegin(egui::pos2(x0, y0)), egui::Modifiers::NONE);
                 // Several moves, like a real drag across frames.
                 for i in 1..=20 {
                     let t = i as f32 / 20.0;
@@ -4566,10 +4355,7 @@ self.filters.remember(&filter);
                             filter,
                             mask: editor.target == Target::Mask,
                         },
-                        View::AddNoise { options, .. } => View::AddNoise {
-                            layer: editor.active,
-                            options,
-                        },
+                        View::AddNoise { options, .. } => View::AddNoise { layer: editor.active, options },
                         view => view,
                     };
                     editor.set_view(view);
@@ -4630,16 +4416,11 @@ self.filters.remember(&filter);
     }
 }
 
-
 /// Add Noise's settings, for its dialog and for noise on a mask.
 fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     ui.horizontal(|ui| {
         ui.label("Amount");
-        ui.add(
-            egui::Slider::new(&mut options.amount, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(1),
-        );
+        ui.add(egui::Slider::new(&mut options.amount, 0.0..=100.0).suffix(" %").fixed_decimals(1));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -4652,19 +4433,12 @@ fn noise_controls(ui: &mut Ui, options: &mut NoiseOptions) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.label("Grain Size");
-        ui.add(
-            egui::Slider::new(&mut options.grain_size, 1.0..=20.0)
-                .suffix(" px")
-                .fixed_decimals(1),
-        );
+        ui.add(egui::Slider::new(&mut options.grain_size, 1.0..=20.0).suffix(" px").fixed_decimals(1));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Roughness");
-        ui.add(
-            egui::Slider::new(&mut options.roughness, 0.0..=1.0)
-                .fixed_decimals(2),
-        );
+        ui.add(egui::Slider::new(&mut options.roughness, 0.0..=1.0).fixed_decimals(2));
     });
     ui.add_space(4.0);
     ui.checkbox(&mut options.tonal_falloff, "Shadow/highlight falloff");
@@ -4713,20 +4487,12 @@ fn filter_preview_box(ui: &mut Ui, filter: &LayerFilter, editor: Option<&Editor>
 fn smart_sharpen_controls(ui: &mut Ui, options: &mut SmartSharpenOptions, hint: egui::Color32) {
     ui.horizontal(|ui| {
         ui.label("Amount");
-        ui.add(
-            egui::Slider::new(&mut options.amount, 1.0..=500.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
+        ui.add(egui::Slider::new(&mut options.amount, 1.0..=500.0).suffix(" %").fixed_decimals(0));
     });
     radius_field(ui, &mut options.radius, "Radius", 0.1..=250.0);
     ui.horizontal(|ui| {
         ui.label("Reduce Noise");
-        ui.add(
-            egui::Slider::new(&mut options.reduce_noise, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
+        ui.add(egui::Slider::new(&mut options.reduce_noise, 0.0..=100.0).suffix(" %").fixed_decimals(0));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -4737,34 +4503,20 @@ fn smart_sharpen_controls(ui: &mut Ui, options: &mut SmartSharpenOptions, hint: 
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Shadows: Fade Amount");
-        ui.add(
-            egui::Slider::new(&mut options.shadow_fade, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
+        ui.add(egui::Slider::new(&mut options.shadow_fade, 0.0..=100.0).suffix(" %").fixed_decimals(0));
     });
     ui.horizontal(|ui| {
         ui.label("Highlights: Fade Amount");
-        ui.add(
-            egui::Slider::new(&mut options.highlight_fade, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
+        ui.add(egui::Slider::new(&mut options.highlight_fade, 0.0..=100.0).suffix(" %").fixed_decimals(0));
     });
-    ui.label(
-        RichText::new("Sharpens luminance only. Judge it at 100 %.")
-            .color(hint),
-    );
+    ui.label(RichText::new("Sharpens luminance only. Judge it at 100 %.").color(hint));
 }
 
 /// Reduce Noise's settings, for its dialog.
 fn reduce_noise_controls(ui: &mut Ui, options: &mut ReduceNoiseOptions, hint: egui::Color32) {
     ui.horizontal(|ui| {
         ui.label("Strength");
-        ui.add(
-            egui::Slider::new(&mut options.strength, 0.0..=10.0)
-                .fixed_decimals(0),
-        );
+        ui.add(egui::Slider::new(&mut options.strength, 0.0..=10.0).fixed_decimals(0));
     });
     for (label, value) in [
         ("Preserve Details", &mut options.preserve_details),
@@ -4776,28 +4528,18 @@ fn reduce_noise_controls(ui: &mut Ui, options: &mut ReduceNoiseOptions, hint: eg
             ui.add(egui::Slider::new(value, 0.0..=100.0).suffix(" %").fixed_decimals(0));
         });
     }
-    ui.label(
-        RichText::new("Smooths noise while preserving edges. Judge it at 100 %.")
-            .color(hint),
-    );
+    ui.label(RichText::new("Smooths noise while preserving edges. Judge it at 100 %.").color(hint));
 }
 
 /// Smart Blur's settings, for its dialog.
 fn smart_blur_controls(ui: &mut Ui, options: &mut SmartBlurOptions, hint: egui::Color32) {
     ui.horizontal(|ui| {
         ui.label("Radius");
-        ui.add(
-            egui::Slider::new(&mut options.radius, 0.1..=100.0)
-                .suffix(" px")
-                .fixed_decimals(1),
-        );
+        ui.add(egui::Slider::new(&mut options.radius, 0.1..=100.0).suffix(" px").fixed_decimals(1));
     });
     ui.horizontal(|ui| {
         ui.label("Threshold");
-        ui.add(
-            egui::Slider::new(&mut options.threshold, 0.1..=100.0)
-                .fixed_decimals(1),
-        );
+        ui.add(egui::Slider::new(&mut options.threshold, 0.1..=100.0).fixed_decimals(1));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -4813,10 +4555,7 @@ fn smart_blur_controls(ui: &mut Ui, options: &mut SmartBlurOptions, hint: egui::
         ui.radio_value(&mut options.mode, SmartBlurMode::EdgeOnly, "Edge Only");
         ui.radio_value(&mut options.mode, SmartBlurMode::OverlayEdge, "Overlay Edge");
     });
-    ui.label(
-        RichText::new("Blurs areas of similar tone, keeping edges sharp.")
-            .color(hint),
-    );
+    ui.label(RichText::new("Blurs areas of similar tone, keeping edges sharp.").color(hint));
 }
 
 /// Frequency Separation's radius until one's chosen: about 8.6 px on a
@@ -4850,11 +4589,7 @@ fn modify_radius(filters: &mut FilterSettings, command: Command) -> Option<&mut 
 fn radius_field(ui: &mut Ui, radius: &mut f32, label: &str, range: std::ops::RangeInclusive<f32>) {
     ui.horizontal(|ui| {
         ui.label(label);
-        let value = egui::DragValue::new(radius)
-            .range(range)
-            .speed(0.1)
-            .suffix(" px")
-            .fixed_decimals(1);
+        let value = egui::DragValue::new(radius).range(range).speed(0.1).suffix(" px").fixed_decimals(1);
         ui.add(value);
     });
 }
@@ -4886,12 +4621,7 @@ fn size_field(ui: &mut Ui, label: &str, value: &mut u32, now: u32) {
 }
 
 /// The Lock commands, in Photoshop's order.
-const LOCKS: [Command; 4] = [
-    Command::LockTransparent,
-    Command::LockPixels,
-    Command::LockPosition,
-    Command::LockAll,
-];
+const LOCKS: [Command; 4] = [Command::LockTransparent, Command::LockPixels, Command::LockPosition, Command::LockAll];
 
 /// The flag a Lock command toggles.
 fn lock_flag(locks: &mut Locks, cmd: Command) -> &mut bool {
@@ -4913,13 +4643,7 @@ fn fill(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [
 
 /// `fill`, but only within `area` (partly where it's partly covered)
 /// rather than the selection, when given.
-fn fill_within(
-    editor: &mut Editor,
-    label: &str,
-    colour: Option<[u8; 3]>,
-    background: [u8; 3],
-    area: Option<Selection>,
-) {
+fn fill_within(editor: &mut Editor, label: &str, colour: Option<[u8; 3]>, background: [u8; 3], area: Option<Selection>) {
     let id = editor.active;
     let target = editor.target;
     let profile = editor.doc.profile.clone();
@@ -4949,14 +4673,9 @@ fn fill_within(
                 // With transparency locked, Delete fills with the background
                 // colour, and only the colour of what's there changes.
                 let colour = colour.or(layer.lock_alpha().then_some(background));
-                let pixel =
-                    colour.map(|rgb| profile.from_srgb8(rgb).unwrap_or([0, 0, 0, u16::MAX]));
+                let pixel = colour.map(|rgb| profile.from_srgb8(rgb).unwrap_or([0, 0, 0, u16::MAX]));
                 let filled = ops::fill_pixels(&layer.pixels, pixel, selection.as_ref());
-                layer.pixels = if layer.lock_alpha() {
-                    ops::keep_alpha(&layer.pixels, filled)
-                } else {
-                    filled
-                };
+                layer.pixels = if layer.lock_alpha() { ops::keep_alpha(&layer.pixels, filled) } else { filled };
             }
             Target::QuickMask => unreachable!(),
         }
@@ -4969,11 +4688,7 @@ fn copy(editor: &Editor, merged: bool) -> Option<Clip> {
     let doc = &editor.doc;
     let selection = doc.selection.as_ref();
     let clip = if merged {
-        Clip::copy(
-            &Tiled::from_raster(&doc.composite()),
-            selection,
-            &doc.profile,
-        )
+        Clip::copy(&Tiled::from_raster(&doc.composite()), selection, &doc.profile)
     } else if editor.target == Target::QuickMask {
         let sel = selection?;
         Clip::copy_mask(&sel.coverage, None, &doc.profile)
@@ -5005,10 +4720,7 @@ fn load_clip(path: &Path) -> Result<(Clip, String), String> {
     let mut doc = omapix_engine::io::load(path).map_err(|e| e.to_string())?;
     let _ = ops::prepare_for_editing(&mut doc);
     let raster = doc.composite();
-    let name = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Layer".into());
+    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Layer".into());
     let clip = Clip {
         bounds: [0, 0, raster.width(), raster.height()],
         pixels: Tiled::from_raster(&raster),
@@ -5019,13 +4731,7 @@ fn load_clip(path: &Path) -> Result<(Clip, String), String> {
 }
 
 /// Paste or place `clip` as a new layer above the active one.
-fn paste(
-    editor: &mut Editor,
-    clip: Arc<Clip>,
-    name: Option<String>,
-    kind: PasteKind,
-    ctx: &egui::Context,
-) {
+fn paste(editor: &mut Editor, clip: Arc<Clip>, name: Option<String>, kind: PasteKind, ctx: &egui::Context) {
     let index = editor.active_index().unwrap_or(0);
     editor.target = Target::Pixels;
     let label = if name.is_some() {
@@ -5170,11 +4876,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         }
         Command::ClippingMask => {
             let clipped = editor.doc.layer(id).is_some_and(|l| l.clipped);
-            let label = if clipped {
-                "Release Clipping Mask"
-            } else {
-                "Create Clipping Mask"
-            };
+            let label = if clipped { "Release Clipping Mask" } else { "Create Clipping Mask" };
             editor.edit(label, |doc, _| {
                 doc.toggle_clipping(id);
             });
@@ -5240,17 +4942,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                             let original = l.pixels.clone();
                             l.pixels.par_update(|_, _, tile| {
                                 let max = u16::MAX;
-                                tile.map(|t| {
-                                    t.iter()
-                                        .map(|p| [max - p[0], max - p[1], max - p[2], p[3]])
-                                        .collect()
-                                })
+                                tile.map(|t| t.iter().map(|p| [max - p[0], max - p[1], max - p[2], p[3]]).collect())
                             });
-                            l.pixels = ops::within_selection(
-                                &original,
-                                l.pixels.clone(),
-                                selection.as_ref(),
-                            );
+                            l.pixels = ops::within_selection(&original, l.pixels.clone(), selection.as_ref());
                         }
                     },
                     ctx,
@@ -5288,11 +4982,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         }
         Command::StampVisible => {
             editor.target = Target::Pixels;
-            editor.edit_in_background(
-                "Stamp Visible",
-                move |doc, active| *active = ops::stamp_visible(doc),
-                ctx,
-            );
+            editor.edit_in_background("Stamp Visible", move |doc, active| *active = ops::stamp_visible(doc), ctx);
         }
         Command::DodgeAndBurn => {
             editor.target = Target::Pixels;
@@ -5314,10 +5004,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         | Command::NewSelectiveColor
         | Command::NewChannelMixer
         | Command::NewColorLookup => {
-            use omapix_engine::adjust::{
-                Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curves, HueSaturation, Levels,
-                SelectiveColor,
-            };
+            use omapix_engine::adjust::{Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curves, HueSaturation, Levels, SelectiveColor};
             let adjustment = match cmd {
                 Command::NewCurves => Adjustment::Curves(Curves::default()),
                 Command::NewLevels => Adjustment::Levels(Levels::default()),
@@ -5337,9 +5024,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             editor.target = Target::Mask;
         }
         Command::SelectAll => {
-            editor.edit("Select All", |doc, _| {
-                doc.selection = Some(Selection::all(w, h))
-            });
+            editor.edit("Select All", |doc, _| doc.selection = Some(Selection::all(w, h)));
         }
         Command::Deselect => {
             editor.edit("Deselect", |doc, _| doc.selection = None);
@@ -5350,10 +5035,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 doc.selection = inverted.filter(|s| !s.is_empty());
             });
         }
-        Command::LoadSelectionRed
-        | Command::LoadSelectionGreen
-        | Command::LoadSelectionBlue
-        | Command::LoadSelectionLuminosity => {
+        Command::LoadSelectionRed | Command::LoadSelectionGreen | Command::LoadSelectionBlue | Command::LoadSelectionLuminosity => {
             let channel = match cmd {
                 Command::LoadSelectionRed => Channel::Red,
                 Command::LoadSelectionGreen => Channel::Green,
@@ -5389,11 +5071,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 editor.set_selection("Load Selection", Selection::from_mask(&mask.pixels), Combine::Replace);
             }
         }
-        Command::Rotate180
-        | Command::Rotate90Cw
-        | Command::Rotate90Ccw
-        | Command::FlipCanvasHorizontal
-        | Command::FlipCanvasVertical => {
+        Command::Rotate180 | Command::Rotate90Cw | Command::Rotate90Ccw | Command::FlipCanvasHorizontal | Command::FlipCanvasVertical => {
             let (label, orientation) = match cmd {
                 Command::Rotate180 => ("Rotate 180°", Orientation::Rotate180),
                 Command::Rotate90Cw => ("Rotate 90° Clockwise", Orientation::Rotate90Cw),
@@ -5418,11 +5096,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         Command::ActualPixels => editor.canvas.actual_pixels(),
         Command::MaskOverlay => {
             let showing = editor.view() == View::MaskOverlay(id);
-            editor.set_view(if showing {
-                View::Image
-            } else {
-                View::MaskOverlay(id)
-            });
+            editor.set_view(if showing { View::Image } else { View::MaskOverlay(id) });
         }
         Command::QuickMask => {
             editor.toggle_quick_mask();
@@ -5502,31 +5176,23 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let bar = egui::Frame::new()
-            .fill(self.theme.dark_background)
-            .inner_margin(egui::Margin::symmetric(8, 4));
-        egui::Panel::top("menu")
-            .frame(bar)
-            .show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::bottom("status")
-            .frame(bar)
-            .show(ui, |ui| self.status_bar(ui));
+        let bar = egui::Frame::new().fill(self.theme.dark_background).inner_margin(egui::Margin::symmetric(8, 4));
+        egui::Panel::top("menu").frame(bar).show(ui, |ui| self.menu_bar(ui));
+        egui::Panel::bottom("status").frame(bar).show(ui, |ui| self.status_bar(ui));
         if let Some(editor) = &mut self.editor {
             let target = editor.target;
-            egui::Panel::top("options")
-                .frame(bar)
-                .show(ui, |ui| {
-                    if editor.liquifying() {
-                        let mut restore = editor.liquify_restore();
-                        let missing = [FACE_MODELS, POSE_MODELS].map(|models| missing(models, &self.models));
-                        self.tools.liquify.options_bar(ui, &self.theme, &mut restore, [&missing[0], &missing[1]]);
-                        if restore != editor.liquify_restore() {
-                            editor.set_liquify_restore(restore);
-                        }
-                    } else {
-                        self.tools.options_bar(ui, target, &self.theme);
+            egui::Panel::top("options").frame(bar).show(ui, |ui| {
+                if editor.liquifying() {
+                    let mut restore = editor.liquify_restore();
+                    let missing = [FACE_MODELS, POSE_MODELS].map(|models| missing(models, &self.models));
+                    self.tools.liquify.options_bar(ui, &self.theme, &mut restore, [&missing[0], &missing[1]]);
+                    if restore != editor.liquify_restore() {
+                        editor.set_liquify_restore(restore);
                     }
-                });
+                } else {
+                    self.tools.options_bar(ui, target, &self.theme);
+                }
+            });
             egui::Panel::left("tools")
                 .frame(bar)
                 .exact_size(44.0)
@@ -5535,69 +5201,65 @@ impl eframe::App for App {
         }
         if let Some(editor) = &mut self.editor {
             let (mut command, mut above) = (None, None);
-            egui::Panel::right("layers")
-                .frame(bar)
-                .default_size(280.0)
-                .resizable(true)
-                .show(ui, |ui| {
-                    if let Some(top_tab) = self.top_tab {
-                        ui.horizontal(|ui| {
-                            for (tab, cmd) in TopTab::ALL {
-                                let is_active = self.top_tab == Some(tab);
-                                let text = if is_active {
-                                    RichText::new(cmd.label()).color(self.theme.foreground).strong()
-                                } else {
-                                    RichText::new(cmd.label()).color(self.theme.dark_foreground)
-                                };
-                                if ui.add(Button::new(text).frame(false)).clicked() {
-                                    TopTab::toggle(&mut self.top_tab, tab);
-                                }
-                                ui.add_space(8.0);
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").on_hover_text("Close").clicked() {
-                                    self.top_tab = None;
-                                }
-                            });
-                        });
-                        ui.separator();
-
-                        match top_tab {
-                            TopTab::Navigator => self.navigator.show(ui, editor, &self.theme),
-                            TopTab::Histogram => self.histogram.show(ui, editor, &self.theme),
-                            TopTab::BrushSettings => above = self.tools.brush_settings(ui, &self.theme, &mut self.brushes),
-                        }
-                        ui.separator();
-                    }
-
+            egui::Panel::right("layers").frame(bar).default_size(280.0).resizable(true).show(ui, |ui| {
+                if let Some(top_tab) = self.top_tab {
                     ui.horizontal(|ui| {
-                        for (tab, command) in RightTab::ALL {
-                            let text = if self.right_tab == tab {
-                                RichText::new(command.label()).color(self.theme.foreground).strong()
+                        for (tab, cmd) in TopTab::ALL {
+                            let is_active = self.top_tab == Some(tab);
+                            let text = if is_active {
+                                RichText::new(cmd.label()).color(self.theme.foreground).strong()
                             } else {
-                                RichText::new(command.label()).color(self.theme.dark_foreground)
+                                RichText::new(cmd.label()).color(self.theme.dark_foreground)
                             };
                             if ui.add(Button::new(text).frame(false)).clicked() {
-                                self.right_tab = tab;
+                                TopTab::toggle(&mut self.top_tab, tab);
                             }
                             ui.add_space(8.0);
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Close").clicked() {
+                                self.top_tab = None;
+                            }
+                        });
                     });
                     ui.separator();
 
-                    match self.right_tab {
-                        RightTab::Layers => {
-                            self.properties.show(ui, editor, &self.theme);
-                            command = self.layers.show(ui, editor, &self.theme);
+                    match top_tab {
+                        TopTab::Navigator => self.navigator.show(ui, editor, &self.theme),
+                        TopTab::Histogram => self.histogram.show(ui, editor, &self.theme),
+                        TopTab::BrushSettings => above = self.tools.brush_settings(ui, &self.theme, &mut self.brushes),
+                    }
+                    ui.separator();
+                }
+
+                ui.horizontal(|ui| {
+                    for (tab, command) in RightTab::ALL {
+                        let text = if self.right_tab == tab {
+                            RichText::new(command.label()).color(self.theme.foreground).strong()
+                        } else {
+                            RichText::new(command.label()).color(self.theme.dark_foreground)
+                        };
+                        if ui.add(Button::new(text).frame(false)).clicked() {
+                            self.right_tab = tab;
                         }
-                        RightTab::Channels => {
-                            command = crate::channels_panel::show(ui, editor, &self.theme);
-                        }
-                        RightTab::History => {
-                            command = self.history.show(ui, editor, &self.theme);
-                        }
+                        ui.add_space(8.0);
                     }
                 });
+                ui.separator();
+
+                match self.right_tab {
+                    RightTab::Layers => {
+                        self.properties.show(ui, editor, &self.theme);
+                        command = self.layers.show(ui, editor, &self.theme);
+                    }
+                    RightTab::Channels => {
+                        command = crate::channels_panel::show(ui, editor, &self.theme);
+                    }
+                    RightTab::History => {
+                        command = self.history.show(ui, editor, &self.theme);
+                    }
+                }
+            });
             if let Some(cmd) = command.or(above) {
                 let ctx = ui.ctx().clone();
                 self.run(cmd, &ctx);
@@ -5620,31 +5282,19 @@ impl eframe::App for App {
             // Show the marquee as its rectangle (constrained to square with Shift).
             crate::tools::Tool::Marquee if points.len() == 2 => {
                 let a = points[0];
-                let b = if shift {
-                    constrain_square(a, points[1])
-                } else {
-                    points[1]
-                };
+                let b = if shift { constrain_square(a, points[1]) } else { points[1] };
                 vec![a, egui::pos2(b.x, a.y), b, egui::pos2(a.x, b.y), a]
             }
             // Show the elliptical marquee as an ellipse (circle with Shift).
             crate::tools::Tool::EllipticalMarquee if points.len() == 2 => {
                 let a = points[0];
-                let b = if shift {
-                    constrain_square(a, points[1])
-                } else {
-                    points[1]
-                };
+                let b = if shift { constrain_square(a, points[1]) } else { points[1] };
                 ellipse_points(a, b)
             }
             // Show the gradient drag as a line (constrained to 45° with Shift).
             crate::tools::Tool::Gradient if points.len() == 2 => {
                 let a = points[0];
-                let b = if shift {
-                    a + constrain_45(points[1] - a)
-                } else {
-                    points[1]
-                };
+                let b = if shift { a + constrain_45(points[1] - a) } else { points[1] };
                 vec![a, b]
             }
             _ => points.clone(),
@@ -5670,12 +5320,8 @@ impl eframe::App for App {
                 let modifiers = ui.input(|i| i.modifiers);
                 // An armed Curves or Levels eyedropper, or Free Transform, takes the
                 // pointer from the tools.
-                let liquify_brush = editor
-                    .liquifying()
-                    .then(|| crate::canvas::BrushOutline::round(self.tools.liquify.size));
-                let tools_off = self.properties.eyedropper.is_some()
-                    || editor.transform().is_some()
-                    || liquify_brush.is_some();
+                let liquify_brush = editor.liquifying().then(|| crate::canvas::BrushOutline::round(self.tools.liquify.size));
+                let tools_off = self.properties.eyedropper.is_some() || editor.transform().is_some() || liquify_brush.is_some();
                 let tip = self.brushes.tip(brush.tip);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
@@ -5683,42 +5329,35 @@ impl eframe::App for App {
                     samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
                     // Holding Alt picks up a colour: a crosshair, not the brush,
                     // unless Alt+right-dragging to resize it.
-                    brush: (!tools_off
-                        && tool.has_brush()
-                        && !(modifiers.alt && tool.alt_picks_colour() && !ui.input(|i| i.pointer.secondary_down())))
-                    .then(|| crate::canvas::outline(&brush, tip.as_deref()))
-                    .or(liquify_brush),
+                    brush: (!tools_off && tool.has_brush() && !(modifiers.alt && tool.alt_picks_colour() && !ui.input(|i| i.pointer.secondary_down())))
+                        .then(|| crate::canvas::outline(&brush, tip.as_deref()))
+                        .or(liquify_brush),
                     moves: !tools_off && tool == crate::tools::Tool::Move,
                     source,
                     selection: outlines,
                     drawing: (!tools_off).then_some(drawing.as_deref()).flatten(),
-                    badge: (idle && !tools_off)
-                        .then(|| crate::tools::cursor_badge(tool, modifiers))
-                        .flatten(),
-                    transform: editor.transform().map(|(bounds, t)| {
-                        // The handle being dragged, or the one under the pointer.
-                        let reach = editor.canvas.image_per_point() * HANDLE_REACH;
-                        let handle = self.transform_drag.map(|d| d.handle()).or_else(|| {
-                            let p = editor.canvas.pointer?;
-                            Some(crate::free_transform::hit(bounds, &t, p, reach))
-                        });
-                        let cursor = handle.map_or(egui::CursorIcon::Default, |h| {
-                            crate::free_transform::cursor(bounds, &t, h)
-                        });
-                        (crate::free_transform::corners(bounds, &t), cursor)
-                    }).or_else(|| {
-                        // The Crop tool's box: outside it, a crosshair to draw a new one.
-                        let rect = crop_box.filter(|_| !tools_off)?;
-                        let t = omapix_engine::transform::Affine::IDENTITY;
-                        let reach = editor.canvas.image_per_point() * HANDLE_REACH;
-                        let handle = crop_handle.or_else(|| {
-                            Some(crate::free_transform::hit(rect, &t, editor.canvas.pointer?, reach))
-                        });
-                        let cursor = handle.map_or(egui::CursorIcon::Crosshair, |h| {
-                            crate::free_transform::cursor(rect, &t, h)
-                        });
-                        Some((crate::free_transform::corners(rect, &t), cursor))
-                    }),
+                    badge: (idle && !tools_off).then(|| crate::tools::cursor_badge(tool, modifiers)).flatten(),
+                    transform: editor
+                        .transform()
+                        .map(|(bounds, t)| {
+                            // The handle being dragged, or the one under the pointer.
+                            let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                            let handle = self.transform_drag.map(|d| d.handle()).or_else(|| {
+                                let p = editor.canvas.pointer?;
+                                Some(crate::free_transform::hit(bounds, &t, p, reach))
+                            });
+                            let cursor = handle.map_or(egui::CursorIcon::Default, |h| crate::free_transform::cursor(bounds, &t, h));
+                            (crate::free_transform::corners(bounds, &t), cursor)
+                        })
+                        .or_else(|| {
+                            // The Crop tool's box: outside it, a crosshair to draw a new one.
+                            let rect = crop_box.filter(|_| !tools_off)?;
+                            let t = omapix_engine::transform::Affine::IDENTITY;
+                            let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                            let handle = crop_handle.or_else(|| Some(crate::free_transform::hit(rect, &t, editor.canvas.pointer?, reach)));
+                            let cursor = handle.map_or(egui::CursorIcon::Crosshair, |h| crate::free_transform::cursor(rect, &t, h));
+                            Some((crate::free_transform::corners(rect, &t), cursor))
+                        }),
                     crop: crop_box.is_some() && !tools_off,
                     spots: match &self.dialog {
                         Some(Dialog::HealBlemishes(dialog)) => dialog.spots(),
@@ -5860,14 +5499,8 @@ mod tests {
 
     fn editor_with_selection() -> Editor {
         let (w, h) = (600, 400);
-        let image =
-            omapix_engine::Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
-        let doc = Document::from_image(
-            "t.tif".into(),
-            &image,
-            omapix_engine::ColorProfile::srgb(),
-            16,
-        );
+        let image = omapix_engine::Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
+        let doc = Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
         let mut editor = Editor::new(doc).unwrap();
         editor.edit("Rectangular Marquee", |doc, _| {
             doc.selection = Some(Selection::rectangle(w, h, (100.0, 100.0), (200.0, 200.0)))
@@ -5897,10 +5530,7 @@ mod tests {
         assert_eq!(pasted.pixels.get(250, 150)[3], 0);
         assert!(editor.doc.selection.is_none());
         // Together they look as they did before the cut.
-        assert_eq!(
-            editor.doc.composite().get(150, 150),
-            [30000, 30000, 30000, 65535]
-        );
+        assert_eq!(editor.doc.composite().get(150, 150), [30000, 30000, 30000, 65535]);
     }
 
     #[test]
@@ -5967,9 +5597,7 @@ mod tests {
     #[test]
     fn cutting_from_a_mask_copies_grey_and_clears_to_the_background() {
         let mut editor = editor_with_selection();
-        editor.edit("Add Layer Mask", |doc, _| {
-            doc.layers[0].mask = Some(Mask::white(600, 400))
-        });
+        editor.edit("Add Layer Mask", |doc, _| doc.layers[0].mask = Some(Mask::white(600, 400)));
         editor.target = Target::Mask;
         let clip = copy(&editor, false).unwrap();
         assert_eq!(clip.pixels.get(150, 150), [65535; 4]);
@@ -6021,7 +5649,10 @@ mod tests {
         app.tools.select(crate::tools::Tool::Brush);
         app.tools.set_size(40.0);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
         let mut output = ctx.run_ui(input, |ui| {
             let editor = app.editor.as_mut().unwrap();
             editor.canvas.show(ui, egui::Color32::BLACK, crate::canvas::Overlay::default());
@@ -6066,10 +5697,7 @@ mod tests {
         app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeMove(egui::pos2(160.0, 160.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
-        assert_eq!(
-            app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150),
-            initial_pixel
-        );
+        assert_eq!(app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150), initial_pixel);
         assert_eq!(
             app.status.as_ref().map(|s| s.0.as_str()),
             Some("Could not use the brush because the layer is locked")
@@ -6079,14 +5707,8 @@ mod tests {
         // Fill is refused with status message
         app.status = None;
         app.run(Command::FillForeground, &ctx);
-        assert_eq!(
-            app.status.as_ref().map(|s| s.0.as_str()),
-            Some("Could not fill because the layer is locked")
-        );
-        assert_eq!(
-            app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150),
-            initial_pixel
-        );
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("Could not fill because the layer is locked"));
+        assert_eq!(app.editor.as_ref().unwrap().doc.layer(active).unwrap().pixels.get(150, 150), initial_pixel);
 
         // Its mask can still be painted
         app.run(Command::AddMask, &ctx);
@@ -6171,18 +5793,9 @@ mod tests {
 
     #[test]
     fn constrain_45_snaps_to_axes_and_diagonals() {
-        assert_eq!(
-            constrain_45(egui::vec2(100.0, 20.0)),
-            egui::vec2(100.0, 0.0)
-        );
-        assert_eq!(
-            constrain_45(egui::vec2(-10.0, -90.0)),
-            egui::vec2(0.0, -90.0)
-        );
-        assert_eq!(
-            constrain_45(egui::vec2(-60.0, 40.0)),
-            egui::vec2(-50.0, 50.0)
-        );
+        assert_eq!(constrain_45(egui::vec2(100.0, 20.0)), egui::vec2(100.0, 0.0));
+        assert_eq!(constrain_45(egui::vec2(-10.0, -90.0)), egui::vec2(0.0, -90.0));
+        assert_eq!(constrain_45(egui::vec2(-60.0, 40.0)), egui::vec2(-50.0, 50.0));
     }
 
     #[test]
@@ -6420,9 +6033,7 @@ mod tests {
             &ctx,
             &mut app,
             egui::RawInput {
-                events: vec![
-                    egui::Event::PointerMoved(drag_start + egui::vec2(20.0, 10.0)),
-                ],
+                events: vec![egui::Event::PointerMoved(drag_start + egui::vec2(20.0, 10.0))],
                 ..Default::default()
             },
             screen_rect,
@@ -6435,14 +6046,12 @@ mod tests {
             &ctx,
             &mut app,
             egui::RawInput {
-                events: vec![
-                    egui::Event::PointerButton {
-                        pos: drag_start + egui::vec2(20.0, 10.0),
-                        button: egui::PointerButton::Primary,
-                        pressed: false,
-                        modifiers: Default::default(),
-                    },
-                ],
+                events: vec![egui::Event::PointerButton {
+                    pos: drag_start + egui::vec2(20.0, 10.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
                 ..Default::default()
             },
             screen_rect,
@@ -6940,23 +6549,11 @@ mod tests {
         let mut app = test_app();
         let active_id = app.editor.as_ref().unwrap().active;
 
-        let (render, _) = render_view(
-            &app.editor.as_ref().unwrap().doc,
-            View::Image,
-            [0; 4],
-            None,
-        );
-        app.editor
-            .as_mut()
-            .unwrap()
-            .canvas
-            .set_render(Arc::new(render));
+        let (render, _) = render_view(&app.editor.as_ref().unwrap().doc, View::Image, [0; 4], None);
+        app.editor.as_mut().unwrap().canvas.set_render(Arc::new(render));
 
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ui| {
@@ -7005,16 +6602,10 @@ mod tests {
 
         // With the group selected, new layers go in at its top.
         run_on_editor(&mut editor, Command::NewLayer, &ctx);
-        assert_eq!(
-            names(&editor),
-            ["Background", "Layer 1(Group 1)", "Layer 2(Group 1)", "Group 1"]
-        );
+        assert_eq!(names(&editor), ["Background", "Layer 1(Group 1)", "Layer 2(Group 1)", "Group 1"]);
         // Bring Forward takes it out of the top of the group.
         run_on_editor(&mut editor, Command::RaiseLayer, &ctx);
-        assert_eq!(
-            names(&editor),
-            ["Background", "Layer 1(Group 1)", "Group 1", "Layer 2"]
-        );
+        assert_eq!(names(&editor), ["Background", "Layer 1(Group 1)", "Group 1", "Layer 2"]);
 
         editor.active = group;
         run_on_editor(&mut editor, Command::DuplicateLayer, &ctx);
@@ -7047,10 +6638,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = test_app();
         app.run(Command::HighPassSharpening, &ctx);
-        let Some(Dialog::Radius {
-            command, radius, ..
-        }) = app.dialog.take()
-        else {
+        let Some(Dialog::Radius { command, radius, .. }) = app.dialog.take() else {
             panic!("no radius dialog");
         };
         app.apply_radius(command, radius, None, &ctx);
@@ -7103,10 +6691,7 @@ mod tests {
         // Ctrl+G puts them all in one group, where the top one was.
         editor.select_layers(three, vec![one]);
         run_on_editor(editor, Command::GroupLayers, &ctx);
-        assert_eq!(
-            names(editor),
-            ["Background", "Layer 2", "Layer 1(Group 1)", "Layer 3(Group 1)", "Group 1"]
-        );
+        assert_eq!(names(editor), ["Background", "Layer 2", "Layer 1(Group 1)", "Layer 3(Group 1)", "Group 1"]);
         assert_eq!(editor.selected().len(), 1, "the group");
         editor.undo();
 
@@ -7180,10 +6765,7 @@ mod tests {
         let editor = app.editor.as_mut().unwrap();
         editor.select_layers(three, vec![two]);
         app.run(Command::GroupLayers, &ctx);
-        assert_eq!(
-            names(&app),
-            ["Background", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Layer 1"]
-        );
+        assert_eq!(names(&app), ["Background", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Layer 1"]);
 
         // Active is Layer 2 inside Group 1.
         let editor = app.editor.as_mut().unwrap();
@@ -7193,18 +6775,12 @@ mod tests {
 
         // Bring to Front brings Layer 2 to the top of Group 1 (not out of it!).
         app.run(Command::BringToFront, &ctx);
-        assert_eq!(
-            names(&app),
-            ["Background", "Layer 3(Group 1)", "Layer 2(Group 1)", "Group 1", "Layer 1"]
-        );
+        assert_eq!(names(&app), ["Background", "Layer 3(Group 1)", "Layer 2(Group 1)", "Group 1", "Layer 1"]);
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Bring to Front"));
 
         // Send to Back sends Layer 2 back to the bottom of Group 1.
         app.run(Command::SendToBack, &ctx);
-        assert_eq!(
-            names(&app),
-            ["Background", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Layer 1"]
-        );
+        assert_eq!(names(&app), ["Background", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Layer 1"]);
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Send to Back"));
 
         // Several selected layers:
@@ -7213,20 +6789,14 @@ mod tests {
         editor.select_layers(background, vec![one]);
         // Send to back moves both to the bottom:
         app.run(Command::SendToBack, &ctx);
-        assert_eq!(
-            names(&app),
-            ["Background", "Layer 1", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1"]
-        );
+        assert_eq!(names(&app), ["Background", "Layer 1", "Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1"]);
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Send to Back"));
         assert!(!app.enabled(Command::SendToBack));
         assert!(app.enabled(Command::BringToFront));
 
         // Bring to front moves both to the front of root:
         app.run(Command::BringToFront, &ctx);
-        assert_eq!(
-            names(&app),
-            ["Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Background", "Layer 1"]
-        );
+        assert_eq!(names(&app), ["Layer 2(Group 1)", "Layer 3(Group 1)", "Group 1", "Background", "Layer 1"]);
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Bring to Front"));
     }
 
@@ -7399,23 +6969,11 @@ mod tests {
         assert_eq!(editor.doc.layers[0].opacity, 0.3);
 
         // Layout canvas so canvas.ready() returns true for run_script.
-        let (render, _) = render_view(
-            &app.editor.as_ref().unwrap().doc,
-            View::Image,
-            [0; 4],
-            None,
-        );
-        app.editor
-            .as_mut()
-            .unwrap()
-            .canvas
-            .set_render(Arc::new(render));
+        let (render, _) = render_view(&app.editor.as_ref().unwrap().doc, View::Image, [0; 4], None);
+        app.editor.as_mut().unwrap().canvas.set_render(Arc::new(render));
 
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ui| {
@@ -7475,10 +7033,7 @@ mod tests {
         assert_eq!(app.tools.tool, crate::tools::Tool::MagicWand);
 
         // Click at (50, 50)
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
 
         assert!(app.editor.as_ref().unwrap().doc.selection.is_some());
@@ -7486,10 +7041,7 @@ mod tests {
         assert_eq!(sel.at(50, 50), 1.0);
 
         // Click outside image deselects
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(700.0, 500.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(700.0, 500.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
         assert!(app.editor.as_ref().unwrap().doc.selection.is_none());
     }
@@ -7499,24 +7051,15 @@ mod tests {
         use omapix_engine::adjust::{Adjustment, Curves, Eyedropper};
 
         let mut app = test_app();
-        let (w, h) = (
-            app.editor.as_ref().unwrap().doc.width,
-            app.editor.as_ref().unwrap().doc.height,
-        );
+        let (w, h) = (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height);
         let curves_layer = Layer::adjustment(200, Adjustment::Curves(Curves::default()), w, h);
         app.editor.as_mut().unwrap().doc.layers.push(curves_layer);
         app.editor.as_mut().unwrap().active = 200;
 
         // Arm Black Point eyedropper and click canvas
         app.properties.eyedropper = Some(Eyedropper::Black);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::NONE,
-        );
-        assert_eq!(
-            app.editor.as_ref().unwrap().undo_label(),
-            Some("Set Black Point")
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set Black Point"));
         if let Some(Adjustment::Curves(c)) = &app.editor.as_ref().unwrap().doc.layer(200).unwrap().adjustment {
             assert!(c.red.points[0].0 > 0.0);
         } else {
@@ -7525,25 +7068,13 @@ mod tests {
 
         // Arm White Point eyedropper and click canvas
         app.properties.eyedropper = Some(Eyedropper::White);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(60.0, 60.0)),
-            egui::Modifiers::NONE,
-        );
-        assert_eq!(
-            app.editor.as_ref().unwrap().undo_label(),
-            Some("Set White Point")
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(60.0, 60.0)), egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set White Point"));
 
         // Arm Gray Point eyedropper and click canvas
         app.properties.eyedropper = Some(Eyedropper::Gray);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(70.0, 70.0)),
-            egui::Modifiers::NONE,
-        );
-        assert_eq!(
-            app.editor.as_ref().unwrap().undo_label(),
-            Some("Set Gray Point")
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(70.0, 70.0)), egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set Gray Point"));
     }
 
     #[test]
@@ -7551,10 +7082,7 @@ mod tests {
         use omapix_engine::adjust::{Adjustment, Curves, Eyedropper};
 
         let mut app = test_app();
-        let (w, h) = (
-            app.editor.as_ref().unwrap().doc.width,
-            app.editor.as_ref().unwrap().doc.height,
-        );
+        let (w, h) = (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height);
         let curves_layer = Layer::adjustment(200, Adjustment::Curves(Curves::default()), w, h);
         app.editor.as_mut().unwrap().doc.layers.push(curves_layer);
         app.editor.as_mut().unwrap().active = 200;
@@ -7567,16 +7095,10 @@ mod tests {
         app.properties.eyedropper = Some(Eyedropper::Black);
 
         // Click on canvas
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
         // Eyedropper handled the click, did not start a selection
         assert!(app.editor.as_ref().unwrap().doc.selection.is_none());
-        assert_eq!(
-            app.editor.as_ref().unwrap().undo_label(),
-            Some("Set Black Point")
-        );
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set Black Point"));
     }
 
     #[test]
@@ -7584,24 +7106,15 @@ mod tests {
         use omapix_engine::adjust::{Adjustment, Eyedropper, Levels};
 
         let mut app = test_app();
-        let (w, h) = (
-            app.editor.as_ref().unwrap().doc.width,
-            app.editor.as_ref().unwrap().doc.height,
-        );
+        let (w, h) = (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height);
         let levels_layer = Layer::adjustment(201, Adjustment::Levels(Levels::default()), w, h);
         app.editor.as_mut().unwrap().doc.layers.push(levels_layer);
         app.editor.as_mut().unwrap().active = 201;
 
         // Arm Black Point eyedropper and click canvas
         app.properties.eyedropper = Some(Eyedropper::Black);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::NONE,
-        );
-        assert_eq!(
-            app.editor.as_ref().unwrap().undo_label(),
-            Some("Set Black Point")
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set Black Point"));
         if let Some(Adjustment::Levels(l)) = &app.editor.as_ref().unwrap().doc.layer(201).unwrap().adjustment {
             assert!(l.in_black > 0.0);
         } else {
@@ -7610,25 +7123,13 @@ mod tests {
 
         // Arm White Point eyedropper and click canvas
         app.properties.eyedropper = Some(Eyedropper::White);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(60.0, 60.0)),
-            egui::Modifiers::NONE,
-        );
-        assert_eq!(
-            app.editor.as_ref().unwrap().undo_label(),
-            Some("Set White Point")
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(60.0, 60.0)), egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set White Point"));
 
         // Arm Gray Point eyedropper and click canvas
         app.properties.eyedropper = Some(Eyedropper::Gray);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(70.0, 70.0)),
-            egui::Modifiers::NONE,
-        );
-        assert_eq!(
-            app.editor.as_ref().unwrap().undo_label(),
-            Some("Set Gray Point")
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(70.0, 70.0)), egui::Modifiers::NONE);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set Gray Point"));
     }
 
     /// A test app with nothing selected and a red 20 px square at (300, 200).
@@ -7686,7 +7187,10 @@ mod tests {
         app.run(Command::Liquify, &ctx);
         key(&mut app, egui::Key::R);
         assert_eq!(app.tools.liquify.brush, Brush::Reconstruct);
-        app.editor.as_mut().unwrap().liquify(Brush::Reconstruct, &[([300.0, 200.0], [0.0; 2])], 200.0, 1.0);
+        app.editor
+            .as_mut()
+            .unwrap()
+            .liquify(Brush::Reconstruct, &[([300.0, 200.0], [0.0; 2])], 200.0, 1.0);
         assert!(pixel(&app, 320, 200) == original.get(320, 200) && pixel(&app, 305, 200) == red);
 
         // Esc puts it back as it was when Liquify opened.
@@ -7780,7 +7284,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = test_app();
         let editor = app.editor.as_mut().unwrap();
-        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)), 1.0);
+        editor
+            .canvas
+            .lay_out_for_test(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)), 1.0);
         let key = |app: &mut App, key| {
             let mut input = egui::RawInput::default();
             input.events.push(egui::Event::Key {
@@ -7912,7 +7418,10 @@ mod tests {
         app.merge(Command::Photomerge, paths, &ctx);
         finish(&mut app);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("Photomerge: the photos don't line up with each other"));
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("Photomerge: the photos don't line up with each other")
+        );
         assert_eq!(app.tabs().count(), 3);
     }
 
@@ -7975,7 +7484,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = test_app();
         let editor = app.editor.as_mut().unwrap();
-        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)), 1.0);
+        editor
+            .canvas
+            .lay_out_for_test(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0)), 1.0);
         let key = |app: &mut App, key| {
             let mut input = egui::RawInput::default();
             input.events.push(egui::Event::Key {
@@ -8298,10 +7809,7 @@ mod tests {
         use omapix_engine::adjust::{Adjustment, Curves, Eyedropper};
 
         let mut app = test_app();
-        let (w, h) = (
-            app.editor.as_ref().unwrap().doc.width,
-            app.editor.as_ref().unwrap().doc.height,
-        );
+        let (w, h) = (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height);
         let curves_layer = Layer::adjustment(200, Adjustment::Curves(Curves::default()), w, h);
         app.editor.as_mut().unwrap().doc.layers.push(curves_layer);
         app.editor.as_mut().unwrap().active = 200;
@@ -8578,7 +8086,13 @@ mod tests {
         use crate::editor::Backdrop;
         let ctx = egui::Context::default();
         let mut app = test_app();
-        let key = |key, pressed, modifiers| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+        let key = |key, pressed, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
         let press = |k| key(k, true, egui::Modifiers::NONE);
         let run = |app: &mut App, events: Vec<egui::Event>| {
             let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| app.dialogs(ui.ctx()));
@@ -8601,7 +8115,10 @@ mod tests {
         // Holding X shows the image, until it's let go.
         assert_eq!(run(&mut app, vec![press(egui::Key::X)]), View::Image);
         assert_eq!(run(&mut app, vec![]), View::Image);
-        assert_eq!(run(&mut app, vec![key(egui::Key::X, false, egui::Modifiers::NONE)]), View::Refined(Backdrop::White));
+        assert_eq!(
+            run(&mut app, vec![key(egui::Key::X, false, egui::Modifiers::NONE)]),
+            View::Refined(Backdrop::White)
+        );
         // OK'd, the view's as it was and the choice is kept for next time.
         assert_eq!(run(&mut app, vec![press(egui::Key::Enter)]), View::Image);
         assert!(app.dialog.is_none());
@@ -8617,18 +8134,35 @@ mod tests {
         // column from 120 to 160, on blue; the subject's selected.
         let (w, h) = (300u32, 200u32);
         let strand = |x: u32| x < 100 || ((120..160).contains(&x) && x.is_multiple_of(4));
-        let px = (0..w * h).map(|i| if strand(i % w) { [59000, 46000, 13000, 65535] } else { [6500, 19700, 52400, 65535] });
+        let px = (0..w * h).map(|i| {
+            if strand(i % w) {
+                [59000, 46000, 13000, 65535]
+            } else {
+                [6500, 19700, 52400, 65535]
+            }
+        });
         let image = omapix_engine::Raster::new(w, h, px.collect());
         let doc = Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
         let mut editor = Editor::new(doc).unwrap();
-        editor.edit("Rectangular Marquee", |doc, _| doc.selection = Some(Selection::rectangle(w, h, (0.0, 0.0), (100.0, 200.0))));
-        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(w as f32, h as f32)), 1.0);
+        editor.edit("Rectangular Marquee", |doc, _| {
+            doc.selection = Some(Selection::rectangle(w, h, (0.0, 0.0), (100.0, 200.0)))
+        });
+        editor
+            .canvas
+            .lay_out_for_test(egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(w as f32, h as f32)), 1.0);
         app.editor = Some(editor);
-        app.filters.select_and_mask = omapix_engine::refine::EdgeOptions { radius: 4.0, ..Default::default() };
+        app.filters.select_and_mask = omapix_engine::refine::EdgeOptions {
+            radius: 4.0,
+            ..Default::default()
+        };
 
         let run = |app: &mut App, events: Vec<Event>| {
             let screen = egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1600.0, 1000.0));
-            let input = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
             let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
             out.textures_delta.clear();
         };
@@ -8650,7 +8184,13 @@ mod tests {
         assert!(refined(&mut app).at(140, 100) < 0.01, "the radius stops short of the strands");
 
         // [ and ] change its size.
-        let press = |key| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let press = |key| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
         run(&mut app, vec![press(egui::Key::CloseBracket)]);
         assert_eq!(size(&app), 125.0);
         run(&mut app, vec![press(egui::Key::OpenBracket)]);
@@ -8659,7 +8199,12 @@ mod tests {
 
         // A stroke down the strands picks them up, and not the blue
         // between them, without a step to undo.
-        let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
         let (top, bottom) = (pos2(140.0, 20.0), pos2(140.0, 180.0));
         run(&mut app, vec![Event::PointerMoved(top), button(top, true)]);
         run(&mut app, vec![Event::PointerMoved(bottom)]);
@@ -8719,10 +8264,7 @@ mod tests {
         fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
             self.time += 0.05;
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(800.0, 600.0),
-                )),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
                 time: Some(self.time),
                 events,
                 ..Default::default()
@@ -8791,30 +8333,24 @@ mod tests {
                     modifiers: egui::Modifiers::NONE,
                 },
             ]);
-            self.frame(vec![
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
         }
 
         fn open_view_menu(&mut self) -> egui::FullOutput {
             let out = self.frame(vec![]);
-            let pos = self
-                .find_text_pos(&out, "View")
-                .expect("View menu button not found");
+            let pos = self.find_text_pos(&out, "View").expect("View menu button not found");
             self.click(pos);
             self.frame(vec![])
         }
 
         fn open_select_menu(&mut self) -> egui::FullOutput {
             let out = self.frame(vec![]);
-            let pos = self
-                .find_text_pos(&out, "Select")
-                .expect("Select menu button not found");
+            let pos = self.find_text_pos(&out, "Select").expect("Select menu button not found");
             self.click(pos);
             self.frame(vec![])
         }
@@ -8895,14 +8431,8 @@ mod tests {
         app.run(Command::SelectionEdges, &ctx);
         assert!(app.editor.as_ref().unwrap().hide_selection_edges);
         app.tools.select(crate::tools::Tool::Marquee);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(10.0, 10.0)),
-            egui::Modifiers::NONE,
-        );
-        app.tool_input(
-            ToolInput::StrokeMove(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(10.0, 10.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
         assert!(!app.editor.as_ref().unwrap().hide_selection_edges);
 
@@ -8910,10 +8440,7 @@ mod tests {
         app.run(Command::SelectionEdges, &ctx);
         assert!(app.editor.as_ref().unwrap().hide_selection_edges);
         app.tools.select(crate::tools::Tool::MagicWand);
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(20.0, 20.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(20.0, 20.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
         assert!(!app.editor.as_ref().unwrap().hide_selection_edges);
     }
@@ -9003,10 +8530,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = test_app();
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
             ..Default::default()
         };
 
@@ -9105,45 +8629,31 @@ mod tests {
         let mut app = test_app();
         app.tools.select(crate::tools::Tool::Eyedropper);
 
-        let render = Arc::new(crate::canvas::Render::new(
-            app.editor.as_ref().unwrap().doc.composite(),
-        ));
+        let render = Arc::new(crate::canvas::Render::new(app.editor.as_ref().unwrap().doc.composite()));
         app.editor.as_mut().unwrap().canvas.set_render(render);
 
         app.tools.foreground = [0, 0, 0];
         app.tools.background = [255, 255, 255];
 
         // 1. Plain click samples foreground
-        app.tool_input(
-            crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)), egui::Modifiers::NONE);
         assert_ne!(app.tools.foreground, [0, 0, 0]);
         assert_eq!(app.tools.background, [255, 255, 255]);
 
         // 2. Alt+click samples background
         app.tools.background = [0, 0, 0];
-        app.tool_input(
-            crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::ALT,
-        );
+        app.tool_input(crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)), egui::Modifiers::ALT);
         assert_ne!(app.tools.background, [0, 0, 0]);
 
         // 3. Dragging continues to sample live
         let prev_fg = app.tools.foreground;
-        app.tool_input(
-            crate::canvas::ToolInput::Sample(egui::pos2(60.0, 60.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(crate::canvas::ToolInput::Sample(egui::pos2(60.0, 60.0)), egui::Modifiers::NONE);
         assert_eq!(app.tools.foreground, prev_fg);
 
         // 4. Painting tool (Brush) Alt+click samples foreground using sample size
         app.tools.select(crate::tools::Tool::Brush);
         app.tools.foreground = [12, 34, 56];
-        app.tool_input(
-            crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)),
-            egui::Modifiers::ALT,
-        );
+        app.tool_input(crate::canvas::ToolInput::Sample(egui::pos2(50.0, 50.0)), egui::Modifiers::ALT);
         assert_ne!(app.tools.foreground, [12, 34, 56]);
     }
 
@@ -9272,14 +8782,21 @@ mod tests {
             let noise: Vec<_> = (0..600 * 400u32).map(|i| [(i.wrapping_mul(2654435761) >> 16) as u16; 4]).collect();
             doc.layers[0].pixels = Tiled::from_slice(600, 400, [0; 4], &noise).map(|p| [p[0], p[1], p[2], 65535]);
         });
-        app.filters.web_export = WebExport { long_edge: 300, ..Default::default() };
+        app.filters.web_export = WebExport {
+            long_edge: 300,
+            ..Default::default()
+        };
         app.run(Command::ExportForWeb, &ctx);
         // Frames of the dialog until it has the file's size for its
         // settings, worked out in the background.
         let sized = |app: &mut App| loop {
             dialog_frame(app, &ctx, None, "");
             match &app.dialog {
-                Some(Dialog::ExportWeb { settings, size: Some((for_settings, size)), .. }) if for_settings == settings => {
+                Some(Dialog::ExportWeb {
+                    settings,
+                    size: Some((for_settings, size)),
+                    ..
+                }) if for_settings == settings => {
                     break *size.as_ref().unwrap();
                 }
                 Some(Dialog::ExportWeb { .. }) => std::thread::sleep(Duration::from_millis(2)),
@@ -9288,10 +8805,14 @@ mod tests {
         };
         let jpeg = sized(&mut app);
         // A lower quality is worked out again, and is smaller; a PNG isn't.
-        let Some(Dialog::ExportWeb { settings, .. }) = &mut app.dialog else { unreachable!() };
+        let Some(Dialog::ExportWeb { settings, .. }) = &mut app.dialog else {
+            unreachable!()
+        };
         settings.quality = 20;
         assert!(sized(&mut app) < jpeg);
-        let Some(Dialog::ExportWeb { settings, .. }) = &mut app.dialog else { unreachable!() };
+        let Some(Dialog::ExportWeb { settings, .. }) = &mut app.dialog else {
+            unreachable!()
+        };
         (settings.jpeg, settings.metadata) = (false, false);
         let png = sized(&mut app);
 
@@ -9302,7 +8823,16 @@ mod tests {
         let button = dialog_frame(&mut app, &ctx, None, "Export…").expect("an Export button");
         dialog_frame(&mut app, &ctx, Some(button), "");
         assert!(app.dialog.is_none());
-        assert_eq!(app.filters.web_export, WebExport { jpeg: false, quality: 20, resize: true, long_edge: 300, metadata: false });
+        assert_eq!(
+            app.filters.web_export,
+            WebExport {
+                jpeg: false,
+                quality: 20,
+                resize: true,
+                long_edge: 300,
+                metadata: false
+            }
+        );
         let dir = std::env::temp_dir().join(format!("omapix-app-web-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         tx.send(Some(vec![dir.join("out")])).unwrap();
@@ -9602,11 +9132,21 @@ mod tests {
             found
         };
         let click = |pos: Pos2, button: egui::PointerButton| {
-            let press = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() };
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: Default::default(),
+            };
             [vec![egui::Event::PointerMoved(pos)], vec![press(true)], vec![press(false)]]
         };
         let find = |drawn: &[(String, Pos2)], text: &str, nth: usize| {
-            drawn.iter().filter(|(t, _)| t == text).nth(nth).unwrap_or_else(|| panic!("no {text} in {drawn:?}")).1
+            drawn
+                .iter()
+                .filter(|(t, _)| t == text)
+                .nth(nth)
+                .unwrap_or_else(|| panic!("no {text} in {drawn:?}"))
+                .1
         };
         let drawn = frame(&mut app, vec![]);
 
@@ -9618,7 +9158,11 @@ mod tests {
         assert_eq!((app.tab, width(&app)), (2, 500));
         let (tx, rx) = channel();
         tx.send(Ok((revision, PathBuf::from("/tmp/a.ora"), true))).unwrap();
-        app.file_job = Some(FileJob { label: "Saving".into(), note: String::new(), rx });
+        app.file_job = Some(FileJob {
+            label: "Saving".into(),
+            note: String::new(),
+            rx,
+        });
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.poll(ui.ctx()));
         output.textures_delta.clear();
         assert_eq!(tab_names(&app), ["a.ora", "b.tif", "c.tif"]);
@@ -9836,7 +9380,10 @@ mod tests {
         let initial_layers = app.editor.as_ref().unwrap().doc.layers.len();
 
         let raw = egui::RawInput {
-            dropped_files: vec![Arc::new(crate::drop::DroppedPath(path1.clone())), Arc::new(crate::drop::DroppedPath(path2.clone()))],
+            dropped_files: vec![
+                Arc::new(crate::drop::DroppedPath(path1.clone())),
+                Arc::new(crate::drop::DroppedPath(path2.clone())),
+            ],
             ..Default::default()
         };
         let mut output = ctx.run_ui(raw, |ctx| app.poll(ctx));
@@ -9880,11 +9427,7 @@ mod tests {
         app.editor.as_mut().unwrap().edit("Fill Red", |doc, _| {
             let (w, h) = (doc.width, doc.height);
             let bg = doc.layer_mut(bg_id).unwrap();
-            bg.pixels = Tiled::from_raster(&omapix_engine::Raster::new(
-                w,
-                h,
-                vec![red; (w * h) as usize],
-            ));
+            bg.pixels = Tiled::from_raster(&omapix_engine::Raster::new(w, h, vec![red; (w * h) as usize]));
         });
 
         // Add empty layer (active layer to clone onto)
@@ -9897,11 +9440,7 @@ mod tests {
         app.editor.as_mut().unwrap().edit("Fill Blue", |doc, _| {
             let (w, h) = (doc.width, doc.height);
             let top = doc.layer_mut(top_id).unwrap();
-            top.pixels = Tiled::from_raster(&omapix_engine::Raster::new(
-                w,
-                h,
-                vec![blue; (w * h) as usize],
-            ));
+            top.pixels = Tiled::from_raster(&omapix_engine::Raster::new(w, h, vec![blue; (w * h) as usize]));
         });
 
         // Select the middle active layer
@@ -9913,50 +9452,22 @@ mod tests {
         app.tools.clone_sample = crate::tools::Sample::CurrentAndBelow;
 
         // Alt+click to set source at (100.0, 100.0)
-        app.tool_input(
-            ToolInput::Sample(egui::pos2(100.0, 100.0)),
-            egui::Modifiers::ALT,
-        );
+        app.tool_input(ToolInput::Sample(egui::pos2(100.0, 100.0)), egui::Modifiers::ALT);
 
         // Stroke at (200.0, 200.0)
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(200.0, 200.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(200.0, 200.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
 
         // The active layer should have copied from below (Red), not from above (Blue)
-        let active_pixel = app
-            .editor
-            .as_ref()
-            .unwrap()
-            .doc
-            .layer(active_id)
-            .unwrap()
-            .pixels
-            .get(200, 200);
+        let active_pixel = app.editor.as_ref().unwrap().doc.layer(active_id).unwrap().pixels.get(200, 200);
         assert_eq!(active_pixel, red);
 
         // With All Layers, cloning stamps Blue from the top layer
         app.tools.clone_sample = crate::tools::Sample::All;
-        app.tool_input(
-            ToolInput::Sample(egui::pos2(100.0, 100.0)),
-            egui::Modifiers::ALT,
-        );
-        app.tool_input(
-            ToolInput::StrokeBegin(egui::pos2(250.0, 200.0)),
-            egui::Modifiers::NONE,
-        );
+        app.tool_input(ToolInput::Sample(egui::pos2(100.0, 100.0)), egui::Modifiers::ALT);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(250.0, 200.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
-        let all_pixel = app
-            .editor
-            .as_ref()
-            .unwrap()
-            .doc
-            .layer(active_id)
-            .unwrap()
-            .pixels
-            .get(250, 200);
+        let all_pixel = app.editor.as_ref().unwrap().doc.layer(active_id).unwrap().pixels.get(250, 200);
         assert_eq!(all_pixel, blue);
     }
 
@@ -10333,21 +9844,36 @@ mod tests {
         let layers = size(&app).2;
 
         // Smaller: the ordinary way, though AI was ticked.
-        app.dialog = Some(Dialog::ImageSize { width: 300, height: 200, constrain: true, ai: true });
+        app.dialog = Some(Dialog::ImageSize {
+            width: 300,
+            height: 200,
+            constrain: true,
+            ai: true,
+        });
         assert!(!enter(&mut app));
         assert_eq!((size(&app), app.upscaling.busy()), ((300, 200, layers), None));
         app.run(Command::Undo, &ctx);
 
         // Larger, without the model: the ordinary way too.
         app.models.insert(omapix_ai::upscale::MODEL, false);
-        app.dialog = Some(Dialog::ImageSize { width: 1200, height: 800, constrain: true, ai: true });
+        app.dialog = Some(Dialog::ImageSize {
+            width: 1200,
+            height: 800,
+            constrain: true,
+            ai: true,
+        });
         assert!(!enter(&mut app));
         assert_eq!((size(&app), app.upscaling.busy()), ((1200, 800, layers), None));
         app.run(Command::Undo, &ctx);
 
         // Larger, with it: the note says where the model's work goes.
         app.models.insert(omapix_ai::upscale::MODEL, true);
-        app.dialog = Some(Dialog::ImageSize { width: 1200, height: 800, constrain: true, ai: true });
+        app.dialog = Some(Dialog::ImageSize {
+            width: 1200,
+            height: 800,
+            constrain: true,
+            ai: true,
+        });
         frame(&mut app, vec![]);
         assert!(frame(&mut app, vec![]));
         assert_eq!(size(&app), (600, 400, layers));
@@ -10364,7 +9890,15 @@ mod tests {
 
         // The dialogs start at the current size; OK applies what's typed.
         app.run(Command::ImageSize, &ctx);
-        assert!(matches!(app.dialog, Some(Dialog::ImageSize { width: 600, height: 400, constrain: true, ai: false })));
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::ImageSize {
+                width: 600,
+                height: 400,
+                constrain: true,
+                ai: false
+            })
+        ));
         app.dialog = None;
         app.resize_image(300, 200);
         assert_eq!((size(&app), app.editor.as_ref().unwrap().undo_label()), ((300, 200), Some("Image Size")));
@@ -10454,7 +9988,10 @@ mod tests {
         omapix_engine::export::tiff(&app.editor.as_ref().unwrap().doc, &good).unwrap();
         let bad = dir.join("bad.tif");
         std::fs::write(&bad, b"not a tiff").unwrap();
-        let settings = crate::settings::BatchExport { folder: Some(dir.join("out")), ..Default::default() };
+        let settings = crate::settings::BatchExport {
+            folder: Some(dir.join("out")),
+            ..Default::default()
+        };
         app.batch_export(vec![good, bad], settings, &ctx);
         // Each file's result, waited for, then handed on for `poll` to report.
         let job = app.batch_export.as_mut().unwrap();
@@ -10474,7 +10011,10 @@ mod tests {
     #[test]
     fn script_steps_run_auto_retouch_with_a_preset_or_as_last_used() {
         use crate::auto_retouch::Preset;
-        assert!(matches!(ScriptStep::parse("AutoRetouch Natural"), Some(ScriptStep::AutoRetouch(Some(Preset::Natural)))));
+        assert!(matches!(
+            ScriptStep::parse("AutoRetouch Natural"),
+            Some(ScriptStep::AutoRetouch(Some(Preset::Natural)))
+        ));
         assert!(matches!(ScriptStep::parse("AutoRetouch"), Some(ScriptStep::AutoRetouch(None))));
         assert!(ScriptStep::parse("AutoRetouch Gentle").is_none());
     }
@@ -10492,7 +10032,9 @@ mod tests {
         let (render, _) = render_view(&doc, View::Image, [0; 4], None);
         let mut editor = Editor::new(doc).unwrap();
         editor.canvas.set_render(Arc::new(render));
-        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
+        editor
+            .canvas
+            .lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
         app.editor = Some(editor);
         app.script.push_back(ScriptStep::parse("AutoRetouch Natural").unwrap());
         let done = |app: &App| app.script.is_empty() && app.dialog.is_none() && app.editor.as_ref().unwrap().busy().is_none();
@@ -10535,7 +10077,9 @@ mod tests {
     #[test]
     #[ignore]
     fn the_generative_fill_script_step_leaves_a_masked_layer() {
-        let (Ok(photo), Ok(corners)) = (std::env::var("OMAPIX_FILL_PHOTO"), std::env::var("OMAPIX_FILL_BOX")) else { return };
+        let (Ok(photo), Ok(corners)) = (std::env::var("OMAPIX_FILL_PHOTO"), std::env::var("OMAPIX_FILL_BOX")) else {
+            return;
+        };
         let corners: Vec<f32> = corners.split_whitespace().map(|c| c.parse().unwrap()).collect();
         let ctx = egui::Context::default();
         let mut app = test_app();
@@ -10550,7 +10094,9 @@ mod tests {
         let (render, _) = render_view(&doc, View::Image, [0; 4], None);
         let mut editor = Editor::new(doc).unwrap();
         editor.canvas.set_render(Arc::new(render));
-        editor.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
+        editor
+            .canvas
+            .lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
         app.editor = Some(editor);
         // Content-Aware Fill first, so its model's on the card and has to
         // give way.
@@ -10583,7 +10129,11 @@ mod tests {
         let layer = editor.doc.layer(editor.active).unwrap();
         assert_eq!(layer.name, "Generative Fill");
         // The middle of the box, or the new canvas's first corner.
-        let (x, y) = if extend { (0, 0) } else { (((corners[0] + corners[2]) / 2.0) as u32, ((corners[1] + corners[3]) / 2.0) as u32) };
+        let (x, y) = if extend {
+            (0, 0)
+        } else {
+            (((corners[0] + corners[2]) / 2.0) as u32, ((corners[1] + corners[3]) / 2.0) as u32)
+        };
         assert_eq!(layer.mask.as_ref().unwrap().pixels.get(x, y), 65535);
         assert_eq!(layer.pixels.get(x, y)[3], 65535);
         assert_eq!(editor.undo_label(), Some("Generative Fill"));
@@ -10602,4 +10152,3 @@ mod tests {
         assert_eq!(settings, &app.filters.batch_export);
     }
 }
-

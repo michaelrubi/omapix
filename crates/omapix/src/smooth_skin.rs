@@ -4,12 +4,12 @@
 //! new Smooth Skin layer above, masked by the skin. The dialog shows a
 //! 100 % box of the result, on a cheek to start with.
 
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Pos2, RichText, Slider};
-use omapix_engine::skin::{self, Smoothing};
 use omapix_engine::Pixel;
+use omapix_engine::skin::{self, Smoothing};
 
 use crate::editor::{Editor, Target};
 use crate::face_selection::{FoundSkin, find_skin};
@@ -109,7 +109,11 @@ impl SmoothSkin {
             }
             ui.add_space(4.0);
             let ready = self.found.is_some();
-            let hint = if ready { "Onto a new Smooth Skin layer, masked to the skin." } else { "Finding skin…" };
+            let hint = if ready {
+                "Onto a new Smooth Skin layer, masked to the skin."
+            } else {
+                "Finding skin…"
+            };
             ui.label(RichText::new(hint).color(theme.dark_foreground));
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -355,7 +359,12 @@ mod tests {
             let top = doc.layers.len() - 1;
             skin::add_layer(&mut doc, top, &found.image, &found.skin, found.iod, &smoothing);
             let after = doc.composite();
-            eprintln!("{name}: iod {:.0}, radii {:?}, found in {found_in:?}, smoothed in {:?}", found.iod, smoothing.radii(found.iod), t.elapsed());
+            eprintln!(
+                "{name}: iod {:.0}, radii {:?}, found in {found_in:?}, smoothed in {:?}",
+                found.iod,
+                smoothing.radii(found.iod),
+                t.elapsed()
+            );
             let before = &found.image;
             let (iw, ih) = (before.width() as f32, before.height() as f32);
             // The face: about 3 × the distance between the eyes each way
@@ -378,7 +387,10 @@ mod tests {
                 }
                 let ppm_path = format!("{out}/{name}-{suffix}.ppm");
                 std::fs::write(&ppm_path, ppm).unwrap();
-                std::process::Command::new("magick").args([&ppm_path, &format!("{out}/{name}-{suffix}.png")]).status().unwrap();
+                std::process::Command::new("magick")
+                    .args([&ppm_path, &format!("{out}/{name}-{suffix}.png")])
+                    .status()
+                    .unwrap();
                 std::fs::remove_file(ppm_path).unwrap();
             }
         }

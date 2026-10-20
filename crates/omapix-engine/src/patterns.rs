@@ -90,8 +90,7 @@ pub(crate) fn decode_plane_rle(data: &[u8], width: usize, height: usize, depth: 
         counts.push(r.u16()? as usize);
     }
     let mut out = Vec::new();
-    out.try_reserve_exact(total)
-        .map_err(|_| bad("not enough memory for decoded plane"))?;
+    out.try_reserve_exact(total).map_err(|_| bad("not enough memory for decoded plane"))?;
     for c in counts {
         let row = r.bytes(c)?;
         packbits::decode_into(row, rb, &mut out)?;
@@ -138,9 +137,7 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
         return Err(bad("pattern name length exceeds limit"));
     }
     let units: Vec<u16> = r.bytes(n * 2)?.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
-    let name = String::from_utf16_lossy(&units)
-        .trim_end_matches('\0')
-        .to_string();
+    let name = String::from_utf16_lossy(&units).trim_end_matches('\0').to_string();
     let idl = r.u8()? as usize;
     let id = String::from_utf8_lossy(r.bytes(idl)?).to_string();
     let palette = if mode == 2 {
@@ -165,12 +162,8 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
     let left = v.i32()?;
     let bottom = v.i32()?;
     let right = v.i32()?;
-    let w = right
-        .checked_sub(left)
-        .ok_or_else(|| bad("pattern width overflow"))?;
-    let h = bottom
-        .checked_sub(top)
-        .ok_or_else(|| bad("pattern height overflow"))?;
+    let w = right.checked_sub(left).ok_or_else(|| bad("pattern width overflow"))?;
+    let h = bottom.checked_sub(top).ok_or_else(|| bad("pattern height overflow"))?;
     if w <= 0 || h <= 0 || w as u32 > MAX_EDGE || h as u32 > MAX_EDGE {
         return Err(bad("invalid pattern dimensions"));
     }
@@ -205,11 +198,7 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
         let d16 = v.u16()?;
         let comp = v.u8()?;
         let data = v.bytes(alen - 23)?;
-        let d = if matches!(d16, 1 | 8 | 16 | 32) {
-            d16
-        } else {
-            d32 as u16
-        };
+        let d = if matches!(d16, 1 | 8 | 16 | 32) { d16 } else { d32 as u16 };
         if !matches!(d, 1 | 8 | 16 | 32) {
             return Err(bad(format!("unsupported pattern depth {d}")));
         }
@@ -219,15 +208,11 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
         }
         let cw = (cr - cl) as usize;
         let ch = (cb - ct) as usize;
-        let channel_bytes = (ch as u64)
-            .checked_mul(row_bytes(cw, d) as u64)
-            .ok_or_else(|| bad("channel size overflow"))?;
+        let channel_bytes = (ch as u64).checked_mul(row_bytes(cw, d) as u64).ok_or_else(|| bad("channel size overflow"))?;
         let plane_bytes = (h as u64)
             .checked_mul(row_bytes(w as usize, d) as u64)
             .ok_or_else(|| bad("plane size overflow"))?;
-        decoded_bytes = decoded_bytes
-            .checked_add(plane_bytes)
-            .ok_or_else(|| bad("decoded bytes overflow"))?;
+        decoded_bytes = decoded_bytes.checked_add(plane_bytes).ok_or_else(|| bad("decoded bytes overflow"))?;
         if decoded_bytes > MAX_DECODED_BYTES {
             return Err(bad("pattern data exceeds limit"));
         }
@@ -235,9 +220,7 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
             return Err(bad(format!("unsupported pattern compression {comp}")));
         }
         if comp == 1 {
-            let max_exp = u64::try_from(data.len())
-                .unwrap_or(0)
-                .saturating_mul(MAX_RLE_EXPANSION);
+            let max_exp = u64::try_from(data.len()).unwrap_or(0).saturating_mul(MAX_RLE_EXPANSION);
             if channel_bytes > max_exp {
                 return Err(bad("pattern channel exceeds expansion limit"));
             }
@@ -271,7 +254,13 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
             }
             ch.data[..expected].to_vec()
         };
-        planes.push(place_channel_plane(plane, (ch.width, ch.height), ch.depth, (ch.x, ch.y), (w as usize, h as usize))?);
+        planes.push(place_channel_plane(
+            plane,
+            (ch.width, ch.height),
+            ch.depth,
+            (ch.x, ch.y),
+            (w as usize, h as usize),
+        )?);
     }
 
     let alpha = (planes.len() > nc).then(|| planes.remove(nc));
@@ -289,13 +278,7 @@ fn read_pattern(r: &mut ByteReader<'_>) -> Result<PsdPattern> {
     })
 }
 
-fn place_channel_plane(
-    mut plane: Vec<u8>,
-    (sw, sh): (usize, usize),
-    depth: u16,
-    (x, y): (usize, usize),
-    (dw, dh): (usize, usize),
-) -> Result<Vec<u8>> {
+fn place_channel_plane(mut plane: Vec<u8>, (sw, sh): (usize, usize), depth: u16, (x, y): (usize, usize), (dw, dh): (usize, usize)) -> Result<Vec<u8>> {
     if x == 0 && y == 0 && sw == dw && sh == dh {
         if depth == 1 && !sw.is_multiple_of(8) {
             let mask = u8::MAX << (8 - sw % 8);

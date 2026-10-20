@@ -65,7 +65,13 @@ impl Field {
     /// No warp, over a `width` × `height` image.
     pub fn new(width: u32, height: u32) -> Self {
         let (cols, rows) = ((width.div_ceil(STEP) + 1) as usize, (height.div_ceil(STEP) + 1) as usize);
-        Self { width, height, cols, rows, d: vec![[0.0; 2]; cols * rows] }
+        Self {
+            width,
+            height,
+            cols,
+            rows,
+            d: vec![[0.0; 2]; cols * rows],
+        }
     }
 
     /// The displacement at (x, y), in pixels.
@@ -145,13 +151,7 @@ impl Field {
     /// from `offset` away, scaled at each point by `fade` (0–1). `offset` is
     /// worked out at every `every`th grid point each way and interpolated
     /// between.
-    pub fn add(
-        &mut self,
-        [x0, y0, x1, y1]: [u32; 4],
-        every: usize,
-        offset: impl Fn([f32; 2]) -> [f32; 2] + Sync,
-        fade: impl Fn([f32; 2]) -> f32 + Sync,
-    ) {
+    pub fn add(&mut self, [x0, y0, x1, y1]: [u32; 4], every: usize, offset: impl Fn([f32; 2]) -> [f32; 2] + Sync, fade: impl Fn([f32; 2]) -> f32 + Sync) {
         let range = |a: u32, b: u32, n: usize| a.div_ceil(STEP) as usize..=((b / STEP) as usize).min(n - 1);
         let (across, down) = (range(x0, x1, self.cols), range(y0, y1, self.rows));
         if across.is_empty() || down.is_empty() {
@@ -166,22 +166,26 @@ impl Field {
             .into_par_iter()
             .map(|k| offset([(first + k % wide * every) as f32 * step, (top + k / wide * every) as f32 * step]))
             .collect();
-        self.d.par_chunks_mut(self.cols).enumerate().filter(|(j, _)| down.contains(j)).for_each(|(j, row)| {
-            let (b, fy) = ((j - top) / every, ((j - top) % every) as f32 / every as f32);
-            let below = (b + 1).min(tall - 1);
-            for i in across.clone() {
-                let fade = fade([i as f32 * step, j as f32 * step]);
-                if fade <= 0.0 {
-                    continue;
+        self.d
+            .par_chunks_mut(self.cols)
+            .enumerate()
+            .filter(|(j, _)| down.contains(j))
+            .for_each(|(j, row)| {
+                let (b, fy) = ((j - top) / every, ((j - top) % every) as f32 / every as f32);
+                let below = (b + 1).min(tall - 1);
+                for i in across.clone() {
+                    let fade = fade([i as f32 * step, j as f32 * step]);
+                    if fade <= 0.0 {
+                        continue;
+                    }
+                    let (a, fx) = ((i - first) / every, ((i - first) % every) as f32 / every as f32);
+                    let right = (a + 1).min(wide - 1);
+                    let at = |a: usize, b: usize| coarse[b * wide + a];
+                    let lerp = |p: [f32; 2], q: [f32; 2], t: f32| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+                    let d = lerp(lerp(at(a, b), at(right, b), fx), lerp(at(a, below), at(right, below), fx), fy);
+                    row[i] = [row[i][0] + d[0] * fade, row[i][1] + d[1] * fade];
                 }
-                let (a, fx) = ((i - first) / every, ((i - first) % every) as f32 / every as f32);
-                let right = (a + 1).min(wide - 1);
-                let at = |a: usize, b: usize| coarse[b * wide + a];
-                let lerp = |p: [f32; 2], q: [f32; 2], t: f32| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
-                let d = lerp(lerp(at(a, b), at(right, b), fx), lerp(at(a, below), at(right, below), fx), fy);
-                row[i] = [row[i][0] + d[0] * fade, row[i][1] + d[1] * fade];
-            }
-        });
+            });
     }
 
     /// Put this warp over `under`, as one: `under` is done first, and this
@@ -199,7 +203,12 @@ impl Field {
     fn shown(&self, across: &RangeInclusive<usize>, down: &RangeInclusive<usize>) -> [u32; 4] {
         let lo = |g: usize| g.saturating_sub(1) as u32 * STEP;
         let hi = |g: usize, n: u32| ((g as u32 + 1) * STEP + 1).min(n);
-        [lo(*across.start()), lo(*down.start()), hi(*across.end(), self.width), hi(*down.end(), self.height)]
+        [
+            lo(*across.start()),
+            lo(*down.start()),
+            hi(*across.end(), self.width),
+            hi(*down.end(), self.height),
+        ]
     }
 
     /// The grid's values over `area` of the image (x0, y0, x1, y1), to put
@@ -265,7 +274,9 @@ impl Spline {
         let n = moves.len();
         let count = n.max(1) as f64;
         let centre = [0, 1].map(|c| moves.iter().map(|(_, to)| f64::from(to[c])).sum::<f64>() / count);
-        let spread = moves.iter().map(|(_, to)| (f64::from(to[0]) - centre[0]).powi(2) + (f64::from(to[1]) - centre[1]).powi(2));
+        let spread = moves
+            .iter()
+            .map(|(_, to)| (f64::from(to[0]) - centre[0]).powi(2) + (f64::from(to[1]) - centre[1]).powi(2));
         let scale = (spread.sum::<f64>() / count).sqrt().max(1e-6);
         let points: Vec<[f64; 2]> = moves.iter().map(|(_, to)| [0, 1].map(|c| (f64::from(to[c]) - centre[c]) / scale)).collect();
         // Each point's displacement is the bends from every point, plus the
@@ -307,7 +318,12 @@ impl Spline {
                 weights[k] = (rows[k][size + c] - known) / rows[k][k];
             }
         }
-        Some(Self { points, centre, scale, weights })
+        Some(Self {
+            points,
+            centre,
+            scale,
+            weights,
+        })
     }
 
     /// The displacement at `v`, in pixels.

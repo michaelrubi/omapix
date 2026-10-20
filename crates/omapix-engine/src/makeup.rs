@@ -57,7 +57,10 @@ pub fn add_layers(doc: &mut Document, above: usize, products: &[(Product, Select
     // Each goes in at the top of the group.
     for (product, on) in products.iter().filter(|(_, on)| !on.is_empty()) {
         let (colour, blend, amount) = product.look();
-        let [r, g, b, _] = doc.profile.from_srgb8(colour).unwrap_or([colour[0], colour[1], colour[2], 255].map(|v| u16::from(v) * 257));
+        let [r, g, b, _] = doc
+            .profile
+            .from_srgb8(colour)
+            .unwrap_or([colour[0], colour[1], colour[2], 255].map(|v| u16::from(v) * 257));
         let id = doc.next_layer_id();
         let mut layer = Layer::from_pixels(id, product.name(), on.coverage.map(|a| if a == 0 { [0; 4] } else { [r, g, b, a] }));
         layer.blend = blend;

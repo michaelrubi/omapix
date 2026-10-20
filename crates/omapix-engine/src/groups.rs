@@ -76,8 +76,7 @@ impl Document {
         };
         self.layers.insert(at, layer);
         let below = self.sibling_below(at).map(|i| &self.layers[i]);
-        let in_run = below.is_some_and(|l| l.clipped)
-            || (below.is_some() && self.sibling_above(at).is_some_and(|l| l.clipped));
+        let in_run = below.is_some_and(|l| l.clipped) || (below.is_some() && self.sibling_above(at).is_some_and(|l| l.clipped));
         if !self.layers[at].is_group && in_run {
             self.layers[at].clipped = true;
         }
@@ -171,10 +170,7 @@ impl Document {
     pub fn move_layer(&mut self, id: u64, place: Place) -> bool {
         let (target, parent) = match place {
             Place::Above(t) | Place::Below(t) => (t, self.layer(t).map(|l| l.parent)),
-            Place::IntoTop(g) | Place::IntoBottom(g) => (
-                g,
-                self.layer(g).filter(|l| l.is_group).map(|_| Some(g)),
-            ),
+            Place::IntoTop(g) | Place::IntoBottom(g) => (g, self.layer(g).filter(|l| l.is_group).map(|_| Some(g))),
         };
         let (Some(index), Some(parent)) = (self.index_of(id), parent) else {
             return false;
@@ -227,11 +223,7 @@ impl Document {
         if below.parent != parent {
             return Some(Place::Below(parent?));
         }
-        Some(if below.is_group {
-            Place::IntoTop(below.id)
-        } else {
-            Place::Below(below.id)
-        })
+        Some(if below.is_group { Place::IntoTop(below.id) } else { Place::Below(below.id) })
     }
 
     /// Where Bring to Front (Ctrl+Shift+]) takes layers `ids` (see
@@ -267,12 +259,7 @@ impl Document {
     fn arrange(&self, ids: &[u64], active: u64) -> Option<(Option<u64>, Vec<u64>, usize)> {
         let parent = self.layer(active)?.parent;
         let ids = self.outermost(ids);
-        let siblings: Vec<u64> = self
-            .layers
-            .iter()
-            .filter(|l| l.parent == parent)
-            .map(|l| l.id)
-            .collect();
+        let siblings: Vec<u64> = self.layers.iter().filter(|l| l.parent == parent).map(|l| l.id).collect();
         let n = siblings.iter().filter(|id| ids.contains(id)).count();
         Some((parent, siblings, n))
     }
@@ -288,10 +275,7 @@ impl Document {
     pub fn duplicate_layer(&mut self, index: usize) -> u64 {
         let span = self.span(index);
         let mut copies = self.layers[span.clone()].to_vec();
-        let ids: HashMap<u64, u64> = copies
-            .iter()
-            .map(|l| (l.id, self.next_layer_id()))
-            .collect();
+        let ids: HashMap<u64, u64> = copies.iter().map(|l| (l.id, self.next_layer_id())).collect();
         for copy in &mut copies {
             copy.id = ids[&copy.id];
             if let Some(p) = copy.parent.and_then(|p| ids.get(&p)) {
@@ -349,20 +333,14 @@ impl Document {
     pub fn move_layers(&mut self, ids: &[u64], place: Place) -> bool {
         let ids = self.outermost(ids);
         let (Place::Above(t) | Place::Below(t) | Place::IntoTop(t) | Place::IntoBottom(t)) = place;
-        if let (Some(k), Place::Above(_) | Place::Below(_)) =
-            (ids.iter().position(|&id| id == t), place)
-        {
+        if let (Some(k), Place::Above(_) | Place::Below(_)) = (ids.iter().position(|&id| id == t), place) {
             // Just above or below one of them, they go there among the
             // layers that stay: above the next one down in its group, or
             // below the next one up.
             let stays = |i: &usize| !ids.contains(&self.layers[*i].id);
             let index = self.index_of(t).expect("outermost layers exist");
-            let below = std::iter::successors(self.sibling_below(index), |&i| self.sibling_below(i))
-                .find(stays);
-            let above = std::iter::successors(self.sibling_above_index(index), |&i| {
-                self.sibling_above_index(i)
-            })
-            .find(stays);
+            let below = std::iter::successors(self.sibling_below(index), |&i| self.sibling_below(i)).find(stays);
+            let above = std::iter::successors(self.sibling_above_index(index), |&i| self.sibling_above_index(i)).find(stays);
             match (below, above) {
                 (Some(b), _) => return self.move_layers(&ids, Place::Above(self.layers[b].id)),
                 (None, Some(a)) => return self.move_layers(&ids, Place::Below(self.layers[a].id)),
@@ -681,10 +659,7 @@ mod tests {
         let copy = doc.duplicate_layer(g);
         check(&doc);
         assert_eq!(doc.layer(copy).unwrap().name, "g copy");
-        assert_eq!(
-            names(&doc),
-            ["bg", "a(g)", "b(g)", "g", "a(g copy)", "b(g copy)", "g copy", "c"]
-        );
+        assert_eq!(names(&doc), ["bg", "a(g)", "b(g)", "g", "a(g copy)", "b(g copy)", "g copy", "c"]);
         let ids: std::collections::HashSet<u64> = doc.layers.iter().map(|l| l.id).collect();
         assert_eq!(ids.len(), doc.layers.len(), "every copy has a new id");
     }
@@ -795,10 +770,7 @@ mod tests {
         let copies = doc.duplicate_layers(&[bg, g]);
         check(&doc);
         assert_eq!(copies.len(), 2);
-        assert_eq!(
-            names(&doc),
-            ["bg", "bg copy", "a(g)", "b(g)", "g", "a(g copy)", "b(g copy)", "g copy", "c"]
-        );
+        assert_eq!(names(&doc), ["bg", "bg copy", "a(g)", "b(g)", "g", "a(g copy)", "b(g copy)", "g copy", "c"]);
         assert_eq!(doc.layer(copies[1]).unwrap().name, "g copy");
 
         assert_eq!(doc.removed_count(&[g, a, copies[1]]), 6);

@@ -165,16 +165,28 @@ impl Outside {
         edt_rows(&mut far, size);
         // A cell's edge is half a cell from its middle. With nobody there,
         // everywhere is far.
-        let far = far.into_iter().map(|d| if d.is_finite() { (d.sqrt() - 0.5).max(0.0) * cell } else { matte.side });
+        let far = far
+            .into_iter()
+            .map(|d| if d.is_finite() { (d.sqrt() - 0.5).max(0.0) * cell } else { matte.side });
         let (sin, cos) = matte.angle.sin_cos();
-        Self { centre: matte.centre, sin, cos, size, cell, far: far.collect() }
+        Self {
+            centre: matte.centre,
+            sin,
+            cos,
+            size,
+            cell,
+            far: far.collect(),
+        }
     }
 
     /// Where on the grid `p` is: across and down, in cells.
     fn place(&self, p: Point) -> (f32, f32) {
         let (x, y) = (p[0] - self.centre[0], p[1] - self.centre[1]);
         let middle = (self.size - 1) as f32 / 2.0;
-        ((x * self.cos + y * self.sin) / self.cell + middle, (y * self.cos - x * self.sin) / self.cell + middle)
+        (
+            (x * self.cos + y * self.sin) / self.cell + middle,
+            (y * self.cos - x * self.sin) / self.cell + middle,
+        )
     }
 
     /// How far outside the person `p` is, in pixels: 0 on them.
@@ -236,7 +248,11 @@ impl Lines {
             .map(|k| {
                 let (i, j) = ((k % fine) as isize, (k / fine) as isize);
                 let cut = (-2..=2).any(|y| (-2..=2).any(|x| at(i + x, j + y) < 0.0));
-                if cut { 0.0 } else { ramp(CLEAR[0], CLEAR[1], outside.far[cell(k)] / outside.cell) }
+                if cut {
+                    0.0
+                } else {
+                    ramp(CLEAR[0], CLEAR[1], outside.far[cell(k)] / outside.cell)
+                }
             })
             .collect();
         // How much the light changes across and down there, each squared
@@ -266,7 +282,11 @@ impl Lines {
                 if clear[k] == 0.0 || apart <= 0.0 {
                     return [0.0; 3];
                 }
-                [ramp(EDGE[0], EDGE[1], (mean + apart).sqrt()) * ramp(ONE_WAY[0], ONE_WAY[1], apart / mean), half / apart, cross / apart]
+                [
+                    ramp(EDGE[0], EDGE[1], (mean + apart).sqrt()) * ramp(ONE_WAY[0], ONE_WAY[1], apart / mean),
+                    half / apart,
+                    cross / apart,
+                ]
             })
             .collect();
         // How much of a line: of an edge carrying on the same way, on its
@@ -284,7 +304,10 @@ impl Lines {
                 let side = |way: f32| {
                     let (mut sum, mut count) = (0.0f32, 0.0f32);
                     for t in 1..=RUN {
-                        let (i, j) = ((x - way * t as f32 * facing.sin()).round() as isize, (y + way * t as f32 * facing.cos()).round() as isize);
+                        let (i, j) = (
+                            (x - way * t as f32 * facing.sin()).round() as isize,
+                            (y + way * t as f32 * facing.cos()).round() as isize,
+                        );
                         if i < 0 || j < 0 || i >= fine as isize || j >= fine as isize || clear[j as usize * fine + i as usize] == 0.0 {
                             continue;
                         }
@@ -307,7 +330,9 @@ impl Lines {
             }
         }
         let [a, b, c] = held.map(|plane| blur(&plane, size, REACH));
-        Self { held: (0..size * size).map(|k| [a[k], b[k], c[k]]).collect() }
+        Self {
+            held: (0..size * size).map(|k| [a[k], b[k], c[k]]).collect(),
+        }
     }
 
     /// The part of the move `d` that's held at (u, v) of a grid of `size`,
@@ -380,7 +405,14 @@ impl Tube {
                 *width = three[1];
             }
         }
-        Self { from, along, length, first, last, widths }
+        Self {
+            from,
+            along,
+            length,
+            first,
+            last,
+            widths,
+        }
     }
 
     /// How far along the bone `p` is (0 at its start and 1 at its end) and
@@ -531,7 +563,12 @@ impl Body {
         const UPPER: [f32; 4] = [0.05, 0.4, 0.9, 1.1];
         const LOWER: [f32; 4] = [-0.1, 0.1, 0.95, 1.2];
         let halves = |tops: [Joint; 2], middles: [Joint; 2], ends: [Joint; 2]| -> Vec<Limb> {
-            let both = (0..2).flat_map(|k| [Limb::seen(tops[k], middles[k], UPPER, &outside), Limb::seen(middles[k], ends[k], LOWER, &outside)]);
+            let both = (0..2).flat_map(|k| {
+                [
+                    Limb::seen(tops[k], middles[k], UPPER, &outside),
+                    Limb::seen(middles[k], ends[k], LOWER, &outside),
+                ]
+            });
             both.flatten().collect()
         };
         let arms = halves(joints.shoulders, joints.elbows, joints.wrists);
@@ -539,7 +576,12 @@ impl Body {
         let strides = (0..2).filter_map(|k| {
             let thigh = Limb::seen(joints.hips[k], joints.knees[k], UPPER, &outside)?;
             let calf = Limb::seen(joints.knees[k], joints.ankles[k], LOWER, &outside)?;
-            Some(Leg { hip: thigh.tube.from, knee: calf.tube.from, ankle: [joints.ankles[k][0], joints.ankles[k][1]], width: thigh.tube.middle() })
+            Some(Leg {
+                hip: thigh.tube.from,
+                knee: calf.tube.from,
+                ankle: [joints.ankles[k][0], joints.ankles[k][1]],
+                width: thigh.tube.middle(),
+            })
         });
         let strides = strides.collect();
 
@@ -558,10 +600,25 @@ impl Body {
 
         // They may move a little beyond the matte's square.
         let reach = matte.side * (0.5 * (outside.sin.abs() + outside.cos.abs()) + 0.25);
-        let area = [matte.centre[0] - reach, matte.centre[1] - reach, matte.centre[0] + reach, matte.centre[1] + reach];
+        let area = [
+            matte.centre[0] - reach,
+            matte.centre[1] - reach,
+            matte.centre[0] + reach,
+            matte.centre[1] + reach,
+        ];
         let mut shoulders = [[left[0], left[1]], [right[0], right[1]]];
         shoulders.sort_by(|a, b| a[0].total_cmp(&b[0]));
-        Some(Self { torso, arms, legs, strides, head, shoulders, outside, lines: None, area })
+        Some(Self {
+            torso,
+            arms,
+            legs,
+            strides,
+            head,
+            shoulders,
+            outside,
+            lines: None,
+            area,
+        })
     }
 
     /// With the straight lines behind them found, for moves across them to
@@ -639,7 +696,10 @@ impl Body {
         let from_head = (x - up[0] * to).hypot(y - up[1] * to);
         // All of it on the head, and none at the shoulders or far from it.
         let weight = (1.0 - ramp(radius, radius * (1.0 + HEAD_CARRY), from_head)) * ramp(0.05 * length, 0.45 * length, x * up[0] + y * up[1]);
-        [((x - up[0] * lift) / (1.0 + larger) - x) * weight, ((y - up[1] * lift) / (1.0 + larger) - y) * weight]
+        [
+            ((x - up[0] * lift) / (1.0 + larger) - x) * weight,
+            ((y - up[1] * lift) / (1.0 + larger) - y) * weight,
+        ]
     }
 
     /// Where `p` reads from, for `shape`.
@@ -649,7 +709,9 @@ impl Body {
         let mut add = |by: Point| d = [d[0] + by[0], d[1] + by[1]];
         if shape.shoulders != 0.0 || shape.waist != 0.0 || shape.hips != 0.0 {
             add(self.torso.widened(p, |s| {
-                SHOULDERS * part(shape.shoulders) * bump(SHOULDER_LINE, s) + WAIST * part(shape.waist) * bump(WAIST_LINE, s) + HIPS * part(shape.hips) * bump(HIP_LINE, s)
+                SHOULDERS * part(shape.shoulders) * bump(SHOULDER_LINE, s)
+                    + WAIST * part(shape.waist) * bump(WAIST_LINE, s)
+                    + HIPS * part(shape.hips) * bump(HIP_LINE, s)
             }));
         }
         for (limbs, wider) in [(&self.arms, ARMS * part(shape.arms)), (&self.legs, LEGS * part(shape.legs))] {
@@ -697,7 +759,12 @@ pub fn reshape(field: &mut Field, body: &Body, shape: &Shape, level: u32) {
     if *shape == Shape::default() {
         return;
     }
-    let area = [body.area[0].max(0.0) as u32, body.area[1].max(0.0) as u32, body.area[2].max(0.0).ceil() as u32, body.area[3].max(0.0).ceil() as u32];
+    let area = [
+        body.area[0].max(0.0) as u32,
+        body.area[1].max(0.0) as u32,
+        body.area[2].max(0.0).ceil() as u32,
+        body.area[3].max(0.0).ceil() as u32,
+    ];
     field.add(area, 1 << level, |p| body.offset(p, shape), |_| 1.0);
 }
 
@@ -764,7 +831,17 @@ mod tests {
     fn body(arms_down: bool) -> Body {
         let joints = joints(arms_down);
         let cover = cover(&joints);
-        Body::new(&joints, &Matte { centre: [512.0; 2], side: SIDE, angle: 0.0, size: SIZE, cover: &cover }).unwrap()
+        Body::new(
+            &joints,
+            &Matte {
+                centre: [512.0; 2],
+                side: SIDE,
+                angle: 0.0,
+                size: SIZE,
+                cover: &cover,
+            },
+        )
+        .unwrap()
     }
 
     /// The field that gives the person `shape`.
@@ -820,7 +897,13 @@ mod tests {
     #[test]
     fn a_narrower_waist_leaves_the_shoulders_hips_and_background_alone() {
         let body = body(false);
-        let field = field(&body, &Shape { waist: -100.0, ..Default::default() });
+        let field = field(
+            &body,
+            &Shape {
+                waist: -100.0,
+                ..Default::default()
+            },
+        );
         // The waist's edges come in by a fifth, the same each side, and the
         // spine stays.
         let (left, right) = (goes(&field, [432.0, 424.0]), goes(&field, [592.0, 424.0]));
@@ -842,7 +925,13 @@ mod tests {
     #[test]
     fn an_arm_beside_a_narrower_waist_comes_in_with_it() {
         let body = body(true);
-        let field = field(&body, &Shape { waist: -100.0, ..Default::default() });
+        let field = field(
+            &body,
+            &Shape {
+                waist: -100.0,
+                ..Default::default()
+            },
+        );
         // The arm hangs at x = 400 to 450 at the waist: both its edges come
         // in, by nearly as much.
         let (outer, inner) = (goes(&field, [402.0, 424.0]), goes(&field, [448.0, 424.0]));
@@ -853,7 +942,14 @@ mod tests {
     #[test]
     fn hips_and_shoulders_widen_where_they_are() {
         let body = body(false);
-        let wider = field(&body, &Shape { hips: 100.0, shoulders: 100.0, ..Default::default() });
+        let wider = field(
+            &body,
+            &Shape {
+                hips: 100.0,
+                shoulders: 100.0,
+                ..Default::default()
+            },
+        );
         let (hip, shoulder, waist) = (goes(&wider, [434.0, 510.0]), goes(&wider, [434.0, 302.0]), goes(&wider, [434.0, 424.0]));
         assert!(434.0 - hip[0] > 8.0 && 434.0 - shoulder[0] > 6.0, "{hip:?} {shoulder:?}");
         assert!((434.0 - waist[0]).abs() < 1.5, "{waist:?}");
@@ -862,7 +958,14 @@ mod tests {
     #[test]
     fn thinner_arms_and_legs_narrow_about_their_bones() {
         let body = body(false);
-        let field = field(&body, &Shape { arms: -100.0, legs: -100.0, ..Default::default() });
+        let field = field(
+            &body,
+            &Shape {
+                arms: -100.0,
+                legs: -100.0,
+                ..Default::default()
+            },
+        );
         // The person's left calf is about x = 564.5 at y = 770, 25 either
         // side: both edges come in by a fifth, and the bone stays.
         let (inner, outer, bone) = (goes(&field, [541.0, 770.0]), goes(&field, [588.0, 770.0]), goes(&field, [564.5, 770.0]));
@@ -882,10 +985,19 @@ mod tests {
     #[test]
     fn longer_legs_carry_the_feet_down_and_leave_the_hips() {
         let body = body(false);
-        let field = field(&body, &Shape { leg_length: 100.0, ..Default::default() });
+        let field = field(
+            &body,
+            &Shape {
+                leg_length: 100.0,
+                ..Default::default()
+            },
+        );
         // 360 from hip to ankle: the ankle goes 29 down, the knee half that.
         let (ankle, knee) = (goes(&field, [567.0, 860.0]), goes(&field, [562.0, 680.0]));
-        assert!((ankle[1] - 860.0 - 28.8).abs() < 2.0 && (knee[1] - 680.0 - 14.4).abs() < 2.0, "{ankle:?} {knee:?}");
+        assert!(
+            (ankle[1] - 860.0 - 28.8).abs() < 2.0 && (knee[1] - 680.0 - 14.4).abs() < 2.0,
+            "{ankle:?} {knee:?}"
+        );
         // Both legs alike, and between them.
         let other = goes(&field, [457.0, 860.0]);
         assert!((other[1] - ankle[1]).abs() < 0.5, "{other:?}");
@@ -902,18 +1014,36 @@ mod tests {
     #[test]
     fn a_larger_head_grows_from_the_shoulders_and_a_longer_neck_lifts_it() {
         let body = body(false);
-        let larger = field(&body, &Shape { head: 100.0, ..Default::default() });
+        let larger = field(
+            &body,
+            &Shape {
+                head: 100.0,
+                ..Default::default()
+            },
+        );
         // 80 above the shoulders, 12 % larger: the middle goes up 9.6, the
         // top 15.6 and each side out 6.
         let (middle, top, side) = (goes(&larger, [512.0, 220.0]), goes(&larger, [512.0, 172.0]), goes(&larger, [560.0, 220.0]));
-        assert!((220.0 - middle[1] - 9.6).abs() < 1.0 && (172.0 - top[1] - 15.4).abs() < 1.5, "{middle:?} {top:?}");
+        assert!(
+            (220.0 - middle[1] - 9.6).abs() < 1.0 && (172.0 - top[1] - 15.4).abs() < 1.5,
+            "{middle:?} {top:?}"
+        );
         assert!((side[0] - 560.0 - 5.8).abs() < 1.0, "{side:?}");
-        let lifted = field(&body, &Shape { neck: 100.0, ..Default::default() });
+        let lifted = field(
+            &body,
+            &Shape {
+                neck: 100.0,
+                ..Default::default()
+            },
+        );
         let (middle, side) = (goes(&lifted, [512.0, 220.0]), goes(&lifted, [560.0, 220.0]));
         assert!((220.0 - middle[1] - 9.6).abs() < 1.0 && (side[0] - 560.0).abs() < 0.5, "{middle:?} {side:?}");
         // Either way the shoulders and all below stay.
         for field in [&larger, &lifted] {
-            assert_eq!((field.at(512.0, 304.0), field.at(440.0, 320.0), field.at(512.0, 600.0)), ([0.0; 2], [0.0; 2], [0.0; 2]));
+            assert_eq!(
+                (field.at(512.0, 304.0), field.at(440.0, 320.0), field.at(512.0, 600.0)),
+                ([0.0; 2], [0.0; 2], [0.0; 2])
+            );
         }
     }
 
@@ -932,32 +1062,66 @@ mod tests {
                 *v = 1.0;
             }
         }
-        Body::new(&joints, &Matte { centre: [512.0; 2], side: SIDE, angle: 0.0, size: SIZE, cover: &cover }).unwrap()
+        Body::new(
+            &joints,
+            &Matte {
+                centre: [512.0; 2],
+                side: SIDE,
+                angle: 0.0,
+                size: SIZE,
+                cover: &cover,
+            },
+        )
+        .unwrap()
     }
 
     #[test]
     fn levelled_shoulders_meet_half_way_and_leave_the_head_and_waist() {
         let body = leaning(10.0);
         assert!((body.shoulder_tilt() - 7.1).abs() < 0.1, "{}", body.shoulder_tilt());
-        let level = field(&body, &Shape { level: 100.0, ..Default::default() });
+        let level = field(
+            &body,
+            &Shape {
+                level: 100.0,
+                ..Default::default()
+            },
+        );
         // The shoulders, at y = 290 and 310, meet at 300, and half way with
         // the slider half way.
         let (high, low) = (goes(&level, [432.0, 290.0]), goes(&level, [592.0, 310.0]));
         assert!((high[1] - 300.0).abs() < 1.0 && (low[1] - 300.0).abs() < 1.0, "{high:?} {low:?}");
         assert_eq!((high[0], low[0]), (432.0, 592.0));
-        let half = field(&body, &Shape { level: 50.0, ..Default::default() });
+        let half = field(
+            &body,
+            &Shape {
+                level: 50.0,
+                ..Default::default()
+            },
+        );
         let low = goes(&half, [592.0, 310.0]);
         assert!((low[1] - 305.0).abs() < 1.0, "{low:?}");
         // The top of an arm goes with its shoulder, and the chest below
         // less: between them nothing's torn.
         let (arm, chest) = (goes(&level, [612.0, 330.0]), goes(&level, [580.0, 380.0]));
-        assert!((330.0 - arm[1] - 9.0).abs() < 1.5 && (2.0..8.0).contains(&(380.0 - chest[1])), "{arm:?} {chest:?}");
+        assert!(
+            (330.0 - arm[1] - 9.0).abs() < 1.5 && (2.0..8.0).contains(&(380.0 - chest[1])),
+            "{arm:?} {chest:?}"
+        );
         // The head, the spine, the waist and all below stay.
         for p in [[512.0, 220.0], [550.0, 230.0], [512.0, 320.0], [440.0, 480.0], [590.0, 480.0], [467.0, 700.0]] {
             assert_eq!(level.at(p[0], p[1]), [0.0; 2], "{p:?}");
         }
         // Level already, there's nothing to do; leaning far, nothing's done.
-        let none = [body.clone(), leaning(0.0), leaning(60.0)].map(|body| field(&body, &Shape { level: 100.0, ..Default::default() }).at(592.0, 310.0));
+        let none = [body.clone(), leaning(0.0), leaning(60.0)].map(|body| {
+            field(
+                &body,
+                &Shape {
+                    level: 100.0,
+                    ..Default::default()
+                },
+            )
+            .at(592.0, 310.0)
+        });
         assert!(none[0][1] > 5.0 && none[1] == [0.0; 2] && none[2] == [0.0; 2], "{none:?}");
         assert!(leaning(60.0).shoulder_tilt() > LEVELLED);
     }
@@ -976,7 +1140,9 @@ mod tests {
         let rows = leaning(10.0).with_lines(&light(|_, y| y % 40 < 4));
         let columns = leaning(10.0).with_lines(&light(|x, _| x % 40 < 4));
         let pebbles = leaning(10.0).with_lines(&light(|x, y| {
-            let h = ((x / 12) as u32).wrapping_mul(374761393).wrapping_add(((y / 12) as u32).wrapping_mul(668265263));
+            let h = ((x / 12) as u32)
+                .wrapping_mul(374761393)
+                .wrapping_add(((y / 12) as u32).wrapping_mul(668265263));
             let h = (h ^ (h >> 13)).wrapping_mul(1274126177);
             ((x % 12) as f32 - (3 + (h >> 8) % 6) as f32).hypot((y % 12) as f32 - (3 + (h >> 16) % 6) as f32) < 3.0
         }));
@@ -985,7 +1151,10 @@ mod tests {
 
         // Levelling the shoulders takes what's beside each up or down with
         // it: here 20 px or more out from the arms.
-        let level = Shape { level: 100.0, ..Default::default() };
+        let level = Shape {
+            level: 100.0,
+            ..Default::default()
+        };
         for (p, least) in [([660.0, 320.0], 5.0), ([380.0, 280.0], 3.0)] {
             assert!(plain.outside.distance(p) > 20.0);
             let goes = at(&plain, &level, p);
@@ -1006,7 +1175,10 @@ mod tests {
         // A narrower waist takes what's beside it in, along the lines across
         // the picture: they don't hold it. The lines down it do, by more
         // than half.
-        let waist = Shape { waist: -100.0, ..Default::default() };
+        let waist = Shape {
+            waist: -100.0,
+            ..Default::default()
+        };
         let p = [610.0, 424.0];
         let (goes, slid, held) = (at(&plain, &waist, p), at(&rows, &waist, p), at(&columns, &waist, p));
         assert!(goes[0] > 10.0 && (slid[0] - goes[0]).abs() < 0.1 && slid[1].abs() < 0.1, "{goes:?} {slid:?}");
@@ -1020,10 +1192,27 @@ mod tests {
             joint[2] = 0.1;
         }
         let cover = cover(&joints);
-        let matte = Matte { centre: [512.0; 2], side: SIDE, angle: 0.0, size: SIZE, cover: &cover };
+        let matte = Matte {
+            centre: [512.0; 2],
+            side: SIDE,
+            angle: 0.0,
+            size: SIZE,
+            cover: &cover,
+        };
         let body = Body::new(&joints, &matte).unwrap();
         assert!(body.legs.is_empty() && body.strides.is_empty() && body.arms.len() == 4);
-        assert_eq!(field(&body, &Shape { legs: 100.0, leg_length: 100.0, ..Default::default() }).extent(), None);
+        assert_eq!(
+            field(
+                &body,
+                &Shape {
+                    legs: 100.0,
+                    leg_length: 100.0,
+                    ..Default::default()
+                }
+            )
+            .extent(),
+            None
+        );
         // And without both shoulders there's nobody to shape.
         joints.shoulders[0][2] = 0.1;
         assert!(Body::new(&joints, &matte).is_none());
@@ -1032,7 +1221,13 @@ mod tests {
     #[test]
     fn a_quick_look_is_nearly_the_same() {
         let body = body(false);
-        let shape = Shape { waist: -100.0, legs: -60.0, leg_length: 50.0, head: 40.0, ..Default::default() };
+        let shape = Shape {
+            waist: -100.0,
+            legs: -60.0,
+            leg_length: 50.0,
+            head: 40.0,
+            ..Default::default()
+        };
         let fine = field(&body, &shape);
         let mut coarse = Field::new(1024, 1024);
         reshape(&mut coarse, &body, &shape, 2);
@@ -1049,7 +1244,13 @@ mod tests {
         let joints = joints(false);
         let upright = cover(&joints);
         let turned: Vec<f32> = (0..SIZE * SIZE).map(|k| upright[(k % SIZE) * SIZE + SIZE - 1 - k / SIZE]).collect();
-        let matte = Matte { centre: [512.0; 2], side: SIDE, angle: std::f32::consts::FRAC_PI_2, size: SIZE, cover: &turned };
+        let matte = Matte {
+            centre: [512.0; 2],
+            side: SIDE,
+            angle: std::f32::consts::FRAC_PI_2,
+            size: SIZE,
+            cover: &turned,
+        };
         let body = Body::new(&joints, &matte).unwrap();
         let waist = body.torso.width(0.6, true);
         assert!((waist - 80.0).abs() < 5.0, "{waist}");

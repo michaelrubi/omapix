@@ -207,12 +207,7 @@ impl Tool {
     pub fn selects(self) -> bool {
         matches!(
             self,
-            Tool::Marquee
-                | Tool::EllipticalMarquee
-                | Tool::Lasso
-                | Tool::MagicWand
-                | Tool::ObjectSelection
-                | Tool::QuickSelection
+            Tool::Marquee | Tool::EllipticalMarquee | Tool::Lasso | Tool::MagicWand | Tool::ObjectSelection | Tool::QuickSelection
         )
     }
 
@@ -224,8 +219,7 @@ impl Tool {
 
     /// Tools that paint with a brush, and so show its outline.
     pub fn paints(self) -> bool {
-        !self.selects()
-            && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient | Tool::PaintBucket | Tool::Crop)
+        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient | Tool::PaintBucket | Tool::Crop)
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -235,9 +229,7 @@ impl Tool {
 
     /// Tools where holding Alt picks up a colour, as the Eyedropper does.
     pub fn alt_picks_colour(self) -> bool {
-        self.paints()
-            && !self.copies()
-            && !matches!(self, Tool::Dodge | Tool::Burn | Tool::Sponge)
+        self.paints() && !self.copies() && !matches!(self, Tool::Dodge | Tool::Burn | Tool::Sponge)
     }
 }
 
@@ -252,12 +244,7 @@ pub enum SampleSize {
 }
 
 impl SampleSize {
-    pub const ALL: [SampleSize; 4] = [
-        SampleSize::Point,
-        SampleSize::ThreeByThree,
-        SampleSize::FiveByFive,
-        SampleSize::ElevenByEleven,
-    ];
+    pub const ALL: [SampleSize; 4] = [SampleSize::Point, SampleSize::ThreeByThree, SampleSize::FiveByFive, SampleSize::ElevenByEleven];
 
     pub fn radius(self) -> u32 {
         match self {
@@ -287,11 +274,7 @@ pub enum Sample {
 }
 
 impl Sample {
-    pub const ALL: [Sample; 3] = [
-        Sample::Current,
-        Sample::CurrentAndBelow,
-        Sample::All,
-    ];
+    pub const ALL: [Sample; 3] = [Sample::Current, Sample::CurrentAndBelow, Sample::All];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -338,10 +321,7 @@ pub enum GradientColors {
 }
 
 impl GradientColors {
-    pub const ALL: [GradientColors; 2] = [
-        GradientColors::ForegroundToBackground,
-        GradientColors::ForegroundToTransparent,
-    ];
+    pub const ALL: [GradientColors; 2] = [GradientColors::ForegroundToBackground, GradientColors::ForegroundToTransparent];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -374,10 +354,7 @@ impl SpongeMode {
 fn percent(ui: &mut Ui, label: &str, value: &mut f32) {
     ui.label(label);
     let mut p = *value * 100.0;
-    if ui
-        .add(Slider::new(&mut p, 0.0..=100.0).suffix("%").fixed_decimals(0))
-        .changed()
-    {
+    if ui.add(Slider::new(&mut p, 0.0..=100.0).suffix("%").fixed_decimals(0)).changed() {
         *value = p / 100.0;
     }
 }
@@ -400,7 +377,14 @@ pub struct Liquify {
 
 impl Default for Liquify {
     fn default() -> Self {
-        Self { brush: LiquifyBrush::ForwardWarp, size: 100.0, pressure: 1.0, pen_pressure: true, face_aware: false, body: false }
+        Self {
+            brush: LiquifyBrush::ForwardWarp,
+            size: 100.0,
+            pressure: 1.0,
+            pen_pressure: true,
+            face_aware: false,
+            body: false,
+        }
     }
 }
 
@@ -799,13 +783,7 @@ impl Tools {
             (Tool::Eraser, Target::Mask | Target::QuickMask) => Paint::Mask(u16::MAX),
             (Tool::Brush, Target::Mask | Target::QuickMask) => Paint::Mask(grey(self.foreground)),
             (Tool::Eraser, Target::Pixels) => Paint::Erase,
-            (_, Target::Pixels) => {
-                Paint::Color(
-                    profile
-                        .from_srgb8(self.foreground)
-                        .unwrap_or([0, 0, 0, u16::MAX]),
-                )
-            }
+            (_, Target::Pixels) => Paint::Color(profile.from_srgb8(self.foreground).unwrap_or([0, 0, 0, u16::MAX])),
             (_, Target::Mask | Target::QuickMask) => Paint::Mask(grey(self.foreground)),
         })
     }
@@ -1095,15 +1073,47 @@ impl Tools {
             ui.spacing_mut().slider_width = 70.0;
             egui::Grid::new("brush-settings").num_columns(2).show(ui, |ui| {
                 heading(ui, "Brush Tip Shape");
-                row(ui, "Spacing", &mut d.spacing, 1.0..=300.0, 100.0, "%", "The distance between dabs, as a share of the brush's size");
-                row(ui, "Angle", &mut d.angle, -180.0..=180.0, 1.0, "°", "Turns a tip that isn't round, anticlockwise");
-                row(ui, "Roundness", &mut d.roundness, 1.0..=100.0, 100.0, "%", "The tip's height as a share of its width");
-                let (x, y) = ("A tip made from an image, mirrored left to right", "A tip made from an image, mirrored top to bottom");
+                row(
+                    ui,
+                    "Spacing",
+                    &mut d.spacing,
+                    1.0..=300.0,
+                    100.0,
+                    "%",
+                    "The distance between dabs, as a share of the brush's size",
+                );
+                row(
+                    ui,
+                    "Angle",
+                    &mut d.angle,
+                    -180.0..=180.0,
+                    1.0,
+                    "°",
+                    "Turns a tip that isn't round, anticlockwise",
+                );
+                row(
+                    ui,
+                    "Roundness",
+                    &mut d.roundness,
+                    1.0..=100.0,
+                    100.0,
+                    "%",
+                    "The tip's height as a share of its width",
+                );
+                let (x, y) = (
+                    "A tip made from an image, mirrored left to right",
+                    "A tip made from an image, mirrored top to bottom",
+                );
                 pair(ui, (&mut d.flip_x, "Flip X", x), (&mut d.flip_y, "Flip Y", y));
 
                 heading(ui, "Shape Dynamics");
                 percent(ui, "Size Jitter", &mut d.size_jitter, "How much smaller a dab can be at random");
-                percent(ui, "Minimum Diameter", &mut d.minimum_diameter, "The smallest a dab gets, from jitter or a pen's pressure");
+                percent(
+                    ui,
+                    "Minimum Diameter",
+                    &mut d.minimum_diameter,
+                    "The smallest a dab gets, from jitter or a pen's pressure",
+                );
                 percent(ui, "Angle Jitter", &mut d.angle_jitter, "How far a dab can turn at random");
                 ui.label("");
                 ui.checkbox(&mut d.angle_follows, "Follow the stroke")
@@ -1111,13 +1121,25 @@ impl Tools {
                 ui.end_row();
                 percent(ui, "Roundness Jitter", &mut d.roundness_jitter, "How much flatter a dab can be at random");
                 percent(ui, "Minimum Roundness", &mut d.minimum_roundness, "The flattest that makes it");
-                let (x, y) = ("Each dab mirrored left to right or not, at random", "Each dab mirrored top to bottom or not, at random");
+                let (x, y) = (
+                    "Each dab mirrored left to right or not, at random",
+                    "Each dab mirrored top to bottom or not, at random",
+                );
                 pair(ui, (&mut d.flip_x_jitter, "Flip X Jitter", x), (&mut d.flip_y_jitter, "Flip Y Jitter", y));
 
                 heading(ui, "Scattering");
-                row(ui, "Scatter", &mut d.scatter, 0.0..=1000.0, 100.0, "%", "How far dabs stray from the stroke, as a share of the brush's radius");
+                row(
+                    ui,
+                    "Scatter",
+                    &mut d.scatter,
+                    0.0..=1000.0,
+                    100.0,
+                    "%",
+                    "How far dabs stray from the stroke, as a share of the brush's radius",
+                );
                 ui.label("");
-                ui.checkbox(&mut d.both_axes, "Both Axes").on_hover_text("Stray along the stroke as well as across it");
+                ui.checkbox(&mut d.both_axes, "Both Axes")
+                    .on_hover_text("Stray along the stroke as well as across it");
                 ui.end_row();
                 ui.label("Count").on_hover_text("Dabs at each step");
                 ui.add(Slider::new(&mut d.count, 1..=MAX_COUNT)).on_hover_text("Dabs at each step");
@@ -1129,7 +1151,10 @@ impl Tools {
                 percent(ui, "Flow Jitter", &mut d.flow_jitter, "How much lower a dab's flow can be at random");
 
                 heading(ui, "Other");
-                let (noise, wet) = ("Breaks up the soft parts of each dab into grain", "Paint gathers along the edge of the stroke, as watercolour's does");
+                let (noise, wet) = (
+                    "Breaks up the soft parts of each dab into grain",
+                    "Paint gathers along the edge of the stroke, as watercolour's does",
+                );
                 pair(ui, (&mut d.noise, "Noise", noise), (&mut d.wet_edges, "Wet Edges", wet));
             });
         });
@@ -1143,16 +1168,8 @@ impl Tools {
             ui.separator();
             if self.tool == Tool::Gradient {
                 ui.label("Type");
-                ui.selectable_value(
-                    &mut self.gradient_type,
-                    omapix_engine::ops::GradientType::Linear,
-                    "Linear",
-                );
-                ui.selectable_value(
-                    &mut self.gradient_type,
-                    omapix_engine::ops::GradientType::Radial,
-                    "Radial",
-                );
+                ui.selectable_value(&mut self.gradient_type, omapix_engine::ops::GradientType::Linear, "Linear");
+                ui.selectable_value(&mut self.gradient_type, omapix_engine::ops::GradientType::Radial, "Radial");
                 ui.separator();
                 ui.label("Colours");
                 ComboBox::from_id_salt("gradient-colors")
@@ -1168,14 +1185,7 @@ impl Tools {
                 let percent = |ui: &mut Ui, label: &str, value: &mut f32| {
                     ui.label(label);
                     let mut p = *value * 100.0;
-                    if ui
-                        .add(
-                            Slider::new(&mut p, 0.0..=100.0)
-                                .suffix("%")
-                                .fixed_decimals(0),
-                        )
-                        .changed()
-                    {
+                    if ui.add(Slider::new(&mut p, 0.0..=100.0).suffix("%").fixed_decimals(0)).changed() {
                         *value = p / 100.0;
                     }
                 };
@@ -1193,11 +1203,7 @@ impl Tools {
                 percent(ui, "Opacity", &mut self.bucket_opacity);
                 ui.separator();
                 ui.label("Tolerance");
-                ui.add(
-                    egui::DragValue::new(&mut self.bucket_tolerance)
-                        .range(0..=255)
-                        .speed(1.0),
-                );
+                ui.add(egui::DragValue::new(&mut self.bucket_tolerance).range(0..=255).speed(1.0));
                 ui.checkbox(&mut self.bucket_anti_alias, "Anti-alias");
                 ui.checkbox(&mut self.bucket_contiguous, "Contiguous");
                 ui.checkbox(&mut self.bucket_all_layers, "All Layers");
@@ -1225,12 +1231,7 @@ impl Tools {
             if matches!(self.tool, Tool::ObjectSelection | Tool::QuickSelection) {
                 if self.tool == Tool::QuickSelection {
                     ui.label("Size");
-                    ui.add(
-                        egui::DragValue::new(&mut self.quick.size)
-                            .range(MIN_SIZE..=MAX_SIZE)
-                            .speed(1.0)
-                            .suffix(" px"),
-                    );
+                    ui.add(egui::DragValue::new(&mut self.quick.size).range(MIN_SIZE..=MAX_SIZE).speed(1.0).suffix(" px"));
                     ui.separator();
                 }
                 ui.label("Threshold");
@@ -1253,20 +1254,12 @@ impl Tools {
             }
             if self.tool == Tool::MagicWand {
                 ui.label("Tolerance");
-                ui.add(
-                    egui::DragValue::new(&mut self.wand_tolerance)
-                        .range(0..=255)
-                        .speed(1.0),
-                );
+                ui.add(egui::DragValue::new(&mut self.wand_tolerance).range(0..=255).speed(1.0));
                 ui.checkbox(&mut self.wand_anti_alias, "Anti-alias");
                 ui.checkbox(&mut self.wand_contiguous, "Contiguous");
                 let mut sample_all = self.wand_sample == Sample::All;
                 if ui.checkbox(&mut sample_all, "Sample All Layers").changed() {
-                    self.wand_sample = if sample_all {
-                        Sample::All
-                    } else {
-                        Sample::Current
-                    };
+                    self.wand_sample = if sample_all { Sample::All } else { Sample::Current };
                 }
                 ui.separator();
                 let hint = "Click to select similar colours · Shift adds · Alt subtracts · Shift+Alt intersects";
@@ -1295,29 +1288,19 @@ impl Tools {
             if matches!(self.tool, Tool::Dodge | Tool::Burn) {
                 ui.label("Range");
                 let is_dodge = self.tool == Tool::Dodge;
-                let range = if is_dodge {
-                    &mut self.dodge_range
-                } else {
-                    &mut self.burn_range
-                };
-                ComboBox::from_id_salt("tone-range")
-                    .selected_text(range.label())
-                    .show_ui(ui, |ui| {
-                        for r in ToneRange::ALL {
-                            ui.selectable_value(range, r, r.label());
-                        }
-                    });
+                let range = if is_dodge { &mut self.dodge_range } else { &mut self.burn_range };
+                ComboBox::from_id_salt("tone-range").selected_text(range.label()).show_ui(ui, |ui| {
+                    for r in ToneRange::ALL {
+                        ui.selectable_value(range, r, r.label());
+                    }
+                });
                 ui.separator();
                 let s = self.settings_mut();
                 percent(ui, "Exposure", &mut s.opacity);
                 ui.toggle_value(&mut s.opacity_pressure, "✒")
                     .on_hover_text("A pen's pressure sets the exposure");
                 ui.separator();
-                let protect = if is_dodge {
-                    &mut self.dodge_protect
-                } else {
-                    &mut self.burn_protect
-                };
+                let protect = if is_dodge { &mut self.dodge_protect } else { &mut self.burn_protect };
                 ui.checkbox(protect, "Protect Tones");
                 ui.separator();
                 let s = self.settings_mut();
@@ -1330,8 +1313,7 @@ impl Tools {
                         .fixed_decimals(0),
                 );
                 percent(ui, "Hardness", &mut s.hardness);
-                ui.toggle_value(&mut s.size_pressure, "⊙")
-                    .on_hover_text("A pen's pressure sets the size");
+                ui.toggle_value(&mut s.size_pressure, "⊙").on_hover_text("A pen's pressure sets the size");
                 ui.separator();
                 let hint = if is_dodge {
                     "Drag to lighten · Alt burns · 1–9 set exposure"
@@ -1339,14 +1321,8 @@ impl Tools {
                     "Drag to darken · Alt dodges · 1–9 set exposure"
                 };
                 let (text, colour) = match target {
-                    Target::QuickMask => (
-                        if is_dodge { "Dodging Quick Mask" } else { "Burning Quick Mask" },
-                        theme.accent,
-                    ),
-                    Target::Mask => (
-                        if is_dodge { "Dodging layer mask" } else { "Burning layer mask" },
-                        theme.accent,
-                    ),
+                    Target::QuickMask => (if is_dodge { "Dodging Quick Mask" } else { "Burning Quick Mask" }, theme.accent),
+                    Target::Mask => (if is_dodge { "Dodging layer mask" } else { "Burning layer mask" }, theme.accent),
                     Target::Pixels => (hint, theme.dark_foreground),
                 };
                 ui.label(RichText::new(text).color(colour));
@@ -1354,18 +1330,15 @@ impl Tools {
             }
             if self.tool == Tool::Sponge {
                 ui.label("Mode");
-                ComboBox::from_id_salt("sponge-mode")
-                    .selected_text(self.sponge_mode.label())
-                    .show_ui(ui, |ui| {
-                        for m in SpongeMode::ALL {
-                            ui.selectable_value(&mut self.sponge_mode, m, m.label());
-                        }
-                    });
+                ComboBox::from_id_salt("sponge-mode").selected_text(self.sponge_mode.label()).show_ui(ui, |ui| {
+                    for m in SpongeMode::ALL {
+                        ui.selectable_value(&mut self.sponge_mode, m, m.label());
+                    }
+                });
                 ui.separator();
                 let s = self.settings_mut();
                 percent(ui, "Flow", &mut s.opacity);
-                ui.toggle_value(&mut s.opacity_pressure, "✒")
-                    .on_hover_text("A pen's pressure sets the flow");
+                ui.toggle_value(&mut s.opacity_pressure, "✒").on_hover_text("A pen's pressure sets the flow");
                 ui.separator();
                 ui.checkbox(&mut self.sponge_vibrance, "Vibrance");
                 ui.separator();
@@ -1379,17 +1352,11 @@ impl Tools {
                         .fixed_decimals(0),
                 );
                 percent(ui, "Hardness", &mut s.hardness);
-                ui.toggle_value(&mut s.size_pressure, "⊙")
-                    .on_hover_text("A pen's pressure sets the size");
+                ui.toggle_value(&mut s.size_pressure, "⊙").on_hover_text("A pen's pressure sets the size");
                 ui.separator();
                 let (text, colour) = match target {
-                    Target::QuickMask | Target::Mask => {
-                        ("Sponge works on layer colours, not masks", theme.red)
-                    }
-                    Target::Pixels => (
-                        "Drag to saturate or desaturate · Alt swaps mode · 1–9 set flow",
-                        theme.dark_foreground,
-                    ),
+                    Target::QuickMask | Target::Mask => ("Sponge works on layer colours, not masks", theme.red),
+                    Target::Pixels => ("Drag to saturate or desaturate · Alt swaps mode · 1–9 set flow", theme.dark_foreground),
                 };
                 ui.label(RichText::new(text).color(colour));
                 return;
@@ -1405,13 +1372,10 @@ impl Tools {
             );
             percent(ui, "Hardness", &mut s.hardness);
             percent(ui, "Opacity", &mut s.opacity);
-            ui.toggle_value(&mut s.opacity_pressure, "✒")
-                .on_hover_text("A pen's pressure sets the opacity");
+            ui.toggle_value(&mut s.opacity_pressure, "✒").on_hover_text("A pen's pressure sets the opacity");
             percent(ui, "Flow", &mut s.flow);
-            ui.toggle_value(&mut s.flow_pressure, "✒")
-                .on_hover_text("A pen's pressure sets the flow");
-            ui.toggle_value(&mut s.size_pressure, "⊙")
-                .on_hover_text("A pen's pressure sets the size");
+            ui.toggle_value(&mut s.flow_pressure, "✒").on_hover_text("A pen's pressure sets the flow");
+            ui.toggle_value(&mut s.size_pressure, "⊙").on_hover_text("A pen's pressure sets the size");
             ui.separator();
             if self.tool == Tool::SpotHealing {
                 self.sample_options(ui);
@@ -1419,24 +1383,15 @@ impl Tools {
                 let (text, colour) = match target {
                     Target::QuickMask => ("Quick Mask paints selections, not blemishes", theme.red),
                     Target::Mask => ("Select the layer, not its mask, to heal", theme.red),
-                    Target::Pixels => (
-                        "Paint over a blemish; it heals when you let go",
-                        theme.dark_foreground,
-                    ),
+                    Target::Pixels => ("Paint over a blemish; it heals when you let go", theme.dark_foreground),
                 };
                 ui.label(RichText::new(text).color(colour));
             } else if self.tool.copies() {
                 self.sample_options(ui);
                 ui.separator();
                 let (text, colour) = match (target, self.source) {
-                    (Target::QuickMask, _) => (
-                        "Quick Mask paints selections, not cloned pixels",
-                        theme.red,
-                    ),
-                    (Target::Mask, _) => (
-                        "Select the layer, not its mask, to clone or heal",
-                        theme.red,
-                    ),
+                    (Target::QuickMask, _) => ("Quick Mask paints selections, not cloned pixels", theme.red),
+                    (Target::Mask, _) => ("Select the layer, not its mask, to clone or heal", theme.red),
                     (_, None) => ("Alt+click to set the source", theme.accent),
                     (_, Some(_)) => ("Alt+click to set a new source", theme.dark_foreground),
                 };
@@ -1460,11 +1415,7 @@ impl Tools {
             for &group in ToolGroup::ALL {
                 let current_tool = self.group_tool(group);
                 let active = self.tool.group() == group;
-                let colour = if active {
-                    theme.foreground
-                } else {
-                    theme.dark_foreground
-                };
+                let colour = if active { theme.foreground } else { theme.dark_foreground };
                 let icon = current_tool.icon();
                 let tip = match current_tool.shortcut_letter() {
                     Some(letter) => format!("{} ({letter})", current_tool.name()),
@@ -1482,11 +1433,7 @@ impl Tools {
                         let p1 = Pos2::new(r.max.x - 3.0, r.max.y - 7.0);
                         let p2 = Pos2::new(r.max.x - 7.0, r.max.y - 3.0);
                         let p3 = Pos2::new(r.max.x - 3.0, r.max.y - 3.0);
-                        ui.painter().add(egui::Shape::convex_polygon(
-                            vec![p1, p2, p3],
-                            colour,
-                            egui::Stroke::NONE,
-                        ));
+                        ui.painter().add(egui::Shape::convex_polygon(vec![p1, p2, p3], colour, egui::Stroke::NONE));
 
                         let mut repaint_after = None;
                         let is_held = response.contains_pointer()
@@ -1499,8 +1446,7 @@ impl Tools {
                                         return true;
                                     }
                                     let remaining = (0.35 - elapsed).max(0.0);
-                                    repaint_after =
-                                        Some(std::time::Duration::from_secs_f64(remaining));
+                                    repaint_after = Some(std::time::Duration::from_secs_f64(remaining));
                                 }
                                 false
                             });
@@ -1516,14 +1462,8 @@ impl Tools {
                         popup.show(|ui| {
                             for &tool in group.tools() {
                                 let item_active = self.tool == tool;
-                                let item_colour = if item_active {
-                                    theme.foreground
-                                } else {
-                                    theme.dark_foreground
-                                };
-                                let item_text =
-                                    RichText::new(format!("{}  {}", tool.icon(), tool.name()))
-                                        .color(item_colour);
+                                let item_colour = if item_active { theme.foreground } else { theme.dark_foreground };
+                                let item_text = RichText::new(format!("{}  {}", tool.icon(), tool.name())).color(item_colour);
                                 let mut item_button = Button::new(item_text);
                                 if let Some(letter) = tool.shortcut_letter() {
                                     item_button = item_button.shortcut_text(letter);
@@ -1546,10 +1486,8 @@ impl Tools {
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(6.0);
-            egui::widgets::color_picker::color_edit_button_srgb(ui, &mut self.foreground)
-                .on_hover_text("Foreground colour — X swaps, D resets");
-            egui::widgets::color_picker::color_edit_button_srgb(ui, &mut self.background)
-                .on_hover_text("Background colour");
+            egui::widgets::color_picker::color_edit_button_srgb(ui, &mut self.foreground).on_hover_text("Foreground colour — X swaps, D resets");
+            egui::widgets::color_picker::color_edit_button_srgb(ui, &mut self.background).on_hover_text("Background colour");
         });
     }
 }
@@ -1630,10 +1568,7 @@ mod tests {
             ..Tools::default()
         };
         let srgb = ColorProfile::srgb();
-        assert_eq!(
-            tools.paint(Target::Pixels, &srgb, Pos2::new(50.0, 50.0)),
-            None
-        );
+        assert_eq!(tools.paint(Target::Pixels, &srgb, Pos2::new(50.0, 50.0)), None);
         tools.set_source(Pos2::new(10.0, 20.0));
         let first = tools.paint(Target::Pixels, &srgb, Pos2::new(50.0, 50.0));
         assert_eq!(first, Some(Paint::Clone { dx: -40, dy: -30 }));
@@ -1715,10 +1650,7 @@ mod tests {
             tool: Tool::Eraser,
             ..Tools::default()
         };
-        assert_eq!(
-            eraser.paint(Target::Mask, &srgb, at),
-            Some(Paint::Mask(u16::MAX))
-        );
+        assert_eq!(eraser.paint(Target::Mask, &srgb, at), Some(Paint::Mask(u16::MAX)));
         assert_eq!(eraser.paint(Target::Pixels, &srgb, at), Some(Paint::Erase));
     }
 
@@ -1764,10 +1696,7 @@ mod tests {
         press(&ctx, &[(Key::Num5, Modifiers::NONE)]);
         assert_eq!(tools.keys(&ctx), Some(0.5));
         assert_eq!(tools.settings().opacity, 1.0);
-        assert_eq!(
-            tools.paint(Target::Pixels, &ColorProfile::srgb(), Pos2::ZERO),
-            None
-        );
+        assert_eq!(tools.paint(Target::Pixels, &ColorProfile::srgb(), Pos2::ZERO), None);
 
         press(
             &ctx,
@@ -2221,12 +2150,7 @@ mod tests {
         let ctrl = Modifiers::COMMAND;
 
         // Selection tools: +, -, ×, or None
-        let selection_tools = [
-            Tool::Marquee,
-            Tool::EllipticalMarquee,
-            Tool::Lasso,
-            Tool::MagicWand,
-        ];
+        let selection_tools = [Tool::Marquee, Tool::EllipticalMarquee, Tool::Lasso, Tool::MagicWand];
         for tool in selection_tools {
             assert_eq!(cursor_badge(tool, none), None);
             assert_eq!(cursor_badge(tool, ctrl), None);
@@ -2332,7 +2256,10 @@ mod tests {
     fn the_brush_settings_panel_changes_the_current_tools_brush_and_resets_it() {
         let ctx = egui::Context::default();
         let theme = Theme::default();
-        let mut tools = Tools { tool: Tool::Eraser, ..Tools::default() };
+        let mut tools = Tools {
+            tool: Tool::Eraser,
+            ..Tools::default()
+        };
         let mut brushes = crate::brushes::Library::default();
         let mut time = 0.0;
         // Draw the panel, and give back where its texts are.
@@ -2360,14 +2287,27 @@ mod tests {
             found
         };
         let click = |pos: Pos2, pressed: bool| {
-            let button = egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            let button = egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
             vec![egui::Event::PointerMoved(pos), button]
         };
         let at = |drawn: &[(String, Pos2)], text: &str| drawn.iter().find(|(t, _)| t == text).unwrap_or_else(|| panic!("no {text}")).1;
 
         let drawn = frame(&mut tools, vec![]);
         // It says whose brush it is, and has every section.
-        for text in ["Eraser", "Brush Tip Shape", "Shape Dynamics", "Scattering", "Transfer", "Spacing", "Flow Jitter"] {
+        for text in [
+            "Eraser",
+            "Brush Tip Shape",
+            "Shape Dynamics",
+            "Scattering",
+            "Transfer",
+            "Spacing",
+            "Flow Jitter",
+        ] {
             at(&drawn, text);
         }
         let follow = at(&drawn, "Follow the stroke");
@@ -2381,7 +2321,10 @@ mod tests {
             frame(&mut tools, click(tick, false));
         }
         let d = tools.eraser.dynamics;
-        assert_eq!((d.flip_x, d.flip_y, d.flip_x_jitter, d.flip_y_jitter, d.noise, d.wet_edges), (false, true, true, false, false, true));
+        assert_eq!(
+            (d.flip_x, d.flip_y, d.flip_x_jitter, d.flip_y_jitter, d.noise, d.wet_edges),
+            (false, true, true, false, false, true)
+        );
         assert_eq!(tools.brush.dynamics, Dynamics::default(), "the Brush tool's is its own");
 
         let drawn = frame(&mut tools, vec![]);
@@ -2407,7 +2350,10 @@ mod tests {
         crate::brushes::tests::loaded(&mut brushes);
         std::fs::remove_dir_all(&dir).unwrap();
 
-        let mut tools = Tools { tool: Tool::CloneStamp, ..Tools::default() };
+        let mut tools = Tools {
+            tool: Tool::CloneStamp,
+            ..Tools::default()
+        };
         tools.clone.opacity = 0.5;
         let mut time = 0.0;
         // Draw the panel: where its pictures are, and the command it asks for.
@@ -2434,7 +2380,12 @@ mod tests {
             (found, command)
         };
         let click = |pos: Pos2, pressed: bool| {
-            let button = egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            let button = egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
             vec![egui::Event::PointerMoved(pos), button]
         };
         // The file's two brushes, the second the one with a sampled tip,
@@ -2446,7 +2397,11 @@ mod tests {
         let leaf = tools.clone;
         assert!(leaf.tip.is_some() && brushes.tip(leaf.tip).is_some());
         assert_eq!((leaf.size, leaf.dynamics.spacing, leaf.size_pressure), (60.0, 0.25, false));
-        assert_eq!((leaf.opacity, tools.brush.tip), (0.5, None), "the tool's opacity, and the other tools' brushes, are left alone");
+        assert_eq!(
+            (leaf.opacity, tools.brush.tip),
+            (0.5, None),
+            "the tool's opacity, and the other tools' brushes, are left alone"
+        );
         // The round one takes the tip away again, and brings its hardness.
         frame(&mut tools, &mut brushes, click(pictures[0], true));
         frame(&mut tools, &mut brushes, click(pictures[0], false));

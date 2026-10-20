@@ -49,9 +49,7 @@ fn error(e: impl std::fmt::Display) -> String {
 impl Sam {
     /// Load the model from Omapix's or darktable's model folder.
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL).ok_or_else(|| {
-            format!("Object Selection needs the {MODEL} model: install it from darktable's AI preferences")
-        })?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Object Selection needs the {MODEL} model: install it from darktable's AI preferences"))?;
         Ok(Self {
             encoder: session(&files["encoder.onnx"])?,
             decoder: session(&files["decoder.onnx"])?,
@@ -84,10 +82,7 @@ impl Sam {
         // not in it 0.
         let (coords, labels) = match *prompt {
             Prompt::Point(x, y) => (vec![x * sx, y * sy], vec![1.0]),
-            Prompt::Box(x0, y0, x1, y1) => (
-                vec![x0.min(x1) * sx, y0.min(y1) * sy, x0.max(x1) * sx, y0.max(y1) * sy],
-                vec![2.0, 3.0],
-            ),
+            Prompt::Box(x0, y0, x1, y1) => (vec![x0.min(x1) * sx, y0.min(y1) * sy, x0.max(x1) * sx, y0.max(y1) * sy], vec![2.0, 3.0]),
             Prompt::Points(ref points) => (
                 points.iter().flat_map(|&(x, y, _)| [x * sx, y * sy]).collect(),
                 points.iter().map(|&(_, _, inside)| if inside { 1.0 } else { 0.0 }).collect(),
@@ -125,7 +120,11 @@ mod tests {
         (0..600 * 400)
             .map(|i| {
                 let (x, y) = ((i % 600) as f32 - 200.0, (i / 600) as f32 - 200.0);
-                if x * x + y * y < 100.0 * 100.0 { [230, 180, 150, 255] } else { [40, 60, 90, 255] }
+                if x * x + y * y < 100.0 * 100.0 {
+                    [230, 180, 150, 255]
+                } else {
+                    [40, 60, 90, 255]
+                }
             })
             .collect()
     }
@@ -136,9 +135,7 @@ mod tests {
     fn a_click_or_a_box_selects_the_disc() {
         let mut sam = Sam::load().unwrap();
         let image = sam.encode(&disc(), 600, 400).unwrap();
-        let at = |mask: &[f32], x: f32, y: f32| {
-            mask[(y / 400.0 * MASK_SIZE as f32) as usize * MASK_SIZE + (x / 600.0 * MASK_SIZE as f32) as usize]
-        };
+        let at = |mask: &[f32], x: f32, y: f32| mask[(y / 400.0 * MASK_SIZE as f32) as usize * MASK_SIZE + (x / 600.0 * MASK_SIZE as f32) as usize];
         let painted = Prompt::Points(vec![(180.0, 200.0, true), (220.0, 200.0, true), (500.0, 200.0, false)]);
         for prompt in [Prompt::Point(200.0, 200.0), Prompt::Box(90.0, 90.0, 310.0, 310.0), painted] {
             let mask = sam.select(&image, &prompt, None).unwrap();

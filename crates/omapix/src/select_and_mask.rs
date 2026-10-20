@@ -10,9 +10,9 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Color32, ComboBox, RichText, Slider, Stroke, vec2};
+use omapix_engine::Mask;
 use omapix_engine::refine::{EdgeBrush, EdgeOptions, colours, decontaminate_colours, refine_edge_again};
 use omapix_engine::selection::{Combine, Selection};
-use omapix_engine::Mask;
 
 use crate::editor::{Backdrop, Editor, View};
 use crate::theme::Theme;
@@ -116,7 +116,10 @@ impl SelectAndMask {
 
     /// The refined selection for the current settings, once it's ready.
     pub fn ready(&self) -> Option<&Selection> {
-        self.latest.as_ref().filter(|(o, p, _)| (*o, *p) == (self.options, self.painted)).map(|(_, _, s)| s)
+        self.latest
+            .as_ref()
+            .filter(|(o, p, _)| (*o, *p) == (self.options, self.painted))
+            .map(|(_, _, s)| s)
     }
 
     fn receive(&mut self, editor: &mut Editor, answer: (EdgeOptions, u64, Selection)) {
@@ -170,8 +173,7 @@ impl SelectAndMask {
         }
         let has_pixels = editor.doc.layer(editor.active).is_some_and(|l| l.has_pixels());
         let mut result = None;
-        let area = egui::Modal::default_area(egui::Id::new("select-and-mask"))
-            .anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
+        let area = egui::Modal::default_area(egui::Id::new("select-and-mask")).anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
         let modal = egui::Modal::new(egui::Id::new("select-and-mask"))
             .area(area)
             .backdrop_color(Color32::TRANSPARENT)
@@ -186,7 +188,8 @@ impl SelectAndMask {
                     ui.end_row();
                 };
                 egui::Grid::new("select-and-mask-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                    ui.label("View").on_hover_text("F goes through the views, and holding X shows the image as it is");
+                    ui.label("View")
+                        .on_hover_text("F goes through the views, and holding X shows the image as it is");
                     let label = |b| VIEWS.iter().find(|v| v.0 == b).map_or("", |v| v.1);
                     ComboBox::from_id_salt("select-and-mask-view")
                         .selected_text(label(self.backdrop))
@@ -196,22 +199,41 @@ impl SelectAndMask {
                             }
                         });
                     ui.end_row();
-                    slider(ui, "Radius", &mut o.radius, 0.0..=250.0, " px", "Edge Detection: how far either side of the edge to look for the photo's own, for hair and fur");
+                    slider(
+                        ui,
+                        "Radius",
+                        &mut o.radius,
+                        0.0..=250.0,
+                        " px",
+                        "Edge Detection: how far either side of the edge to look for the photo's own, for hair and fur",
+                    );
                     ui.label("");
                     ui.checkbox(&mut o.smart_radius, "Smart Radius")
                         .on_hover_text("Automatically adapt the radius to the edge's sharpness: narrower on hard edges, wider on soft ones");
                     ui.end_row();
-                    ui.label("Refine Edge Brush").on_hover_text(
-                        "Paint over hair on the image to look for its edge there too, and Alt to paint that away. [ and ] change the size",
+                    ui.label("Refine Edge Brush")
+                        .on_hover_text("Paint over hair on the image to look for its edge there too, and Alt to paint that away. [ and ] change the size");
+                    ui.add(
+                        Slider::new(&mut self.brush_size, 1.0..=5000.0)
+                            .logarithmic(true)
+                            .suffix(" px")
+                            .fixed_decimals(0),
                     );
-                    ui.add(Slider::new(&mut self.brush_size, 1.0..=5000.0).logarithmic(true).suffix(" px").fixed_decimals(0));
                     ui.end_row();
                     slider(ui, "Smooth", &mut o.smooth, 0.0..=100.0, "", "Rounds off a jagged outline");
                     slider(ui, "Feather", &mut o.feather, 0.0..=250.0, " px", "Softens the edge");
                     slider(ui, "Contrast", &mut o.contrast, 0.0..=100.0, " %", "Hardens soft edges");
-                    slider(ui, "Shift Edge", &mut o.shift_edge, -100.0..=100.0, " %", "Moves soft edges out, or in with negative values");
+                    slider(
+                        ui,
+                        "Shift Edge",
+                        &mut o.shift_edge,
+                        -100.0..=100.0,
+                        " %",
+                        "Moves soft edges out, or in with negative values",
+                    );
                     ui.label("");
-                    if ui.checkbox(&mut o.decontaminate, "Decontaminate Colors")
+                    if ui
+                        .checkbox(&mut o.decontaminate, "Decontaminate Colors")
                         .on_hover_text("Replaces color fringing in edge transitions with nearby foreground colors")
                         .changed()
                         && o.decontaminate
@@ -221,15 +243,21 @@ impl SelectAndMask {
                     }
                     ui.end_row();
                     if o.decontaminate {
-                        slider(ui, "Amount", &mut o.decontaminate_amount, 0.0..=100.0, " %", "How strongly to replace fringe color with foreground color");
+                        slider(
+                            ui,
+                            "Amount",
+                            &mut o.decontaminate_amount,
+                            0.0..=100.0,
+                            " %",
+                            "How strongly to replace fringe color with foreground color",
+                        );
                     }
                     ui.label("Output To");
                     ComboBox::from_id_salt("select-and-mask-output")
                         .selected_text(self.output.label())
                         .show_ui(ui, |ui| {
                             for output in Output::ALL {
-                                let possible = (has_pixels || output != Output::NewLayerWithMask)
-                                    && (!o.decontaminate || output != Output::Selection);
+                                let possible = (has_pixels || output != Output::NewLayerWithMask) && (!o.decontaminate || output != Output::Selection);
                                 ui.add_enabled_ui(possible, |ui| {
                                     ui.selectable_value(&mut self.output, output, output.label());
                                 });
@@ -269,10 +297,11 @@ impl SelectAndMask {
     /// its backdrop takes the pointer from the canvas.
     fn paint(&mut self, ctx: &egui::Context, editor: &Editor, backdrop: &egui::Response) {
         let canvas = &editor.canvas;
-        let (pointer, origin, down, alt) =
-            ctx.input(|i| (i.pointer.interact_pos(), i.pointer.press_origin(), i.pointer.primary_down(), i.modifiers.alt));
+        let (pointer, origin, down, alt) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.press_origin(), i.pointer.primary_down(), i.modifiers.alt));
         let on_canvas = |p: Option<egui::Pos2>| p.is_some_and(|p| canvas.image_at(p).is_some());
-        if backdrop.is_pointer_button_down_on() && down && on_canvas(origin)
+        if backdrop.is_pointer_button_down_on()
+            && down
+            && on_canvas(origin)
             && let Some(p) = pointer.map(|p| canvas.to_image(p))
         {
             if self.last != Some(p) {
@@ -323,12 +352,7 @@ impl SelectAndMask {
                     };
                     if let Some(layer) = doc.layer_mut(target) {
                         if options.decontaminate {
-                            layer.pixels = decontaminate_colours(
-                                &layer.pixels,
-                                &refined.coverage,
-                                options.radius,
-                                options.decontaminate_amount,
-                            );
+                            layer.pixels = decontaminate_colours(&layer.pixels, &refined.coverage, options.radius, options.decontaminate_amount);
                         }
                         layer.mask = Some(Mask {
                             pixels: refined.coverage,

@@ -91,12 +91,7 @@ impl Clipboard {
     pub fn current(&self) -> Option<Arc<Clip>> {
         let clip = self.clip.as_ref()?;
         let mut system = self.system.lock().unwrap();
-        let ours = !system.enabled
-            || system.published != system.generation
-            || system
-                .server
-                .as_mut()
-                .is_some_and(|s| matches!(s.try_wait(), Ok(None)));
+        let ours = !system.enabled || system.published != system.generation || system.server.as_mut().is_some_and(|s| matches!(s.try_wait(), Ok(None)));
         ours.then(|| Arc::clone(clip))
     }
 }
@@ -122,10 +117,7 @@ pub fn read_system() -> Result<Clip, String> {
         .output()
         .map_err(|e| format!("Can't read the clipboard: {e}"))?;
     let types = String::from_utf8_lossy(&types.stdout);
-    let Some(kind) = IMAGE_TYPES
-        .into_iter()
-        .find(|t| types.lines().any(|l| l.trim() == *t))
-    else {
+    let Some(kind) = IMAGE_TYPES.into_iter().find(|t| types.lines().any(|l| l.trim() == *t)) else {
         return Err(nothing);
     };
     let data = Command::new("wl-paste")
@@ -175,11 +167,7 @@ mod tests {
         // Omapix pastes its own copy while the clipboard holds it...
         assert!(clipboard.current().is_some_and(|c| c.in_place));
         // ...and whatever another app copies after that.
-        let text = Command::new("wl-copy")
-            .arg("text")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let text = Command::new("wl-copy").arg("text").stdout(Stdio::null()).stderr(Stdio::null()).status();
         assert!(text.unwrap().success());
         wait();
         assert!(clipboard.current().is_none());

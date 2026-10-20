@@ -8,19 +8,16 @@ mod channels_panel;
 mod clipboard;
 mod commands;
 mod content_fill;
-mod generative_fill;
 mod denoise;
-mod select_subject;
 mod drop;
+mod editor;
 mod even_tone;
 mod face_liquify;
-mod editor;
 mod face_selection;
-mod heal_blemishes;
-mod preview_box;
-mod smooth_skin;
 mod free_transform;
+mod generative_fill;
 mod gpu;
+mod heal_blemishes;
 mod histogram_panel;
 mod history_panel;
 mod hotkeys;
@@ -30,10 +27,13 @@ mod monitor;
 mod navigator_panel;
 mod object_selection;
 mod presets;
+mod preview_box;
 mod properties_panel;
 mod recent;
 mod select_and_mask;
+mod select_subject;
 mod settings;
+mod smooth_skin;
 mod tablet;
 mod theme;
 mod tools;
@@ -46,8 +46,7 @@ use eframe::egui_wgpu::WgpuSetup;
 use eframe::wgpu::PowerPreference;
 
 fn main() -> eframe::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,omapix=info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,omapix=info")).init();
     // `omapix --round-trip image.tif` is how darktable sends an image (see
     // darktable/omapix.lua): saving also writes it back to the TIFF.
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -72,9 +71,5 @@ fn main() -> eframe::Result {
         setup.power_preference = PowerPreference::LowPower;
     }
 
-    eframe::run_native(
-        "omapix",
-        options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, paths, round_trip)))),
-    )
+    eframe::run_native("omapix", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, paths, round_trip)))))
 }

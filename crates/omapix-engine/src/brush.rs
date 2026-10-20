@@ -319,7 +319,15 @@ impl Stroke {
 
     fn dab(&mut self, dab: &Dab, touched: &mut Vec<(u32, u32)>) {
         let (w, h) = self.original.size();
-        let Dab { x: cx, y: cy, radius: r, roundness, most, flow, .. } = *dab;
+        let Dab {
+            x: cx,
+            y: cy,
+            radius: r,
+            roundness,
+            most,
+            flow,
+            ..
+        } = *dab;
         let hardness = self.settings.hardness.clamp(0.0, 1.0);
         let (sin, cos) = dab.angle.sin_cos();
         let noise = self.settings.dynamics.noise;
@@ -388,7 +396,9 @@ impl Stroke {
         if (x1 - x0) as usize * (y1 - y0) as usize >= PARALLEL {
             // A big dab: each tile on its own core. Their coverage is
             // taken out of the stroke for the while.
-            let mut taken: Vec<_> = tiles.map(|at| (at, self.coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS]))).collect();
+            let mut taken: Vec<_> = tiles
+                .map(|at| (at, self.coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS])))
+                .collect();
             let hits: Vec<bool> = taken.par_iter_mut().map(|(at, cov)| lay(*at, cov)).collect();
             for ((at, cov), hit) in taken.into_iter().zip(hits) {
                 self.coverage.insert(at, cov);
@@ -415,9 +425,7 @@ impl Stroke {
                 let (w, h) = (orig.width(), orig.height());
                 let painted = |&(col, row): &(u32, u32)| {
                     let cov = self.coverage.get(&(col, row))?;
-                    let mut out: Vec<Pixel> = orig
-                        .tile(col, row)
-                        .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
+                    let mut out: Vec<Pixel> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
                     let (tx, ty) = (col * TILE, row * TILE);
                     for i in 0..TILE_PIXELS {
                         let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
@@ -446,25 +454,18 @@ impl Stroke {
                     Paint::Mask(v) => f32::from(v),
                     Paint::Color(c) => f32::from(c[1]),
                     // Cloning isn't offered on masks; leave them alone.
-                    Paint::Erase
-                    | Paint::Clone { .. }
-                    | Paint::Heal { .. }
-                    | Paint::SpotHeal => MAX,
+                    Paint::Erase | Paint::Clone { .. } | Paint::Heal { .. } | Paint::SpotHeal => MAX,
                     // Worked out for each pixel below.
                     Paint::Tone { .. } | Paint::Sponge { .. } => 0.0,
                 };
                 let painted = |&(col, row): &(u32, u32)| {
                     let cov = self.coverage.get(&(col, row))?;
-                    let mut out: Vec<u16> = orig
-                        .tile(col, row)
-                        .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[u16]>::to_vec);
+                    let mut out: Vec<u16> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[u16]>::to_vec);
                     for i in 0..TILE_PIXELS {
                         let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
                         let v = f32::from(out[i]);
                         out[i] = match self.paint {
-                            Paint::Tone { range, burn, .. } => {
-                                (toning::tone_curve(v / MAX, a, range, burn) * MAX).round() as u16
-                            }
+                            Paint::Tone { range, burn, .. } => (toning::tone_curve(v / MAX, a, range, burn) * MAX).round() as u16,
                             Paint::Sponge { .. } => out[i],
                             _ => (v + (target - v) * a).round() as u16,
                         };
@@ -510,9 +511,7 @@ impl Stroke {
                 let tiles: Vec<(u32, u32)> = self.coverage.keys().copied().collect();
                 if let (Surface::Pixels(dst), Surface::Pixels(orig)) = (surface, &self.original) {
                     for &(col, row) in &tiles {
-                        let base = orig
-                            .tile(col, row)
-                            .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
+                        let base = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
                         dst.tile_mut(col, row).copy_from_slice(&base);
                     }
                 }
@@ -523,9 +522,7 @@ impl Stroke {
         let Paint::Heal { .. } = self.paint else {
             return waited;
         };
-        let (Some(src), Surface::Pixels(orig), Surface::Pixels(dst)) =
-            (&self.source, &self.original, surface)
-        else {
+        let (Some(src), Surface::Pixels(orig), Surface::Pixels(dst)) = (&self.source, &self.original, surface) else {
             return waited;
         };
         let tiles: Vec<(u32, u32)> = self.coverage.keys().copied().collect();
@@ -567,9 +564,7 @@ impl Stroke {
         let opacity = self.settings.opacity;
         for &(col, row) in &tiles {
             let cov = &self.coverage[&(col, row)];
-            let base: Vec<Pixel> = orig
-                .tile(col, row)
-                .map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
+            let base: Vec<Pixel> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
             let out = dst.tile_mut(col, row);
             for i in 0..TILE_PIXELS {
                 let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
@@ -613,10 +608,7 @@ impl Stroke {
         for (&(col, row), cov) in &self.coverage {
             for (i, &c) in cov.iter().enumerate() {
                 if c > 0.01 {
-                    let (x, y) = (
-                        i64::from(col * TILE) + (i as i64 % 256),
-                        i64::from(row * TILE) + (i as i64 / 256),
-                    );
+                    let (x, y) = (i64::from(col * TILE) + (i as i64 % 256), i64::from(row * TILE) + (i as i64 / 256));
                     x0 = x0.min(x);
                     y0 = y0.min(y);
                     x1 = x1.max(x + 1);
@@ -684,10 +676,7 @@ impl Stroke {
             let dist = ring * extent;
             for k in 0..24 {
                 let angle = k as f32 / 24.0 * std::f32::consts::TAU;
-                let (ox, oy) = (
-                    (angle.cos() * dist).round() as i64,
-                    (angle.sin() * dist).round() as i64,
-                );
+                let (ox, oy) = ((angle.cos() * dist).round() as i64, (angle.sin() * dist).round() as i64);
                 if rx0 + ox < 0 || ry0 + oy < 0 || rx1 + ox > w || ry1 + oy > h {
                     continue;
                 }
@@ -695,8 +684,7 @@ impl Stroke {
                 let Some(there) = there else { continue };
                 // Surroundings: their difference, on average and in shape.
                 let (mut shift, mut shift_sq, mut ring_n) = ([0.0f32; 3], 0.0f32, 0.0f32);
-                let (mut source_ring, mut patch, mut patch_sq, mut texture, mut patch_n) =
-                    ([0.0f32; 3], [0.0f32; 3], 0.0f32, 0.0f32, 0.0f32);
+                let (mut source_ring, mut patch, mut patch_sq, mut texture, mut patch_n) = ([0.0f32; 3], [0.0f32; 3], 0.0f32, 0.0f32, 0.0f32);
                 for (d, s) in here.iter().zip(&there) {
                     if d.2 {
                         for (p, v) in patch.iter_mut().zip(s.0) {
@@ -739,17 +727,17 @@ impl Stroke {
 
 /// A pixel's colour, 0–1.
 fn rgb(p: Pixel) -> [f32; 3] {
-    [
-        f32::from(p[0]) / MAX,
-        f32::from(p[1]) / MAX,
-        f32::from(p[2]) / MAX,
-    ]
+    [f32::from(p[0]) / MAX, f32::from(p[1]) / MAX, f32::from(p[2]) / MAX]
 }
 
 /// What `f` makes of each of `tiles`: a tile to a core when there are
 /// enough of them to be worth starting the others up.
 fn each<T: Send>(tiles: &[(u32, u32)], f: impl Fn(&(u32, u32)) -> Option<T> + Sync) -> Vec<T> {
-    if tiles.len() < 4 { tiles.iter().filter_map(f).collect() } else { tiles.par_iter().filter_map(&f).collect() }
+    if tiles.len() < 4 {
+        tiles.iter().filter_map(f).collect()
+    } else {
+        tiles.par_iter().filter_map(&f).collect()
+    }
 }
 
 /// Photoshop's measured round tip: a solid core of radius `r0 · R`, then a
@@ -851,12 +839,8 @@ fn paint_pixel(base: Pixel, a: f32, paint: Paint) -> Pixel {
             out[3] = (base_a * (1.0 - a) * MAX).round() as u16;
             out
         }
-        Paint::Tone { range, burn, protect } => {
-            toning::on_pixel(base, |c| toning::dodge_burn(c, a, range, burn, protect))
-        }
-        Paint::Sponge { saturate, vibrance } => {
-            toning::on_pixel(base, |c| toning::sponge(c, a, saturate, vibrance))
-        }
+        Paint::Tone { range, burn, protect } => toning::on_pixel(base, |c| toning::dodge_burn(c, a, range, burn, protect)),
+        Paint::Sponge { saturate, vibrance } => toning::on_pixel(base, |c| toning::sponge(c, a, saturate, vibrance)),
         Paint::Mask(_) | Paint::Clone { .. } | Paint::Heal { .. } | Paint::SpotHeal => base,
     }
 }
@@ -869,12 +853,7 @@ mod tests {
         Tiled::from_slice(w, h, [0; 4], &vec![[65535; 4]; (w * h) as usize])
     }
 
-    fn stroke(
-        settings: BrushSettings,
-        paint: Paint,
-        surface: &Surface,
-        points: &[(f32, f32)],
-    ) -> Surface {
+    fn stroke(settings: BrushSettings, paint: Paint, surface: &Surface, points: &[(f32, f32)]) -> Surface {
         let mut s = Stroke::new(settings, paint, surface.clone());
         let mut out = surface.clone();
         for &(x, y) in points {
@@ -892,12 +871,7 @@ mod tests {
             hardness: 1.0,
             ..Default::default()
         };
-        let Surface::Pixels(out) = stroke(
-            settings,
-            Paint::Color([0, 0, 0, 65535]),
-            &surface,
-            &[(100.0, 100.0)],
-        ) else {
+        let Surface::Pixels(out) = stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &[(100.0, 100.0)]) else {
             unreachable!()
         };
         assert_eq!(out.get(100, 100), [0, 0, 0, 65535]);
@@ -907,10 +881,21 @@ mod tests {
     #[test]
     fn toning_strokes_lighten_darken_and_desaturate() {
         let grey = |c: Pixel| Tiled::from_slice(100, 100, [0; 4], &vec![c; 100 * 100]);
-        let hard = BrushSettings { size: 40.0, hardness: 1.0, opacity: 0.5, ..Default::default() };
-        let tone = |burn| Paint::Tone { range: ToneRange::Midtones, burn, protect: true };
+        let hard = BrushSettings {
+            size: 40.0,
+            hardness: 1.0,
+            opacity: 0.5,
+            ..Default::default()
+        };
+        let tone = |burn| Paint::Tone {
+            range: ToneRange::Midtones,
+            burn,
+            protect: true,
+        };
         let run = |paint, surface: &Surface, points: &[(f32, f32)]| {
-            let Surface::Pixels(out) = stroke(hard, paint, surface, points) else { unreachable!() };
+            let Surface::Pixels(out) = stroke(hard, paint, surface, points) else {
+                unreachable!()
+            };
             out
         };
         let mid = Surface::Pixels(grey([32768, 32768, 32768, 40000]));
@@ -926,16 +911,30 @@ mod tests {
         assert_eq!(scrubbed.get(50, 50), dodged.get(50, 50));
 
         let red = Surface::Pixels(grey([50000, 20000, 15000, 65535]));
-        let p = run(Paint::Sponge { saturate: false, vibrance: false }, &red, &[(50.0, 50.0)]);
+        let p = run(
+            Paint::Sponge {
+                saturate: false,
+                vibrance: false,
+            },
+            &red,
+            &[(50.0, 50.0)],
+        );
         let p = p.get(50, 50);
         assert!(p[0] - p[2] < 50000 - 15000, "{p:?}");
 
         // On a mask, Dodge lightens its greys and Sponge leaves them alone.
         let mask = Surface::Mask(Tiled::new(100, 100, 32768));
-        let Surface::Mask(m) = stroke(hard, tone(false), &mask, &[(50.0, 50.0)]) else { unreachable!() };
+        let Surface::Mask(m) = stroke(hard, tone(false), &mask, &[(50.0, 50.0)]) else {
+            unreachable!()
+        };
         assert!(m.get(50, 50) > 36000);
-        let sponge = Paint::Sponge { saturate: true, vibrance: true };
-        let Surface::Mask(m) = stroke(hard, sponge, &mask, &[(50.0, 50.0)]) else { unreachable!() };
+        let sponge = Paint::Sponge {
+            saturate: true,
+            vibrance: true,
+        };
+        let Surface::Mask(m) = stroke(hard, sponge, &mask, &[(50.0, 50.0)]) else {
+            unreachable!()
+        };
         assert_eq!(m.get(50, 50), 32768);
     }
 
@@ -988,9 +987,7 @@ mod tests {
     #[test]
     fn keeping_alpha_changes_only_colour() {
         // Opaque, half-transparent and transparent white columns.
-        let px: Vec<Pixel> = (0..30 * 10)
-            .map(|i| [65535, 65535, 65535, [65535, 32768, 0][i % 30 / 10]])
-            .collect();
+        let px: Vec<Pixel> = (0..30 * 10).map(|i| [65535, 65535, 65535, [65535, 32768, 0][i % 30 / 10]]).collect();
         let surface = Surface::Pixels(Tiled::from_slice(30, 10, [0; 4], &px));
         let settings = BrushSettings {
             size: 200.0,
@@ -1026,17 +1023,11 @@ mod tests {
             ..Default::default()
         };
         let path = [(50.0, 50.0), (250.0, 50.0), (50.0, 50.0), (250.0, 50.0)];
-        let Surface::Pixels(out) =
-            stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &path)
-        else {
+        let Surface::Pixels(out) = stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &path) else {
             unreachable!()
         };
         // Half-way to black, however many times the stroke passed.
-        assert!(
-            out.get(150, 50)[0].abs_diff(32768) <= 2,
-            "{:?}",
-            out.get(150, 50)
-        );
+        assert!(out.get(150, 50)[0].abs_diff(32768) <= 2, "{:?}", out.get(150, 50));
     }
 
     #[test]
@@ -1067,12 +1058,7 @@ mod tests {
             hardness: 0.0,
             ..Default::default()
         };
-        let Surface::Pixels(out) = stroke(
-            settings,
-            Paint::Color([0, 0, 0, 65535]),
-            &surface,
-            &[(100.0, 100.0)],
-        ) else {
+        let Surface::Pixels(out) = stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &[(100.0, 100.0)]) else {
             unreachable!()
         };
         let centre = out.get(100, 100)[0];
@@ -1089,15 +1075,13 @@ mod tests {
             hardness: 1.0,
             ..Default::default()
         };
-        let Surface::Pixels(erased) = stroke(settings, Paint::Erase, &pixels, &[(50.0, 50.0)])
-        else {
+        let Surface::Pixels(erased) = stroke(settings, Paint::Erase, &pixels, &[(50.0, 50.0)]) else {
             unreachable!()
         };
         assert_eq!(erased.get(50, 50)[3], 0);
 
         let mask = Surface::Mask(Tiled::new(100, 100, u16::MAX));
-        let Surface::Mask(painted) = stroke(settings, Paint::Mask(0), &mask, &[(50.0, 50.0)])
-        else {
+        let Surface::Mask(painted) = stroke(settings, Paint::Mask(0), &mask, &[(50.0, 50.0)]) else {
             unreachable!()
         };
         assert_eq!(painted.get(50, 50), 0);
@@ -1130,14 +1114,11 @@ mod tests {
             hardness: 1.0,
             ..Default::default()
         };
-        let mut s = Stroke::new(settings, Paint::Clone { dx: 0, dy: 50 }, surface.clone())
-            .sampling(img.clone());
+        let mut s = Stroke::new(settings, Paint::Clone { dx: 0, dy: 50 }, surface.clone()).sampling(img.clone());
         let mut out = surface;
         let tiles = s.add_point(150.0, 100.0, 1.0);
         s.apply(&mut out, &tiles);
-        let Surface::Pixels(out) = out else {
-            unreachable!()
-        };
+        let Surface::Pixels(out) = out else { unreachable!() };
         assert_eq!(out.get(150, 100), img.get(150, 150));
     }
 
@@ -1151,23 +1132,17 @@ mod tests {
             ..Default::default()
         };
         // Source 60 px to the left: same texture, but a darker tone there.
-        let mut s = Stroke::new(settings, Paint::Heal { dx: -60, dy: 0 }, surface.clone())
-            .sampling(img.clone());
+        let mut s = Stroke::new(settings, Paint::Heal { dx: -60, dy: 0 }, surface.clone()).sampling(img.clone());
         let mut out = surface;
         let tiles = s.add_point(150.0, 100.0, 1.0);
         s.apply(&mut out, &tiles);
         let tiles = s.finish(&mut out);
         assert!(!tiles.is_empty());
-        let Surface::Pixels(out) = out else {
-            unreachable!()
-        };
+        let Surface::Pixels(out) = out else { unreachable!() };
         let healed = out.get(150, 100)[0];
         // What unblemished skin at that spot would be.
         let expected = 30000 + 150 * 60 + 100 * 20;
-        assert!(
-            healed.abs_diff(expected) < 800,
-            "healed {healed}, expected about {expected}"
-        );
+        assert!(healed.abs_diff(expected) < 800, "healed {healed}, expected about {expected}");
         // A plain clone would have brought the darker tone from the left.
         let cloned = img.get(90, 100)[0];
         assert!(healed.abs_diff(expected) < cloned.abs_diff(expected) / 3);
@@ -1181,13 +1156,21 @@ mod tests {
         let px: Vec<Pixel> = (0..w * h)
             .map(|i| {
                 let (x, y) = ((i % w) as f32, (i / w) as f32);
-                let tone = if x < 100.0 { 40000.0 } else { 36000.0 + 12000.0 * (x / 15.0).sin() * (y / 20.0).cos() };
+                let tone = if x < 100.0 {
+                    40000.0
+                } else {
+                    36000.0 + 12000.0 * (x / 15.0).sin() * (y / 20.0).cos()
+                };
                 [tone as u16, tone as u16 - 4000, tone as u16 - 8000, 65535]
             })
             .collect();
         let img = Tiled::from_slice(w, h, [0; 4], &px);
         let surface = Surface::Pixels(img.clone());
-        let settings = BrushSettings { size: 60.0, hardness: 1.0, ..Default::default() };
+        let settings = BrushSettings {
+            size: 60.0,
+            hardness: 1.0,
+            ..Default::default()
+        };
         let mut s = Stroke::new(settings, Paint::Heal { dx: -140, dy: 0 }, surface.clone()).sampling(img.clone());
         let mut out = surface;
         let tiles = s.add_point(200.0, 100.0, 1.0);
@@ -1205,7 +1188,9 @@ mod tests {
                 let d = (x as f32 + 0.5 - 200.0).hypot(y as f32 + 0.5 - 100.0);
                 if (24.0..tip_reach(30.0, 1.0) + 1.0).contains(&d) {
                     for c in 0..3 {
-                        worst = worst.max(change(x, y, c).abs_diff(change(x + 1, y, c))).max(change(x, y, c).abs_diff(change(x, y + 1, c)));
+                        worst = worst
+                            .max(change(x, y, c).abs_diff(change(x + 1, y, c)))
+                            .max(change(x, y, c).abs_diff(change(x, y + 1, c)));
                     }
                 }
             }
@@ -1218,10 +1203,22 @@ mod tests {
         // Skin with something dark beside it, which the dab overlaps and
         // the selection stops short of.
         let (w, h) = (300, 200);
-        let px: Vec<Pixel> = (0..w * h).map(|i| if i % w >= 215 { [5000, 5000, 5000, 65535] } else { [40000, 36000, 32000, 65535] }).collect();
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                if i % w >= 215 {
+                    [5000, 5000, 5000, 65535]
+                } else {
+                    [40000, 36000, 32000, 65535]
+                }
+            })
+            .collect();
         let img = Tiled::from_slice(w, h, [0; 4], &px);
         let surface = Surface::Pixels(img.clone());
-        let settings = BrushSettings { size: 60.0, hardness: 0.5, ..Default::default() };
+        let settings = BrushSettings {
+            size: 60.0,
+            hardness: 0.5,
+            ..Default::default()
+        };
         let selection = crate::selection::Selection::rectangle(w, h, (0.0, 0.0), (212.0, 200.0));
         let mut s = Stroke::new(settings, Paint::Heal { dx: -100, dy: 0 }, surface.clone())
             .sampling(img.clone())
@@ -1246,16 +1243,12 @@ mod tests {
             hardness: 1.0,
             ..Default::default()
         };
-        let selection =
-            crate::selection::Selection::rectangle(200, 100, (0.0, 0.0), (100.0, 100.0));
-        let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), surface.clone())
-            .within(selection.coverage);
+        let selection = crate::selection::Selection::rectangle(200, 100, (0.0, 0.0), (100.0, 100.0));
+        let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), surface.clone()).within(selection.coverage);
         let mut out = surface;
         let tiles = s.add_point(100.0, 50.0, 1.0);
         s.apply(&mut out, &tiles);
-        let Surface::Pixels(out) = out else {
-            unreachable!()
-        };
+        let Surface::Pixels(out) = out else { unreachable!() };
         assert_eq!(out.get(90, 50)[0], 0);
         assert_eq!(out.get(110, 50)[0], 65535);
     }
@@ -1284,15 +1277,10 @@ mod tests {
         s.apply(&mut out, &tiles);
         let tiles = s.finish(&mut out);
         assert!(!tiles.is_empty());
-        let Surface::Pixels(out) = out else {
-            unreachable!()
-        };
+        let Surface::Pixels(out) = out else { unreachable!() };
         let healed = out.get(150, 100)[0];
         let expected = 30000 + 150 * 60 + 100 * 20;
-        assert!(
-            healed.abs_diff(expected) < 1000,
-            "healed {healed}, expected about {expected}"
-        );
+        assert!(healed.abs_diff(expected) < 1000, "healed {healed}, expected about {expected}");
         // No dark bar pulled into the patch.
         for x in 140..160 {
             assert!(out.get(x, 100)[0] > 20000, "dark pixel at {x}");
@@ -1332,9 +1320,7 @@ mod tests {
         let tiles = s.add_point(200.0, 150.0, 1.0);
         s.apply(&mut out, &tiles);
         s.finish(&mut out);
-        let Surface::Pixels(out) = out else {
-            unreachable!()
-        };
+        let Surface::Pixels(out) = out else { unreachable!() };
         // Pores in the healed patch, not the smooth patch's evenness.
         let (lo, hi) = (140..160)
             .flat_map(|y| (190..210).map(move |x| (x, y)))
@@ -1354,9 +1340,7 @@ mod tests {
         };
         // A line drawn in many small moves covers every pixel along it.
         let points: Vec<(f32, f32)> = (0..500).map(|i| (50.0 + i as f32, 50.0)).collect();
-        let Surface::Pixels(out) =
-            stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &points)
-        else {
+        let Surface::Pixels(out) = stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &points) else {
             unreachable!()
         };
         assert!((60..540).all(|x| out.get(x, 50)[0] == 0));
@@ -1378,13 +1362,21 @@ mod tests {
     }
 
     fn hard(size: f32, dynamics: Dynamics) -> BrushSettings {
-        BrushSettings { size, hardness: 1.0, dynamics, ..Default::default() }
+        BrushSettings {
+            size,
+            hardness: 1.0,
+            dynamics,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn a_flat_tip_paints_an_ellipse_at_its_angle() {
         // Half as high as it's wide: 40 px across, 20 up and down.
-        let flat = Dynamics { roundness: 0.5, ..Default::default() };
+        let flat = Dynamics {
+            roundness: 0.5,
+            ..Default::default()
+        };
         let out = stroked(hard(40.0, flat), &[(100.0, 100.0)], true);
         let painted = |x, y| out.get(x, y)[0] == 0;
         assert!(painted(117, 100) && painted(83, 100) && painted(100, 108) && painted(100, 91));
@@ -1402,7 +1394,10 @@ mod tests {
     #[test]
     fn wide_spacing_leaves_gaps_between_dabs() {
         // 10 px dabs every 30 px.
-        let apart = Dynamics { spacing: 3.0, ..Default::default() };
+        let apart = Dynamics {
+            spacing: 3.0,
+            ..Default::default()
+        };
         let out = stroked(hard(10.0, apart), &[(50.0, 100.0), (200.0, 100.0)], true);
         let painted: Vec<bool> = (40..210).map(|x| out.get(x, 100)[0] == 0).collect();
         let dabs = painted.windows(2).filter(|w| !w[0] && w[1]).count();
@@ -1413,7 +1408,12 @@ mod tests {
     #[test]
     fn the_first_dab_waits_for_the_strokes_direction() {
         // A flat tip that follows the stroke.
-        let following = Dynamics { roundness: 0.25, angle_follows: true, spacing: 10.0, ..Default::default() };
+        let following = Dynamics {
+            roundness: 0.25,
+            angle_follows: true,
+            spacing: 10.0,
+            ..Default::default()
+        };
         // Nothing until the pointer moves, and then the dab lies along
         // the way it went: down.
         let out = stroked(hard(40.0, following), &[(100.0, 100.0)], false);
@@ -1452,13 +1452,23 @@ mod tests {
 
     #[test]
     fn minimum_diameter_keeps_a_light_touch_from_vanishing() {
-        let settings = BrushSettings { size: 40.0, hardness: 1.0, ..Default::default() };
+        let settings = BrushSettings {
+            size: 40.0,
+            hardness: 1.0,
+            ..Default::default()
+        };
         let stroke = |least: f32| {
-            let dynamics = Dynamics { minimum_diameter: least, ..Default::default() };
+            let dynamics = Dynamics {
+                minimum_diameter: least,
+                ..Default::default()
+            };
             Stroke::new(BrushSettings { dynamics, ..settings }, Paint::Erase, Surface::Pixels(white(8, 8)))
         };
         assert_eq!((stroke(0.0).diameter(0.0), stroke(0.0).diameter(0.5)), (0.0, 20.0));
-        assert_eq!((stroke(0.5).diameter(0.0), stroke(0.5).diameter(0.5), stroke(0.5).diameter(1.0)), (20.0, 30.0, 40.0));
+        assert_eq!(
+            (stroke(0.5).diameter(0.0), stroke(0.5).diameter(0.5), stroke(0.5).diameter(1.0)),
+            (20.0, 30.0, 40.0)
+        );
     }
 
     #[test]
@@ -1466,7 +1476,12 @@ mod tests {
         // Twice as wide as it's high, with paint in its right half only.
         let tip = Arc::new(Tip::new(40, 20, (0..800).map(|i| if i % 40 >= 20 { 65535 } else { 0 }).collect()).unwrap());
         let stamp = |size: f32, dynamics: Dynamics| {
-            let settings = BrushSettings { size, hardness: 0.0, dynamics, ..Default::default() };
+            let settings = BrushSettings {
+                size,
+                hardness: 0.0,
+                dynamics,
+                ..Default::default()
+            };
             let mut out = Surface::Pixels(white(300, 200));
             let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone()).with_tip(tip.clone());
             let tiles = s.add_point(100.0, 100.0, 1.0);
@@ -1483,13 +1498,31 @@ mod tests {
         let at = stamp(8.0, Dynamics::default());
         assert!(at(102, 100) == 0 && at(97, 100) == 65535 && at(102, 103) == 65535);
         // Turned a quarter anticlockwise, its right half points up.
-        let at = stamp(80.0, Dynamics { angle: 90.0, ..Default::default() });
+        let at = stamp(
+            80.0,
+            Dynamics {
+                angle: 90.0,
+                ..Default::default()
+            },
+        );
         assert!(at(100, 80) == 0 && at(118, 62) == 0 && at(82, 62) == 0 && at(100, 120) == 65535 && at(125, 80) == 65535);
         // At an eighth, its far corners reach beyond the brush's radius.
-        let at = stamp(80.0, Dynamics { angle: 45.0, ..Default::default() });
+        let at = stamp(
+            80.0,
+            Dynamics {
+                angle: 45.0,
+                ..Default::default()
+            },
+        );
         assert!(at(138, 85) == 0 && at(114, 61) == 0 && at(88, 112) == 65535);
         // Half as round, it's half as high.
-        let at = stamp(80.0, Dynamics { roundness: 0.5, ..Default::default() });
+        let at = stamp(
+            80.0,
+            Dynamics {
+                roundness: 0.5,
+                ..Default::default()
+            },
+        );
         assert!(at(120, 108) == 0 && at(120, 112) == 65535 && at(120, 92) == 0 && at(120, 88) == 65535);
     }
 
@@ -1498,7 +1531,11 @@ mod tests {
         // Paint in the tip's top right quarter only.
         let tip = Arc::new(Tip::new(40, 40, (0..1600).map(|i| if i % 40 >= 20 && i / 40 < 20 { 65535 } else { 0 }).collect()).unwrap());
         let quarters = |dynamics: Dynamics| {
-            let settings = BrushSettings { size: 80.0, dynamics, ..Default::default() };
+            let settings = BrushSettings {
+                size: 80.0,
+                dynamics,
+                ..Default::default()
+            };
             let mut out = Surface::Pixels(white(300, 200));
             let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone()).with_tip(tip.clone());
             let tiles = s.add_point(100.0, 100.0, 1.0);
@@ -1511,12 +1548,30 @@ mod tests {
         assert_eq!(quarters(d), [false, true, false, false]);
         assert_eq!(quarters(Dynamics { flip_x: true, ..d }), [true, false, false, false]);
         assert_eq!(quarters(Dynamics { flip_y: true, ..d }), [false, false, false, true]);
-        assert_eq!(quarters(Dynamics { flip_x: true, flip_y: true, ..d }), [false, false, true, false]);
+        assert_eq!(
+            quarters(Dynamics {
+                flip_x: true,
+                flip_y: true,
+                ..d
+            }),
+            [false, false, true, false]
+        );
     }
 
     #[test]
     fn noise_breaks_up_a_dabs_soft_edge_and_wet_edges_thin_its_middle() {
-        let dab = |hardness: f32, dynamics: Dynamics| stroked(BrushSettings { size: 120.0, hardness, dynamics, ..Default::default() }, &[(150.0, 100.0)], true);
+        let dab = |hardness: f32, dynamics: Dynamics| {
+            stroked(
+                BrushSettings {
+                    size: 120.0,
+                    hardness,
+                    dynamics,
+                    ..Default::default()
+                },
+                &[(150.0, 100.0)],
+                true,
+            )
+        };
         let d = Dynamics::default();
         // How much neighbours differ along a line out through the soft edge.
         let rough = |out: &Tiled<Pixel>| (171..208).map(|x| u32::from(out.get(x, 100)[0].abs_diff(out.get(x + 1, 100)[0]))).sum::<u32>() / 37;
@@ -1525,12 +1580,24 @@ mod tests {
         // The solid middle and what's outside are as they were, and it's
         // the same grain each time (a soft tip reaches past its radius).
         let reach = tip_reach(60.0, 0.3).ceil() as u32;
-        assert_eq!((noisy.get(150, 100), noisy.get(160, 105), noisy.get(150 + reach + 2, 100)), (smooth.get(150, 100), smooth.get(160, 105), [65535; 4]));
+        assert_eq!(
+            (noisy.get(150, 100), noisy.get(160, 105), noisy.get(150 + reach + 2, 100)),
+            (smooth.get(150, 100), smooth.get(160, 105), [65535; 4])
+        );
         assert!(noisy.to_vec() == dab(0.3, Dynamics { noise: true, ..d }).to_vec());
 
         // Wet Edges: half the paint where the stroke is solid, however
         // many dabs land there, and more of it in a band along its edge.
-        let wet = stroked(BrushSettings { size: 120.0, hardness: 0.3, dynamics: Dynamics { wet_edges: true, ..d }, ..Default::default() }, &[(100.0, 100.0), (200.0, 100.0)], true);
+        let wet = stroked(
+            BrushSettings {
+                size: 120.0,
+                hardness: 0.3,
+                dynamics: Dynamics { wet_edges: true, ..d },
+                ..Default::default()
+            },
+            &[(100.0, 100.0), (200.0, 100.0)],
+            true,
+        );
         let grey = |y: u32| wet.get(150, y)[0];
         assert!(grey(100).abs_diff(32768) <= 1 && grey(110).abs_diff(32768) <= 1, "{} {}", grey(100), grey(110));
         let darkest = (100..160).map(grey).min().unwrap();
@@ -1560,13 +1627,8 @@ mod tests {
         for step in 0..=10 {
             let h = step as f32 / 10.0;
             let reach = tip_reach(20.0, h);
-            let prof: Vec<f32> = (0..=200)
-                .map(|i| tip_falloff(i as f32 * (reach + 5.0) / 200.0, 20.0, h))
-                .collect();
-            assert!(
-                prof.windows(2).all(|w| w[1] <= w[0]),
-                "hardness {h} not monotonic: {prof:?}"
-            );
+            let prof: Vec<f32> = (0..=200).map(|i| tip_falloff(i as f32 * (reach + 5.0) / 200.0, 20.0, h)).collect();
+            assert!(prof.windows(2).all(|w| w[1] <= w[0]), "hardness {h} not monotonic: {prof:?}");
         }
     }
 
@@ -1591,12 +1653,7 @@ mod tests {
         };
 
         // One soft (hardness 0) 40 px dab's total coverage vs old falloff.
-        let Surface::Pixels(dab_out) = stroke(
-            settings,
-            Paint::Color([0, 0, 0, 65535]),
-            &surface,
-            &[(50.0, 50.0)],
-        ) else {
+        let Surface::Pixels(dab_out) = stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &[(50.0, 50.0)]) else {
             unreachable!()
         };
         let mut new_dab_total = 0.0f32;
@@ -1618,12 +1675,7 @@ mod tests {
         );
 
         // A soft stroke of overlapping dabs at 0.8 × radius from its middle.
-        let Surface::Pixels(stroke_out) = stroke(
-            settings,
-            Paint::Color([0, 0, 0, 65535]),
-            &surface,
-            &[(20.0, 50.0), (80.0, 50.0)],
-        ) else {
+        let Surface::Pixels(stroke_out) = stroke(settings, Paint::Color([0, 0, 0, 65535]), &surface, &[(20.0, 50.0), (80.0, 50.0)]) else {
             unreachable!()
         };
         let y_probe = 50 + (0.8f32 * 20.0).round() as u32; // y = 66

@@ -74,13 +74,28 @@ impl Pose {
     /// in `image`: `None` if their shoulders are out of view.
     pub fn body(&self, image: &Image) -> Option<Body> {
         let Crop { centre, side, angle } = self.crop;
-        let body = Body::new(&self.joints(), &Matte { centre, side, angle, size: SIZE, cover: &self.matte })?;
+        let body = Body::new(
+            &self.joints(),
+            &Matte {
+                centre,
+                side,
+                angle,
+                size: SIZE,
+                cover: &self.matte,
+            },
+        )?;
         // How light the picture is over the matte's square, and −1 outside
         // the picture.
         let size = SIZE * LINES;
-        let mut light: Vec<f32> = image.sample(&self.crop, size).iter().map(|[r, g, b]| 0.299 * r + 0.587 * g + 0.114 * b).collect();
+        let mut light: Vec<f32> = image
+            .sample(&self.crop, size)
+            .iter()
+            .map(|[r, g, b]| 0.299 * r + 0.587 * g + 0.114 * b)
+            .collect();
         for (k, light) in light.iter_mut().enumerate() {
-            let [x, y] = self.crop.to_image(((k % size) as f32 + 0.5) / size as f32, ((k / size) as f32 + 0.5) / size as f32);
+            let [x, y] = self
+                .crop
+                .to_image(((k % size) as f32 + 0.5) / size as f32, ((k / size) as f32 + 0.5) / size as f32);
             if x < 0.0 || y < 0.0 || x >= image.width as f32 || y >= image.height as f32 {
                 *light = -1.0;
             }
@@ -101,7 +116,11 @@ fn sigmoid(v: f32) -> f32 {
 /// circle round it, turned so the way from one to the other is up.
 fn body_crop(centre: [f32; 2], edge: [f32; 2]) -> Crop {
     let (dx, dy) = (edge[0] - centre[0], edge[1] - centre[1]);
-    Crop { centre, side: 2.0 * dx.hypot(dy) * ROOM, angle: std::f32::consts::FRAC_PI_2 - (-dy).atan2(dx) }
+    Crop {
+        centre,
+        side: 2.0 * dx.hypot(dy) * ROOM,
+        angle: std::f32::consts::FRAC_PI_2 - (-dy).atan2(dx),
+    }
 }
 
 pub struct Poses {
@@ -111,8 +130,7 @@ pub struct Poses {
 
 impl Poses {
     pub fn load() -> Result<Self> {
-        let files =
-            find_model(MODEL).ok_or_else(|| format!("Body Reshape needs the {MODEL} model: run scripts/fetch-models.sh"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Body Reshape needs the {MODEL} model: run scripts/fetch-models.sh"))?;
         Ok(Self {
             detector: session(&files["pose_detection.onnx"])?,
             landmarker: session(&files["pose_landmarks_detector_heavy.onnx"])?,
@@ -238,17 +256,36 @@ mod tests {
         // Shoulders and hips in a 300 × 200 picture, in a square of 400
         // about its middle, with stripes across it behind.
         let mut points = vec![[0.0, 0.0, 0.0, 0.0]; point::COUNT];
-        for (i, x, y) in [(point::LEFT_SHOULDER, 190.0, 60.0), (point::RIGHT_SHOULDER, 110.0, 60.0), (point::LEFT_HIP, 175.0, 160.0), (point::RIGHT_HIP, 125.0, 160.0)] {
+        for (i, x, y) in [
+            (point::LEFT_SHOULDER, 190.0, 60.0),
+            (point::RIGHT_SHOULDER, 110.0, 60.0),
+            (point::LEFT_HIP, 175.0, 160.0),
+            (point::RIGHT_HIP, 125.0, 160.0),
+        ] {
             points[i] = [x, y, 0.0, 1.0];
         }
-        let crop = Crop { centre: [150.0, 100.0], side: 400.0, angle: 0.0 };
+        let crop = Crop {
+            centre: [150.0, 100.0],
+            side: 400.0,
+            angle: 0.0,
+        };
         let matte = (0..SIZE * SIZE).map(|k| {
             let [x, y] = crop.to_image(((k % SIZE) as f32 + 0.5) / SIZE as f32, ((k / SIZE) as f32 + 0.5) / SIZE as f32);
             if (x - 150.0).abs() < 40.0 && (60.0..160.0).contains(&y) { 1.0 } else { 0.0 }
         });
-        let pose = Pose { crop, points, matte: matte.collect() };
-        let pixels: Vec<[u8; 4]> = (0..300 * 200).map(|k| if k / 300 % 20 < 3 { [40, 40, 40, 255] } else { [200, 200, 200, 255] }).collect();
-        let image = Image { pixels: &pixels, width: 300, height: 200 };
+        let pose = Pose {
+            crop,
+            points,
+            matte: matte.collect(),
+        };
+        let pixels: Vec<[u8; 4]> = (0..300 * 200)
+            .map(|k| if k / 300 % 20 < 3 { [40, 40, 40, 255] } else { [200, 200, 200, 255] })
+            .collect();
+        let image = Image {
+            pixels: &pixels,
+            width: 300,
+            height: 200,
+        };
         assert!(pose.body(&image).is_some());
     }
 
@@ -258,7 +295,11 @@ mod tests {
     #[ignore]
     fn a_blank_image_has_nobody_in_it() {
         let pixels = vec![[128u8, 128, 128, 255]; 300 * 200];
-        let image = Image { pixels: &pixels, width: 300, height: 200 };
+        let image = Image {
+            pixels: &pixels,
+            width: 300,
+            height: 200,
+        };
         assert!(Poses::load().unwrap().find(&image).unwrap().is_empty());
     }
 }

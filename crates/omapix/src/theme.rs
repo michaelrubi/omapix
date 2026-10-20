@@ -95,17 +95,12 @@ impl Theme {
     /// pasteboard.
     pub fn pasteboard(&self) -> Color32 {
         let c = self.darker_background;
-        let luma =
-            0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
+        let luma = 0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b());
         Color32::from_gray(luma.round() as u8)
     }
 
     pub fn visuals(&self) -> Visuals {
-        let mut v = if self.dark {
-            Visuals::dark()
-        } else {
-            Visuals::light()
-        };
+        let mut v = if self.dark { Visuals::dark() } else { Visuals::light() };
         let square = CornerRadius::ZERO;
 
         v.override_text_color = Some(self.foreground);
@@ -138,13 +133,7 @@ impl Theme {
         }
         w.hovered.bg_stroke = Stroke::new(1.0, self.accent);
         w.active.bg_stroke = Stroke::new(1.0, self.accent);
-        for state in [
-            &mut w.noninteractive,
-            &mut w.inactive,
-            &mut w.hovered,
-            &mut w.active,
-            &mut w.open,
-        ] {
+        for state in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
             state.corner_radius = square;
             state.expansion = 0.0;
         }
@@ -162,14 +151,8 @@ pub fn watch(ctx: egui::Context) -> Receiver<Theme> {
         .spawn(move || {
             let stamp = || -> Option<(SystemTime, SystemTime)> {
                 let dir = theme_dir()?;
-                let name = std::fs::metadata(dir.with_file_name("theme.name"))
-                    .ok()?
-                    .modified()
-                    .ok()?;
-                let colors = std::fs::metadata(dir.join("colors.toml"))
-                    .ok()?
-                    .modified()
-                    .ok()?;
+                let name = std::fs::metadata(dir.with_file_name("theme.name")).ok()?.modified().ok()?;
+                let colors = std::fs::metadata(dir.join("colors.toml")).ok()?.modified().ok()?;
                 Some((name, colors))
             };
             let mut last = stamp();
@@ -191,10 +174,7 @@ pub fn watch(ctx: egui::Context) -> Receiver<Theme> {
 
 /// Use the system monospace font (the Omarchy font) for all UI text.
 pub fn install_font(ctx: &egui::Context) {
-    let Ok(out) = std::process::Command::new("fc-match")
-        .args(["monospace", "-f", "%{file}"])
-        .output()
-    else {
+    let Ok(out) = std::process::Command::new("fc-match").args(["monospace", "-f", "%{file}"]).output() else {
         return;
     };
     let path = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -202,15 +182,9 @@ pub fn install_font(ctx: &egui::Context) {
         return;
     };
     let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("omarchy".into(), egui::FontData::from_owned(bytes).into());
+    fonts.font_data.insert("omarchy".into(), egui::FontData::from_owned(bytes).into());
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .insert(0, "omarchy".into());
+        fonts.families.entry(family).or_default().insert(0, "omarchy".into());
     }
     ctx.set_fonts(fonts);
 }
