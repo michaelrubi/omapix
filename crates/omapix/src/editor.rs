@@ -3202,7 +3202,15 @@ mod tests {
             ctx: egui::Context::default(),
         };
         job.run();
-        let progress: Vec<Progress> = rx.try_iter().collect();
+        // Tiles come in batches the size of the thread pool, so a level's
+        // batches in a row count as one.
+        let mut progress: Vec<Progress> = Vec::new();
+        for p in rx.try_iter() {
+            match (progress.last_mut(), p) {
+                (Some(Progress::Tiles(last, all)), Progress::Tiles(level, tiles)) if *last == level => all.extend(tiles),
+                (_, p) => progress.push(p),
+            }
+        }
         let steps: Vec<String> = progress
             .iter()
             .map(|p| match p {
