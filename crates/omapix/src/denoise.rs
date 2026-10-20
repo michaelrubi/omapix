@@ -53,6 +53,8 @@ pub struct Denoise {
     /// How much luminance and colour noise goes, 0–100.
     pub luminance: f32,
     pub color: f32,
+    /// OK'd as soon as it can be (an `OMAPIX_SCRIPT` step).
+    pub accept: bool,
     /// The layer whose Current & Below is denoised.
     layer: u64,
     profile: ColorProfile,
@@ -85,6 +87,7 @@ impl Denoise {
         Ok(Self {
             luminance,
             color,
+            accept: false,
             layer: editor.active,
             profile: editor.doc.profile.clone(),
             source: None,
@@ -150,7 +153,7 @@ impl Denoise {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 let ready = self.source.is_some();
-                if ui.add_enabled(ready, egui::Button::new("OK")).clicked() || (ready && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                if ui.add_enabled(ready, egui::Button::new("OK")).clicked() || (ready && (self.accept || ui.input(|i| i.key_pressed(egui::Key::Enter)))) {
                     result = Some(true);
                 }
                 if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
