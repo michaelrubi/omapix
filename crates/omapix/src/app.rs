@@ -22,7 +22,7 @@ use crate::canvas::ToolInput;
 use crate::clipboard::Clipboard;
 use crate::commands::Command;
 use crate::content_fill::ContentFill;
-use crate::editor::{Editor, SeparationBand, Target, View};
+use crate::editor::{Editor, SeparationBand, Target, View, render_view};
 use crate::face_selection::{FaceSelection, Part};
 use crate::histogram_panel::HistogramPanel;
 use crate::history_panel::HistoryPanel;
@@ -39,7 +39,7 @@ use crate::theme::{self, Theme};
 use crate::tools::{Sample, Tools};
 
 const OPEN_EXTENSIONS: [&str; 8] = ["ora", "tif", "tiff", "png", "jpg", "jpeg", "psd", "psb"];
-const JPEG_QUALITY: u8 = 92;
+pub(crate) const JPEG_QUALITY: u8 = 92;
 
 /// The file dialog's filter for Export for Web's format: its name and
 /// extensions, the usual one first.
@@ -394,7 +394,7 @@ struct BatchJob {
 
 /// One step of an `OMAPIX_SCRIPT` (comma-separated steps):
 /// - a command name, e.g. `FrequencySeparation` (radius commands use their
-///   default radius);
+///   default radius, and Denoise its amounts as last used, OK'd once ready);
 /// - `Stroke x0 y0 x1 y1`: a brush stroke with the current tool, in image
 ///   pixels, through the same path as mouse strokes;
 /// - `Tool Move|Brush|Eraser|Clone|Heal|SpotHeal|Marquee|Lasso|Crop`, `Size n`, `Opacity percent`,
@@ -427,6 +427,16 @@ enum ScriptStep {
 }
 
 impl ScriptStep {
+    /// The command the step runs, if it runs one.
+    fn command(&self) -> Option<Command> {
+        match self {
+            ScriptStep::Command(cmd) => Some(*cmd),
+            ScriptStep::AutoRetouch(_) => Some(Command::AutoRetouch),
+            ScriptStep::GenerativeFill(_) => Some(Command::GenerativeFill),
+            _ => None,
+        }
+    }
+
     fn parse(step: &str) -> Option<Self> {
         let mut words = step.split_whitespace();
         let head = words.next()?;
@@ -730,6 +740,72 @@ impl App {
             }
         }
         app
+    }
+
+    /// An app with no window, for `omapix --mcp` and tests: no image open,
+    /// the tool options as they start, and `filters` for the settings.
+    pub(crate) fn headless(filters: FilterSettings, defaults: FilterSettings) -> Self {
+        let (_tx, rx) = channel();
+        App {
+            theme: Theme::default(),
+            theme_rx: rx,
+            editor: None,
+            parked: Vec::new(),
+            tab: 0,
+            layers: LayersPanel::default(),
+            properties: PropertiesPanel::default(),
+            history: HistoryPanel,
+            recent: RecentStore::default(),
+            top_tab: None,
+            histogram: HistogramPanel::default(),
+            navigator: NavigatorPanel::default(),
+            brushes: brushes::Library::default(),
+            right_tab: RightTab::default(),
+            tools: Tools::default(),
+            tools_path: None,
+            saved_tools: String::new(),
+            opening: VecDeque::new(),
+            picking: None,
+            merging: None,
+            file_job: None,
+            batch_export: None,
+            dialog: None,
+            filter_preview: None,
+            status: None,
+            filters,
+            defaults,
+            allow_close: false,
+            title: String::new(),
+            drawing: None,
+            move_from: None,
+            transform_drag: None,
+            crop: None,
+            crop_drag: None,
+            liquify_at: None,
+            objects: Default::default(),
+            script: VecDeque::new(),
+            clipboard: Clipboard::new(false),
+            pasting: None,
+            from_clipboard: None,
+            pending_drops: Vec::new(),
+            v_down: false,
+            tablet: None,
+            pen_moves: Vec::new(),
+            pen: None,
+            monitor: None,
+            proof: Default::default(),
+            content_fill: ContentFill::default(),
+            denoising: Default::default(),
+            upscaling: Default::default(),
+            aligning: None,
+            select_subject: SelectSubject::default(),
+            face_selection: FaceSelection::default(),
+            whitening: Default::default(),
+            face_liquify: Default::default(),
+            body_liquify: Default::default(),
+            models: HashMap::new(),
+            models_check: None,
+        }
     }
 
     fn message(&mut self, text: impl Into<String>, error: bool) {
@@ -4296,16 +4372,36 @@ impl App {
             return;
         };
         log::info!("script: {step:?}");
+        if let Some(cmd) = step.command() {
+            let missing = missing_models(cmd, &self.models);
+            if !missing.is_empty() {
+                self.message(
+                    format!(
+                        "{} needs the {} model: see Help › AI Models",
+                        cmd.label().trim_end_matches('…'),
+                        missing.join(", ")
+                    ),
+                    true,
+                );
+                return;
+            }
+            if !self.enabled(cmd) {
+                self.message(format!("{} can't be used on this image now", cmd.label().trim_end_matches('…')), true);
+                return;
+            }
+        }
         match step {
             ScriptStep::Command(cmd) => {
                 self.run(cmd, ctx);
-                // Radius commands open a dialog; accept its default.
-                if let Some(Dialog::Radius { command, radius, coarse, .. }) = self.dialog.take() {
-                    self.apply_radius(command, radius, coarse, ctx);
-                }
+                // Radius commands and filters open a dialog; accept its default.
                 match self.dialog.take() {
+                    Some(Dialog::Radius { command, radius, coarse, .. }) => self.apply_radius(command, radius, coarse, ctx),
                     Some(Dialog::AddNoise { options, .. }) => self.apply_add_noise(options, ctx),
                     Some(Dialog::Filter { filter, .. }) => self.apply_filter(filter, ctx),
+                    Some(Dialog::Denoise(mut dialog)) => {
+                        dialog.accept = true;
+                        self.dialog = Some(Dialog::Denoise(dialog));
+                    }
                     dialog => self.dialog = dialog,
                 }
             }
@@ -4389,6 +4485,55 @@ impl App {
             }
         }
         ctx.request_repaint();
+    }
+
+    /// Run `OMAPIX_SCRIPT` steps on `doc` with no window, as `omapix --mcp`
+    /// does, waiting for each to finish. Gives back the document they leave
+    /// and what the status bar last said, or the error it showed.
+    pub(crate) fn run_steps(&mut self, doc: Document, steps: &[&str], ctx: &egui::Context) -> Result<(Document, Option<String>), String> {
+        for step in steps {
+            let step = ScriptStep::parse(step).ok_or_else(|| format!("can't understand {step:?}"))?;
+            // Whether the models it needs are on disk, as the app checks
+            // at startup.
+            for id in step.command().map_or(&[][..], models_for) {
+                self.models.entry(id).or_insert_with(|| omapix_ai::find_model(id).is_some());
+            }
+            self.script.push_back(step);
+        }
+        let (render, _) = render_view(&doc, View::Image, [0; 4], None);
+        let mut editor = Editor::new(doc)?;
+        editor.canvas.set_render(Arc::new(render));
+        editor
+            .canvas
+            .lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)), 0.1);
+        self.editor = Some(editor);
+        self.status = None;
+        let deadline = Instant::now() + Duration::from_secs(30 * 60);
+        while !(self.script.is_empty() && self.held().is_none()) {
+            if Instant::now() > deadline {
+                self.script.clear();
+                self.editor = None;
+                return Err("timed out".into());
+            }
+            self.run_script(ctx);
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| self.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            self.poll(ctx);
+            if let Some(editor) = &mut self.editor {
+                editor.update(ctx);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let doc = self.editor.take().ok_or("the image was closed")?.doc;
+        match self.status.take() {
+            Some((text, true, _)) => Err(text),
+            status => Ok((doc, status.map(|(text, ..)| text))),
+        }
+    }
+
+    /// The filter and retouching settings, as last used.
+    pub(crate) fn filters_mut(&mut self) -> &mut FilterSettings {
+        &mut self.filters
     }
 
     fn update_title(&mut self, ctx: &egui::Context) {
@@ -5442,7 +5587,6 @@ fn ellipse_points(a: Pos2, b: Pos2) -> Vec<Pos2> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::render_view;
 
     #[test]
     fn proof_colors_and_the_gamut_warning_show_through_proof_setups_profile() {
@@ -5873,66 +6017,9 @@ mod tests {
     }
 
     fn test_app() -> App {
-        let (_tx, rx) = channel();
         App {
-            theme: Theme::default(),
-            theme_rx: rx,
             editor: Some(editor_with_selection()),
-            parked: Vec::new(),
-            tab: 0,
-            layers: LayersPanel::default(),
-            properties: PropertiesPanel::default(),
-            history: HistoryPanel,
-            recent: RecentStore::default(),
-            top_tab: None,
-            histogram: HistogramPanel::default(),
-            navigator: NavigatorPanel::default(),
-            brushes: brushes::Library::default(),
-            right_tab: RightTab::default(),
-            tools: Tools::default(),
-            tools_path: None,
-            saved_tools: String::new(),
-            opening: VecDeque::new(),
-            picking: None,
-            merging: None,
-            file_job: None,
-            batch_export: None,
-            dialog: None,
-            filter_preview: None,
-            status: None,
-            filters: FilterSettings::default(),
-            defaults: FilterSettings::default(),
-            allow_close: false,
-            title: String::new(),
-            drawing: None,
-            move_from: None,
-            transform_drag: None,
-            crop: None,
-            crop_drag: None,
-            liquify_at: None,
-            objects: Default::default(),
-            script: VecDeque::new(),
-            clipboard: Clipboard::new(false),
-            pasting: None,
-            from_clipboard: None,
-            pending_drops: Vec::new(),
-            v_down: false,
-            tablet: None,
-            pen_moves: Vec::new(),
-            pen: None,
-            monitor: None,
-            proof: Default::default(),
-            content_fill: ContentFill::default(),
-            denoising: Default::default(),
-            upscaling: Default::default(),
-            aligning: None,
-            select_subject: SelectSubject::default(),
-            face_selection: FaceSelection::default(),
-            whitening: Default::default(),
-            face_liquify: Default::default(),
-            body_liquify: Default::default(),
-            models: HashMap::new(),
-            models_check: None,
+            ..App::headless(FilterSettings::default(), FilterSettings::default())
         }
     }
 
@@ -10056,6 +10143,20 @@ mod tests {
         assert!(names.contains(&"Smooth Skin") && names.contains(&"Dodge & Burn"));
         assert_eq!(editor.undo_label(), Some("Auto Retouch"));
         assert_eq!(app.filters.auto_retouch, crate::auto_retouch::Preset::Natural.settings());
+    }
+
+    #[test]
+    fn run_steps_waits_for_the_steps_and_says_when_one_cant_run() {
+        let ctx = egui::Context::default();
+        let mut app = App::headless(FilterSettings::default(), FilterSettings::default());
+        let image = omapix_engine::Raster::new(64, 48, vec![[30000, 30000, 30000, 65535]; 64 * 48]);
+        let doc = Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
+        let (doc, _) = app.run_steps(doc, &["NewLayer", "GaussianBlur"], &ctx).unwrap();
+        assert_eq!(doc.layers.len(), 2);
+        assert!(app.editor.is_none());
+        let refused = app.run_steps(doc.clone(), &["SaveSelection"], &ctx);
+        assert_eq!(refused.err().as_deref(), Some("Save Selection can't be used on this image now"));
+        assert_eq!(app.run_steps(doc, &["Juggle"], &ctx).err().as_deref(), Some("can't understand \"Juggle\""));
     }
 
     #[test]

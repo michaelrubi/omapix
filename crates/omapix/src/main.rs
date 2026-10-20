@@ -23,6 +23,7 @@ mod history_panel;
 mod hotkeys;
 mod layers_panel;
 mod live;
+mod mcp;
 mod monitor;
 mod navigator_panel;
 mod object_selection;
@@ -50,6 +51,11 @@ fn main() -> eframe::Result {
     // `omapix --round-trip image.tif` is how darktable sends an image (see
     // darktable/omapix.lua): saving also writes it back to the TIFF.
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    // `omapix --mcp` serves the Model Context Protocol for AI agents (see mcp.rs).
+    if args.first().is_some_and(|a| a == "--mcp") {
+        mcp::serve(std::io::stdin().lock(), std::io::stdout().lock());
+        return Ok(());
+    }
     let round_trip = args.first().is_some_and(|a| a == "--round-trip");
     if round_trip {
         args.remove(0);
