@@ -527,13 +527,13 @@ What Omapix needs before people other than Michael can install it, rely on it an
   - Next: put it on the AUR, so `yay -S omapix-git` works.
   - Later: other distributions, if someone will look after them.
 - **A first release:** tag `v0.1.0` once the items here that affect users are done, with a short list of what's in it, and an `omapix` package built from the tag beside `omapix-git`. Until then the version in `Cargo.toml` means nothing.
-- **Tests that don't depend on how busy the machine is.** Three wait a fixed time for background work and fail when the CPU is busy (seen with a release build running beside them): `batch_export_runs_in_the_background_and_says_what_failed`, `select_and_mask_previews_in_red_then_applies_cancels_or_makes_a_mask` and `a_layer_in_a_pass_through_group_moves_live`. They need fixing before CI, which runs on slower machines.
-- **CI:** `cargo test` and `cargo clippy` on every pull request. Neither needs a display, a GPU or the models, only `lcms2`.
-- **Formatting:** the code isn't formatted as rustfmt would (it differs from rustfmt's defaults in about 1,600 places, and still in 1,000 at a line width of 160), so a contributor with format-on-save rewrites every file they touch. Either add a `rustfmt.toml` and format everything once, in a commit of its own, or keep saying not to in CONTRIBUTING.md.
-- **AI models without darktable.** SAM 2.1, NIND and RealPLKSR have no download URL, so Object Selection, Denoise and upscaling need darktable installed and its models fetched from its preferences. They need URLs in `models.txt`.
+- ~~**Tests that don't depend on how busy the machine is**~~ (done): batch export, Select and Mask's preview and the live view's stack are waited for on the channel their worker answers on, with 60 s only as a safety net, where before the tests waited a fixed time. `cargo test` passed 20 times in a row with release builds running beside it.
+- ~~**CI**~~ (done): `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` in an Arch container on pull requests and pushes to main. Forgejo has none.
+- ~~**Formatting**~~ (done): `rustfmt.toml` (160 columns), everything formatted once in a commit of its own, listed in `.git-blame-ignore-revs`.
+- ~~**AI models without darktable**~~ (done): SAM 2.1, NIND and RealPLKSR are downloaded by `scripts/fetch-models.sh` from darktable-ai's `release-5.6.0`, the same files darktable installs (checked by SHA-256), taken out of its zipped `.dtmodel`s with `bsdtar`.
 - **AI features for packaged installs:**
-  - Messages that say "run scripts/fetch-models.sh" should name `omapix-fetch-models` when that's what's installed.
-  - ONNX Runtime is only looked for at `/usr/lib/libonnxruntime.so` (or `OMAPIX_ORT_LIBRARY`), which is right for Arch and not for most other distributions.
+  - ~~Messages name the right command~~ (done): `omapix-fetch-models` when Omapix runs from `/usr/bin`, `scripts/fetch-models.sh` otherwise (`omapix_ai::models::fetch_command`).
+  - ~~ONNX Runtime found on other distributions~~ (done): after `OMAPIX_ORT_LIBRARY`, `libonnxruntime.so` in `/usr/lib`, `/usr/lib64`, `/usr/lib/x86_64-linux-gnu` and `/usr/local/lib`, then wherever `dlopen` finds it.
   - Only CUDA is asked for, so AMD and Intel GPUs run the models on the CPU. ONNX Runtime's ROCm, MIGraphX and OpenVINO providers could be tried by someone with the hardware.
 - **Other hardware and desktops.** Omapix has only run on Hyprland with an NVIDIA GPU. To try, and write down what happens: AMD and Intel GPUs, GNOME, KDE, Sway and niri, X11 (the tablet and clipboard code is Wayland's), and a desktop with no Omarchy theme (it falls back to Catppuccin Mocha).
 - **Screenshots** in the README: the window with a portrait open, and Auto Retouch's layers.

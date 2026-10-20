@@ -161,7 +161,7 @@ fn error(e: impl std::fmt::Display) -> String {
 }
 
 fn load(id: &str, file: &str) -> Result<Session> {
-    let files = find_model(id).ok_or_else(|| format!("Face analysis needs the {id} model: run scripts/fetch-models.sh"))?;
+    let files = find_model(id).ok_or_else(|| format!("Face analysis needs the {id} model: run {}", crate::models::fetch_command()))?;
     session(&files[file])
 }
 

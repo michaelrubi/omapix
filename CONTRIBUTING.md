@@ -111,9 +111,10 @@ crates/
   the pattern to copy.
 - **Keep changes small.** No new abstraction until something needs it, and
   no new dependency without a reason that's worth its build time.
-- **Don't run `cargo fmt`.** The code isn't formatted with rustfmt's
-  defaults, and reformatting a file buries the change in it. Match the
-  code around yours, and turn off format-on-save.
+- **Run `cargo fmt`** (`rustfmt.toml` sets 160 columns). CI checks it,
+  with `cargo clippy --all-targets -- -D warnings` and `cargo test`. To
+  skip the one commit that formatted everything in `git blame`:
+  `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
 
 ## Pull requests
 

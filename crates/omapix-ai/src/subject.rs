@@ -20,7 +20,7 @@ pub struct Subject {
 
 impl Subject {
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL).ok_or_else(|| format!("Select Subject needs the {MODEL} model: run scripts/fetch-models.sh"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Select Subject needs the {MODEL} model: run {}", crate::models::fetch_command()))?;
         Ok(Self {
             session: session(&files["model_fp16.onnx"])?,
         })

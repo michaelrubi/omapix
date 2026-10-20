@@ -20,7 +20,7 @@ pub struct Lama {
 
 impl Lama {
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL).ok_or_else(|| format!("Content-Aware Fill needs the {MODEL} model: run scripts/fetch-models.sh"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Content-Aware Fill needs the {MODEL} model: run {}", crate::models::fetch_command()))?;
         Ok(Self {
             session: session(&files["lama_fp32.onnx"])?,
         })
