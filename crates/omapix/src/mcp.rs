@@ -29,20 +29,27 @@ const ADJUSTMENTS: [&str; 7] = [
 const VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 
 /// Answer requests from `input` on `output` until `input` ends.
-pub fn serve(input: impl BufRead, mut output: impl Write) {
+pub fn serve(input: impl BufRead, output: impl Write) {
     let (filters, defaults) = FilterSettings::load();
     let mut server = Server {
         app: App::headless(filters.in_memory(), defaults),
         ctx: egui::Context::default(),
     };
+    serve_lines(input, output, |line| server.handle(line));
+}
+
+/// Answer each line of `input` on `output` with `handle`, until `input`
+/// ends (here and on the live session's socket).
+pub(crate) fn serve_lines(input: impl BufRead, mut output: impl Write, mut handle: impl FnMut(&str) -> Option<Value>) {
     for line in input.lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = server.handle(&line) {
-            let _ = writeln!(output, "{reply}");
-            let _ = output.flush();
+        if let Some(reply) = handle(&line)
+            && writeln!(output, "{reply}").and_then(|_| output.flush()).is_err()
+        {
+            break;
         }
     }
 }
@@ -55,41 +62,59 @@ struct Server {
 /// A JSON-RPC error: its code and message.
 type RpcError = (i64, String);
 
-impl Server {
-    /// The reply to one line, or `None` for a notification.
-    fn handle(&mut self, line: &str) -> Option<Value> {
-        let message: Value = match serde_json::from_str(line) {
-            Ok(message) => message,
-            Err(e) => return Some(reply(Value::Null, Err((-32700, format!("Parse error: {e}"))))),
-        };
-        let id = message.get("id").cloned()?;
-        let Some(method) = message["method"].as_str() else {
-            return Some(reply(id, Err((-32600, "Invalid request".into()))));
-        };
-        let result = match method {
-            "initialize" => {
-                let asked = message["params"]["protocolVersion"].as_str();
-                let version = asked.filter(|v| VERSIONS.contains(v)).unwrap_or(VERSIONS[VERSIONS.len() - 1]);
-                Ok(json!({
-                    "protocolVersion": version,
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "omapix", "version": env!("CARGO_PKG_VERSION") },
-                }))
+/// The reply to one JSON-RPC line, or `None` for a notification: the
+/// protocol's own methods, and `tools/call` through `call`, which gives
+/// `None` for a tool it doesn't have. A tool that fails says why in its
+/// result, as the protocol asks; only an unknown tool is a JSON-RPC error.
+pub(crate) fn respond(line: &str, tools: impl FnOnce() -> Value, call: impl FnOnce(&str, &Value) -> Option<Result<Value, String>>) -> Option<Value> {
+    let message: Value = match serde_json::from_str(line) {
+        Ok(message) => message,
+        Err(e) => return Some(reply(Value::Null, Err((-32700, format!("Parse error: {e}"))))),
+    };
+    let id = message.get("id").cloned()?;
+    let Some(method) = message["method"].as_str() else {
+        return Some(reply(id, Err((-32600, "Invalid request".into()))));
+    };
+    let result = match method {
+        "initialize" => {
+            let asked = message["params"]["protocolVersion"].as_str();
+            let version = asked.filter(|v| VERSIONS.contains(v)).unwrap_or(VERSIONS[VERSIONS.len() - 1]);
+            Ok(json!({
+                "protocolVersion": version,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "omapix", "version": env!("CARGO_PKG_VERSION") },
+            }))
+        }
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({ "tools": tools() })),
+        "tools/call" => {
+            let name = message["params"]["name"].as_str().unwrap_or_default();
+            match call(name, &message["params"]["arguments"]) {
+                Some(Ok(value)) => Ok(json!({
+                    "content": [{ "type": "text", "text": value.to_string() }],
+                    "structuredContent": value,
+                    "isError": false,
+                })),
+                Some(Err(e)) => Ok(json!({
+                    "content": [{ "type": "text", "text": e }],
+                    "isError": true,
+                })),
+                None => Err((-32602, format!("Unknown tool: {name}"))),
             }
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
-            "tools/call" => self.call(&message["params"]),
-            _ => Err((-32601, format!("Method not found: {method}"))),
-        };
-        Some(reply(id, result))
+        }
+        _ => Err((-32601, format!("Method not found: {method}"))),
+    };
+    Some(reply(id, result))
+}
+
+impl Server {
+    fn handle(&mut self, line: &str) -> Option<Value> {
+        respond(line, tools, |name, args| self.call(name, args))
     }
 
-    /// Run a tool. A tool that fails says why in its result, as the
-    /// protocol asks; only an unknown tool is a JSON-RPC error.
-    fn call(&mut self, params: &Value) -> Result<Value, RpcError> {
-        let name = params["name"].as_str().unwrap_or_default();
-        let args = &params["arguments"];
-        let result = match name {
+    /// Run a tool, or `None` if there's no such tool.
+    fn call(&mut self, name: &str, args: &Value) -> Option<Result<Value, String>> {
+        Some(match name {
             "inspect_document" => path(args, "path").and_then(|p| load(&p)).map(|doc| inspect(&doc)),
             "apply_frequency_separation" => {
                 if let Some(radius) = args["radius"].as_f64() {
@@ -128,18 +153,7 @@ impl Server {
                 write(&doc, &output, args)?;
                 Ok(json!({ "output": output }))
             })(),
-            _ => return Err((-32602, format!("Unknown tool: {name}"))),
-        };
-        Ok(match result {
-            Ok(value) => json!({
-                "content": [{ "type": "text", "text": value.to_string() }],
-                "structuredContent": value,
-                "isError": false,
-            }),
-            Err(e) => json!({
-                "content": [{ "type": "text", "text": e }],
-                "isError": true,
-            }),
+            _ => return None,
         })
     }
 
@@ -186,7 +200,7 @@ fn write(doc: &Document, path: &Path, args: &Value) -> Result<(), String> {
 }
 
 /// The size, colour profile and layers of `doc`, top layer first.
-fn inspect(doc: &Document) -> Value {
+pub(crate) fn inspect(doc: &Document) -> Value {
     let layers: Vec<Value> = doc
         .layers
         .iter()
