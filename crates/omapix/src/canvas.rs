@@ -449,8 +449,8 @@ impl Canvas {
         self.render.as_ref()
     }
 
-    /// Lay the canvas out at `zoom` over `rect`, as a frame would.
-    #[cfg(test)]
+    /// Lay the canvas out at `zoom` over `rect`, as a frame would, for tests
+    /// and `omapix --mcp`, which have no window.
     pub fn lay_out_for_test(&mut self, rect: Rect, zoom: f32) {
         self.rect = rect;
         self.ppp = 1.0;
