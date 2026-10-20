@@ -1,5 +1,6 @@
 //! ONNX Runtime, opened once from the system (`OMAPIX_ORT_LIBRARY`, or
-//! `/usr/lib/libonnxruntime.so`), and sessions on the GPU when it can.
+//! `libonnxruntime.so` in the usual places, or wherever `dlopen` finds it),
+//! and sessions on the GPU when it can.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -14,7 +15,7 @@ use crate::Result;
 fn init() -> Result<()> {
     static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     INIT.get_or_init(|| {
-        let library = std::env::var("OMAPIX_ORT_LIBRARY").unwrap_or_else(|_| "/usr/lib/libonnxruntime.so".into());
+        let library = std::env::var("OMAPIX_ORT_LIBRARY").unwrap_or_else(|_| library());
         // Arch's CUDA provider isn't linked against cuDNN, so it has to be
         // loaded already, where the provider can see it. Without it, CUDA
         // just isn't used.
@@ -31,6 +32,16 @@ fn init() -> Result<()> {
         Ok(())
     })
     .clone()
+}
+
+/// Where ONNX Runtime is: in the first of the usual places that has it,
+/// otherwise by its name alone, for `dlopen` to search for.
+fn library() -> String {
+    ["/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/local/lib"]
+        .iter()
+        .map(|dir| format!("{dir}/libonnxruntime.so"))
+        .find(|path| Path::new(path).exists())
+        .unwrap_or_else(|| "libonnxruntime.so".into())
 }
 
 /// A session for the model in `path`: on the GPU with CUDA if it works,

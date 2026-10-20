@@ -528,10 +528,10 @@ What Omapix needs before people other than Michael can install it, rely on it an
 - ~~**Tests that don't depend on how busy the machine is**~~ (done): batch export, Select and Mask's preview and the live view's stack are waited for on the channel their worker answers on, with 60 s only as a safety net, where before the tests waited a fixed time. `cargo test` passed 20 times in a row with release builds running beside it.
 - ~~**CI**~~ (done): `.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` in an Arch container on pull requests and pushes to main. Forgejo has none.
 - ~~**Formatting**~~ (done): `rustfmt.toml` (160 columns), everything formatted once in a commit of its own, listed in `.git-blame-ignore-revs`.
-- **AI models without darktable.** SAM 2.1, NIND and RealPLKSR have no download URL, so Object Selection, Denoise and upscaling need darktable installed and its models fetched from its preferences. They need URLs in `models.txt`.
+- ~~**AI models without darktable**~~ (done): SAM 2.1, NIND and RealPLKSR are downloaded by `scripts/fetch-models.sh` from darktable-ai's `release-5.6.0`, the same files darktable installs (checked by SHA-256), taken out of its zipped `.dtmodel`s with `bsdtar`.
 - **AI features for packaged installs:**
-  - Messages that say "run scripts/fetch-models.sh" should name `omapix-fetch-models` when that's what's installed.
-  - ONNX Runtime is only looked for at `/usr/lib/libonnxruntime.so` (or `OMAPIX_ORT_LIBRARY`), which is right for Arch and not for most other distributions.
+  - ~~Messages name the right command~~ (done): `omapix-fetch-models` when Omapix runs from `/usr/bin`, `scripts/fetch-models.sh` otherwise (`omapix_ai::models::fetch_command`).
+  - ~~ONNX Runtime found on other distributions~~ (done): after `OMAPIX_ORT_LIBRARY`, `libonnxruntime.so` in `/usr/lib`, `/usr/lib64`, `/usr/lib/x86_64-linux-gnu` and `/usr/local/lib`, then wherever `dlopen` finds it.
   - Only CUDA is asked for, so AMD and Intel GPUs run the models on the CPU. ONNX Runtime's ROCm, MIGraphX and OpenVINO providers could be tried by someone with the hardware.
 - **Other hardware and desktops.** Omapix has only run on Hyprland with an NVIDIA GPU. To try, and write down what happens: AMD and Intel GPUs, GNOME, KDE, Sway and niri, X11 (the tablet and clipboard code is Wayland's), and a desktop with no Omarchy theme (it falls back to Catppuccin Mocha).
 - **Screenshots** in the README: the window with a portrait open, and Auto Retouch's layers.

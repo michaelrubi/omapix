@@ -183,8 +183,9 @@ goes in the engine, where it can be tested without models.
 - `scripts/fetch-models.sh` downloads the default set with `curl`, checks
   the checksums, and prints each model's size and licence before
   downloading. Omapix itself never touches the network. SAM 2.1, NIND and
-  RealPLKSR have no download URL yet: darktable installs them (as zipped
-  `.dtmodel`s).
+  RealPLKSR come from darktable's release of them (zipped `.dtmodel`s from
+  darktable-ai's `release-5.6.0`): the script downloads each zip once and
+  takes the files out (`#path` after the URL in `models.txt`).
 - A Help › AI Models dialog lists what's installed, where from, the licence
   and GPU/CPU, and says how to run the script for what's missing.
 

@@ -64,7 +64,8 @@ impl GenerativeFill {
     pub fn open(ctx: &egui::Context, editor: &mut Editor) -> Result<Self, String> {
         if omapix_ai::find_model(flux::MODEL).is_none() {
             return Err(format!(
-                "Generative Fill needs the FLUX.2 klein model: run scripts/fetch-models.sh {}",
+                "Generative Fill needs the FLUX.2 klein model: run {} {}",
+                omapix_ai::models::fetch_command(),
                 flux::MODEL
             ));
         }

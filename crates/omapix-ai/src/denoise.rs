@@ -1,5 +1,5 @@
 //! NIND (Benoit Brummer's UNet trained on the Natural Image Noise Dataset,
-//! GPL-3.0), which darktable installs as `denoise-nind`: Filter › Noise ›
+//! GPL-3.0), as darktable packages it (`denoise-nind`): Filter › Noise ›
 //! Denoise. It sees a 768 × 768 square; the engine's `denoise` module
 //! cuts the image into them and puts the answers back together.
 
@@ -21,7 +21,7 @@ pub struct Nind {
 
 impl Nind {
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL).ok_or_else(|| format!("Denoise needs the {MODEL} model, which darktable installs"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Denoise needs the {MODEL} model: run {}", crate::models::fetch_command()))?;
         Ok(Self {
             session: session(&files["model.onnx"])?,
         })
@@ -42,7 +42,7 @@ impl Nind {
 mod tests {
     use super::*;
 
-    /// Needs the model (darktable installs it). How well it denoises is
+    /// Needs the model (scripts/fetch-models.sh). How well it denoises is
     /// for real photos: see examples/denoise.rs.
     #[test]
     #[ignore]

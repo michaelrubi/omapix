@@ -26,7 +26,7 @@ pub struct Upscaler {
 impl Upscaler {
     /// The model that enlarges by `factor`: 2 or 4.
     pub fn load(factor: usize) -> Result<Self> {
-        let files = find_model(MODEL).ok_or_else(|| format!("AI upscaling needs the {MODEL} model, which darktable installs"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("AI upscaling needs the {MODEL} model: run {}", crate::models::fetch_command()))?;
         let (file, size) = if factor == 2 { ("model_x2.onnx", 512) } else { ("model_x4.onnx", 256) };
         let session = session(&files[file])?;
         let input = session.inputs()[0].name().to_owned();
@@ -48,7 +48,7 @@ impl Upscaler {
 mod tests {
     use super::*;
 
-    /// Needs the model (darktable installs it). How well it enlarges is
+    /// Needs the model (scripts/fetch-models.sh). How well it enlarges is
     /// for real photos: see examples/upscale.rs.
     #[test]
     #[ignore]

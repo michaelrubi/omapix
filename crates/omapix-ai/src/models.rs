@@ -30,9 +30,24 @@ pub struct File {
     pub name: &'static str,
     pub bytes: u64,
     pub sha256: &'static str,
-    /// Where scripts/fetch-models.sh downloads it from; `None` if darktable
-    /// installs it.
+    /// Where scripts/fetch-models.sh downloads it from (ending in `#path`:
+    /// the file at that path in the zip there).
     pub url: Option<&'static str>,
+}
+
+/// The command that downloads the models, for messages: the package's
+/// `omapix-fetch-models` when Omapix runs from `/usr/bin`, the repository's
+/// script otherwise.
+pub fn fetch_command() -> &'static str {
+    fetch_command_for(&std::env::current_exe().unwrap_or_default())
+}
+
+fn fetch_command_for(exe: &Path) -> &'static str {
+    if exe.starts_with("/usr/bin") {
+        "omapix-fetch-models"
+    } else {
+        "scripts/fetch-models.sh"
+    }
 }
 
 /// Every model Omapix uses.
@@ -168,13 +183,28 @@ mod tests {
     fn the_manifest_lists_each_model_with_its_files() {
         let sam = models().iter().find(|m| m.id == crate::sam::MODEL).unwrap();
         assert_eq!(sam.files.iter().map(|f| f.name).collect::<Vec<_>>(), ["encoder.onnx", "decoder.onnx"]);
-        assert!(sam.files.iter().all(|f| f.url.is_none() && f.sha256.len() == 64));
-        for id in [crate::lama::MODEL, crate::subject::MODEL, crate::flux::MODEL] {
-            let model = models().iter().find(|m| m.id == id).unwrap();
-            assert!(model.files.iter().all(|f| f.url.is_some_and(|u| u.starts_with("https://"))), "{id}");
+        // From darktable's release, out of its zip.
+        let darktable = "https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/mask-object-sam21-small.dtmodel#";
+        assert_eq!(sam.files[0].url, Some(&*format!("{darktable}mask-object-sam21-small/encoder.onnx")));
+        for model in models() {
+            assert!(
+                model
+                    .files
+                    .iter()
+                    .all(|f| f.url.is_some_and(|u| u.starts_with("https://")) && f.sha256.len() == 64),
+                "{}",
+                model.id
+            );
             // Only the big one has to be asked for.
-            assert_eq!(model.optional, id == crate::flux::MODEL);
+            assert_eq!(model.optional, model.id == crate::flux::MODEL);
         }
+    }
+
+    #[test]
+    fn messages_name_the_packaged_command_when_installed_by_the_package() {
+        assert_eq!(fetch_command_for(Path::new("/usr/bin/omapix")), "omapix-fetch-models");
+        assert_eq!(fetch_command_for(Path::new("/home/m/.local/bin/omapix")), "scripts/fetch-models.sh");
+        assert_eq!(fetch_command(), "scripts/fetch-models.sh");
     }
 
     #[test]
