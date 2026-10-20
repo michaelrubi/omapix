@@ -7439,8 +7439,9 @@ mod tests {
             top = doc.next_layer_id();
             doc.layers.push(Layer::from_pixels(top, "Second frame", scene.translated(20, 10, [0; 4])));
         });
+        // Until the result's in and the edit made with it is committed.
         let finish = |app: &mut App| {
-            while app.aligning.is_some() {
+            while app.aligning.is_some() || app.editor.as_ref().unwrap().busy().is_some() {
                 std::thread::sleep(Duration::from_millis(5));
                 app.editor.as_mut().unwrap().update(&ctx);
                 app.poll(&ctx);
