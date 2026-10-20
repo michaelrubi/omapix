@@ -48,7 +48,10 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   export target that brings the result back beside the raw.
 
 Shortcuts follow Photoshop, and can be changed in
-`~/.config/omapix/hotkeys.toml`. See [docs/DESIGN.md](docs/DESIGN.md) for
+`~/.config/omapix/hotkeys.toml`. The guide walks through the main
+workflows: [the darktable round trip](docs/guide/darktable-round-trip.md),
+[frequency separation](docs/guide/frequency-separation.md) and
+[Auto Retouch](docs/guide/auto-retouch.md). See [docs/DESIGN.md](docs/DESIGN.md) for
 the design and the main shortcuts, [docs/ROADMAP.md](docs/ROADMAP.md) for
 what's done and what's next, and [docs/AI.md](docs/AI.md) for how the AI
 features work.

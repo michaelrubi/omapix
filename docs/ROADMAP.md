@@ -440,7 +440,7 @@ The goal is Evoto-style one-click cleanup, running locally on the GPU with no su
     - Too slow on the CPU: fp16 on ONNX Runtime's CPU provider took over 10 minutes. Without CUDA it needs the fp32 export (970 MB) or a lighter model such as MODNet.
   - ~~**Models**~~ (done): `crates/omapix-ai/models.txt` lists every model's files with their sizes, SHA-256 and where to download them; Omapix and `scripts/fetch-models.sh` both read it. Omapix finds a model in its own folder, or anywhere in darktable's models or in the folders listed in `~/.config/omapix/model_folders` (one a line) by size and checksum, whatever the file's called; the script uses such a copy rather than downloading it again. Help › AI Models lists each model, what uses it, its licence, where it was found and whether it runs on the GPU, or how to get it.
   - Select › Subject and the others are greyed out when their model isn't on disk, saying which model they need when hovered (Content-Aware Fill isn't: it copies texture instead, as Texture Fill does). Models are looked for on a thread at startup, and again whenever Help › AI Models opens (so after running the script, open it to pick up the new model). The Object Selection tools still say in the status bar when SAM is missing.
-  - Later: a download URL for SAM 2.1, for those without darktable, and a tiny ONNX test fixture.
+  - ~~A download URL for SAM 2.1~~ (done, with NIND's and RealPLKSR's: darktable's own release). Later: a tiny ONNX test fixture.
 - Skin and face-part segmentation (skin, eyes, lips, teeth, hair) to make masks automatically, per face and per person.
   - ~~**Select › Skin and Hair**~~ (done): select all the skin (faces, necks, arms, hands) or all the hair in the image in one step, with Shift to add to the selection and Alt to take away. Skin leaves out each face's eyes, brows and lips (with the teeth), grown a little and feathered, so smoothing through it won't touch them. Three small models find faces (YuNet), put 478 points on each (MediaPipe Face Landmarker) and tell hair, face skin and body skin apart (MediaPipe multiclass selfie segmentation); `scripts/fetch-models.sh` installs them (21 MB). The rough mask is snapped to the photo's edges with the guided filter, as for Object Selection. About 0.45 s at 24 MP on the GPU, plus about a second to load the models the first time.
     - Known gaps: skin-coloured things (an orange pumpkin) can come out as skin; small patches of skin in a full-length shot (a shin) can be missed; a face in profile gets no feature cut-outs. Splitting skin between people, and a closer look round each person, are next.
@@ -535,8 +535,8 @@ What Omapix needs before people other than Michael can install it, rely on it an
   - Only CUDA is asked for, so AMD and Intel GPUs run the models on the CPU. ONNX Runtime's ROCm, MIGraphX and OpenVINO providers could be tried by someone with the hardware.
 - **Other hardware and desktops.** Omapix has only run on Hyprland with an NVIDIA GPU. To try, and write down what happens: AMD and Intel GPUs, GNOME, KDE, Sway and niri, X11 (the tablet and clipboard code is Wayland's), and a desktop with no Omarchy theme (it falls back to Catppuccin Mocha).
 - **Screenshots** in the README: the window with a portrait open, and Auto Retouch's layers.
-- **Issue templates** for bug reports, asking for what CONTRIBUTING.md lists.
-- **A user guide.** DESIGN.md's shortcut table covers the basics, and the rest is only in the roadmap's descriptions of finished items. One page for each of the main workflows (darktable round trip, frequency separation, Auto Retouch) would do.
+- ~~**Issue templates**~~ (done): `.github/ISSUE_TEMPLATE/bug_report.yml` asks for what CONTRIBUTING.md lists.
+- ~~**A user guide**~~ (done): `docs/guide/` has a page for each of the main workflows, the darktable round trip, frequency separation and Auto Retouch, linked from the README.
 
 ## Borrowing from PhotoCraft
 
