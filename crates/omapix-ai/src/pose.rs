@@ -130,7 +130,7 @@ pub struct Poses {
 
 impl Poses {
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL).ok_or_else(|| format!("Body Reshape needs the {MODEL} model: run scripts/fetch-models.sh"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Body Reshape needs the {MODEL} model: run {}", crate::models::fetch_command()))?;
         Ok(Self {
             detector: session(&files["pose_detection.onnx"])?,
             landmarker: session(&files["pose_landmarks_detector_heavy.onnx"])?,

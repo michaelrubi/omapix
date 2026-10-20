@@ -4,11 +4,11 @@
 #
 # model|id|name|used by|licence|author|source|task|arch
 # optional|… (as model: only downloaded when the script is given its id)
-# file|id|file name|bytes|SHA-256|URL (none: darktable installs it)
+# file|id|file name|bytes|SHA-256|URL (with #path: that file in the zip at the URL)
 
 model|mask-object-sam21-small|SAM 2.1 Hiera Small|Object Selection, Quick Selection|Apache-2.0 (trained on SA-V, CC BY 4.0, and SA-1B, Meta's research licence)|Meta|https://github.com/facebookresearch/sam2|mask|sam2
-file|mask-object-sam21-small|encoder.onnx|162683048|82ee8774d6c362de06b35481ff6e6e68bb33ed5973aee8c45c606dfae7300d06|
-file|mask-object-sam21-small|decoder.onnx|20603850|606d43f1f16e2c61dafb93d7781f7461c9604baf10aaf372ddf77e3bdddb1e8d|
+file|mask-object-sam21-small|encoder.onnx|162683048|82ee8774d6c362de06b35481ff6e6e68bb33ed5973aee8c45c606dfae7300d06|https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/mask-object-sam21-small.dtmodel#mask-object-sam21-small/encoder.onnx
+file|mask-object-sam21-small|decoder.onnx|20603850|606d43f1f16e2c61dafb93d7781f7461c9604baf10aaf372ddf77e3bdddb1e8d|https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/mask-object-sam21-small.dtmodel#mask-object-sam21-small/decoder.onnx
 
 model|mask-subject-birefnet-portrait|BiRefNet portrait|Select Subject|MIT (trained on P3M-10k, MIT, and TR-humans, Apache-2.0)|Peng Zheng et al. (BiRefNet), onnx-community (ONNX export)|https://huggingface.co/onnx-community/BiRefNet-portrait-ONNX|mask|birefnet
 file|mask-subject-birefnet-portrait|model_fp16.onnx|489666272|4c05930c0b6f1418d02eb1de81c46fe37638ba54f5a93adeb5c674521db10110|https://huggingface.co/onnx-community/BiRefNet-portrait-ONNX/resolve/dd7167f6a8b54ff7efc29a4c988938d79866464f/onnx/model_fp16.onnx
@@ -30,7 +30,7 @@ file|pose-landmarks-mediapipe|pose_detection.onnx|15058101|72081da8481170bc6d8fa
 file|pose-landmarks-mediapipe|pose_landmarks_detector_heavy.onnx|55181539|717c32b11d95e214612e2ff0edf825c38a8dd24c9b7c99f34f52f89431c68453|https://huggingface.co/unity/inference-engine-blaze-pose/resolve/d96e13766db93eaaac6ad398d7b01f1c94c7ff6e/models/pose_landmarks_detector_heavy.onnx
 
 model|denoise-nind|NIND denoiser|Denoise|GPL-3.0 (trained on NIND, CC BY 4.0 and CC0)|Benoit Brummer (UCLouvain)|https://github.com/trougnouf/nind-denoise|denoise|unet
-file|denoise-nind|model.onnx|59138823|5d615c5026a3c579455b9082f72b91e109adb54f4125b5b5cde45983bd6776b2|
+file|denoise-nind|model.onnx|59138823|5d615c5026a3c579455b9082f72b91e109adb54f4125b5b5cde45983bd6776b2|https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/denoise-nind.dtmodel#denoise-nind/model.onnx
 
 optional|fill-flux2-klein-4b|FLUX.2 klein 4B (int4)|Generative Fill|Apache-2.0|Black Forest Labs (FLUX.2 klein), hlhc (ONNX export)|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4|inpaint|flux2-klein
 file|fill-flux2-klein-4b|transformer.onnx|4732855|7a27b7c6512396ac08e06deefa6365c2fb709a5eb5eb3a13be358838b6d5156e|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/transformer.onnx
@@ -42,5 +42,5 @@ file|fill-flux2-klein-4b|vae_decoder.onnx|198603667|20817bfe5cc1a81043bc3dc320c4
 file|fill-flux2-klein-4b|tokenizer.json|11422650|be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506|https://huggingface.co/hlhc/FLUX.2-klein-4B-onnx-int4/resolve/41667f618148856aeca7722a080f21e4a49db4fa/tokenizer/tokenizer.json
 
 model|upscale-realplksr|RealPLKSR|Image Size|MIT (trained on DF2K: DIV2K, and Flickr2K, which has no explicit licence)|Dongheon Lee et al. (University of Seoul)|https://github.com/dslisleedh/PLKSR|upscale|plksr
-file|upscale-realplksr|model_x2.onnx|29627920|d7abb65092f3808d3aa255ffdab42b1d672883915d90adbdd321204168b9f293|
-file|upscale-realplksr|model_x4.onnx|29711010|8ce692652494e2e5c31e1f7c7ab61eb084e9a450cde727a374f5d6746cfe054b|
+file|upscale-realplksr|model_x2.onnx|29627920|d7abb65092f3808d3aa255ffdab42b1d672883915d90adbdd321204168b9f293|https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/upscale-realplksr.dtmodel#upscale-realplksr/model_x2.onnx
+file|upscale-realplksr|model_x4.onnx|29711010|8ce692652494e2e5c31e1f7c7ab61eb084e9a450cde727a374f5d6746cfe054b|https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/upscale-realplksr.dtmodel#upscale-realplksr/model_x4.onnx

@@ -49,7 +49,7 @@ fn error(e: impl std::fmt::Display) -> String {
 impl Sam {
     /// Load the model from Omapix's or darktable's model folder.
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL).ok_or_else(|| format!("Object Selection needs the {MODEL} model: install it from darktable's AI preferences"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Object Selection needs the {MODEL} model: run {}", crate::models::fetch_command()))?;
         Ok(Self {
             encoder: session(&files["encoder.onnx"])?,
             decoder: session(&files["decoder.onnx"])?,

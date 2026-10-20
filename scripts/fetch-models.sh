@@ -5,6 +5,8 @@
 # in darktable's models or in a folder listed in ~/.config/omapix/model_folders,
 # is used where it is rather than downloaded again. Optional models (the big
 # ones) are only downloaded when named: fetch-models.sh fill-flux2-klein-4b
+# A URL ending in #path is a zip (darktable's .dtmodel), downloaded once, and
+# the file is taken from it at that path.
 set -euo pipefail
 
 manifest="$(dirname "$0")/../crates/omapix-ai/models.txt"
@@ -32,6 +34,22 @@ find_shared() {
   done
 }
 
+# Zips downloaded so far, deleted when the script ends.
+archives=$(mktemp -d)
+trap 'rm -rf "$archives"' EXIT
+
+# Downloads `url` to `out`, or with #path, the file at path in the zip there.
+download() {
+  local url=$1 out=$2
+  if [[ $url == *#* ]]; then
+    local zip="$archives/$(basename "${url%%#*}")"
+    [[ -f $zip ]] || curl --fail --location --progress-bar --output "$zip" "${url%%#*}"
+    bsdtar -xOf "$zip" "${url#*#}" >"$out"
+  else
+    curl --fail --location --progress-bar --output "$out" "$url"
+  fi
+}
+
 declare -A licence author source task arch skip
 while IFS='|' read -r kind id a b c d e f g; do
   if [[ $kind == optional ]]; then
@@ -56,12 +74,10 @@ while IFS='|' read -r kind id a b c d e f g; do
         echo "  $file: already installed"
       elif found=$(find_shared "$bytes" "$sha") && [[ -n $found ]]; then
         echo "  $file: using $found"
-      elif [[ -z $url ]]; then
-        echo "  $file: missing; install it from darktable's AI preferences ($size)"
       else
         echo "  $file: downloading $size"
         mkdir -p "$dir/$id"
-        curl --fail --location --progress-bar --output "$target.part" "$url"
+        download "$url" "$target.part"
         if ! echo "$sha  $target.part" | sha256sum --check --status; then
           rm -f "$target.part"
           echo "  $file: checksum mismatch, removed the download" >&2

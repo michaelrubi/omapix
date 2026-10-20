@@ -38,7 +38,7 @@ const REMOVE: &str = "Remove the object, leaving only the background";
 const EXTEND: &str = "Extend the picture, continuing the scene";
 
 fn file(name: &str) -> Result<std::path::PathBuf> {
-    let files = find_model(MODEL).ok_or_else(|| format!("Generative Fill needs the FLUX.2 klein model: run scripts/fetch-models.sh {MODEL}"))?;
+    let files = find_model(MODEL).ok_or_else(|| format!("Generative Fill needs the FLUX.2 klein model: run {} {MODEL}", crate::models::fetch_command()))?;
     Ok(files[name].clone())
 }
 

@@ -3277,13 +3277,10 @@ impl App {
                                 let folder = path.parent().unwrap_or(path);
                                 ui.label(RichText::new(format!("{}{runs}", folder.display())).color(hint));
                             }
-                            None if model.files.iter().all(|f| f.url.is_none()) => {
-                                ui.label(RichText::new("Not installed: install it from darktable's AI preferences").color(warning));
-                            }
                             None => {
                                 let size: u64 = model.files.iter().map(|f| f.bytes).sum();
                                 let id = if model.optional { format!(" {}", model.id) } else { String::new() };
-                                let text = format!("Not installed: run scripts/fetch-models.sh{id} ({} MB)", size / 1_000_000);
+                                let text = format!("Not installed: run {}{id} ({} MB)", omapix_ai::models::fetch_command(), size / 1_000_000);
                                 ui.label(RichText::new(text).color(warning));
                             }
                         }
@@ -7867,11 +7864,9 @@ mod tests {
             assert!(texts.iter().any(|t| t == model.name), "{} in {texts:?}", model.name);
         }
         assert!(texts.iter().any(|t| t == "/models/sam"), "{texts:?}");
-        // The rest aren't installed: from the script, or from darktable.
+        // The rest aren't installed, and the script downloads them.
         let count = |start: &str| texts.iter().filter(|t| t.starts_with(start)).count();
-        let darktables = models.iter().filter(|m| m.files.iter().all(|f| f.url.is_none())).count();
-        assert_eq!(count("Not installed: run scripts/fetch-models.sh"), models.len() - darktables, "{texts:?}");
-        assert_eq!(count("Not installed: install it from darktable"), darktables - 1, "{texts:?}");
+        assert_eq!(count("Not installed: run scripts/fetch-models.sh"), models.len() - 1, "{texts:?}");
 
         frame(
             &mut app,
