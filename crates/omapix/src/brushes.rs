@@ -10,6 +10,7 @@ use egui::{RichText, Ui, vec2};
 use omapix_engine::abr::AbrFile;
 use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
 use omapix_engine::brushes::{Preset, presets};
+use omapix_engine::texture::Pattern;
 use omapix_engine::tiled::Tiled;
 use omapix_engine::tip::Tip;
 
@@ -120,7 +121,7 @@ fn thumbnail(brush: &Preset) -> egui::ColorImage {
 /// A stroke with `brush` on a strip `width` by `height` pixels, as a pen
 /// pressing harder in the middle would draw it: white where it paints. A
 /// brush too big for the strip is drawn smaller.
-fn stroke_picture(brush: &BrushSettings, tip: Option<Arc<Tip>>, [width, height]: [u32; 2]) -> egui::ColorImage {
+fn stroke_picture(brush: &BrushSettings, tip: Option<Arc<Tip>>, pattern: Option<Arc<Pattern>>, [width, height]: [u32; 2]) -> egui::ColorImage {
     let (w, h) = (width as f32, height as f32);
     let settings = BrushSettings {
         size: brush.size.min(h / 2.0),
@@ -131,6 +132,9 @@ fn stroke_picture(brush: &BrushSettings, tip: Option<Arc<Tip>>, [width, height]:
     let mut stroke = Stroke::new(settings, Paint::Mask(u16::MAX), out.clone());
     if let Some(tip) = tip {
         stroke = stroke.with_tip(tip);
+    }
+    if let Some(pattern) = pattern {
+        stroke = stroke.with_pattern(&pattern);
     }
     let margin = settings.size / 2.0 + 2.0;
     let mut tiles = Vec::new();
@@ -197,6 +201,23 @@ impl Library {
         tips.into_iter().find(|tip| tip.id() == id).cloned()
     }
 
+    /// The Texture patterns the brushes have, each once.
+    pub fn patterns(&self) -> Vec<Arc<Pattern>> {
+        let mut out: Vec<Arc<Pattern>> = Vec::new();
+        for pattern in self.files.iter().flat_map(|(_, brushes)| brushes).filter_map(|b| b.pattern.as_ref()) {
+            if !out.iter().any(|p| p.id() == pattern.id()) {
+                out.push(pattern.clone());
+            }
+        }
+        out
+    }
+
+    /// The pattern a brush's Texture names, if it's among the brushes'.
+    pub fn pattern(&self, settings: &BrushSettings) -> Option<Arc<Pattern>> {
+        let id = settings.dynamics.texture?.pattern;
+        self.patterns().into_iter().find(|p| p.id() == id)
+    }
+
     /// A stroke drawn with `brush`, across the panel: drawn again when the
     /// brush changes.
     pub fn preview(&mut self, ui: &mut Ui, theme: &Theme, brush: &BrushSettings) {
@@ -207,7 +228,7 @@ impl Library {
             return;
         }
         if !self.preview.as_ref().is_some_and(|(of, at, _)| of == brush && *at == size) {
-            let image = stroke_picture(brush, self.tip(brush.tip), size);
+            let image = stroke_picture(brush, self.tip(brush.tip), self.pattern(brush), size);
             let texture = ui.ctx().load_texture("brush-preview", image, egui::TextureOptions::LINEAR);
             self.preview = Some((*brush, size, texture));
         }
@@ -256,6 +277,7 @@ pub(crate) mod tests {
     use super::*;
     use omapix_engine::abr::{AbrSample, write_v6};
     use omapix_engine::descriptor::{Descriptor, UnicodeString, Value};
+    use omapix_engine::patterns::PsdPattern;
 
     /// A brush file with a round brush and one with a sampled tip.
     pub(crate) fn brush_file() -> Vec<u8> {
@@ -266,7 +288,23 @@ pub(crate) mod tests {
         let leaf = Descriptor::new("sampledBrush")
             .with("Dmtr", Value::Double(60.0))
             .with("sampledData", Value::Text(UnicodeString::new("leaf")));
-        let textured = name("Leaf").with("Brsh", Value::Descriptor(leaf)).with("useTexture", Value::Boolean(true));
+        // With Texture: a pattern of stripes, black then white.
+        let canvas = Descriptor::new("Ptrn").with("Idnt", Value::Text(UnicodeString::new("canvas")));
+        let textured = name("Leaf")
+            .with("Brsh", Value::Descriptor(leaf))
+            .with("useTexture", Value::Boolean(true))
+            .with("Txtr", Value::Descriptor(canvas));
+        let stripes = PsdPattern {
+            mode: 1,
+            width: 4,
+            height: 1,
+            name: "Canvas".into(),
+            id: "canvas".into(),
+            palette: None,
+            depth: 8,
+            channels: vec![vec![0, 0, 255, 255]],
+            alpha: None,
+        };
         let presets = [name("Soft").with("Brsh", Value::Descriptor(round)), textured];
         let pixels = (0..30 * 20).map(|i| if i % 30 < 15 { 255 } else { 0 }).collect();
         let tip = AbrSample {
@@ -276,7 +314,7 @@ pub(crate) mod tests {
             depth: 8,
             data: pixels,
         };
-        write_v6(2, &[tip], &[], &presets, true).unwrap()
+        write_v6(2, &[tip], &[stripes], &presets, true).unwrap()
     }
 
     /// Wait for the background to finish, and give back what it says.
@@ -301,10 +339,7 @@ pub(crate) mod tests {
 
         let mut library = Library::default();
         library.import(&downloads.join("Nature.abr"), &folder, &ctx).unwrap();
-        assert_eq!(
-            loaded(&mut library),
-            Some(("Loaded 2 brushes from Nature.abr, without their Texture".into(), false))
-        );
+        assert_eq!(loaded(&mut library), Some(("Loaded 2 brushes from Nature.abr".into(), false)));
         assert!(folder.join("Nature.abr").exists());
         let names: Vec<_> = library.files.iter().map(|(file, brushes)| (file.as_str(), brushes.len())).collect();
         assert_eq!(names, [("Nature", 2)]);
@@ -312,6 +347,13 @@ pub(crate) mod tests {
         let leaf = library.files[0].1[1].tip.clone().unwrap();
         assert_eq!(library.tip(Some(leaf.id())), Some(leaf.clone()));
         assert_eq!((library.tip(Some(1)), library.tip(None)), (None, None));
+        // Its Texture's pattern comes with it, and a brush naming it finds it.
+        let patterns = library.patterns();
+        assert_eq!(patterns.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Canvas"]);
+        let mut textured = BrushSettings::default();
+        library.files[0].1[1].apply(&mut textured);
+        assert_eq!(library.pattern(&textured).map(|p| p.id()), Some(patterns[0].id()));
+        assert_eq!(library.pattern(&BrushSettings::default()), None);
 
         // One that can't be read is said, and not kept.
         library.import(&downloads.join("Broken.ABR"), &folder, &ctx).unwrap();
@@ -341,7 +383,7 @@ pub(crate) mod tests {
             hardness: 1.0,
             ..Default::default()
         };
-        let image = stroke_picture(&soft, None, [240, 56]);
+        let image = stroke_picture(&soft, None, None, [240, 56]);
         // How much paint there is in a block of the strip.
         let paint = |image: &egui::ColorImage, xs: std::ops::Range<usize>, ys: std::ops::Range<usize>| -> u32 {
             xs.flat_map(|x| ys.clone().map(move |y| (x, y)))
@@ -364,6 +406,7 @@ pub(crate) mod tests {
                 opacity_pressure: false,
                 ..soft
             },
+            None,
             None,
             [240, 56],
         );

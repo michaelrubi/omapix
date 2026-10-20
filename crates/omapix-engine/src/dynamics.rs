@@ -1,6 +1,6 @@
 //! Photoshop's Brush Settings: the shape of a brush's tip, and how its dabs
-//! vary along a stroke (Shape Dynamics, Scattering, Transfer, Noise and
-//! Wet Edges).
+//! vary along a stroke (Shape Dynamics, Scattering, Transfer, Texture's
+//! depth, Noise and Wet Edges).
 //! [`crate::brush`] lays the dabs this works out.
 //!
 //! Whatever varies at random comes from the stroke's seed and the dab's
@@ -29,6 +29,8 @@
 //! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
+
+use crate::texture::Texture;
 
 /// The most dabs Scattering lays at one step.
 pub const MAX_COUNT: u32 = 16;
@@ -82,6 +84,8 @@ pub struct Dynamics {
     /// Wet Edges: paint gathers along the edge of the stroke, as
     /// watercolour's does.
     pub wet_edges: bool,
+    /// Texture: a pattern worked into the paint.
+    pub texture: Option<Texture>,
 }
 
 impl Default for Dynamics {
@@ -108,6 +112,7 @@ impl Default for Dynamics {
             flow_jitter: 0.0,
             noise: false,
             wet_edges: false,
+            texture: None,
         }
     }
 }
@@ -127,7 +132,7 @@ pub(crate) struct Step {
 
 /// One dab: its centre, radius, angle (radians, anticlockwise) and
 /// roundness, whether its tip is mirrored, how far coverage can build up
-/// under it, and its flow.
+/// under it, its flow, and its Texture's depth.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Dab {
     pub x: f32,
@@ -139,6 +144,7 @@ pub(crate) struct Dab {
     pub flip_y: bool,
     pub most: f32,
     pub flow: f32,
+    pub depth: f32,
 }
 
 impl Dynamics {
@@ -197,6 +203,7 @@ impl Dynamics {
                     flip_y: self.flip_y != (self.flip_y_jitter && r(FLIP_Y) < 0.5),
                     most: at.most * (1.0 - unit(self.opacity_jitter) * r(OPACITY)),
                     flow: at.flow * (1.0 - unit(self.flow_jitter) * r(FLOW)),
+                    depth: self.texture.map_or(1.0, |t| t.dab_depth(r(DEPTH))),
                 }
             })
             .collect()
@@ -215,6 +222,7 @@ const SCATTER_Y: u64 = 7;
 const COUNT: u64 = 8;
 const OPACITY: u64 = 9;
 const FLOW: u64 = 10;
+const DEPTH: u64 = 11;
 
 /// SplitMix64's finaliser.
 pub(crate) fn mix(mut z: u64) -> u64 {
@@ -270,6 +278,7 @@ mod tests {
             flip_y: false,
             most: 1.0,
             flow: 0.8,
+            depth: 1.0,
         };
         assert_eq!(dabs.len(), 500);
         assert!(dabs.iter().all(|d| *d == plain));

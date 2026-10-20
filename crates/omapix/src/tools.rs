@@ -5,6 +5,7 @@ use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
 use omapix_engine::dynamics::{Dynamics, MAX_COUNT};
 use omapix_engine::selection::Combine;
+use omapix_engine::texture::{Mode, Texture};
 use omapix_engine::toning::ToneRange;
 use omapix_engine::warp::Brush as LiquifyBrush;
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
@@ -1044,6 +1045,7 @@ impl Tools {
             self.use_brush(&brush);
         }
         brushes.preview(ui, theme, &self.settings_mut().clone());
+        let patterns = brushes.patterns();
         let d = &mut self.settings_mut().dynamics;
         let heading = |ui: &mut Ui, text: &str| {
             ui.label(RichText::new(text).color(theme.foreground).strong());
@@ -1149,6 +1151,66 @@ impl Tools {
                 heading(ui, "Transfer");
                 percent(ui, "Opacity Jitter", &mut d.opacity_jitter, "How much lower a dab's opacity can be at random");
                 percent(ui, "Flow Jitter", &mut d.flow_jitter, "How much lower a dab's flow can be at random");
+
+                heading(ui, "Texture");
+                let mut textured = d.texture.is_some();
+                ui.label("");
+                let toggle = ui
+                    .add_enabled(textured || !patterns.is_empty(), egui::Checkbox::new(&mut textured, "Use a pattern"))
+                    .on_hover_text("A pattern worked into the paint")
+                    .on_disabled_hover_text("Load a brush file with patterns to have some to choose from");
+                if toggle.changed() {
+                    d.texture = textured.then(|| Texture {
+                        pattern: patterns[0].id(),
+                        ..Texture::default()
+                    });
+                }
+                ui.end_row();
+                if let Some(t) = &mut d.texture {
+                    ui.label("Pattern").on_hover_text("From the brush files loaded");
+                    let name = patterns.iter().find(|p| p.id() == t.pattern).map_or("(not loaded)", |p| p.name.as_str());
+                    ComboBox::from_id_salt("texture-pattern").selected_text(name).show_ui(ui, |ui| {
+                        for p in &patterns {
+                            ui.selectable_value(&mut t.pattern, p.id(), &p.name);
+                        }
+                    });
+                    ui.end_row();
+                    row(ui, "Scale", &mut t.scale, 1.0..=1000.0, 100.0, "%", "The pattern's size");
+                    row(
+                        ui,
+                        "Brightness",
+                        &mut t.brightness,
+                        -150.0..=150.0,
+                        150.0,
+                        "",
+                        "Lightens or darkens the pattern",
+                    );
+                    // Photoshop's -50 to 0 and 0 to 100, scaled apart.
+                    let hint = "Steepens the pattern's greys towards black and white, or flattens them";
+                    ui.label("Contrast").on_hover_text(hint);
+                    let mut shown = if t.contrast < 0.0 { t.contrast * 50.0 } else { t.contrast * 100.0 };
+                    if ui.add(Slider::new(&mut shown, -50.0..=100.0).fixed_decimals(0)).on_hover_text(hint).changed() {
+                        t.contrast = if shown < 0.0 { shown / 50.0 } else { shown / 100.0 };
+                    }
+                    ui.end_row();
+                    let (invert, each) = (
+                        "Swaps the pattern's light and dark",
+                        "Into each dab, so Depth can vary from dab to dab, rather than into the stroke as a whole",
+                    );
+                    pair(ui, (&mut t.invert, "Invert", invert), (&mut t.each_tip, "Texture Each Tip", each));
+                    ui.label("Mode").on_hover_text("How the pattern meets the paint");
+                    ComboBox::from_id_salt("texture-mode").selected_text(t.mode.label()).show_ui(ui, |ui| {
+                        for mode in Mode::ALL {
+                            ui.selectable_value(&mut t.mode, mode, mode.label());
+                        }
+                    });
+                    ui.end_row();
+                    percent(ui, "Depth", &mut t.depth, "How strongly the pattern shows");
+                    if t.each_tip {
+                        percent(ui, "Minimum Depth", &mut t.minimum_depth, "The least Depth Jitter takes it to");
+                        percent(ui, "Depth Jitter", &mut t.depth_jitter, "How much lower each dab's depth can be at random");
+                    }
+                }
 
                 heading(ui, "Other");
                 let (noise, wet) = (
@@ -2336,6 +2398,79 @@ mod tests {
         // A tool with no brush shows the Brush tool's.
         tools.tool = Tool::Move;
         at(&frame(&mut tools, vec![]), "Brush");
+    }
+
+    #[test]
+    fn texture_works_a_loaded_pattern_into_the_brush() {
+        let ctx = egui::Context::default();
+        let theme = Theme::default();
+        let mut brushes = crate::brushes::Library::default();
+        let mut tools = Tools::default();
+        let mut time = 0.0;
+        let mut frame = |tools: &mut Tools, brushes: &mut crate::brushes::Library, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
+            time += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 1400.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                tools.brush_settings(ui, &theme, brushes);
+            });
+            out.textures_delta.clear();
+            fn texts(shape: &egui::Shape, found: &mut Vec<(String, Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => found.push((t.galley.text().to_owned(), t.visual_bounding_rect().center())),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, found)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| texts(&s.shape, &mut found));
+            found
+        };
+        let click = |pos: Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            [vec![egui::Event::PointerMoved(pos), button(true)], vec![button(false)]]
+        };
+        let at = |drawn: &[(String, Pos2)], text: &str| drawn.iter().find(|(t, _)| t == text).map(|(_, p)| *p);
+
+        // With no patterns loaded there's nothing to use.
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        for events in click(at(&drawn, "Use a pattern").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert_eq!(tools.brush.dynamics.texture, None);
+
+        let dir = std::env::temp_dir().join(format!("omapix-brush-texture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Nature.abr"), crate::brushes::tests::brush_file()).unwrap();
+        brushes.load(dir.clone(), None, &ctx);
+        crate::brushes::tests::loaded(&mut brushes);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let canvas = brushes.patterns()[0].id();
+
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Pattern").is_none());
+        for events in click(at(&drawn, "Use a pattern").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        let texture = tools.brush.dynamics.texture.expect("a Texture");
+        assert_eq!((texture.pattern, texture.each_tip), (canvas, false));
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Canvas").is_some() && at(&drawn, "Depth").is_some() && at(&drawn, "Depth Jitter").is_none());
+        for events in click(at(&drawn, "Texture Each Tip").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert!(tools.brush.dynamics.texture.unwrap().each_tip);
+        assert!(at(&frame(&mut tools, &mut brushes, vec![]), "Depth Jitter").is_some());
+        assert_eq!(brushes.pattern(&tools.brush).map(|p| p.id()), Some(canvas));
     }
 
     #[test]

@@ -4007,7 +4007,7 @@ impl App {
                     paint = Paint::Color(background.unwrap_or([65535; 4]));
                 }
                 let (settings, sample) = (self.tools.settings(), self.tools.sample_from());
-                if editor.begin_stroke(settings, paint, sample, self.brushes.tip(settings.tip)) {
+                if editor.begin_stroke(settings, paint, sample, self.brushes.tip(settings.tip), self.brushes.pattern(&settings)) {
                     editor.stroke_to(p.x, p.y, pressure);
                 }
             }
@@ -5654,7 +5654,7 @@ mod tests {
         // Nothing there to fill or paint on.
         fill(&mut editor, "Fill", Some([255, 0, 0]), [255, 255, 255]);
         let settings = omapix_engine::brush::BrushSettings::default();
-        assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), crate::tools::Sample::Current, None));
+        assert!(editor.begin_stroke(settings, Paint::Color([0, 0, 0, 65535]), crate::tools::Sample::Current, None, None));
         editor.stroke_to(300.0, 300.0, 1.0);
         editor.end_stroke();
         let pixels = &editor.doc.layer(empty).unwrap().pixels;
