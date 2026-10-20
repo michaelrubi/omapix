@@ -249,6 +249,46 @@ impl FilterSettings {
         out
     }
 
+    /// Change the settings named in `changes` (JSON, as `omapix --mcp`
+    /// shows them; a section can be given in part) and save them. A name
+    /// that isn't a setting, or a value of the wrong kind, changes nothing.
+    pub fn update(&mut self, changes: &serde_json::Value) -> Result<(), String> {
+        fn merge(into: &mut serde_json::Value, changes: &serde_json::Value, at: &str) -> Result<(), String> {
+            let serde_json::Value::Object(changes) = changes else {
+                *into = changes.clone();
+                return Ok(());
+            };
+            for (key, change) in changes {
+                let name = if at.is_empty() { key.clone() } else { format!("{at}.{key}") };
+                let value = into.get_mut(key).ok_or_else(|| format!("there's no setting \"{name}\""))?;
+                match value {
+                    serde_json::Value::Object(_) => merge(value, change, &name)?,
+                    _ => *value = change.clone(),
+                }
+            }
+            Ok(())
+        }
+        if !changes.is_object() {
+            return Err("the settings to change should be an object".into());
+        }
+        let mut value = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
+        merge(&mut value, changes, "")?;
+        let updated: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        *self = Self {
+            path: self.path.take(),
+            ..updated
+        };
+        self.save();
+        Ok(())
+    }
+
+    /// Not written back from now on: `omapix --mcp` uses the settings
+    /// without changing what the app remembers.
+    pub fn in_memory(mut self) -> Self {
+        self.path = None;
+        self
+    }
+
     pub fn save(&self) {
         save(self.path.as_deref(), self, "filter settings");
     }
@@ -358,6 +398,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn settings_are_updated_by_name_and_saved() {
+        let path = dir("update").join("filters.toml");
+        let mut settings = FilterSettings::load_from(&path, &FilterSettings::default());
+        let changes = serde_json::json!({ "blur_radius": 4.5, "separation_radius": 9.0, "unsharp_mask": { "amount": 1.2 } });
+        settings.update(&changes).unwrap();
+        assert_eq!((settings.blur_radius, settings.separation_radius), (4.5, Some(9.0)));
+        assert_eq!((settings.unsharp_mask.amount, settings.unsharp_mask.radius), (1.2, 1.5));
+        assert_eq!(FilterSettings::load_from(&path, &FilterSettings::default()), settings);
+        // Nothing changes for a misspelt name or a wrong kind of value.
+        let before = settings.clone();
+        let err = settings.update(&serde_json::json!({ "blur_radius": 3.0, "unsharp_mask": { "amout": 1.0 } }));
+        assert_eq!(err, Err("there's no setting \"unsharp_mask.amout\"".into()));
+        assert!(settings.update(&serde_json::json!({ "blur_radius": "wide" })).is_err());
+        assert_eq!(settings, before);
     }
 
     #[test]
