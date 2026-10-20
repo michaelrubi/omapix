@@ -142,6 +142,20 @@ impl Curve {
     /// Evaluate with a monotone cubic spline (Fritsch–Carlson), which passes
     /// through every point without the overshoot of a natural spline.
     /// Outside the first and last points the curve is flat.
+    /// A point at input `x`, on the curve as it is, unless one's within 1 %
+    /// of it already (or it's outside the end points). Returns whether one
+    /// was added.
+    pub fn add_point_at(&mut self, x: f32) -> bool {
+        let (first, last) = (self.points[0].0, self.points[self.points.len() - 1].0);
+        if x <= first || x >= last || self.points.iter().any(|&(px, _)| (px - x).abs() < 0.01) {
+            return false;
+        }
+        let y = self.eval(x).clamp(0.0, 1.0);
+        let i = self.points.iter().position(|&(px, _)| px > x).unwrap_or(self.points.len());
+        self.points.insert(i, (x, y));
+        true
+    }
+
     pub fn eval(&self, x: f32) -> f32 {
         let p = &self.points;
         match p.len() {
@@ -265,6 +279,27 @@ fn set_curve_gray(curve: &mut Curve, in_val: f32, target: f32) {
 }
 
 impl Curves {
+    /// Ctrl+click on the image (Photoshop's, as PhotoCraft's 8736098d): a
+    /// point at `sample`'s tone on `channel`'s curve (0 = RGB, by
+    /// luminance; 1–3 = red, green, blue), where the curve is now, so
+    /// nothing changes until it's moved. With `each`, a point on each of
+    /// red, green and blue instead. Returns whether a point was added.
+    pub fn add_sampled_point(&mut self, channel: usize, sample: [f32; 3], each: bool) -> bool {
+        if each {
+            let added = [&mut self.red, &mut self.green, &mut self.blue]
+                .into_iter()
+                .zip(sample)
+                .map(|(curve, x)| curve.add_point_at(x));
+            return added.fold(false, |any, added| any | added);
+        }
+        match channel {
+            1 => self.red.add_point_at(sample[0]),
+            2 => self.green.add_point_at(sample[1]),
+            3 => self.blue.add_point_at(sample[2]),
+            _ => self.master.add_point_at(luminance(sample)),
+        }
+    }
+
     pub fn set_point(&mut self, eyedropper: Eyedropper, sample: [f32; 3]) {
         match eyedropper {
             Eyedropper::Black => self.set_black_point(sample),
@@ -1002,6 +1037,26 @@ impl PreparedColorLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sampled_point_lands_on_the_curve_at_the_pixels_tone() {
+        let mut curves = Curves::default();
+        curves.master.points = vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)];
+        let before = curves.master.eval(0.25);
+        // RGB: by luminance, where the curve already is.
+        assert!(curves.add_sampled_point(0, [0.25; 3], false));
+        assert_eq!(curves.master.points.len(), 4);
+        assert_eq!(curves.master.points[1].0, 0.25);
+        assert!((curves.master.eval(0.25) - before).abs() < 1e-6);
+        // Not twice in the same place.
+        assert!(!curves.add_sampled_point(0, [0.255; 3], false));
+        // A channel takes its own value; with each, all three do.
+        assert!(curves.add_sampled_point(2, [0.1, 0.6, 0.3], false));
+        assert_eq!(curves.green.points[1], (0.6, 0.6));
+        assert!(curves.add_sampled_point(0, [0.1, 0.4, 0.3], true));
+        assert_eq!((curves.red.points[1].0, curves.green.points[1].0, curves.blue.points[1].0), (0.1, 0.4, 0.3));
+        assert_eq!(curves.green.points.len(), 4);
+    }
 
     #[test]
     fn a_lut_written_as_cube_reads_back_the_same() {

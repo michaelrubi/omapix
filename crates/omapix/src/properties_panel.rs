@@ -44,6 +44,11 @@ pub struct PropertiesPanel {
 }
 
 impl PropertiesPanel {
+    /// The Curves channel shown: 0 = RGB, 1–3 = red, green, blue.
+    pub fn channel(&self) -> usize {
+        self.channel
+    }
+
     /// Draw the panel for the active layer if it's an adjustment layer.
     /// Returns false (drawing nothing) otherwise.
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> bool {
