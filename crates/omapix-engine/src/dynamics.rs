@@ -1,6 +1,6 @@
 //! Photoshop's Brush Settings: the shape of a brush's tip, and how its dabs
 //! vary along a stroke (Shape Dynamics, Scattering, Transfer, Texture's
-//! depth, Noise and Wet Edges).
+//! depth, Dual Brush, Noise and Wet Edges).
 //! [`crate::brush`] lays the dabs this works out.
 //!
 //! Whatever varies at random comes from the stroke's seed and the dab's
@@ -30,7 +30,7 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use crate::texture::Texture;
+use crate::texture::{Mode, Texture};
 
 /// The most dabs Scattering lays at one step.
 pub const MAX_COUNT: u32 = 16;
@@ -86,6 +86,107 @@ pub struct Dynamics {
     pub wet_edges: bool,
     /// Texture: a pattern worked into the paint.
     pub texture: Option<Texture>,
+    /// Dual Brush: a second tip along the same stroke, and the paint only
+    /// where the two meet.
+    pub dual: Option<DualBrush>,
+}
+
+/// Photoshop's Dual Brush: a second tip laid along the stroke with its own
+/// size, spacing and scatter. The stroke's paint is combined with where it
+/// lays, in [`Mode`].
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DualBrush {
+    pub mode: Mode,
+    /// The sampled tip it stamps ([`crate::tip::Tip::id`]), or none for a
+    /// round one; the stroke is given the tip itself.
+    pub tip: Option<u64>,
+    /// Its diameter as a fraction of the brush's, so it keeps its
+    /// proportion as the brush is made bigger or smaller (as Photoshop's,
+    /// PhotoCraft's `0ce7e00f`).
+    pub size: f32,
+    /// A round tip's hardness.
+    pub hardness: f32,
+    pub roundness: f32,
+    /// Degrees, anticlockwise.
+    pub angle: f32,
+    /// The distance between its dabs, as a fraction of its diameter.
+    pub spacing: f32,
+    /// How far its dabs stray, in its radii.
+    pub scatter: f32,
+    pub both_axes: bool,
+    /// Its dabs at each step, up to [`MAX_COUNT`].
+    pub count: u32,
+    /// Each of its dabs mirrored left to right or not, at random.
+    pub flip: bool,
+}
+
+impl Default for DualBrush {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Multiply,
+            tip: None,
+            size: 0.25,
+            hardness: 1.0,
+            roundness: 1.0,
+            angle: 0.0,
+            spacing: 0.25,
+            scatter: 0.0,
+            both_axes: false,
+            count: 1,
+            flip: false,
+        }
+    }
+}
+
+impl DualBrush {
+    /// The distance between its steps, with the brush `size` across.
+    pub(crate) fn step(&self, size: f32) -> f32 {
+        (self.diameter(size) * self.spacing.max(0.01)).max(0.5)
+    }
+
+    /// Its diameter in pixels, with the brush `size` across.
+    pub fn diameter(&self, size: f32) -> f32 {
+        (size * self.size).clamp(1.0, 5000.0)
+    }
+
+    /// Its dabs at (x, y), going in `direction`, with the brush `size`
+    /// across. `next` numbers them, apart from the brush's own.
+    pub(crate) fn dabs(&self, seed: u64, next: &mut u64, x: f32, y: f32, direction: f32, size: f32) -> Vec<Dab> {
+        let seed = seed ^ 0xD0A1;
+        let radius = (self.diameter(size) / 2.0).max(0.5);
+        (0..self.count.clamp(1, MAX_COUNT))
+            .map(|_| {
+                let i = *next;
+                *next += 1;
+                let either_way = |stream: u64| random(seed, i, stream) * 2.0 - 1.0;
+                let (mut x, mut y) = (x, y);
+                if self.scatter > 0.0 {
+                    let far = self.scatter * radius;
+                    let (across, along) = (either_way(SCATTER_X) * far, either_way(SCATTER_Y) * far);
+                    if self.both_axes {
+                        x += across;
+                        y += along;
+                    } else {
+                        x += direction.sin() * across;
+                        y += direction.cos() * across;
+                    }
+                }
+                Dab {
+                    x,
+                    y,
+                    radius,
+                    angle: self.angle.to_radians(),
+                    roundness: self.roundness.clamp(0.01, 1.0),
+                    flip_x: self.flip && random(seed, i, FLIP_X) < 0.5,
+                    flip_y: false,
+                    most: 1.0,
+                    flow: 1.0,
+                    depth: 1.0,
+                }
+            })
+            .collect()
+    }
 }
 
 impl Default for Dynamics {
@@ -113,6 +214,7 @@ impl Default for Dynamics {
             noise: false,
             wet_edges: false,
             texture: None,
+            dual: None,
         }
     }
 }
@@ -150,7 +252,7 @@ pub(crate) struct Dab {
 impl Dynamics {
     /// Whether dabs depend on the way the stroke is going.
     pub(crate) fn follows_direction(&self) -> bool {
-        self.angle_follows || self.scatter > 0.0 && !self.both_axes
+        self.angle_follows || self.scatter > 0.0 && !self.both_axes || self.dual.is_some_and(|d| d.scatter > 0.0 && !d.both_axes)
     }
 
     /// The distance between steps of a brush `diameter` across.

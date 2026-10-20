@@ -36,7 +36,7 @@ use rayon::prelude::*;
 use crate::abr::{AbrFile, AbrSample, LegacyTip};
 use crate::brush::BrushSettings;
 use crate::descriptor::{Descriptor, Value};
-use crate::dynamics::{Dynamics, MAX_COUNT};
+use crate::dynamics::{DualBrush, Dynamics, MAX_COUNT};
 use crate::texture::{Mode, Pattern, Texture};
 use crate::tip::Tip;
 
@@ -57,6 +57,8 @@ pub struct Preset {
     pub tip: Option<Arc<Tip>>,
     /// Texture's pattern, which `dynamics` names.
     pub pattern: Option<Arc<Pattern>>,
+    /// Dual Brush's sampled tip, which `dynamics` names.
+    pub dual_tip: Option<Arc<Tip>>,
 }
 
 impl Preset {
@@ -127,6 +129,7 @@ fn preset(
         },
         tip: None,
         pattern: None,
+        dual_tip: None,
     };
     let v = &mut out.dynamics;
     // Whether anything is set by a control Omapix doesn't have: one other
@@ -222,10 +225,41 @@ fn preset(
         }
     }
     out.pattern = pattern;
-    let dual = object(d, "dualBrush").is_some_and(|dual| on(dual, "useDualBrush"));
+    // Dual Brush: its tip, sized against the brush's, and how it's laid.
+    if let Some(db) = object(d, "dualBrush").filter(|db| on(db, "useDualBrush")) {
+        let mut dual = DualBrush::default();
+        if let Some(t) = object(db, "Brsh") {
+            let id = t.get("sampledData").and_then(Value::as_str);
+            // A sampled tip that isn't in the file: a round one stands in.
+            let found = id.and_then(|id| file.samples.iter().position(|s| s.id == id)).and_then(|at| tips[at].clone());
+            let own = found.as_deref().map(longer);
+            dual.size = (number(t, "Dmtr").or(own).unwrap_or(25.0).clamp(1.0, 5000.0) / out.size).clamp(0.0002, 5000.0);
+            dual.tip = found.as_ref().map(|tip| tip.id());
+            out.dual_tip = found;
+            dual.hardness = fraction(t, "Hrdn").unwrap_or(1.0).clamp(0.0, 1.0);
+            dual.roundness = fraction(t, "Rndn").unwrap_or(1.0).clamp(0.01, 1.0);
+            dual.angle = number(t, "Angl").unwrap_or(0.0);
+            dual.spacing = fraction(t, "Spcn").unwrap_or(dual.spacing).clamp(0.01, 10.0);
+        }
+        // The `Spcn` beside the tip reads 100 % whatever the panel says, so
+        // it only stands in for a tip without one (as PhotoCraft found).
+        if object(db, "Brsh").and_then(|t| fraction(t, "Spcn")).is_none()
+            && let Some(spacing) = fraction(db, "Spcn")
+        {
+            dual.spacing = spacing.clamp(0.01, 10.0);
+        }
+        dual.mode = match db.get("BlnM") {
+            Some(Value::Enumerated { value, .. }) => Mode::from_abr(&String::from_utf8_lossy(value.as_bytes())).unwrap_or_default(),
+            _ => Mode::Multiply,
+        };
+        dual.flip = on(db, "Flip");
+        dual.scatter = varies(db, "scatterDynamics").0.min(10.0);
+        dual.both_axes = on(db, "bothAxes");
+        dual.count = number(db, "Cnt ").map_or(1, |n| n.clamp(1.0, MAX_COUNT as f32) as u32);
+        out.dynamics.dual = Some(dual);
+    }
     let more = [
         (lost_pattern, "Texture (its pattern isn't in the file)"),
-        (dual, "Dual Brush"),
         (on(d, "useColorDynamics"), "Color Dynamics"),
         (on(d, "useBrushPose"), "Brush Pose"),
     ];
@@ -246,6 +280,7 @@ pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
         dynamics: Dynamics { spacing, ..Default::default() },
         tip: None,
         pattern: None,
+        dual_tip: None,
     };
     let mut left_out = BTreeSet::new();
     let mut out = Vec::new();
@@ -328,6 +363,52 @@ mod tests {
 
     fn named(name: &str) -> Descriptor {
         Descriptor::new("brushPreset").with("Nm  ", Value::Text(UnicodeString::new_nul(name)))
+    }
+
+    #[test]
+    fn a_brushs_dual_brush_comes_with_its_tip_and_keeps_its_proportion() {
+        use crate::descriptor::Id;
+        let tip = Descriptor::new("sampledBrush")
+            .with("sampledData", Value::Text(UnicodeString::new("grain")))
+            .with("Dmtr", Value::UnitFloat { unit: *b"#Pxl", value: 30.0 })
+            .with("Angl", Value::Double(45.0))
+            .with("Spcn", percent(150.0));
+        let dual = Descriptor::new("dualBrush")
+            .with("useDualBrush", Value::Boolean(true))
+            .with("Brsh", Value::Descriptor(tip))
+            .with(
+                "BlnM",
+                Value::Enumerated {
+                    type_id: Id::new("BlnM"),
+                    value: Id::new("Drkn"),
+                },
+            )
+            .with("Flip", Value::Boolean(true))
+            .with("scatterDynamics", vary(200.0, 0))
+            .with("bothAxes", Value::Boolean(true))
+            .with("Cnt ", Value::Double(2.0))
+            // Beside the tip: 100 % whatever the panel says, so not used.
+            .with("Spcn", percent(100.0));
+        let brush = named("Grainy")
+            .with(
+                "Brsh",
+                Value::Descriptor(Descriptor::new("computedBrush").with("Dmtr", Value::UnitFloat { unit: *b"#Pxl", value: 120.0 })),
+            )
+            .with("dualBrush", Value::Descriptor(dual));
+        let bytes = write_v6(2, &[sample("grain", 10, 6)], &[], &[brush], true).unwrap();
+        let (brushes, left_out) = presets(&parse(&bytes).unwrap());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let [grainy] = &brushes[..] else { panic!("{}", brushes.len()) };
+        let d = grainy.dynamics.dual.unwrap();
+        let tip = grainy.dual_tip.as_ref().unwrap();
+        assert_eq!((tip.size(), d.tip), ((10, 6), Some(tip.id())));
+        // A quarter of the brush's 120 px.
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(
+            close(d.size, 0.25) && close(d.angle, 45.0) && close(d.spacing, 1.5) && close(d.scatter, 2.0),
+            "{d:?}"
+        );
+        assert_eq!((d.mode, d.flip, d.both_axes, d.count), (Mode::Darken, true, true, 2));
     }
 
     #[test]
@@ -485,10 +566,7 @@ mod tests {
             ..Default::default()
         };
         let (brushes, left_out) = presets(&file);
-        assert_eq!(
-            left_out,
-            ["Dual Brush", "Fade, tilt and other controls", "Texture (its pattern isn't in the file)"]
-        );
+        assert_eq!(left_out, ["Fade, tilt and other controls", "Texture (its pattern isn't in the file)"]);
         let [chalk] = &brushes[..] else { panic!("{}", brushes.len()) };
         assert_eq!(
             (chalk.name.as_str(), chalk.size, chalk.hardness, chalk.size_pressure),
@@ -501,6 +579,8 @@ mod tests {
                 spacing: SPACING,
                 flip_x: true,
                 wet_edges: true,
+                // A Dual Brush that says nothing more: as it starts.
+                dual: Some(DualBrush::default()),
                 ..Default::default()
             }
         );
