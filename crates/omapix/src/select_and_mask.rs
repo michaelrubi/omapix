@@ -184,7 +184,9 @@ impl SelectAndMask {
                 let o = &mut self.options;
                 let slider = |ui: &mut egui::Ui, label: &str, value: &mut f32, range, suffix: &str, tip: &str| {
                     ui.label(label).on_hover_text(tip);
-                    ui.add(Slider::new(value, range).suffix(suffix).fixed_decimals(1));
+                    // Sizes in px are curved like Photoshop's, so a few px can be
+                    // dragged to (PhotoCraft's a0128945).
+                    ui.add(Slider::new(value, range).logarithmic(suffix == " px").suffix(suffix).fixed_decimals(1));
                     ui.end_row();
                 };
                 egui::Grid::new("select-and-mask-grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
