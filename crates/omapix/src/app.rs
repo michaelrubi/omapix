@@ -8498,6 +8498,12 @@ mod tests {
         assert!(!texts.iter().any(|t| t.ends_with("Brush Settings")), "{texts:?}");
     }
 
+    /// Waits for Select and Mask's preview of the settings last sent.
+    fn wait_for_select_and_mask(app: &mut App) {
+        let Some(Dialog::SelectAndMask(d)) = &mut app.dialog else { panic!("closed") };
+        d.wait(app.editor.as_mut().unwrap());
+    }
+
     #[test]
     fn select_and_mask_previews_in_red_then_applies_cancels_or_makes_a_mask() {
         let ctx = egui::Context::default();
@@ -8519,18 +8525,9 @@ mod tests {
             app.filters.select_and_mask.feather = 5.0;
             app.filters.select_and_mask_output = output;
             app.run(Command::SelectAndMask, &ctx);
-            // Generous, as the worker competes with the whole test suite.
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while std::time::Instant::now() < deadline {
-                run(app, vec![]);
-                if let Some(Dialog::SelectAndMask(d)) = &app.dialog
-                    && d.ready().is_some()
-                {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            panic!("no preview");
+            run(app, vec![]);
+            wait_for_select_and_mask(app);
+            run(app, vec![]);
         };
         // Cancelled, nothing changes.
         open(&mut app, crate::select_and_mask::Output::Selection);
@@ -8588,13 +8585,8 @@ mod tests {
             app.editor.as_ref().unwrap().view()
         };
         app.run(Command::SelectAndMask, &ctx);
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            if run(&mut app, vec![]) == View::QuickMask {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        run(&mut app, vec![]);
+        wait_for_select_and_mask(&mut app);
         assert_eq!(run(&mut app, vec![]), View::QuickMask, "Overlay to start with");
         assert_eq!(run(&mut app, vec![press(egui::Key::F)]), View::Refined(Backdrop::Black));
         assert_eq!(run(&mut app, vec![press(egui::Key::F)]), View::Refined(Backdrop::White));
@@ -8641,17 +8633,13 @@ mod tests {
         };
         // The refined selection, once it's ready.
         let refined = |app: &mut App| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while std::time::Instant::now() < deadline {
-                run(app, vec![]);
-                if let Some(Dialog::SelectAndMask(d)) = &app.dialog
-                    && let Some(s) = d.ready()
-                {
-                    return s.clone();
-                }
-                std::thread::sleep(Duration::from_millis(5));
+            run(app, vec![]);
+            wait_for_select_and_mask(app);
+            run(app, vec![]);
+            match &app.dialog {
+                Some(Dialog::SelectAndMask(d)) => d.ready().unwrap().clone(),
+                _ => panic!("closed"),
             }
-            panic!("no preview");
         };
         let size = |app: &App| match &app.dialog {
             Some(Dialog::SelectAndMask(d)) => d.brush_size,
@@ -10467,13 +10455,15 @@ mod tests {
         std::fs::write(&bad, b"not a tiff").unwrap();
         let settings = crate::settings::BatchExport { folder: Some(dir.join("out")), ..Default::default() };
         app.batch_export(vec![good, bad], settings, &ctx);
-        for _ in 0..1000 {
-            app.poll(&ctx);
-            if app.batch_export.is_none() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
+        // Each file's result, waited for, then handed on for `poll` to report.
+        let job = app.batch_export.as_mut().unwrap();
+        let (tx, rx) = channel();
+        for _ in 0..job.total {
+            tx.send(job.rx.recv_timeout(Duration::from_secs(60)).expect("a file exported")).unwrap();
         }
+        job.rx = rx;
+        app.poll(&ctx);
+        assert!(app.batch_export.is_none());
         let (text, error, _) = app.status.clone().expect("a message");
         assert!(error && text.starts_with("Exported 1 file; 1 failed: bad.tif"), "{text}");
         assert!(dir.join("out/good.jpg").exists());

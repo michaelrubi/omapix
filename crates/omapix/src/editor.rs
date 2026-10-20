@@ -3757,14 +3757,19 @@ mod live_tests {
         e
     }
 
+    /// Waits for the live view's stack to be made, then picks it up.
     fn settle(e: &mut Editor, ctx: &egui::Context) {
-        for _ in 0..500 {
-            e.update(ctx);
-            if e.live_view.as_ref().is_none_or(|l| l.rx.is_none()) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+        e.update(ctx);
+        if let Some(live) = &mut e.live_view
+            && let Some(rx) = &mut live.rx
+        {
+            // Only a safety net: the stack competes with the whole test suite.
+            let stack = rx.recv_timeout(std::time::Duration::from_secs(60)).expect("a live stack");
+            let (tx, made) = std::sync::mpsc::channel();
+            tx.send(stack).unwrap();
+            *rx = made;
         }
+        e.update(ctx);
     }
 
     #[test]
