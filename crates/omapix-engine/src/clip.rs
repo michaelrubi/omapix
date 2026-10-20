@@ -27,11 +27,7 @@ impl Clip {
     /// Copy what `selection` covers of `pixels` (all of them without a
     /// selection). Partly selected pixels come out partly transparent, as
     /// in Photoshop. `None` if nothing is selected.
-    pub fn copy(
-        pixels: &Tiled<Pixel>,
-        selection: Option<&Selection>,
-        profile: &ColorProfile,
-    ) -> Option<Clip> {
+    pub fn copy(pixels: &Tiled<Pixel>, selection: Option<&Selection>, profile: &ColorProfile) -> Option<Clip> {
         let (w, h) = (pixels.width(), pixels.height());
         let (pixels, bounds) = match selection {
             None => (pixels.clone(), [0, 0, w, h]),
@@ -66,11 +62,7 @@ impl Clip {
     }
 
     /// Copy a layer mask as opaque grey pixels.
-    pub fn copy_mask(
-        mask: &Tiled<u16>,
-        selection: Option<&Selection>,
-        profile: &ColorProfile,
-    ) -> Option<Clip> {
+    pub fn copy_mask(mask: &Tiled<u16>, selection: Option<&Selection>, profile: &ColorProfile) -> Option<Clip> {
         let grey = Tiled::from_tiles(mask.width(), mask.height(), [0; 4], |col, row| {
             let t = mask.tile(col, row);
             Some(
@@ -99,9 +91,7 @@ impl Clip {
     /// True if every copied pixel is transparent.
     pub fn is_empty(&self) -> bool {
         let [bx, by, bw, bh] = self.bounds;
-        (by..by + bh)
-            .into_par_iter()
-            .all(|y| (bx..bx + bw).all(|x| self.pixels.get(x, y)[3] == 0))
+        (by..by + bh).into_par_iter().all(|y| (bx..bx + bw).all(|x| self.pixels.get(x, y)[3] == 0))
     }
 
     /// The copied area as an 8-bit sRGB PNG, for other apps.
@@ -109,30 +99,24 @@ impl Clip {
         let [bx, by, bw, bh] = self.bounds;
         let transform = DisplayTransform::to_srgb(&self.profile)?;
         let mut rgba = vec![[0u8; 4]; bw as usize * bh as usize];
-        rgba.par_chunks_mut(bw as usize)
-            .enumerate()
-            .for_each(|(y, out)| {
-                let row: Vec<Pixel> = (0..bw)
-                    .map(|x| self.pixels.get(bx + x, by + y as u32))
-                    .collect();
-                transform.convert(&row, out);
-            });
+        rgba.par_chunks_mut(bw as usize).enumerate().for_each(|(y, out)| {
+            let row: Vec<Pixel> = (0..bw).map(|x| self.pixels.get(bx + x, by + y as u32)).collect();
+            transform.convert(&row, out);
+        });
         let mut png = Vec::new();
-        PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive)
-            .write_image(rgba.as_flattened(), bw, bh, image::ExtendedColorType::Rgba8)?;
+        PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive).write_image(
+            rgba.as_flattened(),
+            bw,
+            bh,
+            image::ExtendedColorType::Rgba8,
+        )?;
         Ok(png)
     }
 
     /// The clip as a `width`×`height` layer's pixels in `profile`: centred
     /// on `centre` if given (Paste Into), or else back where it was copied
     /// from if it fits there, otherwise centred.
-    pub fn place(
-        &self,
-        width: u32,
-        height: u32,
-        profile: &ColorProfile,
-        centre: Option<(i64, i64)>,
-    ) -> Result<Tiled<Pixel>> {
+    pub fn place(&self, width: u32, height: u32, profile: &ColorProfile, centre: Option<(i64, i64)>) -> Result<Tiled<Pixel>> {
         let src = &self.pixels;
         let [bx, by, bw, bh] = self.bounds;
         let (x, y) = if let Some((cx, cy)) = centre {
@@ -140,10 +124,7 @@ impl Clip {
         } else if self.in_place && bx + bw <= width && by + bh <= height {
             (i64::from(bx), i64::from(by))
         } else {
-            (
-                (i64::from(width) - i64::from(bw)) / 2,
-                (i64::from(height) - i64::from(bh)) / 2,
-            )
+            ((i64::from(width) - i64::from(bw)) / 2, (i64::from(height) - i64::from(bh)) / 2)
         };
         let same_place = (x, y) == (i64::from(bx), i64::from(by));
         let placed = if same_place && (src.width(), src.height()) == (width, height) {
@@ -155,12 +136,8 @@ impl Clip {
                 let (tx, ty) = (i64::from(col * TILE), i64::from(row * TILE));
                 let x0 = x.max(tx);
                 let y0 = y.max(ty);
-                let x1 = (x + i64::from(bw))
-                    .min(tx + i64::from(TILE))
-                    .min(i64::from(width));
-                let y1 = (y + i64::from(bh))
-                    .min(ty + i64::from(TILE))
-                    .min(i64::from(height));
+                let x1 = (x + i64::from(bw)).min(tx + i64::from(TILE)).min(i64::from(width));
+                let y1 = (y + i64::from(bh)).min(ty + i64::from(TILE)).min(i64::from(height));
                 if x0 >= x1 || y0 >= y1 {
                     return None;
                 }
@@ -216,12 +193,7 @@ pub fn paste(doc: &mut Document, clip: &Clip, above: usize, kind: PasteKind) -> 
         doc.selection
             .as_ref()
             .and_then(|s| s.bounds())
-            .map(|[bx, by, bw, bh]| {
-                (
-                    i64::from(bx) + i64::from(bw) / 2,
-                    i64::from(by) + i64::from(bh) / 2,
-                )
-            })
+            .map(|[bx, by, bw, bh]| (i64::from(bx) + i64::from(bw) / 2, i64::from(by) + i64::from(bh) / 2))
     } else {
         None
     };
@@ -251,15 +223,8 @@ mod tests {
     const GREY: Pixel = [30000, 30000, 30000, 65535];
 
     fn doc(w: u32, h: u32) -> Document {
-        let px = (0..w * h)
-            .map(|i| [(i % w) as u16 * 100, (i / w) as u16 * 100, 20000, 65535])
-            .collect();
-        Document::from_image(
-            "t.tif".into(),
-            &Raster::new(w, h, px),
-            ColorProfile::srgb(),
-            16,
-        )
+        let px = (0..w * h).map(|i| [(i % w) as u16 * 100, (i / w) as u16 * 100, 20000, 65535]).collect();
+        Document::from_image("t.tif".into(), &Raster::new(w, h, px), ColorProfile::srgb(), 16)
     }
 
     #[test]
@@ -351,9 +316,7 @@ mod tests {
     #[test]
     fn place_centres_foreign_image_on_given_point_and_clips_at_edges() {
         let (w, h) = (100, 100);
-        let px: Vec<Pixel> = (0..w * h)
-            .map(|i| [(i % w) as u16 * 100, (i / w) as u16 * 100, 10000, 65535])
-            .collect();
+        let px: Vec<Pixel> = (0..w * h).map(|i| [(i % w) as u16 * 100, (i / w) as u16 * 100, 10000, 65535]).collect();
         let clip = Clip {
             pixels: Tiled::from_raster(&Raster::new(w, h, px)),
             bounds: [0, 0, 100, 100],

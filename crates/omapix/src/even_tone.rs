@@ -4,8 +4,8 @@
 //! Dodge & Burn group above with its masks filled in. The dialog's box
 //! shows the face small, evened, since evenness is judged from a distance.
 
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Pos2, RichText, Slider, pos2};
 use omapix_engine::tone::{self, Evening, Tone};
@@ -126,7 +126,11 @@ impl EvenTone {
                 });
             }
             ui.add_space(4.0);
-            let hint = if self.skin.is_some() { "As a Dodge & Burn group, its masks filled in on the skin." } else { "Finding skin…" };
+            let hint = if self.skin.is_some() {
+                "As a Dodge & Burn group, its masks filled in on the skin."
+            } else {
+                "Finding skin…"
+            };
             ui.label(RichText::new(hint).color(theme.dark_foreground));
             ui.add_space(12.0);
             // Not while the copy's away being evened again.
@@ -347,7 +351,9 @@ mod tests {
                 }
             };
             let t = std::time::Instant::now();
-            let Some(tone) = Tone::new(&found.image, &found.skin, found.iod, evening.radii(found.iod)) else { continue };
+            let Some(tone) = Tone::new(&found.image, &found.skin, found.iod, evening.radii(found.iod)) else {
+                continue;
+            };
             let evened_in = t.elapsed();
             let t = std::time::Instant::now();
             let top = doc.layers.len() - 1;
@@ -387,7 +393,10 @@ mod tests {
             }
             let ppm_path = format!("{out}/{name}-tone.ppm");
             std::fs::write(&ppm_path, ppm).unwrap();
-            std::process::Command::new("magick").args([&ppm_path, &format!("{out}/{name}-tone.png")]).status().unwrap();
+            std::process::Command::new("magick")
+                .args([&ppm_path, &format!("{out}/{name}-tone.png")])
+                .status()
+                .unwrap();
             std::fs::remove_file(ppm_path).unwrap();
         }
     }

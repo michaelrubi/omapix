@@ -23,9 +23,7 @@ fn default_config_path() -> Option<PathBuf> {
 
 impl RecentStore {
     pub fn load() -> Self {
-        default_config_path()
-            .and_then(|p| Self::load_from(&p))
-            .unwrap_or_default()
+        default_config_path().and_then(|p| Self::load_from(&p)).unwrap_or_default()
     }
 
     pub fn load_from(path: &Path) -> Option<Self> {

@@ -7,8 +7,8 @@
 //! them to give one its own settings or leave it out. The blemishes to be
 //! healed are circled on the canvas meanwhile.
 
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Color32, Pos2, RichText, Slider, vec2};
 use omapix_engine::blemish::Spot;
@@ -161,7 +161,11 @@ impl AutoRetouch {
     /// The spots face `n` has healed: none if it or the step is off.
     fn healed(&self, n: usize) -> &[Spot] {
         let (face, blemishes) = (&self.faces[n], self.settings(Some(n)).blemishes);
-        if face.on && blemishes.on { at_sensitivity(&face.found.spots, blemishes.amount) } else { &[] }
+        if face.on && blemishes.on {
+            at_sensitivity(&face.found.spots, blemishes.amount)
+        } else {
+            &[]
+        }
     }
 
     /// Select the face at `at` (image pixels), if there's one there.
@@ -191,8 +195,7 @@ impl AutoRetouch {
         let ready = self.finding.is_none();
         self.circled = (0..self.faces.len()).flat_map(|n| self.healed(n).to_vec()).collect();
         let mut result = (ready && self.accept).then_some(true);
-        let area = egui::Modal::default_area(egui::Id::new("auto-retouch"))
-            .anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
+        let area = egui::Modal::default_area(egui::Id::new("auto-retouch")).anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
         let modal = egui::Modal::new(egui::Id::new("auto-retouch"))
             .area(area)
             .backdrop_color(Color32::TRANSPARENT)
@@ -325,7 +328,15 @@ impl AutoRetouch {
                     lighten(settings.whiten_eyes, &found.eyes),
                     lighten(settings.whiten_teeth, &found.teeth),
                 ];
-                (n + 1, Arc::clone(found), self.healed(n).len(), amount(settings.shine), smoothing, evening, lighten)
+                (
+                    n + 1,
+                    Arc::clone(found),
+                    self.healed(n).len(),
+                    amount(settings.shine),
+                    smoothing,
+                    evening,
+                    lighten,
+                )
             })
             .filter(|(_, _, healed, shine, smoothing, evening, lighten)| {
                 *healed > 0 || shine.is_some() || smoothing.is_some() || evening.is_some() || lighten.iter().any(Option::is_some)
@@ -614,7 +625,11 @@ mod tests {
         let pixels: Vec<_> = (image.pixels().iter().enumerate())
             .map(|(i, &p)| {
                 let (x, y) = (i as u32 % W, i as u32 / W);
-                if (90..130).contains(&x) && (355..375).contains(&y) { [p[0] - 5000, p[1] - 4000, p[2] - 3500, p[3]] } else { p }
+                if (90..130).contains(&x) && (355..375).contains(&y) {
+                    [p[0] - 5000, p[1] - 4000, p[2] - 3500, p[3]]
+                } else {
+                    p
+                }
             })
             .collect();
         let (mut editor, mut dialog) = dialog_on(Raster::new(W, H, pixels));
@@ -629,7 +644,12 @@ mod tests {
         assert_eq!(names[1..], ["Under Eyes", "Face 1", "Retouch"]);
         assert_eq!(editor.doc.layers[1].opacity, 0.5);
         let after = editor.doc.composite();
-        assert!(after.get(110, 365)[0] > before.get(110, 365)[0] + 500, "{} {}", after.get(110, 365)[0], before.get(110, 365)[0]);
+        assert!(
+            after.get(110, 365)[0] > before.get(110, 365)[0] + 500,
+            "{} {}",
+            after.get(110, 365)[0],
+            before.get(110, 365)[0]
+        );
         assert_eq!(after.get(110, 388), before.get(110, 388));
     }
 
@@ -767,7 +787,14 @@ mod tests {
             eprintln!("{name}: {} faces found in {found_in:?}, retouched in {:?}", dialog.faces.len(), t.elapsed());
             for (n, face) in dialog.faces.iter().enumerate() {
                 let found = &face.found;
-                eprintln!("  face {}: iod {:.0}, {} spots ({} healed), skin {:?}", n + 1, found.iod, found.spots.len(), dialog.healed(n).len(), found.skin.bounds());
+                eprintln!(
+                    "  face {}: iod {:.0}, {} spots ({} healed), skin {:?}",
+                    n + 1,
+                    found.iod,
+                    found.spots.len(),
+                    dialog.healed(n).len(),
+                    found.skin.bounds()
+                );
             }
             eprintln!("  {}", names.join(", "));
             let after = editor.doc.composite();

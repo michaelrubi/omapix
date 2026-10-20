@@ -63,7 +63,10 @@ impl GenerativeFill {
     /// as edits to the document, gathered into one undo step.
     pub fn open(ctx: &egui::Context, editor: &mut Editor) -> Result<Self, String> {
         if omapix_ai::find_model(flux::MODEL).is_none() {
-            return Err(format!("Generative Fill needs the FLUX.2 klein model: run scripts/fetch-models.sh {}", flux::MODEL));
+            return Err(format!(
+                "Generative Fill needs the FLUX.2 klein model: run scripts/fetch-models.sh {}",
+                flux::MODEL
+            ));
         }
         let image = Arc::clone(editor.canvas.render().ok_or("The image isn't ready yet")?);
         let (selection, profile) = (editor.doc.selection.clone(), editor.doc.profile.clone());
@@ -121,9 +124,7 @@ impl GenerativeFill {
                 let message = match progress {
                     Progress::Prompt => Ok(Message::Status("Reading the prompt…".into())),
                     Progress::Loading => Ok(Message::Status("Loading the model…".into())),
-                    Progress::Step(result, step) => {
-                        Ok(Message::Status(format!("Result {} of {count}, step {} of {STEPS}…", result + 1, step + 1)))
-                    }
+                    Progress::Step(result, step) => Ok(Message::Status(format!("Result {} of {count}, step {} of {STEPS}…", result + 1, step + 1))),
                     Progress::Result(image) => fill::layer(0, NAME, patch, &image, &profile, selection)
                         .map(|layer| Message::Result(Box::new(layer)))
                         .map_err(|e| e.to_string()),
@@ -232,8 +233,7 @@ impl GenerativeFill {
             result = Some(false);
         }
         let mut generate = false;
-        let area = egui::Modal::default_area(egui::Id::new("generative-fill"))
-            .anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
+        let area = egui::Modal::default_area(egui::Id::new("generative-fill")).anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
         egui::Modal::new(egui::Id::new("generative-fill"))
             .area(area)
             .backdrop_color(Color32::TRANSPARENT)
@@ -364,7 +364,9 @@ mod tests {
     /// A result all of one grey.
     fn result(dialog: &GenerativeFill, (patch, selection): &Cut, grey: f32) -> Result<Message, String> {
         let image = vec![grey; 3 * patch.width * patch.height];
-        Ok(Message::Result(Box::new(fill::layer(0, NAME, patch, &image, &dialog.profile, selection).unwrap())))
+        Ok(Message::Result(Box::new(
+            fill::layer(0, NAME, patch, &image, &dialog.profile, selection).unwrap(),
+        )))
     }
 
     fn shown(editor: &Editor) -> u16 {
@@ -475,7 +477,9 @@ mod tests {
     #[test]
     fn with_nothing_selected_the_empty_canvas_is_filled() {
         // A picture with room made on its right, as the Crop tool leaves.
-        let pixels = (0..600 * 400).map(|i| if i % 600 < 456 { [30000, 30000, 30000, 65535] } else { [0; 4] }).collect();
+        let pixels = (0..600 * 400)
+            .map(|i| if i % 600 < 456 { [30000, 30000, 30000, 65535] } else { [0; 4] })
+            .collect();
         let image = Raster::new(600, 400, pixels);
         let Ok(Message::Patch(room)) = cut(&image, None, &ColorProfile::srgb()) else {
             panic!("nothing to fill");

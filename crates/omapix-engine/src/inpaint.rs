@@ -381,7 +381,11 @@ impl Solver<'_> {
             }
         };
         if w * self.h >= PARALLEL {
-            matches.par_chunks_mut(BAND * w).zip(cost.par_chunks_mut(BAND * w)).enumerate().for_each(|(b, (m, c))| band(b, m, c));
+            matches
+                .par_chunks_mut(BAND * w)
+                .zip(cost.par_chunks_mut(BAND * w))
+                .enumerate()
+                .for_each(|(b, (m, c))| band(b, m, c));
         } else {
             for (b, (m, c)) in matches.chunks_mut(BAND * w).zip(cost.chunks_mut(BAND * w)).enumerate() {
                 band(b, m, c);
@@ -459,7 +463,12 @@ fn complete(w: usize, h: usize, img: &[Px], hole: &[bool]) -> Option<Vec<Px>> {
         across = thickness;
     }
     // Halve it until the hole is a couple of patches across.
-    let mut levels = vec![Level { w, h, img: img.to_vec(), hole: hole.to_vec() }];
+    let mut levels = vec![Level {
+        w,
+        h,
+        img: img.to_vec(),
+        hole: hole.to_vec(),
+    }];
     let mut extents = vec![across];
     while let Some(l) = levels.last() {
         if across <= 2 * PATCH || l.w / 2 < 3 * PATCH || l.h / 2 < 3 * PATCH {
@@ -521,7 +530,14 @@ fn complete(w: usize, h: usize, img: &[Px], hole: &[bool]) -> Option<Vec<Px>> {
             matches.clear();
             continue;
         }
-        let mut solver = Solver { w: lw, h: lh, img: &mut img, hole: &hole, sources, targets };
+        let mut solver = Solver {
+            w: lw,
+            h: lh,
+            img: &mut img,
+            hole: &hole,
+            sources,
+            targets,
+        };
         // Matches start as the size below's, doubled, and at random where
         // that doesn't land on a source.
         let mut rng = Rng::new(SEED ^ (li as u64) << 20);
@@ -579,7 +595,13 @@ fn complete(w: usize, h: usize, img: &[Px], hole: &[bool]) -> Option<Vec<Px>> {
                 (4 * PATCH as i32).min(anywhere)
             };
             for pass in 0..passes {
-                solver.improve(&mut matches, &mut cost, pass + round * passes, SEED.wrapping_add((li * 1000 + round) as u64), reach);
+                solver.improve(
+                    &mut matches,
+                    &mut cost,
+                    pass + round * passes,
+                    SEED.wrapping_add((li * 1000 + round) as u64),
+                    reach,
+                );
             }
             solver.average(&matches, &cost);
         }
@@ -634,7 +656,11 @@ fn with_texture(w: usize, h: usize, img: &[Rgb], unknown: &[bool]) -> Vec<Px> {
             }
             let (x, y) = (i % w, i / w);
             let step = |to: [Option<usize>; 2]| {
-                let (sum, n) = to.into_iter().flatten().filter(|&j| !unknown[j]).fold((0.0f32, 0.0f32), |(s, n), j| (s + (light(j) - light(i)).abs(), n + 1.0));
+                let (sum, n) = to
+                    .into_iter()
+                    .flatten()
+                    .filter(|&j| !unknown[j])
+                    .fold((0.0f32, 0.0f32), |(s, n), j| (s + (light(j) - light(i)).abs(), n + 1.0));
                 if n == 0.0 { 0.0 } else { sum / n * TEXTURE }
             };
             let across = step([(x > 0).then(|| i - 1), (x + 1 < w).then(|| i + 1)]);
@@ -843,7 +869,13 @@ mod tests {
         let mean_rest = mean(&out, &hole_rest);
 
         let diff = (mean_hole - mean_near).abs();
-        assert!(diff < 0.008, "ghost in fill: mean hole {mean_hole:.4} vs near {mean_near:.4} (diff {diff:.4} >= 0.008)");
-        assert!(mean_core >= mean_rest - 0.002, "hair centre line visible: core {mean_core:.4} < rest {mean_rest:.4}");
+        assert!(
+            diff < 0.008,
+            "ghost in fill: mean hole {mean_hole:.4} vs near {mean_near:.4} (diff {diff:.4} >= 0.008)"
+        );
+        assert!(
+            mean_core >= mean_rest - 0.002,
+            "hair centre line visible: core {mean_core:.4} < rest {mean_rest:.4}"
+        );
     }
 }

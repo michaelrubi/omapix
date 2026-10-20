@@ -141,7 +141,11 @@ impl Denoise {
                 ui.add(Slider::new(&mut self.color, 0.0..=100.0).suffix(" %").fixed_decimals(0));
             });
             ui.add_space(4.0);
-            let hint = if self.sampling.is_some() { "Denoising the preview…" } else { "AI (NIND), onto a new Denoise layer." };
+            let hint = if self.sampling.is_some() {
+                "Denoising the preview…"
+            } else {
+                "AI (NIND), onto a new Denoise layer."
+            };
             ui.label(RichText::new(hint).color(theme.dark_foreground));
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -251,7 +255,10 @@ fn sample(ctx: &egui::Context, source: &Arc<Raster>, profile: &ColorProfile, cor
 
 /// `w` × `h` of `raster` from (`x`, `y`).
 fn crop(raster: &Raster, x: u32, y: u32, w: u32, h: u32) -> Raster {
-    let pixels = (0..h).flat_map(|py| (0..w).map(move |px| (px, py))).map(|(px, py)| raster.get(x + px, y + py)).collect();
+    let pixels = (0..h)
+        .flat_map(|py| (0..w).map(move |px| (px, py)))
+        .map(|(px, py)| raster.get(x + px, y + py))
+        .collect();
     Raster::new(w, h, pixels)
 }
 
@@ -414,7 +421,10 @@ mod tests {
         let rx = dialog.opening.take().unwrap();
         let source = rx.recv().unwrap().unwrap();
         let t = std::time::Instant::now();
-        let sample = sample(&ctx, &source, &dialog.profile, ((source.width() - SIDE) / 2, (source.height() - SIDE) / 2)).recv().unwrap().unwrap();
+        let sample = sample(&ctx, &source, &dialog.profile, ((source.width() - SIDE) / 2, (source.height() - SIDE) / 2))
+            .recv()
+            .unwrap()
+            .unwrap();
         eprintln!("preview in {:?} (loading the model too)", t.elapsed());
         let t = std::time::Instant::now();
         let again = super::sample(&ctx, &source, &dialog.profile, (0, 0)).recv().unwrap().unwrap();

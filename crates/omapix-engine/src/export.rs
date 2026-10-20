@@ -9,19 +9,17 @@ use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use rayon::prelude::*;
 use tiff::encoder::{Compression, DeflateLevel, TiffEncoder, colortype};
 use tiff::tags::Tag;
-use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, Exif, PixelLayout, Unstoppable};
 use zenjpeg::encoder::Error as JpegError;
+use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, Exif, PixelLayout, Unstoppable};
 
 use crate::color::LinearSrgbTransform;
 use crate::{DisplayTransform, Document, Error, Pixel, Result};
 
 fn create(path: &Path) -> Result<BufWriter<File>> {
-    File::create(path)
-        .map(BufWriter::new)
-        .map_err(|source| Error::Read {
-            path: path.display().to_string(),
-            source,
-        })
+    File::create(path).map(BufWriter::new).map_err(|source| Error::Read {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 /// Flattened 16-bit TIFF in the document's colour space, with its ICC
@@ -30,14 +28,10 @@ fn create(path: &Path) -> Result<BufWriter<File>> {
 pub fn tiff(doc: &Document, path: &Path) -> Result<()> {
     let image = doc.composite();
     let opaque = image.pixels().iter().all(|p| p[3] == u16::MAX);
-    let mut encoder =
-        TiffEncoder::new(create(path)?)?.with_compression(Compression::Deflate(DeflateLevel::Fast));
+    let mut encoder = TiffEncoder::new(create(path)?)?.with_compression(Compression::Deflate(DeflateLevel::Fast));
     let (w, h) = (image.width(), image.height());
 
-    let parsed_exif = doc
-        .exif
-        .as_ref()
-        .and_then(|bytes| exif::Reader::new().read_raw(bytes.clone()).ok());
+    let parsed_exif = doc.exif.as_ref().and_then(|bytes| exif::Reader::new().read_raw(bytes.clone()).ok());
 
     let exif_offset = if let Some(ref parsed) = parsed_exif {
         if parsed.fields().any(|f| f.tag.context() == exif::Context::Exif) {
@@ -79,11 +73,7 @@ pub fn tiff(doc: &Document, path: &Path) -> Result<()> {
     };
 
     if opaque {
-        let data: Vec<u16> = image
-            .pixels()
-            .iter()
-            .flat_map(|p| [p[0], p[1], p[2]])
-            .collect();
+        let data: Vec<u16> = image.pixels().iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
         let mut img = encoder.new_image::<colortype::RGB16>(w, h)?;
         write_tiff_metadata(img.encoder(), doc, parsed_exif.as_ref(), exif_offset, gps_offset)?;
         img.write_data(&data)?;
@@ -114,23 +104,11 @@ fn write_exif_field<W: std::io::Write + std::io::Seek, K: tiff::encoder::TiffKin
             let _ = dir.write_tag(tag, &v[..]);
         }
         exif::Value::Rational(v) => {
-            let rats: Vec<_> = v
-                .iter()
-                .map(|r| tiff::encoder::Rational {
-                    n: r.num,
-                    d: r.denom,
-                })
-                .collect();
+            let rats: Vec<_> = v.iter().map(|r| tiff::encoder::Rational { n: r.num, d: r.denom }).collect();
             let _ = dir.write_tag(tag, &rats[..]);
         }
         exif::Value::SRational(v) => {
-            let rats: Vec<_> = v
-                .iter()
-                .map(|r| tiff::encoder::SRational {
-                    n: r.num,
-                    d: r.denom,
-                })
-                .collect();
+            let rats: Vec<_> = v.iter().map(|r| tiff::encoder::SRational { n: r.num, d: r.denom }).collect();
             let _ = dir.write_tag(tag, &rats[..]);
         }
         exif::Value::Byte(v) | exif::Value::Undefined(v, _) => {
@@ -207,21 +185,19 @@ fn jpeg_bytes(doc: &Document, quality: u8) -> Result<Vec<u8>> {
     let image = doc.composite();
     let transform = LinearSrgbTransform::new(&doc.profile)?;
     let mut rgb = vec![[0u16; 3]; image.pixels().len()];
-    rgb.par_chunks_mut(65536)
-        .zip(image.pixels().par_chunks(65536))
-        .for_each(|(out, src)| {
-            // Onto white in the document's colour space, where white is
-            // full scale, as Photoshop flattens.
-            let over_white = |c: u16, a: u32| ((u32::from(c) * a + 65535 * (65535 - a) + 32767) / 65535) as u16;
-            let flat: Vec<Pixel> = src
-                .iter()
-                .map(|&[r, g, b, a]| {
-                    let a = u32::from(a);
-                    [over_white(r, a), over_white(g, a), over_white(b, a), u16::MAX]
-                })
-                .collect();
-            transform.convert(&flat, out);
-        });
+    rgb.par_chunks_mut(65536).zip(image.pixels().par_chunks(65536)).for_each(|(out, src)| {
+        // Onto white in the document's colour space, where white is
+        // full scale, as Photoshop flattens.
+        let over_white = |c: u16, a: u32| ((u32::from(c) * a + 65535 * (65535 - a) + 32767) / 65535) as u16;
+        let flat: Vec<Pixel> = src
+            .iter()
+            .map(|&[r, g, b, a]| {
+                let a = u32::from(a);
+                [over_white(r, a), over_white(g, a), over_white(b, a), u16::MAX]
+            })
+            .collect();
+        transform.convert(&flat, out);
+    });
     let srgb = lcms2::Profile::new_srgb().icc().map_err(Error::Color)?;
     let config = EncoderConfig::ycbcr(quality, ChromaSubsampling::None);
     let mut request = config.request().icc_profile(&srgb);
@@ -328,7 +304,10 @@ pub fn batch_file(
     crate::ops::finish(&mut doc, sharpen, grain);
     let name = source.file_stem().unwrap_or_default();
     let path = dir.join(name).with_extension(if jpeg_quality.is_some() { "jpg" } else { "tif" });
-    std::fs::create_dir_all(dir).map_err(|source| Error::Read { path: dir.display().to_string(), source })?;
+    std::fs::create_dir_all(dir).map_err(|source| Error::Read {
+        path: dir.display().to_string(),
+        source,
+    })?;
     match jpeg_quality {
         Some(quality) => jpeg(&doc, &path, quality)?,
         None => tiff(&doc, &path)?,
@@ -351,10 +330,7 @@ fn fit_jpeg_exif(exif: &[u8]) -> Option<Vec<u8>> {
     let parsed = exif::Reader::new().read_raw(exif.to_vec()).ok()?;
     let mut writer = exif::experimental::Writer::new();
     // XMP, IPTC, PrintIM and MakerNote.
-    for f in parsed
-        .fields()
-        .filter(|f| !matches!(f.tag.number(), 0x02bc | 0x83bb | 0xc4a5 | 0x927c))
-    {
+    for f in parsed.fields().filter(|f| !matches!(f.tag.number(), 0x02bc | 0x83bb | 0xc4a5 | 0x927c)) {
         writer.push_field(f);
     }
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -371,15 +347,8 @@ mod tests {
     #[test]
     fn tiff_round_trips_through_loader() {
         let (w, h) = (40, 30);
-        let px: Vec<crate::Pixel> = (0..w * h)
-            .map(|i| [i as u16 * 50, 30000, 65535 - i as u16, 65535])
-            .collect();
-        let doc = Document::from_image(
-            "x.tif".into(),
-            &Raster::new(w, h, px.clone()),
-            ColorProfile::srgb(),
-            16,
-        );
+        let px: Vec<crate::Pixel> = (0..w * h).map(|i| [i as u16 * 50, 30000, 65535 - i as u16, 65535]).collect();
+        let doc = Document::from_image("x.tif".into(), &Raster::new(w, h, px.clone()), ColorProfile::srgb(), 16);
         let dir = std::env::temp_dir().join(format!("omapix-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.tif");
@@ -507,21 +476,14 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         writer.write(&mut buf, true).unwrap();
 
-        let mut doc = Document::from_image(
-            "x.tif".into(),
-            &Raster::new(8, 8, vec![[30000; 4]; 64]),
-            ColorProfile::srgb(),
-            16,
-        );
+        let mut doc = Document::from_image("x.tif".into(), &Raster::new(8, 8, vec![[30000; 4]; 64]), ColorProfile::srgb(), 16);
         doc.exif = Some(buf.into_inner());
         let dir = std::env::temp_dir().join(format!("omapix-bigexif-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.jpg");
         jpeg(&doc, &path, 90).unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let parsed = exif::Reader::new()
-            .read_from_container(&mut std::io::Cursor::new(&bytes))
-            .unwrap();
+        let parsed = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
         assert!(segments_ok(&bytes));
         assert!(parsed.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY).is_some());
@@ -547,8 +509,15 @@ mod tests {
         assert_eq!(path, out.join("wide.tif"));
         assert_eq!(crate::io::load(&path).unwrap().composite().pixels(), doc.composite().pixels());
         // Sharpened and grained, as Finish does it.
-        let sharpen = crate::filters::LayerFilter::UnsharpMask { amount: 2.0, radius: 2.0, threshold: 0.0 };
-        let grain = crate::NoiseOptions { amount: 20.0, ..Default::default() };
+        let sharpen = crate::filters::LayerFilter::UnsharpMask {
+            amount: 2.0,
+            radius: 2.0,
+            threshold: 0.0,
+        };
+        let grain = crate::NoiseOptions {
+            amount: 20.0,
+            ..Default::default()
+        };
         let path = batch_file(&source, &out, None, Some(&sharpen), Some(&grain), None).unwrap();
         let mut finished = doc.clone();
         crate::ops::finish(&mut finished, Some(&sharpen), Some(&grain));

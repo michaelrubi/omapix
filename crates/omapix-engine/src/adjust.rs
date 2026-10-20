@@ -107,11 +107,7 @@ const LUT_SIZE: usize = 4096;
 
 impl Lut {
     fn from_fn(f: impl Fn(f32) -> f32) -> Self {
-        Self(
-            (0..LUT_SIZE)
-                .map(|i| f(i as f32 / (LUT_SIZE - 1) as f32).clamp(0.0, 1.0))
-                .collect(),
-        )
+        Self((0..LUT_SIZE).map(|i| f(i as f32 / (LUT_SIZE - 1) as f32).clamp(0.0, 1.0)).collect())
     }
 
     #[inline]
@@ -191,10 +187,7 @@ impl Curve {
                 tangents[i + 1] = t * b * slopes[i];
             }
         }
-        let i = p
-            .windows(2)
-            .position(|w| x >= w[0].0 && x <= w[1].0)
-            .unwrap_or(n - 2);
+        let i = p.windows(2).position(|w| x >= w[0].0 && x <= w[1].0).unwrap_or(n - 2);
         let (x0, y0) = p[i];
         let (x1, y1) = p[i + 1];
         let h = (x1 - x0).max(1e-6);
@@ -244,12 +237,7 @@ fn set_curve_black(curve: &mut Curve, in_val: f32) {
     let (_, y_last) = curve.points.last().copied().unwrap_or((1.0, 1.0));
     let x_last = curve.points.last().map_or(1.0, |p| p.0);
     let x = in_val.clamp(0.0, (x_last - 0.001).max(0.0));
-    let mut remaining: Vec<(f32, f32)> = curve
-        .points
-        .iter()
-        .copied()
-        .filter(|&(px, _)| px > x && px < x_last)
-        .collect();
+    let mut remaining: Vec<(f32, f32)> = curve.points.iter().copied().filter(|&(px, _)| px > x && px < x_last).collect();
     let mut new_points = Vec::with_capacity(remaining.len() + 2);
     new_points.push((x, 0.0));
     new_points.append(&mut remaining);
@@ -260,12 +248,7 @@ fn set_curve_black(curve: &mut Curve, in_val: f32) {
 fn set_curve_white(curve: &mut Curve, in_val: f32) {
     let (x_first, y_first) = curve.points.first().copied().unwrap_or((0.0, 0.0));
     let x = in_val.clamp((x_first + 0.001).min(1.0), 1.0);
-    let mut remaining: Vec<(f32, f32)> = curve
-        .points
-        .iter()
-        .copied()
-        .filter(|&(px, _)| px > x_first && px < x)
-        .collect();
+    let mut remaining: Vec<(f32, f32)> = curve.points.iter().copied().filter(|&(px, _)| px > x_first && px < x).collect();
     let mut new_points = Vec::with_capacity(remaining.len() + 2);
     new_points.push((x_first, y_first));
     new_points.append(&mut remaining);
@@ -276,10 +259,7 @@ fn set_curve_white(curve: &mut Curve, in_val: f32) {
 fn set_curve_gray(curve: &mut Curve, in_val: f32, target: f32) {
     let (x_first, y_first) = curve.points.first().copied().unwrap_or((0.0, 0.0));
     let (x_last, y_last) = curve.points.last().copied().unwrap_or((1.0, 1.0));
-    let x = in_val.clamp(
-        (x_first + 0.001).min(1.0),
-        (x_last - 0.001).max(x_first + 0.001),
-    );
+    let x = in_val.clamp((x_first + 0.001).min(1.0), (x_last - 0.001).max(x_first + 0.001));
     let y = target.clamp(0.0, 1.0);
     curve.points = vec![(x_first, y_first), (x, y), (x_last, y_last)];
 }
@@ -385,19 +365,11 @@ impl HueSaturation {
         let h = (h + self.hue / 360.0).rem_euclid(1.0);
         let k = self.saturation / 100.0;
         // Positive saturation pushes towards full colour, negative towards grey.
-        let s = if k >= 0.0 {
-            s + (1.0 - s) * k * s.min(1.0)
-        } else {
-            s * (1.0 + k)
-        };
+        let s = if k >= 0.0 { s + (1.0 - s) * k * s.min(1.0) } else { s * (1.0 + k) };
         let mut rgb = hsl_to_rgb(h, s.clamp(0.0, 1.0), l);
         let light = self.lightness / 100.0;
         for v in &mut rgb {
-            *v = if light >= 0.0 {
-                *v + (1.0 - *v) * light
-            } else {
-                *v * (1.0 + light)
-            };
+            *v = if light >= 0.0 { *v + (1.0 - *v) * light } else { *v * (1.0 + light) };
         }
         rgb
     }
@@ -431,15 +403,11 @@ impl ColorBalance {
         let (_, _, lightness) = rgb_to_hsl(c);
         let (a, b, scale) = (0.25, 0.333, 0.7);
         let shadow_w = ((lightness - b) / -a + 0.5).clamp(0.0, 1.0) * scale;
-        let mid_w = ((lightness - b) / a + 0.5).clamp(0.0, 1.0)
-            * ((lightness + b - 1.0) / -a + 0.5).clamp(0.0, 1.0)
-            * scale;
+        let mid_w = ((lightness - b) / a + 0.5).clamp(0.0, 1.0) * ((lightness + b - 1.0) / -a + 0.5).clamp(0.0, 1.0) * scale;
         let high_w = ((lightness + b - 1.0) / a + 0.5).clamp(0.0, 1.0) * scale;
         let mut out = c;
         for ch in 0..3 {
-            let shift = self.shadows[ch] * shadow_w
-                + self.midtones[ch] * mid_w
-                + self.highlights[ch] * high_w;
+            let shift = self.shadows[ch] * shadow_w + self.midtones[ch] * mid_w + self.highlights[ch] * high_w;
             out[ch] = (c[ch] + shift / 100.0).clamp(0.0, 1.0);
         }
         if self.preserve_luminosity {
@@ -458,11 +426,7 @@ fn rgb_to_hsl([r, g, b]: [f32; 3]) -> (f32, f32, f32) {
     if d < 1e-7 {
         return (0.0, 0.0, l);
     }
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
-    } else {
-        d / (max + min)
-    };
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
     let h = if max == r {
         (g - b) / d + if g < b { 6.0 } else { 0.0 }
     } else if max == g {
@@ -477,11 +441,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
     if s <= 0.0 {
         return [l; 3];
     }
-    let q = if l < 0.5 {
-        l * (1.0 + s)
-    } else {
-        l + s - l * s
-    };
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
     let p = 2.0 * l - q;
     let hue = |mut t: f32| {
         t = t.rem_euclid(1.0);
@@ -526,9 +486,7 @@ impl SelectiveColor {
     pub const WHITES: usize = 6;
     pub const NEUTRALS: usize = 7;
     pub const BLACKS: usize = 8;
-    pub const RANGE_NAMES: [&'static str; 9] = [
-        "Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas", "Whites", "Neutrals", "Blacks",
-    ];
+    pub const RANGE_NAMES: [&'static str; 9] = ["Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas", "Whites", "Neutrals", "Blacks"];
 
     pub fn prepare(&self) -> PreparedSelectiveColor {
         let active = self
@@ -573,11 +531,7 @@ impl PreparedSelectiveColor {
                 SelectiveColor::BLUES if b == max => max - med,
                 SelectiveColor::MAGENTAS if g == min => med - min,
                 SelectiveColor::WHITES if r > 0.5 && g > 0.5 && b > 0.5 => (min - 0.5) * 2.0,
-                SelectiveColor::NEUTRALS
-                    if (r > 0.0 || g > 0.0 || b > 0.0) && (r < 1.0 || g < 1.0 || b < 1.0) =>
-                {
-                    1.0 - ((max - 0.5).abs() + (min - 0.5).abs())
-                }
+                SelectiveColor::NEUTRALS if (r > 0.0 || g > 0.0 || b > 0.0) && (r < 1.0 || g < 1.0 || b < 1.0) => 1.0 - ((max - 0.5).abs() + (min - 0.5).abs()),
                 SelectiveColor::BLACKS if r < 0.5 && g < 0.5 && b < 0.5 => (0.5 - max) * 2.0,
                 _ => 0.0,
             };
@@ -587,11 +541,7 @@ impl PreparedSelectiveColor {
                 adj_b += comp_adjust(scale, b, y, k, self.relative);
             }
         }
-        [
-            (r + adj_r).clamp(0.0, 1.0),
-            (g + adj_g).clamp(0.0, 1.0),
-            (b + adj_b).clamp(0.0, 1.0),
-        ]
+        [(r + adj_r).clamp(0.0, 1.0), (g + adj_g).clamp(0.0, 1.0), (b + adj_b).clamp(0.0, 1.0)]
     }
 }
 
@@ -716,10 +666,7 @@ impl ColorLookup {
     pub fn load_cube_file<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<(), String> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let fallback = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "LUT".into());
+        let fallback = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "LUT".into());
         self.load_cube_str(&content, &fallback)
     }
 
@@ -885,19 +832,13 @@ pub fn parse_cube(content: &str, title_fallback: &str) -> Result<ColorLookup, St
         (Some(s3), _) => {
             let expected = s3 * s3 * s3;
             if table.len() != expected {
-                return Err(format!(
-                    "Expected {expected} data points for 3D LUT of size {s3}, found {}",
-                    table.len()
-                ));
+                return Err(format!("Expected {expected} data points for 3D LUT of size {s3}, found {}", table.len()));
             }
             true
         }
         (None, Some(s1)) => {
             if table.len() != s1 {
-                return Err(format!(
-                    "Expected {s1} data points for 1D LUT of size {s1}, found {}",
-                    table.len()
-                ));
+                return Err(format!("Expected {s1} data points for 1D LUT of size {s1}, found {}", table.len()));
             }
             false
         }
@@ -916,11 +857,7 @@ pub fn parse_cube(content: &str, title_fallback: &str) -> Result<ColorLookup, St
         }
     };
 
-    let size = if is_3d {
-        size_3d.unwrap()
-    } else {
-        size_1d.unwrap()
-    };
+    let size = if is_3d { size_3d.unwrap() } else { size_1d.unwrap() };
 
     Ok(ColorLookup {
         title: title.unwrap_or_else(|| title_fallback.to_string()),
@@ -1079,12 +1016,7 @@ mod tests {
 
     #[test]
     fn defaults_change_nothing() {
-        let samples = [
-            [0.0, 0.0, 0.0],
-            [0.2, 0.5, 0.9],
-            [1.0, 0.3, 0.3],
-            [1.0, 1.0, 1.0],
-        ];
+        let samples = [[0.0, 0.0, 0.0], [0.2, 0.5, 0.9], [1.0, 0.3, 0.3], [1.0, 1.0, 1.0]];
         for adj in [
             Adjustment::Curves(Curves::default()),
             Adjustment::Levels(Levels::default()),
@@ -1096,12 +1028,7 @@ mod tests {
         ] {
             let p = adj.prepare();
             for c in samples {
-                assert!(
-                    close(p.apply(c), c, 2e-3),
-                    "{} changed {c:?} to {:?}",
-                    adj.name(),
-                    p.apply(c)
-                );
+                assert!(close(p.apply(c), c, 2e-3), "{} changed {c:?} to {:?}", adj.name(), p.apply(c));
             }
         }
     }
@@ -1131,10 +1058,7 @@ mod tests {
         let dark = p.apply([0.25; 3]);
         assert!(dark[0] < 0.2);
         let mid = p.apply([0.5; 3]);
-        assert!(
-            mid[2] > mid[0] + 0.05,
-            "blue curve should warm-cool: {mid:?}"
-        );
+        assert!(mid[2] > mid[0] + 0.05, "blue curve should warm-cool: {mid:?}");
     }
 
     #[test]
@@ -1172,10 +1096,7 @@ mod tests {
         })
         .prepare();
         let r = rotate.apply([0.8, 0.2, 0.2]);
-        assert!(
-            r[1] > r[0] && r[1] > r[2],
-            "red rotated 120° should be green: {r:?}"
-        );
+        assert!(r[1] > r[0] && r[1] > r[2], "red rotated 120° should be green: {r:?}");
     }
 
     #[test]
@@ -1306,18 +1227,9 @@ mod tests {
         assert!(lut.is_3d);
         let p = Adjustment::ColorLookup(lut).prepare();
 
-        let samples = [
-            [0.0, 0.0, 0.0],
-            [1.0, 1.0, 1.0],
-            [0.25, 0.5, 0.75],
-            [0.1, 0.9, 0.3],
-        ];
+        let samples = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.25, 0.5, 0.75], [0.1, 0.9, 0.3]];
         for c in samples {
-            assert!(
-                close(p.apply(c), c, 1e-5),
-                "identity 3D LUT changed {c:?} to {:?}",
-                p.apply(c)
-            );
+            assert!(close(p.apply(c), c, 1e-5), "identity 3D LUT changed {c:?} to {:?}", p.apply(c));
         }
 
         // Invert-red 2x2x2 cube

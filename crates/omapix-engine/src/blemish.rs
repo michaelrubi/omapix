@@ -102,10 +102,7 @@ pub fn find(srgb: &[[u8; 4]], skin: &Selection, iod: f32) -> Vec<Spot> {
         })
         .collect();
     let skin: Vec<f32> = weighted.iter().map(|p| p[2]).collect();
-    let scores: Vec<Vec<f32>> = SIZES
-        .par_iter()
-        .map(|size| blob_scores(&weighted, &skin, gw, gh, size * iod))
-        .collect();
+    let scores: Vec<Vec<f32>> = SIZES.par_iter().map(|size| blob_scores(&weighted, &skin, gw, gh, size * iod)).collect();
 
     let mut found = Vec::new();
     for level in 1..SIZES.len() - 2 {
@@ -268,7 +265,6 @@ fn lab([r, g, b]: [f32; 3]) -> [f32; 2] {
     let (fx, fy) = (f(x), f(y));
     [116.0 * fy - 16.0, 500.0 * (fx - fy)]
 }
-
 
 /// Heal `spots` onto a new empty "Blemishes" layer above the layer at
 /// `above`, each with one Spot Healing dab sampling the image below it, so
@@ -449,4 +445,3 @@ mod tests {
         }
     }
 }
-

@@ -45,67 +45,61 @@ impl HistoryPanel {
         let bottom_height = 28.0;
         let available_height = (ui.available_height() - bottom_height).max(60.0);
 
-        ScrollArea::vertical()
-            .max_height(available_height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                for (i, label) in labels.iter().enumerate() {
-                    let is_active = i == active;
-                    let is_future = i > active;
+        ScrollArea::vertical().max_height(available_height).auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for (i, label) in labels.iter().enumerate() {
+                let is_active = i == active;
+                let is_future = i > active;
 
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 24.0),
-                        Sense::hover(),
-                    );
-                    let response = ui.interact(rect, history_row_id(i), Sense::click());
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+                let response = ui.interact(rect, history_row_id(i), Sense::click());
 
-                    if is_active {
-                        ui.painter().rect_filled(rect, 2.0, theme.selection);
-                    } else if response.hovered() {
-                        ui.painter().rect_filled(rect, 2.0, theme.lighter_background);
-                    }
-
-                    let icon = if i == 0 { IMAGE_ICON } else { EDIT_ICON };
-                    let icon_colour = if is_active {
-                        theme.accent
-                    } else if response.hovered() {
-                        theme.foreground
-                    } else {
-                        theme.dark_foreground
-                    };
-
-                    let text_colour = if is_future && !is_active && !response.hovered() {
-                        theme.dark_foreground
-                    } else {
-                        theme.foreground
-                    };
-
-                    if is_active {
-                        let bar = egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height()));
-                        ui.painter().rect_filled(bar, 1.0, theme.accent);
-                    }
-
-                    ui.painter().text(
-                        egui::pos2(rect.left() + 8.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        icon,
-                        egui::FontId::proportional(13.0),
-                        icon_colour,
-                    );
-                    ui.painter().text(
-                        egui::pos2(rect.left() + 24.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        label,
-                        egui::FontId::proportional(13.0),
-                        text_colour,
-                    );
-
-                    if response.clicked() {
-                        editor.jump_to_history(i);
-                    }
+                if is_active {
+                    ui.painter().rect_filled(rect, 2.0, theme.selection);
+                } else if response.hovered() {
+                    ui.painter().rect_filled(rect, 2.0, theme.lighter_background);
                 }
-            });
+
+                let icon = if i == 0 { IMAGE_ICON } else { EDIT_ICON };
+                let icon_colour = if is_active {
+                    theme.accent
+                } else if response.hovered() {
+                    theme.foreground
+                } else {
+                    theme.dark_foreground
+                };
+
+                let text_colour = if is_future && !is_active && !response.hovered() {
+                    theme.dark_foreground
+                } else {
+                    theme.foreground
+                };
+
+                if is_active {
+                    let bar = egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height()));
+                    ui.painter().rect_filled(bar, 1.0, theme.accent);
+                }
+
+                ui.painter().text(
+                    egui::pos2(rect.left() + 8.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    icon,
+                    egui::FontId::proportional(13.0),
+                    icon_colour,
+                );
+                ui.painter().text(
+                    egui::pos2(rect.left() + 24.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    egui::FontId::proportional(13.0),
+                    text_colour,
+                );
+
+                if response.clicked() {
+                    editor.jump_to_history(i);
+                }
+            }
+        });
 
         ui.separator();
         ui.horizontal(|ui| {
@@ -171,19 +165,14 @@ mod tests {
         fn frame(&mut self, events: Vec<Event>) -> Option<Command> {
             self.time += 0.05;
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    pos2(0.0, 0.0),
-                    vec2(300.0, 600.0),
-                )),
+                screen_rect: Some(egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 600.0))),
                 time: Some(self.time),
                 events,
                 ..Default::default()
             };
             let (panel, editor, theme) = (&mut self.panel, &mut self.editor, &self.theme);
             let mut command = None;
-            let mut output = self
-                .ctx
-                .run_ui(input, |ui| command = panel.show(ui, editor, theme));
+            let mut output = self.ctx.run_ui(input, |ui| command = panel.show(ui, editor, theme));
             output.textures_delta.clear();
             command
         }

@@ -18,10 +18,7 @@ pub fn load(path: &Path) -> Result<Document> {
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"));
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
     match ext.as_deref() {
         Some("ora") => crate::ora::load(path),
         Some("psd" | "psb") => crate::psd::load(path),
@@ -43,12 +40,10 @@ pub fn load_round_trip(tiff: &Path) -> Result<Document> {
 }
 
 fn open(path: &Path) -> Result<BufReader<File>> {
-    File::open(path)
-        .map(BufReader::new)
-        .map_err(|source| Error::Read {
-            path: path.display().to_string(),
-            source,
-        })
+    File::open(path).map(BufReader::new).map_err(|source| Error::Read {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 fn load_tiff(path: &Path) -> Result<Document> {
@@ -57,10 +52,7 @@ fn load_tiff(path: &Path) -> Result<Document> {
     let mut decoder = Decoder::new(open(path)?)?.with_limits(Limits::unlimited());
     let (width, height) = decoder.dimensions()?;
     let color_type = decoder.colortype()?;
-    let icc = decoder
-        .find_tag(Tag::IccProfile)?
-        .map(|v| v.into_u8_vec())
-        .transpose()?;
+    let icc = decoder.find_tag(Tag::IccProfile)?.map(|v| v.into_u8_vec()).transpose()?;
 
     let (channels, bits) = match color_type {
         ColorType::Gray(b) => (1, b),
@@ -75,10 +67,7 @@ fn load_tiff(path: &Path) -> Result<Document> {
         DecodingResult::U16(v) => v,
         // Floating-point TIFFs are clipped to 0–1 until the engine gains a
         // float pipeline.
-        DecodingResult::F32(v) => v
-            .into_iter()
-            .map(|s| (s.clamp(0.0, 1.0) * 65535.0).round() as u16)
-            .collect(),
+        DecodingResult::F32(v) => v.into_iter().map(|s| (s.clamp(0.0, 1.0) * 65535.0).round() as u16).collect(),
         _ => return Err(Error::Unsupported(format!("{bits}-bit TIFF samples"))),
     };
 
@@ -87,12 +76,7 @@ fn load_tiff(path: &Path) -> Result<Document> {
         Some(icc) => ColorProfile::from_icc(icc)?,
         None => ColorProfile::srgb(),
     };
-    let mut doc = Document::from_image(
-        path.to_path_buf(),
-        &Raster::new(width, height, pixels),
-        profile,
-        bits,
-    );
+    let mut doc = Document::from_image(path.to_path_buf(), &Raster::new(width, height, pixels), profile, bits);
     doc.exif = read_tiff_exif(path);
     Ok(doc)
 }
@@ -106,18 +90,7 @@ fn read_tiff_exif(path: &Path) -> Option<Vec<u8>> {
         .filter(|f| {
             !matches!(
                 f.tag.number(),
-                0x0100
-                    | 0x0101
-                    | 0x0102
-                    | 0x0103
-                    | 0x0106
-                    | 0x0111
-                    | 0x0115
-                    | 0x0116
-                    | 0x0117
-                    | 0x0144
-                    | 0x0145
-                    | 0x8773
+                0x0100 | 0x0101 | 0x0102 | 0x0103 | 0x0106 | 0x0111 | 0x0115 | 0x0116 | 0x0117 | 0x0144 | 0x0145 | 0x8773
             )
         })
         .collect();
@@ -136,19 +109,12 @@ fn read_tiff_exif(path: &Path) -> Option<Vec<u8>> {
 }
 
 fn load_other(path: &Path) -> Result<Document> {
-    let reader = ImageReader::new(open(path)?)
-        .with_guessed_format()
-        .map_err(|source| Error::Read {
-            path: path.display().to_string(),
-            source,
-        })?;
+    let reader = ImageReader::new(open(path)?).with_guessed_format().map_err(|source| Error::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
     let (raster, profile, source_bits, exif) = decode(reader)?;
-    let mut doc = Document::from_image(
-        path.to_path_buf(),
-        &raster,
-        profile,
-        source_bits,
-    );
+    let mut doc = Document::from_image(path.to_path_buf(), &raster, profile, source_bits);
     doc.exif = exif;
     Ok(doc)
 }
@@ -156,29 +122,22 @@ fn load_other(path: &Path) -> Result<Document> {
 /// Decode a PNG or JPEG held in memory, such as an image pasted from
 /// another app, with its colour space (sRGB if it has no profile).
 pub fn decode_image(bytes: &[u8]) -> Result<(Raster, ColorProfile)> {
-    let reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|source| Error::Read {
-            path: "image data".into(),
-            source,
-        })?;
+    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|source| Error::Read {
+        path: "image data".into(),
+        source,
+    })?;
     let (raster, profile, _, _) = decode(reader)?;
     Ok((raster, profile))
 }
 
 /// Decode an image with the `image` crate, returning it with its colour
 /// space, bits per channel, and raw EXIF metadata.
-fn decode<R: BufRead + Seek>(
-    reader: ImageReader<R>,
-) -> Result<(Raster, ColorProfile, u8, Option<Vec<u8>>)> {
+fn decode<R: BufRead + Seek>(reader: ImageReader<R>) -> Result<(Raster, ColorProfile, u8, Option<Vec<u8>>)> {
     let mut decoder = reader.into_decoder()?;
     let icc = decoder.icc_profile()?;
-    let source_bits =
-        decoder.color_type().bytes_per_pixel() / decoder.color_type().channel_count() * 8;
+    let source_bits = decoder.color_type().bytes_per_pixel() / decoder.color_type().channel_count() * 8;
     let mut exif = decoder.exif_metadata().ok().flatten();
-    let orientation = exif
-        .as_deref_mut()
-        .and_then(image::metadata::Orientation::remove_from_exif_chunk);
+    let orientation = exif.as_deref_mut().and_then(image::metadata::Orientation::remove_from_exif_chunk);
     let mut image = image::DynamicImage::from_decoder(decoder)?;
     if let Some(orient) = orientation {
         image.apply_orientation(orient);
@@ -190,12 +149,7 @@ fn decode<R: BufRead + Seek>(
         Some(icc) => ColorProfile::from_icc(icc)?,
         None => ColorProfile::srgb(),
     };
-    Ok((
-        Raster::new(width, height, pixels),
-        profile,
-        source_bits,
-        exif,
-    ))
+    Ok((Raster::new(width, height, pixels), profile, source_bits, exif))
 }
 
 /// Expand interleaved gray / gray+alpha / RGB / RGBA samples to RGBA pixels.
@@ -271,10 +225,7 @@ mod tests {
         let parsed = exif::Reader::new().read_from_container(&mut file).ok()?;
         let field = parsed.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)?;
         match &field.value {
-            exif::Value::Ascii(v) => v
-                .first()
-                .and_then(|b| std::str::from_utf8(b).ok())
-                .map(|s| s.trim_matches('\0').to_string()),
+            exif::Value::Ascii(v) => v.first().and_then(|b| std::str::from_utf8(b).ok()).map(|s| s.trim_matches('\0').to_string()),
             _ => None,
         }
     }
@@ -292,8 +243,7 @@ mod tests {
         {
             let mut enc = image::codecs::jpeg::JpegEncoder::new(File::create(&init_jpg).unwrap());
             enc.set_exif_metadata(exif_blob.clone()).unwrap();
-            enc.write_image(&[100, 150, 200], 1, 1, image::ExtendedColorType::Rgb8)
-                .unwrap();
+            enc.write_image(&[100, 150, 200], 1, 1, image::ExtendedColorType::Rgb8).unwrap();
         }
 
         let doc_jpg = load(&init_jpg).unwrap();
@@ -392,13 +342,7 @@ mod tests {
     fn loads_real_tiff() {
         let path = std::env::var("OMAPIX_TEST_TIFF").expect("set OMAPIX_TEST_TIFF");
         let doc = load(Path::new(&path)).unwrap();
-        println!(
-            "{}x{} {}-bit, profile: {}",
-            doc.width,
-            doc.height,
-            doc.source_bits,
-            doc.profile.description()
-        );
+        println!("{}x{} {}-bit, profile: {}", doc.width, doc.height, doc.source_bits, doc.profile.description());
         assert!(doc.width > 0);
     }
 

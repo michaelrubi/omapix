@@ -161,7 +161,11 @@ impl Frame {
         let (l, r) = (middle(&face.eyes.left), middle(&face.eyes.right));
         let (dx, dy) = (r[0] - l[0], r[1] - l[1]);
         let iod = dx.hypot(dy).max(1e-3);
-        Self { origin: [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0], across: [dx / iod, dy / iod], iod }
+        Self {
+            origin: [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0],
+            across: [dx / iod, dy / iod],
+            iod,
+        }
     }
 
     /// How far across and down (x, y) is.
@@ -294,7 +298,14 @@ fn symmetrise(face: &mut Face, amounts: &Symmetry) {
         let d = beyond(p);
         [0, 1, 2].map(|c| p[c] - 2.0 * d * normal[c])
     };
-    let Face { eyes, brows, nose, lips, mouth, outline } = face;
+    let Face {
+        eyes,
+        brows,
+        nose,
+        lips,
+        mouth,
+        outline,
+    } = face;
     let features = [
         (eyes, amounts.eyes),
         (brows, amounts.brows),
@@ -330,7 +341,13 @@ fn symmetrise(face: &mut Face, amounts: &Symmetry) {
 /// measures it: the middle of seventeen portraits' looking at the camera.
 /// Eyes are the most alike and the outline the least (hair and the turn of
 /// the head are in it too).
-const USUAL: Symmetry = Symmetry { eyes: 0.006, brows: 0.012, nose: 0.012, mouth: 0.008, jaw: 0.02 };
+const USUAL: Symmetry = Symmetry {
+    eyes: 0.006,
+    brows: 0.012,
+    nose: 0.012,
+    mouth: 0.008,
+    jaw: 0.02,
+};
 
 /// The Symmetry that evens each of `face`'s features only as far as faces
 /// usually are, in whole numbers: none for a feature no more uneven than
@@ -354,7 +371,16 @@ pub fn harmony(face: &Face) -> Symmetry {
 /// held back, and none for one turned too far to tell.
 fn unevenness(face: &Face) -> Symmetry {
     let mut even = face.clone();
-    symmetrise(&mut even, &Symmetry { eyes: 100.0, brows: 100.0, nose: 100.0, mouth: 100.0, jaw: 100.0 });
+    symmetrise(
+        &mut even,
+        &Symmetry {
+            eyes: 100.0,
+            brows: 100.0,
+            nose: 100.0,
+            mouth: 100.0,
+            jaw: 100.0,
+        },
+    );
     let iod = Frame::of(face).iod;
     let moved = |from: &Sides, to: &Sides| {
         let far = from.points().zip(to.points()).map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1])).sum::<f32>();
@@ -427,7 +453,11 @@ fn shaped(face: &Face, shape: &Shape) -> Face {
     for p in to.lips.points_mut().chain(to.mouth.points_mut()) {
         let [u, _] = frame.place(p[0], p[1]);
         let t = (u - across) / (across - left);
-        frame.shift(p, (u - across) * MOUTH_WIDTH * part(shape.mouth_width), -SMILE * iod * part(shape.smile) * t * t);
+        frame.shift(
+            p,
+            (u - across) * MOUTH_WIDTH * part(shape.mouth_width),
+            -SMILE * iod * part(shape.smile) * t * t,
+        );
     }
 
     // The outline: its width from the eyes down, the jaw's from the mouth
@@ -472,7 +502,11 @@ pub fn reshape(field: &mut Field, face: &Face, shape: &Shape, level: u32) {
     let pinned = &moves[moves.len() - PINS..];
     let bound = |c: usize, least: bool| {
         let values = pinned.iter().map(|(p, _)| p[c]);
-        if least { values.fold(f32::MAX, f32::min).max(0.0) as u32 } else { values.fold(0.0, f32::max).ceil() as u32 }
+        if least {
+            values.fold(f32::MAX, f32::min).max(0.0) as u32
+        } else {
+            values.fold(0.0, f32::max).ceil() as u32
+        }
     };
     let area = [bound(0, true), bound(1, true), bound(0, false), bound(1, false)];
     let every = ((frame.iod / (LATTICE * crate::warp::STEP as f32)) as usize).max(1) << level;
@@ -503,7 +537,11 @@ mod tests {
     /// `left`, its mirror image in x = 300, and `middle`, x = 300 at each y.
     fn sides(left: Vec<Point>, middle: &[f32]) -> Sides {
         let right = left.iter().map(|p| [600.0 - p[0], p[1], p[2]]).collect();
-        Sides { left, right, middle: middle.iter().map(|&y| [300.0, y, 0.0]).collect() }
+        Sides {
+            left,
+            right,
+            middle: middle.iter().map(|&y| [300.0, y, 0.0]).collect(),
+        }
     }
 
     /// A face looking straight at the camera, the same either side of x =
@@ -538,7 +576,14 @@ mod tests {
     /// to one side.
     fn turned(mut face: Face, degrees: f32) -> Face {
         let (sin, cos) = degrees.to_radians().sin_cos();
-        let Face { eyes, brows, nose, lips, mouth, outline } = &mut face;
+        let Face {
+            eyes,
+            brows,
+            nose,
+            lips,
+            mouth,
+            outline,
+        } = &mut face;
         for p in [eyes, brows, nose, lips, mouth, outline].into_iter().flat_map(Sides::points_mut) {
             let (x, z) = (p[0] - 300.0, ((p[0] - 300.0) / 10.0).powi(2));
             (p[0], p[2]) = (300.0 + x * cos - z * sin, x * sin + z * cos);
@@ -546,11 +591,20 @@ mod tests {
         face
     }
 
-    const ALL: Symmetry = Symmetry { eyes: 100.0, brows: 100.0, nose: 100.0, mouth: 100.0, jaw: 100.0 };
+    const ALL: Symmetry = Symmetry {
+        eyes: 100.0,
+        brows: 100.0,
+        nose: 100.0,
+        mouth: 100.0,
+        jaw: 100.0,
+    };
 
     #[test]
     fn symmetry_leaves_a_symmetrical_face_as_it_is_even_turned() {
-        let symmetry = Shape { symmetry: ALL, ..Default::default() };
+        let symmetry = Shape {
+            symmetry: ALL,
+            ..Default::default()
+        };
         // With cheeks further back than the nose, turned 25° to one side.
         let turned = turned(face(), 25.0);
         let narrower = turned.outline.right[4][0] - 300.0 < 300.0 - turned.outline.left[4][0] - 20.0;
@@ -570,7 +624,13 @@ mod tests {
         for p in &mut uneven.eyes.left {
             p[1] -= 10.0;
         }
-        let eyes = |amount| Shape { symmetry: Symmetry { eyes: amount, ..Default::default() }, ..Default::default() };
+        let eyes = |amount| Shape {
+            symmetry: Symmetry {
+                eyes: amount,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let height = |eye: &[Point]| middle(eye)[1];
         let even = shaped(&uneven, &eyes(100.0));
         let (l, r) = (height(&even.eyes.left), height(&even.eyes.right));
@@ -578,7 +638,10 @@ mod tests {
         let half = shaped(&uneven, &eyes(50.0));
         assert!((height(&half.eyes.left) - 292.5).abs() < 1.0 && (height(&half.eyes.right) - 297.5).abs() < 1.0);
         // Only the eyes: the rest is where it was.
-        assert_eq!((&even.brows, &even.nose, &even.lips, &even.outline), (&uneven.brows, &uneven.nose, &uneven.lips, &uneven.outline));
+        assert_eq!(
+            (&even.brows, &even.nose, &even.lips, &even.outline),
+            (&uneven.brows, &uneven.nose, &uneven.lips, &uneven.outline)
+        );
         // Each side moves as one: the eye keeps its shape.
         let width = |eye: &[Point]| eye[0][0] - eye[4][0];
         assert!((width(&even.eyes.left) - width(&uneven.eyes.left)).abs() < 0.1);
@@ -592,7 +655,16 @@ mod tests {
         // A midline point off the midline goes back onto it.
         let mut bent = face();
         bent.nose.middle[3][0] += 6.0;
-        let straight = shaped(&bent, &Shape { symmetry: Symmetry { nose: 100.0, ..Default::default() }, ..Default::default() });
+        let straight = shaped(
+            &bent,
+            &Shape {
+                symmetry: Symmetry {
+                    nose: 100.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
         assert!((straight.nose.middle[3][0] - 300.0).abs() < 0.5, "{:?}", straight.nose.middle[3]);
     }
 
@@ -611,7 +683,13 @@ mod tests {
         assert!((78.0..=82.0).contains(&found.eyes), "{found:?}");
         assert_eq!(Symmetry { eyes: 0.0, ..found }, Symmetry::default());
         let height = |eye: &[Point]| middle(eye)[1];
-        let even = shaped(&uneven, &Shape { symmetry: found, ..Default::default() });
+        let even = shaped(
+            &uneven,
+            &Shape {
+                symmetry: found,
+                ..Default::default()
+            },
+        );
         let left = (height(&even.eyes.right) - height(&even.eyes.left)) / 2.0;
         assert!((left / 100.0 - USUAL.eyes).abs() < 0.002, "{left} px each is as uneven as usual");
         // 1 px higher is within the usual: nothing.
@@ -630,32 +708,76 @@ mod tests {
         let width = |points: &[Point]| span(&points.iter().map(|p| [p[0], p[1]]).collect::<Vec<_>>(), 0);
         let near = |a: f32, b: f32| (a - b).abs() < 0.05;
 
-        let to = shaped(&face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() });
+        let to = shaped(
+            &face,
+            &Shape {
+                eye_size: 100.0,
+                eye_distance: 100.0,
+                ..Default::default()
+            },
+        );
         let [l, m, r] = width(&to.eyes.left);
         assert!(near(r - l, 36.0 * 1.2) && near(m, 250.0 - 8.0), "{l} {m} {r}");
         assert!(near(width(&to.eyes.right)[1], 350.0 + 8.0));
         assert_eq!((&to.brows, &to.nose, &to.outline), (&face.brows, &face.nose, &face.outline));
 
-        let to = shaped(&face, &Shape { nose_width: -100.0, nose_length: 100.0, ..Default::default() });
+        let to = shaped(
+            &face,
+            &Shape {
+                nose_width: -100.0,
+                nose_length: 100.0,
+                ..Default::default()
+            },
+        );
         assert_eq!(to.nose.middle[0], face.nose.middle[0], "the top of the bridge stays");
         assert!(near(to.nose.middle[3][1], 375.0) && near(to.nose.left[1][0], 300.0 - 15.0 * (1.0 - 0.25 * 62.0 / 65.0)));
 
-        let to = shaped(&face, &Shape { smile: 100.0, lips: 100.0, mouth_width: 100.0, ..Default::default() });
+        let to = shaped(
+            &face,
+            &Shape {
+                smile: 100.0,
+                lips: 100.0,
+                mouth_width: 100.0,
+                ..Default::default()
+            },
+        );
         // The corner is the third point down each side.
         let (corner, was) = (to.lips.left[2], face.lips.left[2]);
-        assert!(near(corner[1], was[1] - 10.0) && near(300.0 - corner[0], (35.0 + 5.0 * 0.35) * 1.15), "{corner:?}");
+        assert!(
+            near(corner[1], was[1] - 10.0) && near(300.0 - corner[0], (35.0 + 5.0 * 0.35) * 1.15),
+            "{corner:?}"
+        );
         assert!(near(to.lips.middle[0][1], 386.0 - 9.0 * 0.35) && near(to.lips.middle[1][1], 414.0 + 9.0 * 0.35));
         assert_eq!(to.mouth.middle, face.mouth.middle);
 
-        let to = shaped(&face, &Shape { forehead: 100.0, chin: 100.0, ..Default::default() });
+        let to = shaped(
+            &face,
+            &Shape {
+                forehead: 100.0,
+                chin: 100.0,
+                ..Default::default()
+            },
+        );
         assert!(near(to.outline.middle[0][1], 170.0 - 15.0) && near(to.outline.middle[1][1], 470.0 + 12.0));
         // The widest of the outline is at eye level, the fifth point down.
         assert!(near(to.outline.left[4][1], face.outline.left[4][1]));
 
-        let to = shaped(&face, &Shape { face_width: -100.0, ..Default::default() });
+        let to = shaped(
+            &face,
+            &Shape {
+                face_width: -100.0,
+                ..Default::default()
+            },
+        );
         assert!(near(300.0 - to.outline.left[4][0], 110.0 * 0.88));
         assert_eq!(to.outline.middle, face.outline.middle);
-        let to = shaped(&face, &Shape { jaw: -100.0, ..Default::default() });
+        let to = shaped(
+            &face,
+            &Shape {
+                jaw: -100.0,
+                ..Default::default()
+            },
+        );
         assert!(300.0 - to.outline.left[4][0] > 108.0, "not at the cheekbones");
         let (jaw, was) = (to.outline.left[7][0], face.outline.left[7][0]);
         assert!(near(300.0 - jaw, (300.0 - was) * 0.85), "{jaw} {was}");
@@ -668,20 +790,50 @@ mod tests {
         // An eye's inner corner is its first point and its outer its fifth;
         // its top and bottom are the seventh and third.
         let size = |eye: &[Point]| [(eye[0][0] - eye[4][0]).abs(), eye[2][1] - eye[6][1]];
-        let eye = |left_eye: Eye, right_eye: Eye| shaped(&face, &Shape { left_eye, right_eye, ..Default::default() });
+        let eye = |left_eye: Eye, right_eye: Eye| {
+            shaped(
+                &face,
+                &Shape {
+                    left_eye,
+                    right_eye,
+                    ..Default::default()
+                },
+            )
+        };
 
         // The eye on the left larger, on top of both eyes' size: the other
         // is as it was.
-        let to = eye(Eye { size: 100.0, ..Default::default() }, Eye::default());
+        let to = eye(
+            Eye {
+                size: 100.0,
+                ..Default::default()
+            },
+            Eye::default(),
+        );
         assert!(near(size(&to.eyes.left)[0], 36.0 * 1.2) && near(size(&to.eyes.left)[1], 16.0 * 1.2));
         assert!(near(middle(&to.eyes.left)[0], 250.0));
         assert_eq!((&to.eyes.right, &to.brows, &to.nose), (&face.eyes.right, &face.brows, &face.nose));
-        let both = Shape { eye_size: 50.0, left_eye: Eye { size: 50.0, ..Default::default() }, ..Default::default() };
+        let both = Shape {
+            eye_size: 50.0,
+            left_eye: Eye {
+                size: 50.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let both = shaped(&face, &both);
         assert!(near(size(&both.eyes.left)[0], 36.0 * 1.2) && near(size(&both.eyes.right)[0], 36.0 * 1.1));
 
         // Taller, wider, and higher up.
-        let to = eye(Eye::default(), Eye { height: 100.0, width: -100.0, lift: 100.0, ..Default::default() });
+        let to = eye(
+            Eye::default(),
+            Eye {
+                height: 100.0,
+                width: -100.0,
+                lift: 100.0,
+                ..Default::default()
+            },
+        );
         let [w, h] = size(&to.eyes.right);
         assert!(near(w, 36.0 * 0.85) && near(h, 16.0 * 1.3), "{w} {h}");
         let [x, y] = middle(&to.eyes.right);
@@ -690,7 +842,10 @@ mod tests {
 
         // Tilted, each eye's outer corner goes up and its inner one down,
         // about its middle.
-        let tilted = Eye { tilt: 100.0, ..Default::default() };
+        let tilted = Eye {
+            tilt: 100.0,
+            ..Default::default()
+        };
         let to = eye(tilted, tilted);
         let rise = 18.0 * EYE_TILT.sin();
         for eye in [&to.eyes.left, &to.eyes.right] {
@@ -700,14 +855,29 @@ mod tests {
 
         // The brows: one up, the other's outer end up.
         let brows = Shape {
-            left_brow: Brow { lift: 100.0, ..Default::default() },
-            right_brow: Brow { tilt: 100.0, ..Default::default() },
+            left_brow: Brow {
+                lift: 100.0,
+                ..Default::default()
+            },
+            right_brow: Brow {
+                tilt: 100.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let to = shaped(&face, &brows);
-        assert!(to.brows.left.iter().zip(&face.brows.left).all(|(p, was)| near(p[0], was[0]) && near(p[1], 275.0 - 6.0)));
+        assert!(
+            to.brows
+                .left
+                .iter()
+                .zip(&face.brows.left)
+                .all(|(p, was)| near(p[0], was[0]) && near(p[1], 275.0 - 6.0))
+        );
         let (inner, outer) = (to.brows.right[4], to.brows.right[0]);
-        assert!(near(outer[1], 275.0 - 24.0 * BROW_TILT.sin()) && near(inner[1], 275.0 + 24.0 * BROW_TILT.sin()), "{inner:?} {outer:?}");
+        assert!(
+            near(outer[1], 275.0 - 24.0 * BROW_TILT.sin()) && near(inner[1], 275.0 + 24.0 * BROW_TILT.sin()),
+            "{inner:?} {outer:?}"
+        );
         assert_eq!((&to.eyes, &to.outline), (&face.eyes, &face.outline));
     }
 
@@ -733,7 +903,16 @@ mod tests {
         let image = Tiled::from_slice(600, 600, [0; 4], &pixels);
         let face = face();
         let mut field = Field::new(600, 600);
-        reshape(&mut field, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() }, 0);
+        reshape(
+            &mut field,
+            &face,
+            &Shape {
+                eye_size: 100.0,
+                eye_distance: 100.0,
+                ..Default::default()
+            },
+            0,
+        );
         // It's bigger, and further out; the eyebrow above has stayed.
         let out = warped(&image, &field);
         assert_eq!((out.get(242, 300), out.get(235, 300), out.get(242, 307)), (RED, RED, RED));
@@ -746,11 +925,29 @@ mod tests {
         assert!(x0 >= 120 && y0 >= 76 && x1 <= 481 && y1 <= 561, "{:?}", field.extent());
         // Other faces' warps add to it.
         let before = field.at(232.0, 300.0);
-        reshape(&mut field, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() }, 0);
+        reshape(
+            &mut field,
+            &face,
+            &Shape {
+                eye_size: 100.0,
+                eye_distance: 100.0,
+                ..Default::default()
+            },
+            0,
+        );
         assert!((field.at(232.0, 300.0)[0] - 2.0 * before[0]).abs() < 1e-3);
         // For a quick look it's coarser, and much the same.
         let mut quick = Field::new(600, 600);
-        reshape(&mut quick, &face, &Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() }, 2);
+        reshape(
+            &mut quick,
+            &face,
+            &Shape {
+                eye_size: 100.0,
+                eye_distance: 100.0,
+                ..Default::default()
+            },
+            2,
+        );
         let (quick, exact) = (quick.at(232.0, 300.0), before);
         assert!(quick != exact && (quick[0] - exact[0]).hypot(quick[1] - exact[1]) < 2.0, "{quick:?} {exact:?}");
     }

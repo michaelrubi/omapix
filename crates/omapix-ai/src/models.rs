@@ -47,7 +47,14 @@ fn parse(manifest: &'static str) -> Vec<Model> {
         match line.split('|').collect::<Vec<_>>()[..] {
             [kind @ ("model" | "optional"), id, name, used_by, licence, ..] => {
                 let optional = kind == "optional";
-                models.push(Model { id, name, used_by, licence, optional, files: Vec::new() })
+                models.push(Model {
+                    id,
+                    name,
+                    used_by,
+                    licence,
+                    optional,
+                    files: Vec::new(),
+                })
             }
             ["file", id, name, bytes, sha256, url] => {
                 let model = models.iter_mut().find(|m| m.id == id).expect("a file's model comes before it");

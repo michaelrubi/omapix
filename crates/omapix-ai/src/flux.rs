@@ -38,8 +38,7 @@ const REMOVE: &str = "Remove the object, leaving only the background";
 const EXTEND: &str = "Extend the picture, continuing the scene";
 
 fn file(name: &str) -> Result<std::path::PathBuf> {
-    let files = find_model(MODEL)
-        .ok_or_else(|| format!("Generative Fill needs the FLUX.2 klein model: run scripts/fetch-models.sh {MODEL}"))?;
+    let files = find_model(MODEL).ok_or_else(|| format!("Generative Fill needs the FLUX.2 klein model: run scripts/fetch-models.sh {MODEL}"))?;
     Ok(files[name].clone())
 }
 
@@ -267,7 +266,13 @@ pub struct Canvas<'a> {
 /// prompt is read first and that model dropped, and the VAE runs on the
 /// CPU, each result decoded while the next is made.
 pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progress) -> bool + Send) -> Result<()> {
-    let Canvas { image, width, height, anew, empty } = *canvas;
+    let Canvas {
+        image,
+        width,
+        height,
+        anew,
+        empty,
+    } = *canvas;
     // One at a time: a fill told to stop may still be finishing its step,
     // with the card to itself.
     static ONE: Mutex<()> = Mutex::new(());
@@ -288,7 +293,10 @@ pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progr
     // The last prompt's reading is kept: Generate again is usually the
     // same one.
     static READ: Mutex<Option<(String, Vec<f32>)>> = Mutex::new(None);
-    let known = READ.lock().ok().and_then(|read| read.as_ref().filter(|(p, _)| p == prompt).map(|(_, e)| e.clone()));
+    let known = READ
+        .lock()
+        .ok()
+        .and_then(|read| read.as_ref().filter(|(p, _)| p == prompt).map(|(_, e)| e.clone()));
     let embedding = match known {
         Some(embedding) => embedding,
         None => {

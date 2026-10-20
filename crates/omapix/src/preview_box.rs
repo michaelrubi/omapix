@@ -23,9 +23,7 @@ impl PreviewBox {
     /// `centre` as it's dragged, and keeping the box on the image.
     pub fn new(ui: &mut egui::Ui, centre: &mut Pos2, (width, height): (u32, u32)) -> Self {
         let (w, h) = (SIDE.min(width), SIDE.min(height));
-        let (rect, response) = ui
-            .vertical_centered(|ui| ui.allocate_exact_size(vec2(w as f32, h as f32), Sense::drag()))
-            .inner;
+        let (rect, response) = ui.vertical_centered(|ui| ui.allocate_exact_size(vec2(w as f32, h as f32), Sense::drag())).inner;
         if response.dragged() {
             *centre -= response.drag_delta();
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);

@@ -15,8 +15,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use egui::{
-    Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke,
-    StrokeKind, TextureFilter, TextureHandle, TextureOptions, TextureWrapMode, Ui, Vec2, pos2, vec2,
+    Color32, ColorImage, CursorIcon, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, TextureFilter, TextureHandle, TextureOptions,
+    TextureWrapMode, Ui, Vec2, pos2, vec2,
 };
 use omapix_engine::brush::BrushSettings;
 use omapix_engine::pyramid::Pyramid;
@@ -24,9 +24,9 @@ use omapix_engine::tiled::TILE;
 use omapix_engine::tip::Tip;
 use omapix_engine::{DisplayTransform, Pixel, Raster, tiles};
 
-use crate::tools::CursorBadge;
 use crate::gpu::LiveDraw;
 use crate::live::LiveFrame;
+use crate::tools::CursorBadge;
 
 /// Photoshop's zoom presets, as fractions.
 pub const ZOOM_STEPS: [f32; 21] = [
@@ -128,13 +128,7 @@ impl Render {
     /// the levels above it. Nothing is written if `cancel` is set, which is checked under the
     /// lock, so a cancelled background render can't overwrite a brush
     /// stroke drawn since. Returns whether the tiles were written.
-    pub fn write_tiles(
-        &self,
-        level: usize,
-        tiles: &[(u32, u32)],
-        data: &[Vec<Pixel>],
-        cancel: Option<&AtomicBool>,
-    ) -> bool {
+    pub fn write_tiles(&self, level: usize, tiles: &[(u32, u32)], data: &[Vec<Pixel>], cancel: Option<&AtomicBool>) -> bool {
         let mut data_lock = self.data.write().expect("render lock");
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
             return false;
@@ -293,7 +287,10 @@ pub enum ToolInput {
     Sample(Pos2),
     /// Alt+right-drag: change the brush's size (diameter, image pixels) and
     /// hardness by these amounts, as in Photoshop.
-    BrushDrag { size: f32, hardness: f32 },
+    BrushDrag {
+        size: f32,
+        hardness: f32,
+    },
 }
 
 pub struct Canvas {
@@ -497,10 +494,7 @@ impl Canvas {
     /// Mark display tiles covering an image-pixel area as out of date.
     fn mark_dirty(&mut self, (x0, y0, x1, y1): (u32, u32, u32, u32)) {
         for (level, &(lw, lh)) in self.levels.iter().enumerate() {
-            let (kx, ky) = (
-                self.width as f32 / lw as f32,
-                self.height as f32 / lh as f32,
-            );
+            let (kx, ky) = (self.width as f32 / lw as f32, self.height as f32 / lh as f32);
             // Textures carry a 1 px border from their neighbours.
             let lx0 = ((x0 as f32 / kx).floor() as u32).saturating_sub(1);
             let ly0 = ((y0 as f32 / ky).floor() as u32).saturating_sub(1);
@@ -509,8 +503,7 @@ impl Canvas {
             let t = tiles::TILE_SIZE;
             for row in ly0 / t..=(ly1.saturating_sub(1)) / t {
                 for col in lx0 / t..=(lx1.saturating_sub(1)) / t {
-                    self.dirty
-                        .insert(TileKey { level, col, row }, self.generation);
+                    self.dirty.insert(TileKey { level, col, row }, self.generation);
                 }
             }
         }
@@ -600,18 +593,9 @@ impl Canvas {
         let canvas = self.rect;
         let z = self.view.zoom;
         let next = if zoom_in {
-            ZOOM_STEPS
-                .iter()
-                .copied()
-                .find(|&s| s > z * 1.001)
-                .unwrap_or(MAX_ZOOM)
+            ZOOM_STEPS.iter().copied().find(|&s| s > z * 1.001).unwrap_or(MAX_ZOOM)
         } else {
-            ZOOM_STEPS
-                .iter()
-                .rev()
-                .copied()
-                .find(|&s| s < z / 1.001)
-                .unwrap_or(MIN_ZOOM)
+            ZOOM_STEPS.iter().rev().copied().find(|&s| s < z / 1.001).unwrap_or(MIN_ZOOM)
         };
         self.zoom_to(next, canvas.center(), canvas);
     }
@@ -623,8 +607,7 @@ impl Canvas {
 
     /// Screen position (points) to image pixels.
     pub fn to_image(&self, p: Pos2) -> Pos2 {
-        ((p - self.rect.min - self.snapped_origin(self.ppp)) / (self.view.zoom / self.ppp))
-            .to_pos2()
+        ((p - self.rect.min - self.snapped_origin(self.ppp)) / (self.view.zoom / self.ppp)).to_pos2()
     }
 
     /// The image point in the middle of the view (the image's middle
@@ -641,12 +624,7 @@ impl Canvas {
     /// of the active brush, to draw its shape at the pointer;
     /// `source` marks where a clone or heal tool copies from. Returns pointer
     /// input for the active tool.
-    pub fn show(
-        &mut self,
-        ui: &mut Ui,
-        pasteboard: Color32,
-        overlay: Overlay<'_>,
-    ) -> (Option<ToolInput>, egui::Response) {
+    pub fn show(&mut self, ui: &mut Ui, pasteboard: Color32, overlay: Overlay<'_>) -> (Option<ToolInput>, egui::Response) {
         let Overlay {
             tool,
             alt_samples,
@@ -685,8 +663,7 @@ impl Canvas {
         self.hovered_pixel = response.hover_pos().and_then(|p| {
             let img = self.to_image(p);
             let size = self.image_size();
-            (img.x >= 0.0 && img.y >= 0.0 && img.x < size.x && img.y < size.y)
-                .then_some((img.x as u32, img.y as u32))
+            (img.x >= 0.0 && img.y >= 0.0 && img.x < size.x && img.y < size.y).then_some((img.x as u32, img.y as u32))
         });
         self.pointer = response.hover_pos().map(|p| self.to_image(p));
         self.draw_outlines(ui, selection, drawing);
@@ -711,16 +688,12 @@ impl Canvas {
         if let Some(marker) = source {
             let scale = self.view.zoom / self.ppp;
             let at = match marker {
-                SourceMarker::Fixed(p) => {
-                    Some(self.rect.min + self.snapped_origin(self.ppp) + p.to_vec2() * scale)
-                }
+                SourceMarker::Fixed(p) => Some(self.rect.min + self.snapped_origin(self.ppp) + p.to_vec2() * scale),
                 SourceMarker::Offset(d) => response.hover_pos().map(|p| p + d * scale),
             };
             if let Some(at) = at {
                 let painter = ui.painter_at(self.rect);
-                for (width, colour) in
-                    [(3.0, Color32::from_black_alpha(160)), (1.0, Color32::WHITE)]
-                {
+                for (width, colour) in [(3.0, Color32::from_black_alpha(160)), (1.0, Color32::WHITE)] {
                     let stroke = Stroke::new(width, colour);
                     painter.line_segment([at - vec2(8.0, 0.0), at + vec2(8.0, 0.0)], stroke);
                     painter.line_segment([at - vec2(0.0, 8.0), at + vec2(0.0, 8.0)], stroke);
@@ -819,19 +792,9 @@ impl Canvas {
             }
             on_screen = true;
 
-            painter.add(egui::Shape::line(
-                points.clone(),
-                Stroke::new(1.0, Color32::BLACK),
-            ));
+            painter.add(egui::Shape::line(points.clone(), Stroke::new(1.0, Color32::BLACK)));
             let mut shapes = Vec::new();
-            dashed_path(
-                &points,
-                Stroke::new(1.0, Color32::WHITE),
-                ANT_DASH,
-                ANT_GAP,
-                offset,
-                &mut shapes,
-            );
+            dashed_path(&points, Stroke::new(1.0, Color32::WHITE), ANT_DASH, ANT_GAP, offset, &mut shapes);
             painter.extend(shapes);
         };
 
@@ -847,10 +810,7 @@ impl Canvas {
             draw_ants(points, true);
         }
         if let Some(path) = drawing {
-            draw_ants(
-                path.iter().map(|p| self.to_screen((p.x, p.y))).collect(),
-                false,
-            );
+            draw_ants(path.iter().map(|p| self.to_screen((p.x, p.y))).collect(), false);
         }
 
         if on_screen {
@@ -858,14 +818,7 @@ impl Canvas {
         }
     }
 
-    fn tool_input(
-        &mut self,
-        ui: &Ui,
-        response: &egui::Response,
-        alt_samples: bool,
-        samples: bool,
-        brush: bool,
-    ) -> Option<ToolInput> {
+    fn tool_input(&mut self, ui: &Ui, response: &egui::Response, alt_samples: bool, samples: bool, brush: bool) -> Option<ToolInput> {
         let alt = ui.input(|i| i.modifiers.alt);
         // Alt+right-drag: left and right change the size, up and down the
         // hardness (down is harder), with the outline staying put.
@@ -879,19 +832,14 @@ impl Canvas {
             });
         }
         self.resizing = None;
-        let pointer = ui
-            .input(|i| i.pointer.interact_pos())
-            .map(|p| self.to_image(p));
+        let pointer = ui.input(|i| i.pointer.interact_pos()).map(|p| self.to_image(p));
         if (alt && alt_samples) || samples {
-            let sampling = response.clicked_by(PointerButton::Primary)
-                || response.dragged_by(PointerButton::Primary);
+            let sampling = response.clicked_by(PointerButton::Primary) || response.dragged_by(PointerButton::Primary);
             return pointer.filter(|_| sampling).map(ToolInput::Sample);
         }
         if response.drag_started_by(PointerButton::Primary) {
             self.painting = true;
-            let origin = ui
-                .input(|i| i.pointer.press_origin())
-                .map(|p| self.to_image(p));
+            let origin = ui.input(|i| i.pointer.press_origin()).map(|p| self.to_image(p));
             return origin.or(pointer).map(ToolInput::StrokeBegin);
         }
         if self.painting && response.dragged_by(PointerButton::Primary) {
@@ -919,26 +867,12 @@ impl Canvas {
         if reach >= 3.0 {
             // Dark and light rings, visible on any image.
             if outline.along == outline.across {
-                painter.circle_stroke(
-                    pointer,
-                    reach_along,
-                    Stroke::new(1.5, Color32::from_black_alpha(160)),
-                );
-                painter.circle_stroke(
-                    pointer,
-                    reach_along,
-                    Stroke::new(0.75, Color32::from_white_alpha(200)),
-                );
+                painter.circle_stroke(pointer, reach_along, Stroke::new(1.5, Color32::from_black_alpha(160)));
+                painter.circle_stroke(pointer, reach_along, Stroke::new(0.75, Color32::from_white_alpha(200)));
             } else {
                 let points = brush_points(pointer, reach_along, reach_across, outline.angle);
-                painter.add(egui::Shape::closed_line(
-                    points.clone(),
-                    Stroke::new(1.5, Color32::from_black_alpha(160)),
-                ));
-                painter.add(egui::Shape::closed_line(
-                    points,
-                    Stroke::new(0.75, Color32::from_white_alpha(200)),
-                ));
+                painter.add(egui::Shape::closed_line(points.clone(), Stroke::new(1.5, Color32::from_black_alpha(160))));
+                painter.add(egui::Shape::closed_line(points, Stroke::new(0.75, Color32::from_white_alpha(200))));
             }
             ui.ctx().set_cursor_icon(CursorIcon::None);
         } else {
@@ -974,10 +908,7 @@ impl Canvas {
         let c = pointer + vec2(10.0, 10.0);
         let draw_lines = |segments: &[[Pos2; 2]]| outlined_lines(&painter, segments);
         match badge {
-            CursorBadge::Add => draw_lines(&[
-                [pos2(c.x, c.y - 3.5), pos2(c.x, c.y + 3.5)],
-                [pos2(c.x - 3.5, c.y), pos2(c.x + 3.5, c.y)],
-            ]),
+            CursorBadge::Add => draw_lines(&[[pos2(c.x, c.y - 3.5), pos2(c.x, c.y + 3.5)], [pos2(c.x - 3.5, c.y), pos2(c.x + 3.5, c.y)]]),
             CursorBadge::Subtract => draw_lines(&[[pos2(c.x - 3.5, c.y), pos2(c.x + 3.5, c.y)]]),
             CursorBadge::Intersect => draw_lines(&[
                 [pos2(c.x - 2.5, c.y - 2.5), pos2(c.x + 2.5, c.y + 2.5)],
@@ -992,15 +923,11 @@ impl Canvas {
             CursorBadge::Copy => {
                 let back = Rect::from_min_size(c - vec2(3.5, 3.5), vec2(5.0, 5.0));
                 let front = Rect::from_min_size(c - vec2(1.0, 1.0), vec2(5.0, 5.0));
-                for (width, colour) in
-                    [(2.5, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)]
-                {
+                for (width, colour) in [(2.5, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)] {
                     painter.rect_stroke(back, 0.0, Stroke::new(width, colour), StrokeKind::Middle);
                 }
                 painter.rect_filled(front, 0.0, Color32::from_black_alpha(180));
-                for (width, colour) in
-                    [(2.5, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)]
-                {
+                for (width, colour) in [(2.5, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)] {
                     painter.rect_stroke(front, 0.0, Stroke::new(width, colour), StrokeKind::Middle);
                 }
             }
@@ -1010,8 +937,7 @@ impl Canvas {
     /// Pan and zoom. Returns true while the pointer is being used to pan.
     fn navigate(&mut self, ui: &Ui, response: &egui::Response, canvas: Rect) -> bool {
         let space = ui.input(|i| i.key_down(Key::Space));
-        let panning = response.dragged_by(PointerButton::Middle)
-            || (space && response.dragged_by(PointerButton::Primary));
+        let panning = response.dragged_by(PointerButton::Middle) || (space && response.dragged_by(PointerButton::Primary));
         if panning {
             self.view.origin += response.drag_delta();
             self.view.fit = false;
@@ -1021,8 +947,7 @@ impl Canvas {
         }
 
         if let Some(pointer) = response.hover_pos() {
-            let (zoom_delta, scroll, modifiers) =
-                ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers));
+            let (zoom_delta, scroll, modifiers) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers));
             if zoom_delta != 1.0 {
                 // Ctrl+scroll and touchpad pinch.
                 self.zoom_to(self.view.zoom * zoom_delta, pointer, canvas);
@@ -1030,9 +955,7 @@ impl Canvas {
                 // Photoshop's Alt+scroll zoom.
                 let amount = if scroll.y != 0.0 { scroll.y } else { scroll.x };
                 self.zoom_to(self.view.zoom * (amount * 0.005).exp(), pointer, canvas);
-            } else if scroll != Vec2::ZERO
-                && (modifiers == Modifiers::NONE || modifiers.shift_only())
-            {
+            } else if scroll != Vec2::ZERO && (modifiers == Modifiers::NONE || modifiers.shift_only()) {
                 self.view.origin += scroll;
                 self.view.fit = false;
             }
@@ -1064,11 +987,7 @@ impl Canvas {
                 continue;
             }
             // Level 0 is shown nearest-neighbour when magnified, so pixels stay crisp.
-            let magnification = if tile.key.level == 0 {
-                TextureFilter::Nearest
-            } else {
-                TextureFilter::Linear
-            };
+            let magnification = if tile.key.level == 0 { TextureFilter::Nearest } else { TextureFilter::Linear };
             let options = TextureOptions {
                 magnification,
                 minification: TextureFilter::Linear,
@@ -1118,10 +1037,7 @@ impl Canvas {
     /// Image pixels per level pixel, per axis (odd sizes round up when halving).
     fn ratio(&self, level: usize) -> Vec2 {
         let (lw, lh) = self.levels[level];
-        vec2(
-            self.width as f32 / lw as f32,
-            self.height as f32 / lh as f32,
-        )
+        vec2(self.width as f32 / lw as f32, self.height as f32 / lh as f32)
     }
 
     fn draw(&mut self, ui: &Ui, canvas: Rect, ppp: f32) {
@@ -1184,28 +1100,15 @@ impl Canvas {
         let mut drawn = Vec::new();
         for row in r0..r1 {
             for col in c0..c1 {
-                let key = TileKey {
-                    level: target,
-                    col,
-                    row,
-                };
+                let key = TileKey { level: target, col, row };
                 let b = tiles::bounds(lw, lh, col, row);
                 // The tile's content, in image pixels.
                 let region = Rect::from_min_max(
                     pos2(b.x as f32 * to_image.x, b.y as f32 * to_image.y),
-                    pos2(
-                        (b.x + b.w) as f32 * to_image.x,
-                        (b.y + b.h) as f32 * to_image.y,
-                    ),
+                    pos2((b.x + b.w) as f32 * to_image.x, (b.y + b.h) as f32 * to_image.y),
                 );
-                if !self
-                    .textures
-                    .get(&key)
-                    .is_some_and(|t| self.is_fresh(key, t.stamp))
-                {
-                    let distance = (vec2((col as f32 + 0.5) * tile, (row as f32 + 0.5) * tile)
-                        - focus)
-                        .length();
+                if !self.textures.get(&key).is_some_and(|t| self.is_fresh(key, t.stamp)) {
+                    let distance = (vec2((col as f32 + 0.5) * tile, (row as f32 + 0.5) * tile) - focus).length();
                     wanted.push((false, distance, key));
                 }
 
@@ -1230,10 +1133,7 @@ impl Canvas {
                             ((region.min.to_vec2() / k - tex_min) / tex_size).to_pos2(),
                             ((region.max.to_vec2() / k - tex_min) / tex_size).to_pos2(),
                         );
-                        let screen = Rect::from_min_max(
-                            origin + region.min.to_vec2() * scale,
-                            origin + region.max.to_vec2() * scale,
-                        );
+                        let screen = Rect::from_min_max(origin + region.min.to_vec2() * scale, origin + region.max.to_vec2() * scale);
                         if !showing_live {
                             painter.image(t.texture.id(), screen, uv, Color32::WHITE);
                         }
@@ -1304,14 +1204,7 @@ fn tile_image(render: &Render, transform: &DisplayTransform, key: TileKey) -> Op
 ///
 /// Segments wrap seamlessly around corners, and `offset` shifts the dashes
 /// along the polyline.
-fn dashed_path(
-    path: &[Pos2],
-    stroke: Stroke,
-    dash: f32,
-    gap: f32,
-    offset: f32,
-    shapes: &mut Vec<egui::Shape>,
-) {
+fn dashed_path(path: &[Pos2], stroke: Stroke, dash: f32, gap: f32, offset: f32, shapes: &mut Vec<egui::Shape>) {
     if path.len() < 2 {
         return;
     }
@@ -1336,10 +1229,7 @@ fn dashed_path(
         while pos < seg_len {
             let next_pos = (pos + dist_left).min(seg_len);
             if drawing_dash {
-                shapes.push(egui::Shape::line_segment(
-                    [start + dir * pos, start + dir * next_pos],
-                    stroke,
-                ));
+                shapes.push(egui::Shape::line_segment([start + dir * pos, start + dir * next_pos], stroke));
             }
             let consumed = next_pos - pos;
             dist_left -= consumed;
@@ -1386,16 +1276,30 @@ mod tests {
         // Liquify's brush: shown, but Alt doesn't sample with it.
         let mut frame = |canvas: &mut Canvas, event| {
             time += 0.1;
-            let input = egui::RawInput { time: Some(time), screen_rect: Some(view), events: vec![egui::Event::ModifiersChanged(alt), event], ..Default::default() };
+            let input = egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(view),
+                events: vec![egui::Event::ModifiersChanged(alt), event],
+                ..Default::default()
+            };
             let mut input_out = None;
             let mut out = ctx.run_ui(input, |ui| {
-                let overlay = Overlay { tool: true, brush: Some(BrushOutline::round(100.0)), ..Default::default() };
+                let overlay = Overlay {
+                    tool: true,
+                    brush: Some(BrushOutline::round(100.0)),
+                    ..Default::default()
+                };
                 input_out = canvas.show(ui, Color32::BLACK, overlay).0;
             });
             out.textures_delta.clear();
             input_out
         };
-        let button = |pressed| egui::Event::PointerButton { pos: pos2(400.0, 300.0), button: PointerButton::Secondary, pressed, modifiers: alt };
+        let button = |pressed| egui::Event::PointerButton {
+            pos: pos2(400.0, 300.0),
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: alt,
+        };
         frame(&mut canvas, egui::Event::PointerMoved(pos2(400.0, 300.0)));
         frame(&mut canvas, button(true));
         let drag = frame(&mut canvas, egui::Event::PointerMoved(pos2(430.0, 300.0)));
@@ -1413,10 +1317,8 @@ mod tests {
         assert_eq!(paths.len(), 2);
         let xs: Vec<f32> = paths[0].points.iter().map(|p| p.x).collect();
         let ys: Vec<f32> = paths[0].points.iter().map(|p| p.y).collect();
-        let span_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-            - xs.iter().copied().fold(f32::INFINITY, f32::min);
-        let span_y = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-            - ys.iter().copied().fold(f32::INFINITY, f32::min);
+        let span_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) - xs.iter().copied().fold(f32::INFINITY, f32::min);
+        let span_y = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max) - ys.iter().copied().fold(f32::INFINITY, f32::min);
         (span_x, span_y)
     }
 
@@ -1438,7 +1340,11 @@ mod tests {
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| {
-                let overlay = Overlay { tool: true, brush: Some(outline), ..Default::default() };
+                let overlay = Overlay {
+                    tool: true,
+                    brush: Some(outline),
+                    ..Default::default()
+                };
                 canvas.show(ui, Color32::BLACK, overlay);
             });
             out.textures_delta.clear();
@@ -1460,20 +1366,35 @@ mod tests {
         assert!(circles.iter().all(|c| c.center == pointer && c.radius == 50.0));
 
         // (b) Roundness 0.5, angle 0: full diameter horizontally, half vertically.
-        let b = BrushOutline { diameter: 100.0, along: 1.0, across: 0.5, angle: 0.0 };
+        let b = BrushOutline {
+            diameter: 100.0,
+            along: 1.0,
+            across: 0.5,
+            angle: 0.0,
+        };
         let (bx, by) = closed_line_spans(&frame(&mut canvas, b).shapes);
         assert!((bx - 100.0).abs() < 1e-3, "span {bx} for 100.0");
         assert!((by - 50.0).abs() < 1e-3, "span {by} for 50.0");
 
         // (c) Angle 90: spans swap.
-        let c = BrushOutline { diameter: 100.0, along: 1.0, across: 0.5, angle: 90.0 };
+        let c = BrushOutline {
+            diameter: 100.0,
+            along: 1.0,
+            across: 0.5,
+            angle: 90.0,
+        };
         let (cx, cy) = closed_line_spans(&frame(&mut canvas, c).shapes);
         assert!((cx - 50.0).abs() < 1e-3, "span {cx} for 50.0");
         assert!((cy - 100.0).abs() < 1e-3, "span {cy} for 100.0");
 
         // At 45 degrees its ends are up to the right and down to the left:
         // anticlockwise, as a dab is laid.
-        let turned = BrushOutline { diameter: 100.0, along: 1.0, across: 0.5, angle: 45.0 };
+        let turned = BrushOutline {
+            diameter: 100.0,
+            along: 1.0,
+            across: 0.5,
+            angle: 45.0,
+        };
         let out = frame(&mut canvas, turned);
         let far = out.shapes.iter().find_map(|s| match &s.shape {
             egui::Shape::Path(p) if p.closed => p.points.iter().copied().max_by(|a, b| a.distance(pointer).total_cmp(&b.distance(pointer))),
@@ -1484,7 +1405,10 @@ mod tests {
 
         // (d) Sampled tip 100 wide and 50 high gives the same spans as (b).
         let tip = Tip::new(100, 50, vec![65535; 100 * 50]).unwrap();
-        let settings = BrushSettings { size: 100.0, ..Default::default() };
+        let settings = BrushSettings {
+            size: 100.0,
+            ..Default::default()
+        };
         let d = outline(&settings, Some(&tip));
         let (dx, dy) = closed_line_spans(&frame(&mut canvas, d).shapes);
         assert!((dx - bx).abs() < 1e-3 && (dy - by).abs() < 1e-3, "got ({dx}, {dy}), wanted ({bx}, {by})");
@@ -1493,7 +1417,10 @@ mod tests {
     #[test]
     fn outline_for_tall_sampled_tip() {
         let tip = Tip::new(40, 80, vec![65535; 40 * 80]).unwrap();
-        let settings = BrushSettings { size: 120.0, ..Default::default() };
+        let settings = BrushSettings {
+            size: 120.0,
+            ..Default::default()
+        };
         let out = outline(&settings, Some(&tip));
         assert_eq!((out.along, out.across), (0.5, 1.0));
         assert_eq!(out.diameter, 120.0);
@@ -1507,10 +1434,21 @@ mod tests {
         let mut canvas = Canvas::new(800, 600, transform);
         let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
         canvas.lay_out_for_test(view, 1.0);
-        let spot = omapix_engine::blemish::Spot { x: 400.0, y: 300.0, radius: 10.0, score: 20.0 };
-        let input = egui::RawInput { screen_rect: Some(view), ..Default::default() };
+        let spot = omapix_engine::blemish::Spot {
+            x: 400.0,
+            y: 300.0,
+            radius: 10.0,
+            score: 20.0,
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(view),
+            ..Default::default()
+        };
         let mut out = ctx.run_ui(input, |ui| {
-            let overlay = Overlay { spots: &[spot], ..Default::default() };
+            let overlay = Overlay {
+                spots: &[spot],
+                ..Default::default()
+            };
             canvas.show(ui, Color32::BLACK, overlay);
         });
         out.textures_delta.clear();
@@ -1540,7 +1478,11 @@ mod tests {
         // Frames at `time` until every tile on screen has arrived.
         let settle = |canvas: &mut Canvas, time: f64| {
             for _ in 0..500 {
-                let input = egui::RawInput { time: Some(time), screen_rect: Some(view), ..Default::default() };
+                let input = egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(view),
+                    ..Default::default()
+                };
                 let mut out = ctx.run_ui(input, |ui| {
                     canvas.show(ui, Color32::BLACK, Overlay::default());
                 });
@@ -1580,7 +1522,10 @@ mod tests {
         canvas.lay_out_for_test(view, 1.0);
         let frames = |canvas: &mut Canvas, count: usize| {
             for _ in 0..count {
-                let input = egui::RawInput { screen_rect: Some(view), ..Default::default() };
+                let input = egui::RawInput {
+                    screen_rect: Some(view),
+                    ..Default::default()
+                };
                 let mut out = ctx.run_ui(input, |ui| {
                     canvas.show(ui, Color32::BLACK, Overlay::default());
                 });
@@ -1621,14 +1566,7 @@ mod tests {
     fn dashed_path_creates_alternating_segments() {
         let path = [pos2(0.0, 0.0), pos2(20.0, 0.0)];
         let mut shapes = Vec::new();
-        dashed_path(
-            &path,
-            Stroke::new(1.0, Color32::WHITE),
-            4.0,
-            4.0,
-            0.0,
-            &mut shapes,
-        );
+        dashed_path(&path, Stroke::new(1.0, Color32::WHITE), 4.0, 4.0, 0.0, &mut shapes);
 
         assert_eq!(shapes.len(), 3);
         assert_eq!(segment_points(&shapes[0]), [pos2(0.0, 0.0), pos2(4.0, 0.0)]);
@@ -1640,14 +1578,7 @@ mod tests {
     fn dashed_path_wraps_around_corners() {
         let path = [pos2(0.0, 0.0), pos2(6.0, 0.0), pos2(6.0, 6.0)];
         let mut shapes = Vec::new();
-        dashed_path(
-            &path,
-            Stroke::new(1.0, Color32::WHITE),
-            4.0,
-            4.0,
-            0.0,
-            &mut shapes,
-        );
+        dashed_path(&path, Stroke::new(1.0, Color32::WHITE), 4.0, 4.0, 0.0, &mut shapes);
 
         assert_eq!(shapes.len(), 2);
         assert_eq!(segment_points(&shapes[0]), [pos2(0.0, 0.0), pos2(4.0, 0.0)]);
@@ -1660,14 +1591,7 @@ mod tests {
     fn dashed_path_offset_shifts_segments_forward() {
         let path = [pos2(0.0, 0.0), pos2(20.0, 0.0)];
         let mut shapes = Vec::new();
-        dashed_path(
-            &path,
-            Stroke::new(1.0, Color32::WHITE),
-            4.0,
-            4.0,
-            1.0,
-            &mut shapes,
-        );
+        dashed_path(&path, Stroke::new(1.0, Color32::WHITE), 4.0, 4.0, 1.0, &mut shapes);
 
         assert_eq!(shapes.len(), 3);
         // Offset 1.0 shifts dashes forward along the path by 1.0 point.
@@ -1679,25 +1603,12 @@ mod tests {
     #[test]
     fn dashed_path_closed_loop_length_invariant() {
         // A closed loop with perimeter 160 (multiple of 8 = 4 dash + 4 gap).
-        let path = [
-            pos2(0.0, 0.0),
-            pos2(40.0, 0.0),
-            pos2(40.0, 40.0),
-            pos2(0.0, 40.0),
-            pos2(0.0, 0.0),
-        ];
+        let path = [pos2(0.0, 0.0), pos2(40.0, 0.0), pos2(40.0, 40.0), pos2(0.0, 40.0), pos2(0.0, 0.0)];
 
         for i in 0..80 {
             let offset = i as f32 * 0.1;
             let mut shapes = Vec::new();
-            dashed_path(
-                &path,
-                Stroke::new(1.0, Color32::WHITE),
-                4.0,
-                4.0,
-                offset,
-                &mut shapes,
-            );
+            dashed_path(&path, Stroke::new(1.0, Color32::WHITE), 4.0, 4.0, offset, &mut shapes);
 
             let total_dash_len: f32 = shapes
                 .iter()

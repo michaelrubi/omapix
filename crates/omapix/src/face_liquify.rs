@@ -192,7 +192,13 @@ impl Sliders for Face {
 
     /// Symmetry's sliders set from how uneven the face is.
     fn auto(&self, shape: &Shape) -> Option<(Shape, &'static str)> {
-        Some((Shape { symmetry: harmony(self), ..*shape }, AUTO))
+        Some((
+            Shape {
+                symmetry: harmony(self),
+                ..*shape
+            },
+            AUTO,
+        ))
     }
 }
 
@@ -214,7 +220,12 @@ pub struct Panel<F: Sliders> {
 
 impl<F: Sliders> Default for Panel<F> {
     fn default() -> Self {
-        Self { finding: None, failed: None, selected: 0, dragging: false }
+        Self {
+            finding: None,
+            failed: None,
+            selected: 0,
+            dragging: false,
+        }
     }
 }
 
@@ -309,43 +320,49 @@ impl<F: Sliders> Panel<F> {
         // With more groups open than the screen has room for, they scroll.
         let room = ui.ctx().content_rect().height() - 220.0;
         let scroll = egui::ScrollArea::vertical().max_height(room).min_scrolled_height(room);
-        scroll.show(ui, |ui| ui.add_enabled_ui(*preview, |ui| {
-            for &(group, open, least, all, sliders) in F::GROUPS {
-                // A dot says a folded group has sliders set.
-                let set = sliders.iter().any(|(.., value)| *value(shape) != 0.0);
-                let title = RichText::new(if set { format!("{group} •") } else { group.into() }).strong();
-                let folding = egui::CollapsingHeader::new(title).id_salt(group).default_open(open).show(ui, |ui| {
-                    if let Some((_, why)) = notes[self.selected].as_ref().filter(|(noted, _)| *noted == group) {
-                        ui.label(RichText::new(why).color(theme.dark_foreground)).on_hover_text(all.unwrap_or_default());
-                    }
-                    egui::Grid::new(group).num_columns(2).min_col_width(NAMES).show(ui, |ui| {
-                        for (name, hint, value) in sliders {
-                            ui.label(*name);
-                            let slider = ui.add(Slider::new(value(shape), least..=100.0).fixed_decimals(0)).on_hover_text(*hint);
-                            if let Some(all) = all {
-                                slider.on_hover_text(all);
-                            }
-                            ui.end_row();
+        scroll.show(ui, |ui| {
+            ui.add_enabled_ui(*preview, |ui| {
+                for &(group, open, least, all, sliders) in F::GROUPS {
+                    // A dot says a folded group has sliders set.
+                    let set = sliders.iter().any(|(.., value)| *value(shape) != 0.0);
+                    let title = RichText::new(if set { format!("{group} •") } else { group.into() }).strong();
+                    let folding = egui::CollapsingHeader::new(title).id_salt(group).default_open(open).show(ui, |ui| {
+                        if let Some((_, why)) = notes[self.selected].as_ref().filter(|(noted, _)| *noted == group) {
+                            ui.label(RichText::new(why).color(theme.dark_foreground)).on_hover_text(all.unwrap_or_default());
                         }
+                        egui::Grid::new(group).num_columns(2).min_col_width(NAMES).show(ui, |ui| {
+                            for (name, hint, value) in sliders {
+                                ui.label(*name);
+                                let slider = ui.add(Slider::new(value(shape), least..=100.0).fixed_decimals(0)).on_hover_text(*hint);
+                                if let Some(all) = all {
+                                    slider.on_hover_text(all);
+                                }
+                                ui.end_row();
+                            }
+                        });
                     });
-                });
-                // Those that start folded are one eye's or brow's own.
-                if !open {
-                    folding.header_response.on_hover_text("Left and right as they are in the picture");
+                    // Those that start folded are one eye's or brow's own.
+                    if !open {
+                        folding.header_response.on_hover_text("Left and right as they are in the picture");
+                    }
                 }
-            }
-        }));
+            })
+        });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.add_enabled(*preview && *shape != F::Shape::default(), egui::Button::new("Reset")).clicked() {
                 *shape = F::Shape::default();
             }
             if let Some((auto, hint)) = &autos[self.selected]
-                && ui.add_enabled(*preview && shape != auto, egui::Button::new("Auto")).on_hover_text(*hint).clicked()
+                && ui
+                    .add_enabled(*preview && shape != auto, egui::Button::new("Auto"))
+                    .on_hover_text(*hint)
+                    .clicked()
             {
                 *shape = *auto;
             }
-            ui.checkbox(preview, "Preview").on_hover_text("Off, the picture is shown without the sliders' work");
+            ui.checkbox(preview, "Preview")
+                .on_hover_text("Off, the picture is shown without the sliders' work");
         });
     }
 
@@ -367,7 +384,10 @@ impl<F: Sliders> Panel<F> {
 /// left to right.
 fn find(doc: &Document) -> Result<Vec<Face>, String> {
     let (_, analysis) = analyse(&doc.composite(), &doc.profile)?;
-    let faces = analysis.faces.iter().filter_map(|(found, points)| Some((found.bounds[0], face(points.as_deref()?))));
+    let faces = analysis
+        .faces
+        .iter()
+        .filter_map(|(found, points)| Some((found.bounds[0], face(points.as_deref()?))));
     let mut faces: Vec<_> = faces.collect();
     faces.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(faces.into_iter().map(|(_, face)| face).collect())
@@ -387,7 +407,11 @@ fn face(points: &[[f32; 3]]) -> Face {
             middle: vec![at(middle), at(middle + n / 2)],
         }
     };
-    let pair = |left: &[usize], right: &[usize]| Sides { left: at(left), right: at(right), middle: Vec::new() };
+    let pair = |left: &[usize], right: &[usize]| Sides {
+        left: at(left),
+        right: at(right),
+        middle: Vec::new(),
+    };
     let mut nose = sides(&outline::NOSE, 2);
     nose.middle.extend(at(&BRIDGE));
     Face {
@@ -450,7 +474,11 @@ pub(crate) mod tests {
     fn liquifying() -> Editor {
         let pixels = (0..W * H).map(|i| {
             let (x, y) = ((i % W) as f32 - 250.0, (i / W) as f32 - 300.0);
-            if x.hypot(y) <= 8.0 { [65535, 0, 0, 65535] } else { [30000, 30000, 30000, 65535] }
+            if x.hypot(y) <= 8.0 {
+                [65535, 0, 0, 65535]
+            } else {
+                [30000, 30000, 30000, 65535]
+            }
         });
         let image = Raster::new(W, H, pixels.collect());
         let mut editor = Editor::new(Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16)).unwrap();
@@ -504,7 +532,10 @@ pub(crate) mod tests {
         for (n, sides) in features.into_iter().enumerate() {
             assert!(!sides.left.is_empty() && sides.left.len() == sides.right.len(), "{n}");
             for (l, r) in sides.left.iter().zip(&sides.right) {
-                assert!(l[0] < 299.0 && (l[0] + r[0] - 600.0).abs() < 1e-3 && (l[1] - r[1]).abs() < 1e-3, "{n}: {l:?} {r:?}");
+                assert!(
+                    l[0] < 299.0 && (l[0] + r[0] - 600.0).abs() < 1e-3 && (l[1] - r[1]).abs() < 1e-3,
+                    "{n}: {l:?} {r:?}"
+                );
             }
             assert!(sides.middle.iter().all(|m| (m[0] - 300.0).abs() < 1e-3), "{n}");
         }
@@ -530,7 +561,15 @@ pub(crate) mod tests {
         // The eye grows as the slider's dragged, and it's all one step.
         frame(&ctx, &mut panel, &mut editor, true);
         for size in [40.0, 100.0] {
-            panel.shape(&ctx, &mut editor, &[Shape { eye_size: size, eye_distance: 100.0, ..Default::default() }]);
+            panel.shape(
+                &ctx,
+                &mut editor,
+                &[Shape {
+                    eye_size: size,
+                    eye_distance: 100.0,
+                    ..Default::default()
+                }],
+            );
         }
         assert!(red(&editor, 235, 300) && !red(&editor, 258, 300), "bigger, and further out");
         frame(&ctx, &mut panel, &mut editor, false);
@@ -578,7 +617,14 @@ pub(crate) mod tests {
         editor.cancel_liquify();
         editor.begin_liquify().unwrap();
         editor.set_liquify_figures(editor.active, vec![face(&uneven)]);
-        panel.shape(&ctx, &mut editor, &[Shape { eye_size: 30.0, ..Default::default() }]);
+        panel.shape(
+            &ctx,
+            &mut editor,
+            &[Shape {
+                eye_size: 30.0,
+                ..Default::default()
+            }],
+        );
         let away = Pos2::new(10.0, 500.0);
         frame_at(&ctx, &mut panel, &mut editor, away, false);
         let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
@@ -589,15 +635,31 @@ pub(crate) mod tests {
         frame_at(&ctx, &mut panel, &mut editor, auto, false);
         let shape = shapes(&editor)[0];
         assert!((75.0..=85.0).contains(&shape.symmetry.eyes), "{:?}", shape.symmetry);
-        let eyes = omapix_engine::reshape::Symmetry { eyes: shape.symmetry.eyes, ..Default::default() };
-        assert_eq!(shape, Shape { eye_size: 30.0, symmetry: eyes, ..Default::default() });
+        let eyes = omapix_engine::reshape::Symmetry {
+            eyes: shape.symmetry.eyes,
+            ..Default::default()
+        };
+        assert_eq!(
+            shape,
+            Shape {
+                eye_size: 30.0,
+                symmetry: eyes,
+                ..Default::default()
+            }
+        );
         // Clicked again, there's nothing more for it to do.
         frame_at(&ctx, &mut panel, &mut editor, auto, true);
         frame_at(&ctx, &mut panel, &mut editor, auto, false);
         assert_eq!(shapes(&editor)[0], shape);
         // It's one step to undo.
         editor.undo();
-        assert_eq!(shapes(&editor), [Shape { eye_size: 30.0, ..Default::default() }]);
+        assert_eq!(
+            shapes(&editor),
+            [Shape {
+                eye_size: 30.0,
+                ..Default::default()
+            }]
+        );
     }
 
     #[test]
@@ -630,7 +692,13 @@ pub(crate) mod tests {
         assert_eq!(texts.iter().filter(|(t, _)| t == "Tilt").count(), 1, "{texts:?}");
 
         // A folded group with a slider set says so.
-        let lifted = Shape { right_brow: Brow { lift: 30.0, ..Default::default() }, ..Default::default() };
+        let lifted = Shape {
+            right_brow: Brow {
+                lift: 30.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         panel.shape(&ctx, &mut editor, &[lifted, Shape::default()]);
         let (_, texts) = frame_at(&ctx, &mut panel, &mut editor, away, false);
         assert!(has(&texts, "Right Brow •") && has(&texts, "Left Brow") && has(&texts, "Symmetry"));
@@ -662,8 +730,19 @@ pub(crate) mod tests {
         // Dragged, the eye grows and moves out on screen, but the layer and
         // the canvas at full size are as they were.
         frame(&ctx, &mut panel, &mut editor, true);
-        let bigger = Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() };
-        panel.shape(&ctx, &mut editor, &[Shape { eye_size: 50.0, ..Default::default() }]);
+        let bigger = Shape {
+            eye_size: 100.0,
+            eye_distance: 100.0,
+            ..Default::default()
+        };
+        panel.shape(
+            &ctx,
+            &mut editor,
+            &[Shape {
+                eye_size: 50.0,
+                ..Default::default()
+            }],
+        );
         panel.shape(&ctx, &mut editor, &[bigger]);
         assert!(shown(118, 150) && !shown(129, 150));
         assert!(layer(&editor, 250, 300) && !layer(&editor, 236, 300));
@@ -691,7 +770,11 @@ pub(crate) mod tests {
     fn preview_off_shows_the_face_as_it_was_and_its_shape_is_still_applied() {
         let mut editor = liquifying();
         let red = |editor: &Editor, x, y| editor.doc.layers[0].pixels.get(x, y)[1] < 10000;
-        let bigger = Shape { eye_size: 100.0, eye_distance: 100.0, ..Default::default() };
+        let bigger = Shape {
+            eye_size: 100.0,
+            eye_distance: 100.0,
+            ..Default::default()
+        };
         editor.shape_liquify::<Face>(&[bigger]);
         editor.end_liquify_stroke();
         assert!(editor.liquify_shapes_shown() && red(&editor, 235, 300));
@@ -730,7 +813,9 @@ pub(crate) mod tests {
             let value: f32 = value.parse().unwrap();
             let group = SLIDERS.iter().find(|(group, ..)| *group == name).map(|(.., sliders)| *sliders);
             let named = |group: &str, slider: &str| slider == name || format!("{group} {slider}") == name;
-            let slider = SLIDERS.iter().flat_map(|(group, .., sliders)| sliders.iter().filter(move |(slider, ..)| named(group, slider)));
+            let slider = SLIDERS
+                .iter()
+                .flat_map(|(group, .., sliders)| sliders.iter().filter(move |(slider, ..)| named(group, slider)));
             for (.., at) in group.into_iter().flatten().chain(slider) {
                 *at(&mut shape) = value;
             }
@@ -788,10 +873,19 @@ pub(crate) mod tests {
             let (iw, ih) = (before.width() as f32, before.height() as f32);
             for (n, face) in faces.iter().enumerate() {
                 let xs = || face.outline.left.iter().chain(&face.outline.right).chain(&face.outline.middle);
-                let bound = |c: usize, least: bool| xs().map(|p| p[c]).fold(if least { f32::MAX } else { f32::MIN }, if least { f32::min } else { f32::max });
+                let bound = |c: usize, least: bool| {
+                    xs().map(|p| p[c])
+                        .fold(if least { f32::MAX } else { f32::MIN }, if least { f32::min } else { f32::max })
+                };
                 let [l, t, r, b] = [bound(0, true), bound(1, true), bound(0, false), bound(1, false)];
                 let iod = (face.eyes.right[0][0] - face.eyes.left[0][0]).hypot(face.eyes.right[0][1] - face.eyes.left[0][1]);
-                eprintln!("  face {}: {:.0} × {:.0}, eyes' outer corners {iod:.0} apart, Symmetry at {:.0} %", n + 1, r - l, b - t, facing(face) * 100.0);
+                eprintln!(
+                    "  face {}: {:.0} × {:.0}, eyes' outer corners {iod:.0} apart, Symmetry at {:.0} %",
+                    n + 1,
+                    r - l,
+                    b - t,
+                    facing(face) * 100.0
+                );
                 if auto {
                     eprintln!("    Auto: {:?}", shapes[n].symmetry);
                 }

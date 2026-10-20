@@ -14,7 +14,10 @@ pub enum Handle {
     Rotate,
     /// A side (one of `x`, `y` is 0) or corner handle: -1 is the left or
     /// top edge, 1 the right or bottom.
-    Scale { x: i8, y: i8 },
+    Scale {
+        x: i8,
+        y: i8,
+    },
 }
 
 /// A drag in progress: the handle, where it started (image pixels) and the

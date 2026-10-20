@@ -24,24 +24,22 @@ pub fn composite(layers: &[Layer], width: u32, height: u32) -> Raster {
     let mut out = vec![[0u16; 4]; w * height as usize];
     let cols = width.div_ceil(TILE);
 
-    out.par_chunks_mut(w * TILE as usize)
-        .enumerate()
-        .for_each(|(row, band)| {
-            let row = row as u32;
-            let mut acc = vec![[0f32; 4]; TILE_PIXELS];
-            for col in 0..cols {
-                acc.fill([0.0; 4]);
-                blend_all(&mut acc, &visible, col, row);
-                let x0 = (col * TILE) as usize;
-                let tw = (TILE as usize).min(w - x0);
-                for (ty, line) in band.chunks_mut(w).enumerate() {
-                    let src = &acc[ty * TILE as usize..ty * TILE as usize + tw];
-                    for (dst, px) in line[x0..x0 + tw].iter_mut().zip(src) {
-                        *dst = to_u16(*px);
-                    }
+    out.par_chunks_mut(w * TILE as usize).enumerate().for_each(|(row, band)| {
+        let row = row as u32;
+        let mut acc = vec![[0f32; 4]; TILE_PIXELS];
+        for col in 0..cols {
+            acc.fill([0.0; 4]);
+            blend_all(&mut acc, &visible, col, row);
+            let x0 = (col * TILE) as usize;
+            let tw = (TILE as usize).min(w - x0);
+            for (ty, line) in band.chunks_mut(w).enumerate() {
+                let src = &acc[ty * TILE as usize..ty * TILE as usize + tw];
+                for (dst, px) in line[x0..x0 + tw].iter_mut().zip(src) {
+                    *dst = to_u16(*px);
                 }
             }
-        });
+        }
+    });
     Raster::new(width, height, out)
 }
 
@@ -57,11 +55,7 @@ pub fn composite_into(layers: &[Layer], image: &mut Raster, tiles: &[(u32, u32)]
 /// as a whole tile of pixels, row-major, ready for [`Raster::put_tile`].
 /// With `groups`, what isolated groups composite to is reused from earlier
 /// calls where nothing in them has changed, and kept for later ones.
-pub fn composite_tiles(
-    layers: &[Layer],
-    tiles: &[(u32, u32)],
-    groups: Option<&GroupCache>,
-) -> Vec<Vec<Pixel>> {
+pub fn composite_tiles(layers: &[Layer], tiles: &[(u32, u32)], groups: Option<&GroupCache>) -> Vec<Vec<Pixel>> {
     let mut visible = prepare(layers);
     if let Some(groups) = groups {
         groups.attach(&mut visible);
@@ -128,12 +122,7 @@ impl GroupCache {
     }
 }
 
-fn attach(
-    groups: &mut HashMap<u64, Cached>,
-    seen: &mut HashSet<u64>,
-    nodes: &mut [Node],
-    atop: bool,
-) {
+fn attach(groups: &mut HashMap<u64, Cached>, seen: &mut HashSet<u64>, nodes: &mut [Node], atop: bool) {
     for node in nodes {
         let layer = node.layer;
         let own = layer.blend != BlendMode::PassThrough || atop || !node.clipped.is_empty();
@@ -154,14 +143,9 @@ fn slots(groups: &mut HashMap<u64, Cached>, node: &Node) -> Arc<Slots> {
     let pixels = &node.layer.pixels;
     let (cols, rows) = (pixels.cols(), pixels.rows());
     let fresh = || (0..cols * rows).map(|_| OnceLock::new()).collect::<Slots>();
-    let old = groups.remove(&node.layer.id).filter(|old| {
-        old.contents.len() == now.len()
-            && old
-                .contents
-                .iter()
-                .zip(&now)
-                .all(|((d0, a), (d1, b))| d0 == d1 && same_settings(a, b))
-    });
+    let old = groups
+        .remove(&node.layer.id)
+        .filter(|old| old.contents.len() == now.len() && old.contents.iter().zip(&now).all(|((d0, a), (d1, b))| d0 == d1 && same_settings(a, b)));
     let slots = match old {
         Some(old) => {
             let same = |col: u32, row: u32| {
@@ -219,11 +203,7 @@ fn contents<'a>(nodes: &[Node<'a>], depth: u32, out: &mut Vec<(u32, &'a Layer)>)
 /// everything but their pixels and name.
 fn same_settings(a: &Layer, b: &Layer) -> bool {
     let size = |l: &Layer| (l.pixels.width(), l.pixels.height());
-    let mask = |l: &Layer| {
-        l.mask
-            .as_ref()
-            .map(|m| (m.enabled, m.pixels.fill(), m.pixels.width(), m.pixels.height()))
-    };
+    let mask = |l: &Layer| l.mask.as_ref().map(|m| (m.enabled, m.pixels.fill(), m.pixels.width(), m.pixels.height()));
     a.id == b.id
         && a.is_group == b.is_group
         && a.opacity == b.opacity
@@ -268,11 +248,7 @@ fn nodes<'a>(layers: &'a [Layer], within: &dyn Fn(&Layer) -> bool) -> Vec<Node<'
         let node = Node {
             layer: l,
             adjustment: l.adjustment.as_ref().map(|a| a.prepare()),
-            children: if l.is_group {
-                nodes(layers, &|c| c.parent == Some(l.id))
-            } else {
-                Vec::new()
-            },
+            children: if l.is_group { nodes(layers, &|c| c.parent == Some(l.id)) } else { Vec::new() },
             clipped: Vec::new(),
             cached: None,
         };
@@ -297,10 +273,7 @@ struct Coverage<'a> {
 }
 
 impl<'a> Coverage<'a> {
-    const FULL: Coverage<'static> = Coverage {
-        tile: None,
-        fill: 1.0,
-    };
+    const FULL: Coverage<'static> = Coverage { tile: None, fill: 1.0 };
 
     /// `None` where the mask hides the whole tile.
     fn of(layer: &'a Layer, col: u32, row: u32) -> Option<Self> {
@@ -375,9 +348,7 @@ fn blend_one(acc: &mut [[f32; 4]], node: &Node, atop: bool, col: u32, row: u32) 
         // Composite the contents on their own, then blend the result like
         // a single layer.
         if let Some(inner) = group_tile(node, col, row) {
-            blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| {
-                unpack(inner[i])
-            });
+            blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| unpack(inner[i]));
         }
         return;
     }
@@ -497,14 +468,7 @@ fn unpack(s: Pixel) -> [f32; 4] {
     s.map(|v| f32::from(v) / MAX)
 }
 
-fn blend_tile(
-    acc: &mut [[f32; 4]],
-    layer: &Layer,
-    adjustment: Option<&Prepared>,
-    atop: bool,
-    col: u32,
-    row: u32,
-) {
+fn blend_tile(acc: &mut [[f32; 4]], layer: &Layer, adjustment: Option<&Prepared>, atop: bool, col: u32, row: u32) {
     let Some(coverage) = Coverage::of(layer, col, row) else {
         return;
     };
@@ -537,25 +501,13 @@ fn blend_tile(
     let Some(src) = layer.pixels.tile(col, row) else {
         return;
     };
-    blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| {
-        unpack(src[i])
-    });
+    blend_source(acc, Params::of(layer).atop(atop), &coverage, |i| unpack(src[i]));
 }
 
 /// Blend a tile of colours (0–1, straight alpha) onto `acc` with these
 /// params and mask coverage.
-fn blend_source(
-    acc: &mut [[f32; 4]],
-    params: Params,
-    coverage: &Coverage,
-    src: impl Fn(usize) -> [f32; 4],
-) {
-    let Params {
-        mode,
-        opacity,
-        blend_if,
-        atop,
-    } = params;
+fn blend_source(acc: &mut [[f32; 4]], params: Params, coverage: &Coverage, src: impl Fn(usize) -> [f32; 4]) {
+    let Params { mode, opacity, blend_if, atop } = params;
     for (i, px) in acc.iter_mut().enumerate() {
         let [sr, sg, sb, sa] = src(i);
         let a_s = sa * opacity * coverage.at(i);
@@ -640,19 +592,9 @@ mod tests {
     fn frequency_separation_reconstructs_the_image() {
         let (w, h) = (64, 64);
         let image: Vec<Pixel> = (0..w * h)
-            .map(|i| {
-                [
-                    (i * 13 % 60000) as u16 + 2000,
-                    (i * 7 % 50000) as u16 + 5000,
-                    30000,
-                    65535,
-                ]
-            })
+            .map(|i| [(i * 13 % 60000) as u16 + 2000, (i * 7 % 50000) as u16 + 5000, 30000, 65535])
             .collect();
-        let low: Vec<Pixel> = image
-            .iter()
-            .map(|p| [p[0] / 2 + 15000, p[1] / 2 + 12000, 29000, 65535])
-            .collect();
+        let low: Vec<Pixel> = image.iter().map(|p| [p[0] / 2 + 15000, p[1] / 2 + 12000, 29000, 65535]).collect();
         let image = Raster::new(w, h, image);
         let low_layer = Layer::from_raster(1, "low", &Raster::new(w, h, low.clone()));
 
@@ -708,16 +650,8 @@ mod tests {
             ..BlendIf::default()
         });
         let out = composite(&[bottom, top], w, h);
-        assert_eq!(
-            out.get(50, 0),
-            [50 * 257, 50 * 257, 50 * 257, 65535],
-            "dark areas untouched"
-        );
-        assert_eq!(
-            out.get(200, 0),
-            [65535, 0, 0, 65535],
-            "light areas fully covered"
-        );
+        assert_eq!(out.get(50, 0), [50 * 257, 50 * 257, 50 * 257, 65535], "dark areas untouched");
+        assert_eq!(out.get(200, 0), [65535, 0, 0, 65535], "light areas fully covered");
         let mid = out.get(115, 0); // ~45 %: half-way through the fade
         assert!(mid[0] > mid[1] && mid[1] > 0, "partially covered: {mid:?}");
     }
@@ -965,9 +899,7 @@ mod tests {
     }
 
     fn all_tiles(w: u32, h: u32) -> Vec<(u32, u32)> {
-        (0..h.div_ceil(TILE))
-            .flat_map(|r| (0..w.div_ceil(TILE)).map(move |c| (c, r)))
-            .collect()
+        (0..h.div_ceil(TILE)).flat_map(|r| (0..w.div_ceil(TILE)).map(move |c| (c, r))).collect()
     }
 
     /// The kept result for group `id` at its `n`th tile (row major): `None`
@@ -1055,9 +987,6 @@ mod tests {
     fn empty_layer_costs_nothing_and_changes_nothing() {
         let bottom = solid(1, 10, 10, [5, 6, 7, 65535]);
         let empty = Layer::from_pixels(2, "empty", Tiled::new(10, 10, [0; 4]));
-        assert_eq!(
-            composite(&[bottom, empty], 10, 10).get(0, 0),
-            [5, 6, 7, 65535]
-        );
+        assert_eq!(composite(&[bottom, empty], 10, 10).get(0, 0), [5, 6, 7, 65535]);
     }
 }

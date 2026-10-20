@@ -49,7 +49,11 @@ pub fn solve_membrane(w: usize, h: usize, unknown: &[bool], v: &mut [f32]) {
 
 fn solve(w: usize, h: usize, unknown: &[bool], v: &mut [f32], depth: usize) {
     let holes = unknown.iter().filter(|u| **u).count();
-    let (sum, known) = v.iter().zip(unknown).filter(|(_, u)| !**u).fold((0.0f32, 0usize), |(s, n), (x, _)| (s + x, n + 1));
+    let (sum, known) = v
+        .iter()
+        .zip(unknown)
+        .filter(|(_, u)| !**u)
+        .fold((0.0f32, 0usize), |(s, n), (x, _)| (s + x, n + 1));
     if holes == 0 || known == 0 {
         return;
     }

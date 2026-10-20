@@ -57,11 +57,7 @@ impl Channel {
             Channel::Blue => p[2],
             Channel::Luminosity => {
                 // Luminance: 0.3 * R + 0.59 * G + 0.11 * B, matching the histogram.
-                ((19661 * u64::from(p[0])
-                    + 38666 * u64::from(p[1])
-                    + 7209 * u64::from(p[2])
-                    + 32768)
-                    >> 16) as u16
+                ((19661 * u64::from(p[0]) + 38666 * u64::from(p[1]) + 7209 * u64::from(p[2]) + 32768) >> 16) as u16
             }
         }
     }
@@ -243,8 +239,7 @@ impl Selection {
     pub fn invert(&self) -> Selection {
         let c = &self.coverage;
         let coverage = Tiled::from_tiles(c.width(), c.height(), u16::MAX - c.fill(), |col, row| {
-            c.tile(col, row)
-                .map(|t| t.iter().map(|v| u16::MAX - v).collect())
+            c.tile(col, row).map(|t| t.iter().map(|v| u16::MAX - v).collect())
         });
         Selection::from_coverage(coverage)
     }
@@ -268,23 +263,14 @@ impl Selection {
         if radius < 0.1 || self.width() == 0 || self.height() == 0 {
             return self.clone();
         }
-        let values: Vec<u16> = self
-            .blur_coverage(radius)
-            .into_par_iter()
-            .map(|v| v.round().clamp(0.0, MAX) as u16)
-            .collect();
+        let values: Vec<u16> = self.blur_coverage(radius).into_par_iter().map(|v| v.round().clamp(0.0, MAX) as u16).collect();
         Selection::from_coverage(Tiled::from_slice(self.width(), self.height(), 0, &values))
     }
 
     /// Blur the selection's coverage buffer with standard deviation `radius`.
     fn blur_coverage(&self, radius: f32) -> Vec<f32> {
         let (w, h) = (self.width() as usize, self.height() as usize);
-        let buf: Vec<[f32; 4]> = self
-            .coverage
-            .to_vec()
-            .into_par_iter()
-            .map(|v| [f32::from(v), 0.0, 0.0, 0.0])
-            .collect();
+        let buf: Vec<[f32; 4]> = self.coverage.to_vec().into_par_iter().map(|v| [f32::from(v), 0.0, 0.0, 0.0]).collect();
         let blurred = crate::filters::blur_buffer(buf, w, h, radius);
         blurred.into_par_iter().map(|v| v[0]).collect()
     }
@@ -313,10 +299,7 @@ impl Selection {
         let orig_cov = self.coverage.to_vec();
 
         // Binary feature map of seeds (> 50% coverage).
-        let mut buf: Vec<f32> = orig_cov
-            .par_iter()
-            .map(|&v| if f32::from(v) > HALF { 0.0 } else { f32::INFINITY })
-            .collect();
+        let mut buf: Vec<f32> = orig_cov.par_iter().map(|&v| if f32::from(v) > HALF { 0.0 } else { f32::INFINITY }).collect();
 
         // 2D Euclidean distance transform via separable 1D passes:
         // Pass 1: columns (transposed so each column is a contiguous row).
@@ -366,11 +349,7 @@ impl Selection {
         let half = width * 0.5;
         let ring = self.expand(half).combine(&self.contract(half), Combine::Subtract);
         let soften = (half * 0.5).min(1.0);
-        if soften >= 0.1 {
-            ring.feather(soften)
-        } else {
-            ring
-        }
+        if soften >= 0.1 { ring.feather(soften) } else { ring }
     }
 
     /// Magic Wand: select similar colours starting from `start = (x, y)`.
@@ -432,16 +411,13 @@ impl Selection {
                 }
             }
         } else {
-            visited
-                .par_chunks_mut(width as usize)
-                .enumerate()
-                .for_each(|(y, row)| {
-                    for (x, v) in row.iter_mut().enumerate() {
-                        if matches(x as u32, y as u32) {
-                            *v = true;
-                        }
+            visited.par_chunks_mut(width as usize).enumerate().for_each(|(y, row)| {
+                for (x, v) in row.iter_mut().enumerate() {
+                    if matches(x as u32, y as u32) {
+                        *v = true;
                     }
-                });
+                }
+            });
         }
 
         // Bounding box of visited pixels.
@@ -478,11 +454,7 @@ impl Selection {
         let bbox_x1 = (max_x + 1).min(width - 1);
         let bbox_y1 = (max_y + 1).min(height - 1);
 
-        let weights = [
-            [1, 2, 1],
-            [2, 4, 2],
-            [1, 2, 1],
-        ];
+        let weights = [[1, 2, 1], [2, 4, 2], [1, 2, 1]];
 
         let coverage = Tiled::from_tiles(width, height, 0u16, |col, row| {
             let x0 = col * TILE;
@@ -502,11 +474,7 @@ impl Selection {
                 for x in x0..x1 {
                     let tx = x - x0;
                     let val = if !anti_alias {
-                        if visited[(y * width + x) as usize] {
-                            u16::MAX
-                        } else {
-                            0
-                        }
+                        if visited[(y * width + x) as usize] { u16::MAX } else { 0 }
                     } else {
                         let center_inside = is_inside(x as i32, y as i32);
                         let mut sum = 0u32;
@@ -523,11 +491,7 @@ impl Selection {
                             u16::MAX
                         } else {
                             let n = sum as f32 / 16.0;
-                            let c = if center_inside {
-                                0.5 + 0.5 * n
-                            } else {
-                                0.5 * n
-                            };
+                            let c = if center_inside { 0.5 + 0.5 * n } else { 0.5 * n };
                             (c * MAX).round() as u16
                         }
                     };
@@ -545,52 +509,18 @@ impl Selection {
         Self::from_coverage(coverage)
     }
 
-    pub fn magic_wand_raster(
-        raster: &Raster,
-        start: (u32, u32),
-        tolerance: u16,
-        contiguous: bool,
-        anti_alias: bool,
-    ) -> Self {
-        Self::magic_wand(
-            raster.width(),
-            raster.height(),
-            start,
-            tolerance,
-            contiguous,
-            anti_alias,
-            |x, y| raster.get(x, y),
-        )
+    pub fn magic_wand_raster(raster: &Raster, start: (u32, u32), tolerance: u16, contiguous: bool, anti_alias: bool) -> Self {
+        Self::magic_wand(raster.width(), raster.height(), start, tolerance, contiguous, anti_alias, |x, y| {
+            raster.get(x, y)
+        })
     }
 
-    pub fn magic_wand_tiled(
-        tiled: &Tiled<Pixel>,
-        start: (u32, u32),
-        tolerance: u16,
-        contiguous: bool,
-        anti_alias: bool,
-    ) -> Self {
-        Self::magic_wand(
-            tiled.width(),
-            tiled.height(),
-            start,
-            tolerance,
-            contiguous,
-            anti_alias,
-            |x, y| tiled.get(x, y),
-        )
+    pub fn magic_wand_tiled(tiled: &Tiled<Pixel>, start: (u32, u32), tolerance: u16, contiguous: bool, anti_alias: bool) -> Self {
+        Self::magic_wand(tiled.width(), tiled.height(), start, tolerance, contiguous, anti_alias, |x, y| tiled.get(x, y))
     }
 }
 
-fn scan_row(
-    y: u32,
-    x1: u32,
-    x2: u32,
-    width: u32,
-    visited: &[bool],
-    matches: &impl Fn(u32, u32) -> bool,
-    stack: &mut Vec<(u32, u32)>,
-) {
+fn scan_row(y: u32, x1: u32, x2: u32, width: u32, visited: &[bool], matches: &impl Fn(u32, u32) -> bool, stack: &mut Vec<(u32, u32)>) {
     let mut in_run = false;
     for x in x1..=x2 {
         let idx = (y * width + x) as usize;
@@ -804,16 +734,9 @@ fn fill_polygon(width: u32, height: u32, points: &[(f32, f32)]) -> Tiled<u16> {
     if points.len() < 3 {
         return Tiled::new(width, height, 0);
     }
-    let min_y = points
-        .iter()
-        .map(|p| p.1)
-        .fold(f32::MAX, f32::min)
-        .floor()
-        .max(0.0) as u32;
+    let min_y = points.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor().max(0.0) as u32;
     let max_y = (points.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil() as u32).min(height);
-    let edges: Vec<((f32, f32), (f32, f32))> = (0..points.len())
-        .map(|i| (points[i], points[(i + 1) % points.len()]))
-        .collect();
+    let edges: Vec<((f32, f32), (f32, f32))> = (0..points.len()).map(|i| (points[i], points[(i + 1) % points.len()])).collect();
 
     // Coverage per row, computed in parallel.
     let rows: Vec<(u32, Vec<f32>)> = (min_y..max_y)
@@ -908,18 +831,16 @@ fn fill_ellipse(width: u32, height: u32, cx: f32, cy: f32, rx: f32, ry: f32) -> 
 pub(crate) fn transpose_f32(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; w * h];
     const BLOCK: usize = 64;
-    out.par_chunks_mut(h * BLOCK)
-        .enumerate()
-        .for_each(|(bi, block)| {
-            let x0 = bi * BLOCK;
-            let count = (w - x0).min(BLOCK);
-            for y in 0..h {
-                let line = &src[y * w..(y + 1) * w];
-                for (dx, out_row) in block.chunks_mut(h).take(count).enumerate() {
-                    out_row[y] = line[x0 + dx];
-                }
+    out.par_chunks_mut(h * BLOCK).enumerate().for_each(|(bi, block)| {
+        let x0 = bi * BLOCK;
+        let count = (w - x0).min(BLOCK);
+        for y in 0..h {
+            let line = &src[y * w..(y + 1) * w];
+            for (dx, out_row) in block.chunks_mut(h).take(count).enumerate() {
+                out_row[y] = line[x0 + dx];
             }
-        });
+        }
+    });
     out
 }
 
@@ -958,13 +879,11 @@ fn edt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f64]) {
         let f_q = f_q as f64;
         let q_f = q as f64;
         let vk = v[k];
-        let mut s = ((f_q + q_f * q_f) - (f[vk] as f64 + (vk as f64).powi(2)))
-            / (2.0 * (q_f - vk as f64));
+        let mut s = ((f_q + q_f * q_f) - (f[vk] as f64 + (vk as f64).powi(2))) / (2.0 * (q_f - vk as f64));
         while k > 0 && s <= z[k] {
             k -= 1;
             let vk = v[k];
-            s = ((f_q + q_f * q_f) - (f[vk] as f64 + (vk as f64).powi(2)))
-                / (2.0 * (q_f - vk as f64));
+            s = ((f_q + q_f * q_f) - (f[vk] as f64 + (vk as f64).powi(2))) / (2.0 * (q_f - vk as f64));
         }
         k += 1;
         v[k] = q;
@@ -1042,9 +961,7 @@ mod tests {
 
     #[test]
     fn a_lasso_drawn_as_a_line_selects_nothing() {
-        let line: Vec<(f32, f32)> = (0..20)
-            .map(|i| (10.0 + i as f32 * 3.7, 5.0 + i as f32 * 2.9))
-            .collect();
+        let line: Vec<(f32, f32)> = (0..20).map(|i| (10.0 + i as f32 * 3.7, 5.0 + i as f32 * 2.9)).collect();
         assert!(Selection::polygon(100, 100, &line).is_empty());
     }
 
@@ -1070,9 +987,7 @@ mod tests {
         assert_eq!(s.outlines.len(), polygons.len(), "{:?}", s.outlines);
         for &poly in polygons {
             assert!(
-                s.outlines
-                    .iter()
-                    .any(|o| o.len() == poly.len() && poly.iter().all(|c| o.contains(c))),
+                s.outlines.iter().any(|o| o.len() == poly.len() && poly.iter().all(|c| o.contains(c))),
                 "no outline {poly:?} in {:?}",
                 s.outlines
             );
@@ -1110,19 +1025,9 @@ mod tests {
         );
         assert_traces(
             &a.combine(&b, Combine::Subtract),
-            &[&[
-                (10.0, 10.0),
-                (60.0, 10.0),
-                (60.0, 40.0),
-                (40.0, 40.0),
-                (40.0, 60.0),
-                (10.0, 60.0),
-            ]],
+            &[&[(10.0, 10.0), (60.0, 10.0), (60.0, 40.0), (40.0, 40.0), (40.0, 60.0), (10.0, 60.0)]],
         );
-        assert_traces(
-            &a.combine(&b, Combine::Intersect),
-            &[&[(40.0, 40.0), (60.0, 40.0), (60.0, 60.0), (40.0, 60.0)]],
-        );
+        assert_traces(&a.combine(&b, Combine::Intersect), &[&[(40.0, 40.0), (60.0, 40.0), (60.0, 60.0), (40.0, 60.0)]]);
         // Apart, they keep an outline each.
         let c = Selection::rectangle(100, 100, (70.0, 10.0), (90.0, 20.0));
         assert_eq!(a.combine(&c, Combine::Add).outlines.len(), 2);
@@ -1133,10 +1038,7 @@ mod tests {
         let border: &[(f32, f32)] = &[(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)];
         assert_traces(&Selection::all(100, 50), &[border]);
         let hole = Selection::rectangle(100, 50, (10.0, 10.0), (20.0, 20.0)).invert();
-        assert_traces(
-            &hole,
-            &[border, &[(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)]],
-        );
+        assert_traces(&hole, &[border, &[(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)]]);
         assert!(Selection::all(100, 50).invert().outlines.is_empty());
         // Across tiles, and cut off at the image edge.
         let s = Selection::rectangle(600, 400, (200.0, 250.0), (700.0, 300.0));
@@ -1172,10 +1074,7 @@ mod tests {
     fn feathering_rounds_the_outline() {
         let s = Selection::rectangle(200, 200, (50.0, 50.0), (150.0, 150.0)).feather(10.0);
         assert_eq!(s.outlines.len(), 1);
-        let near_corner = s.outlines[0]
-            .iter()
-            .map(|p| (p.0 - 50.0).hypot(p.1 - 50.0))
-            .fold(f32::MAX, f32::min);
+        let near_corner = s.outlines[0].iter().map(|p| (p.0 - 50.0).hypot(p.1 - 50.0)).fold(f32::MAX, f32::min);
         assert!(near_corner > 2.0, "{near_corner}");
     }
 
@@ -1227,11 +1126,7 @@ mod tests {
     #[test]
     fn magic_wand_tolerance_respects_threshold() {
         let (w, h) = (3, 1);
-        let pixels: Vec<Pixel> = vec![
-            [10000, 10000, 10000, 65535],
-            [10500, 10000, 10000, 65535],
-            [12000, 10000, 10000, 65535],
-        ];
+        let pixels: Vec<Pixel> = vec![[10000, 10000, 10000, 65535], [10500, 10000, 10000, 65535], [12000, 10000, 10000, 65535]];
         let raster = Raster::new(w, h, pixels);
 
         let sel_narrow = Selection::magic_wand_raster(&raster, (0, 0), 100, true, false);
@@ -1297,12 +1192,7 @@ mod tests {
     #[test]
     fn from_channel_red_green_blue_luminosity() {
         let (w, h) = (2, 2);
-        let pixels: Vec<Pixel> = vec![
-            [10000, 20000, 30000, 65535],
-            [65535, 0, 0, 65535],
-            [0, 65535, 0, 65535],
-            [0, 0, 65535, 65535],
-        ];
+        let pixels: Vec<Pixel> = vec![[10000, 20000, 30000, 65535], [65535, 0, 0, 65535], [0, 65535, 0, 65535], [0, 0, 65535, 65535]];
         let raster = Raster::new(w, h, pixels);
 
         let red = Selection::from_channel(&raster, Channel::Red);

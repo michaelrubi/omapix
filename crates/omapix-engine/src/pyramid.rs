@@ -71,19 +71,11 @@ impl Pyramid {
 
     /// A level to write into; follow with [`Self::update_from`].
     pub fn level_mut<'a>(&'a mut self, base: &'a mut Raster, index: usize) -> &'a mut Raster {
-        if index == 0 {
-            base
-        } else {
-            &mut self.reduced[index - 1]
-        }
+        if index == 0 { base } else { &mut self.reduced[index - 1] }
     }
 
     pub fn level<'a>(&'a self, base: &'a Raster, index: usize) -> &'a Raster {
-        if index == 0 {
-            base
-        } else {
-            &self.reduced[index - 1]
-        }
+        if index == 0 { base } else { &self.reduced[index - 1] }
     }
 }
 
@@ -93,14 +85,11 @@ fn halve(src: &Raster) -> Raster {
     let (sw, sh) = (src.width(), src.height());
     let (w, h) = (sw.div_ceil(2), sh.div_ceil(2));
     let mut pixels = vec![[0u16; 4]; w as usize * h as usize];
-    pixels
-        .par_chunks_mut(w as usize)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, out) in row.iter_mut().enumerate() {
-                *out = halved_pixel(src, x as u32, y as u32);
-            }
-        });
+    pixels.par_chunks_mut(w as usize).enumerate().for_each(|(y, row)| {
+        for (x, out) in row.iter_mut().enumerate() {
+            *out = halved_pixel(src, x as u32, y as u32);
+        }
+    });
     Raster::new(w, h, pixels)
 }
 
@@ -110,12 +99,7 @@ fn halved_pixel(src: &Raster, x: u32, y: u32) -> Pixel {
     let (sw, sh) = (src.width(), src.height());
     let (x0, y0) = (x * 2, y * 2);
     let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
-    average([
-        src.get(x0, y0),
-        src.get(x1, y0),
-        src.get(x0, y1),
-        src.get(x1, y1),
-    ])
+    average([src.get(x0, y0), src.get(x1, y0), src.get(x0, y1), src.get(x1, y1)])
 }
 
 fn average(px: [Pixel; 4]) -> Pixel {
@@ -135,9 +119,7 @@ mod tests {
     fn halves_until_small_and_averages() {
         let base = Raster::new(600, 300, vec![[1000, 2000, 3000, 65535]; 600 * 300]);
         let p = Pyramid::build(&base);
-        let sizes: Vec<_> = (0..p.len())
-            .map(|i| (p.level(&base, i).width(), p.level(&base, i).height()))
-            .collect();
+        let sizes: Vec<_> = (0..p.len()).map(|i| (p.level(&base, i).width(), p.level(&base, i).height())).collect();
         assert_eq!(sizes, vec![(600, 300), (300, 150), (150, 75), (75, 38)]);
         assert_eq!(p.level(&base, 3).get(0, 0), [1000, 2000, 3000, 65535]);
     }
@@ -155,11 +137,7 @@ mod tests {
         p.update_region(&base, (333, 100, 401, 180));
         let fresh = Pyramid::build(&base);
         for i in 0..p.len() {
-            assert_eq!(
-                p.level(&base, i).pixels(),
-                fresh.level(&base, i).pixels(),
-                "level {i}"
-            );
+            assert_eq!(p.level(&base, i).pixels(), fresh.level(&base, i).pixels(), "level {i}");
         }
     }
 
@@ -177,11 +155,7 @@ mod tests {
         p.update_from(&base, 1, &[(166, 50, 201, 90)]);
         let fresh = Pyramid::build(p.level(&base, 1));
         for i in 2..p.len() {
-            assert_eq!(
-                p.level(&base, i).pixels(),
-                fresh.level(&base, i - 1).pixels(),
-                "level {i}"
-            );
+            assert_eq!(p.level(&base, i).pixels(), fresh.level(&base, i - 1).pixels(), "level {i}");
         }
     }
 

@@ -173,7 +173,12 @@ mod tests {
                 self.frame(vec![
                     Event::ModifiersChanged(modifiers),
                     Event::PointerMoved(pos),
-                    Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers },
+                    Event::PointerButton {
+                        pos,
+                        button: PointerButton::Primary,
+                        pressed,
+                        modifiers,
+                    },
                 ]);
             }
         }

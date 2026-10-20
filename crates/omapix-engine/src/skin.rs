@@ -169,10 +169,20 @@ mod tests {
     fn at_fifty_the_blurs_are_a_fiftieth_and_a_twentieth_of_the_eyes_distance() {
         let [fine, coarse] = Smoothing::default().radii(IOD);
         assert!((fine - 2.0).abs() < 0.01 && (coarse - 5.0).abs() < 0.01, "{fine} {coarse}");
-        let more = Smoothing { smoothness: 100.0, detail: 100.0, ..Default::default() }.radii(IOD);
+        let more = Smoothing {
+            smoothness: 100.0,
+            detail: 100.0,
+            ..Default::default()
+        }
+        .radii(IOD);
         assert!(more[0] > fine && more[1] > coarse);
         // Never coarser texture than blotches: then nothing's smoothed.
-        let [fine, coarse] = Smoothing { smoothness: 0.0, detail: 100.0, ..Default::default() }.radii(IOD);
+        let [fine, coarse] = Smoothing {
+            smoothness: 0.0,
+            detail: 100.0,
+            ..Default::default()
+        }
+        .radii(IOD);
         assert_eq!(fine, coarse);
     }
 
@@ -183,7 +193,10 @@ mod tests {
         let at = |x: u32, y: u32| f32::from(smoothed[(y * W + x) as usize][0]);
         let before = |x: u32, y: u32| f32::from(image.get(x, y)[0]);
         // The blotch's middle comes up most of the way to the skin round it.
-        let (middle, round) = (at(150, 150) + at(151, 150) + at(152, 150) + at(153, 150), at(300, 150) + at(301, 150) + at(302, 150) + at(303, 150));
+        let (middle, round) = (
+            at(150, 150) + at(151, 150) + at(152, 150) + at(153, 150),
+            at(300, 150) + at(301, 150) + at(302, 150) + at(303, 150),
+        );
         assert!(round - middle < 0.35 * 4.0 * 6000.0, "{middle} {round}");
         assert!(before(300, 150) * 4.0 - (before(150, 150) + before(151, 150) + before(152, 150) + before(153, 150)) > 4.0 * 5000.0);
         // The grain is still there, as strong.

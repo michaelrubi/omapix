@@ -62,7 +62,11 @@ fn timed<T>(what: &str, work: impl FnOnce() -> T) -> T {
     done.store(true, Ordering::Relaxed);
     watcher.join().unwrap();
     let now = gpu_mib();
-    println!("{what}: {took:.2?}; GPU {now} MiB now, {} at most; RAM {} MiB", peak.load(Ordering::Relaxed).max(now), rss_mib());
+    println!(
+        "{what}: {took:.2?}; GPU {now} MiB now, {} at most; RAM {} MiB",
+        peak.load(Ordering::Relaxed).max(now),
+        rss_mib()
+    );
     result
 }
 
@@ -88,7 +92,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let embedding = timed("prompt read", || text.embed(prompt))?;
             timed("text encoder dropped", || drop(text));
             let mut transformer = timed("transformer loaded", Transformer::load)?;
-            let request = Request { prompt: &embedding, columns: cells, rows: cells, seed, keep: None, reference: None };
+            let request = Request {
+                prompt: &embedding,
+                columns: cells,
+                rows: cells,
+                seed,
+                keep: None,
+                reference: None,
+            };
             let latents = timed(&format!("{size} px, {STEPS} steps"), || transformer.generate(&request, |_| true))?.unwrap();
             timed("transformer dropped", || drop(transformer));
             let mut vae = timed("VAE loaded", || Vae::load(true))?;
@@ -116,7 +127,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (width, height) = (patch.width, patch.height);
             println!("patch {:?} at {width} x {height}", patch.rect);
             save(&format!("{out}/before.png"), &patch.image, width, height);
-            let canvas = Canvas { image: &patch.image, width, height, anew: &patch.cells(CELL), empty: &patch.empty_cells(CELL) };
+            let canvas = Canvas {
+                image: &patch.image,
+                width,
+                height,
+                anew: &patch.cells(CELL),
+                empty: &patch.empty_cells(CELL),
+            };
             let (started, mut results) = (Instant::now(), 0);
             timed("filled", || {
                 flux::fill(prompt, &canvas, &[seed, seed + 1, seed + 2], |progress| {

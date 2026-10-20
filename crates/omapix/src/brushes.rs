@@ -60,11 +60,25 @@ fn read(folder: &Path, added: Option<&str>) -> Read {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let new = added == Some(&name);
         let found = AbrFile::open(&path).map(|file| presets(&file)).map_err(|e| e.to_string());
-        match found.and_then(|(brushes, left_out)| if brushes.is_empty() { Err("no brushes in it".into()) } else { Ok((brushes, left_out)) }) {
+        match found.and_then(|(brushes, left_out)| {
+            if brushes.is_empty() {
+                Err("no brushes in it".into())
+            } else {
+                Ok((brushes, left_out))
+            }
+        }) {
             Ok((brushes, left_out)) => {
                 if new {
-                    let count = if brushes.len() == 1 { "1 brush".into() } else { format!("{} brushes", brushes.len()) };
-                    let without = if left_out.is_empty() { String::new() } else { format!(", without their {}", listed(&left_out)) };
+                    let count = if brushes.len() == 1 {
+                        "1 brush".into()
+                    } else {
+                        format!("{} brushes", brushes.len())
+                    };
+                    let without = if left_out.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", without their {}", listed(&left_out))
+                    };
                     said = Some((format!("Loaded {count} from {name}{without}"), false));
                 }
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
@@ -108,7 +122,11 @@ fn thumbnail(brush: &Preset) -> egui::ColorImage {
 /// brush too big for the strip is drawn smaller.
 fn stroke_picture(brush: &BrushSettings, tip: Option<Arc<Tip>>, [width, height]: [u32; 2]) -> egui::ColorImage {
     let (w, h) = (width as f32, height as f32);
-    let settings = BrushSettings { size: brush.size.min(h / 2.0), opacity: 1.0, ..*brush };
+    let settings = BrushSettings {
+        size: brush.size.min(h / 2.0),
+        opacity: 1.0,
+        ..*brush
+    };
     let mut out = Surface::Mask(Tiled::new(width, height, 0));
     let mut stroke = Stroke::new(settings, Paint::Mask(u16::MAX), out.clone());
     if let Some(tip) = tip {
@@ -242,12 +260,22 @@ pub(crate) mod tests {
     /// A brush file with a round brush and one with a sampled tip.
     pub(crate) fn brush_file() -> Vec<u8> {
         let name = |name: &str| Descriptor::new("brushPreset").with("Nm  ", Value::Text(UnicodeString::new(name)));
-        let round = Descriptor::new("computedBrush").with("Dmtr", Value::Double(20.0)).with("Hrdn", Value::Double(50.0));
-        let leaf = Descriptor::new("sampledBrush").with("Dmtr", Value::Double(60.0)).with("sampledData", Value::Text(UnicodeString::new("leaf")));
+        let round = Descriptor::new("computedBrush")
+            .with("Dmtr", Value::Double(20.0))
+            .with("Hrdn", Value::Double(50.0));
+        let leaf = Descriptor::new("sampledBrush")
+            .with("Dmtr", Value::Double(60.0))
+            .with("sampledData", Value::Text(UnicodeString::new("leaf")));
         let textured = name("Leaf").with("Brsh", Value::Descriptor(leaf)).with("useTexture", Value::Boolean(true));
         let presets = [name("Soft").with("Brsh", Value::Descriptor(round)), textured];
         let pixels = (0..30 * 20).map(|i| if i % 30 < 15 { 255 } else { 0 }).collect();
-        let tip = AbrSample { id: "leaf".into(), width: 30, height: 20, depth: 8, data: pixels };
+        let tip = AbrSample {
+            id: "leaf".into(),
+            width: 30,
+            height: 20,
+            depth: 8,
+            data: pixels,
+        };
         write_v6(2, &[tip], &[], &presets, true).unwrap()
     }
 
@@ -273,7 +301,10 @@ pub(crate) mod tests {
 
         let mut library = Library::default();
         library.import(&downloads.join("Nature.abr"), &folder, &ctx).unwrap();
-        assert_eq!(loaded(&mut library), Some(("Loaded 2 brushes from Nature.abr, without their Texture".into(), false)));
+        assert_eq!(
+            loaded(&mut library),
+            Some(("Loaded 2 brushes from Nature.abr, without their Texture".into(), false))
+        );
         assert!(folder.join("Nature.abr").exists());
         let names: Vec<_> = library.files.iter().map(|(file, brushes)| (file.as_str(), brushes.len())).collect();
         assert_eq!(names, [("Nature", 2)]);
@@ -305,11 +336,17 @@ pub(crate) mod tests {
     fn the_preview_is_a_stroke_with_the_brush_drawn_again_when_it_changes() {
         // How much paint is at a pixel of the strip.
         let alpha = |image: &egui::ColorImage, x: usize, y: usize| image.pixels[y * 240 + x].a();
-        let soft = BrushSettings { size: 20.0, hardness: 1.0, ..Default::default() };
+        let soft = BrushSettings {
+            size: 20.0,
+            hardness: 1.0,
+            ..Default::default()
+        };
         let image = stroke_picture(&soft, None, [240, 56]);
         // How much paint there is in a block of the strip.
         let paint = |image: &egui::ColorImage, xs: std::ops::Range<usize>, ys: std::ops::Range<usize>| -> u32 {
-            xs.flat_map(|x| ys.clone().map(move |y| (x, y))).map(|(x, y)| u32::from(alpha(image, x, y))).sum()
+            xs.flat_map(|x| ys.clone().map(move |y| (x, y)))
+                .map(|(x, y)| u32::from(alpha(image, x, y)))
+                .sum()
         };
         // An S: up on the left and down on the right, solid in the middle.
         assert!(paint(&image, 40..90, 0..28) > 4 * paint(&image, 40..90, 28..56));
@@ -320,14 +357,26 @@ pub(crate) mod tests {
         assert!(paint(&image, 14..24, 0..56) > 0 && 4 * paint(&image, 14..24, 0..56) < paint(&image, 115..125, 0..56));
         assert_eq!(paint(&image, 0..240, 0..3) + paint(&image, 0..240, 53..56), 0);
         // A brush too big for the strip is drawn at half its height.
-        let big = stroke_picture(&BrushSettings { size: 2000.0, size_pressure: false, opacity_pressure: false, ..soft }, None, [240, 56]);
+        let big = stroke_picture(
+            &BrushSettings {
+                size: 2000.0,
+                size_pressure: false,
+                opacity_pressure: false,
+                ..soft
+            },
+            None,
+            [240, 56],
+        );
         assert!(alpha(&big, 120, 18) == 255 && alpha(&big, 120, 38) == 255 && alpha(&big, 120, 54) == 0);
 
         // In the panel it's kept until the brush changes.
         let ctx = egui::Context::default();
         let mut library = Library::default();
         let shown = |library: &mut Library, brush: &BrushSettings| {
-            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(300.0, 200.0))), ..Default::default() };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(300.0, 200.0))),
+                ..Default::default()
+            };
             let mut out = ctx.run_ui(input, |ui| library.preview(ui, &Theme::default(), brush));
             out.textures_delta.clear();
             library.preview.as_ref().map(|(of, size, texture)| (*of, *size, texture.id()))

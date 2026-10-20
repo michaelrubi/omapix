@@ -3,12 +3,12 @@
 //! the Sensitivity slider decides how many; OK heals them onto a new empty
 //! Blemishes layer.
 
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use egui::{Color32, RichText, Slider, vec2};
-use omapix_engine::blemish::{self, LEAST_SCORE, Spot};
 use omapix_engine::ColorProfile;
+use omapix_engine::blemish::{self, LEAST_SCORE, Spot};
 
 use crate::canvas::Render;
 use crate::editor::{Editor, Target};
@@ -74,8 +74,7 @@ impl HealBlemishes {
         }
         let ready = self.finding.is_none();
         let mut result = None;
-        let area = egui::Modal::default_area(egui::Id::new("heal-blemishes"))
-            .anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
+        let area = egui::Modal::default_area(egui::Id::new("heal-blemishes")).anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
         egui::Modal::new(egui::Id::new("heal-blemishes"))
             .area(area)
             .backdrop_color(Color32::TRANSPARENT)
@@ -117,11 +116,7 @@ impl HealBlemishes {
             return;
         };
         editor.target = Target::Pixels;
-        editor.edit_in_background(
-            "Heal Blemishes",
-            move |doc, active| *active = blemish::heal(doc, index, &spots),
-            ctx,
-        );
+        editor.edit_in_background("Heal Blemishes", move |doc, active| *active = blemish::heal(doc, index, &spots), ctx);
     }
 }
 
@@ -287,7 +282,10 @@ mod tests {
             }
             let ppm_path = format!("{out}/{name}.ppm");
             std::fs::write(&ppm_path, ppm).unwrap();
-            std::process::Command::new("magick").args([&ppm_path, &format!("{out}/{name}.png")]).status().unwrap();
+            std::process::Command::new("magick")
+                .args([&ppm_path, &format!("{out}/{name}.png")])
+                .status()
+                .unwrap();
             std::fs::remove_file(ppm_path).unwrap();
         }
     }

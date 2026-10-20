@@ -20,8 +20,7 @@ pub struct Subject {
 
 impl Subject {
     pub fn load() -> Result<Self> {
-        let files = find_model(MODEL)
-            .ok_or_else(|| format!("Select Subject needs the {MODEL} model: run scripts/fetch-models.sh"))?;
+        let files = find_model(MODEL).ok_or_else(|| format!("Select Subject needs the {MODEL} model: run scripts/fetch-models.sh"))?;
         Ok(Self {
             session: session(&files["model_fp16.onnx"])?,
         })
@@ -31,8 +30,7 @@ impl Subject {
     /// [`SIZE`]² coverage, 0–1, stretched over the whole image.
     pub fn matte(&mut self, srgb: &[[u8; 4]], width: u32, height: u32) -> Result<Vec<f32>> {
         let side = SIZE as i64;
-        let image = Tensor::from_array((vec![1, 3, side, side], imagenet_input(srgb, width, height, SIZE)))
-            .map_err(|e| e.to_string())?;
+        let image = Tensor::from_array((vec![1, 3, side, side], imagenet_input(srgb, width, height, SIZE))).map_err(|e| e.to_string())?;
         let outputs = self.session.run(ort::inputs!["input_image" => image]).map_err(|e| e.to_string())?;
         // It answers in logits.
         let (_, logits) = outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?;

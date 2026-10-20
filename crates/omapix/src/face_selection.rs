@@ -330,11 +330,7 @@ pub fn analyse(image: &Raster, profile: &ColorProfile) -> Result<(Vec<[u8; 4]>, 
         None => models.insert(Faces::load()?),
     };
     let (width, height) = (image.width() as usize, image.height() as usize);
-    let analysis = faces.analyse(&Image {
-        pixels: &srgb,
-        width,
-        height,
-    })?;
+    let analysis = faces.analyse(&Image { pixels: &srgb, width, height })?;
     Ok((srgb, analysis))
 }
 
@@ -391,7 +387,11 @@ pub fn find_skin(image: Raster, profile: &ColorProfile) -> Result<FoundSkin, Str
     let iod = scale(&analysis).ok_or("Found no faces facing the camera")?;
     let skin = skin(&analysis, &image, &[BODY_SKIN, FACE_SKIN]);
     let height = |b: &[f32; 4]| b[3] - b[1];
-    let face = analysis.faces.iter().map(|(f, _)| f).max_by(|a, b| height(&a.bounds).total_cmp(&height(&b.bounds)));
+    let face = analysis
+        .faces
+        .iter()
+        .map(|(f, _)| f)
+        .max_by(|a, b| height(&a.bounds).total_cmp(&height(&b.bounds)));
     let middle = pos2(image.width() as f32 / 2.0, image.height() as f32 / 2.0);
     // The cheek: halfway between an eye and the corner of the mouth below
     // it.
@@ -425,7 +425,9 @@ fn people(faces: &[&Detection], srgb: &[[u8; 4]], image: &Raster) -> Vec<retouch
             let face = [(left + right) / 2.0, (top + bottom) / 2.0];
             let away = |nose: &[f32; 4]| (nose[0] - face[0]).hypot(nose[1] - face[1]);
             let on = |nose: &[f32; 4]| (left..right).contains(&nose[0]) && (top..bottom).contains(&nose[1]);
-            let nearest = (0..poses.len()).filter(|&i| on(&poses[i].0)).min_by(|&a, &b| away(&poses[a].0).total_cmp(&away(&poses[b].0)));
+            let nearest = (0..poses.len())
+                .filter(|&i| on(&poses[i].0))
+                .min_by(|&a, &b| away(&poses[a].0).total_cmp(&away(&poses[b].0)));
             retouch::Person {
                 face,
                 iod: face_scale(f),
@@ -476,7 +478,9 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
             bounds: face.bounds,
             iod,
             skin: retouch::share(&all_skin, &people, n),
-            spots: points.as_deref().map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),
+            spots: points
+                .as_deref()
+                .map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),
             teeth: whites(Whiten::Teeth),
             eyes: whites(Whiten::Eyes),
             under_eyes: points.as_deref().map_or_else(|| (none(), none()), |p| under_eyes(p, &face_skin)),
@@ -544,7 +548,10 @@ fn whites(srgb: &[[u8; 4]], points: &[[f32; 3]], what: Whiten, face: &Selection)
 /// eyes are in sight.
 fn sight(points: &[[f32; 3]]) -> (f32, [bool; 2]) {
     let widths = EACH_EYE.each_ref().map(|eye| apart(points, eye.corners));
-    (iod(points).max(apart(points, FACE_HEIGHT) / 3.0), [0, 1].map(|n| widths[n] >= HIDDEN * widths[1 - n]))
+    (
+        iod(points).max(apart(points, FACE_HEIGHT) / 3.0),
+        [0, 1].map(|n| widths[n] >= HIDDEN * widths[1 - n]),
+    )
 }
 
 /// The skin under the eyes of every face in `image` the landmarker saw,
@@ -606,7 +613,10 @@ fn makeup(faces: &[&[[f32; 3]]], on_faces: &Selection) -> Vec<(Product, Selectio
             let [apple, bone] = CHEEKS[n].map(at);
             let (cx, cy) = (apple.0 + (bone.0 - apple.0) / 3.0, apple.1 + (bone.1 - apple.1) / 3.0);
             let [rx, ry] = BLUSH.map(|r| r * scale);
-            let ellipse: Vec<_> = (0..32).map(|i| (i as f32 * std::f32::consts::TAU / 32.0).sin_cos()).map(|(s, c)| (cx + rx * c, cy + ry * s)).collect();
+            let ellipse: Vec<_> = (0..32)
+                .map(|i| (i as f32 * std::f32::consts::TAU / 32.0).sin_cos())
+                .map(|(s, c)| (cx + rx * c, cy + ry * s))
+                .collect();
             blush.extend(drawn(&ellipse, BLUSH_FEATHER * scale, width, height));
         }
     }
@@ -639,7 +649,10 @@ fn under_eyes(points: &[[f32; 3]], skin: &Selection) -> (Selection, Selection) {
         cheek.extend(drawn(&ring(&top, &below), 0.0, width, height));
     }
     let on_skin = |boxes: &[([u32; 4], Selection)]| place(boxes, width, height).combine(skin, Combine::Intersect);
-    (on_skin(&under).combine(&draw(&[points], &LASHES, width, height), Combine::Subtract), on_skin(&cheek))
+    (
+        on_skin(&under).combine(&draw(&[points], &LASHES, width, height), Combine::Subtract),
+        on_skin(&cheek),
+    )
 }
 
 /// `polygon` filled and feathered, in a box round it: its corners in an
@@ -718,20 +731,14 @@ fn draw(faces: &[&[[f32; 3]]], shapes: &Shapes, width: u32, height: u32) -> Sele
                 }
             }
             let (x0, y0) = (lo[0].max(0.0) as u32, lo[1].max(0.0) as u32);
-            let (x1, y1) = (
-                (hi[0].ceil().max(0.0) as u32).min(width),
-                (hi[1].ceil().max(0.0) as u32).min(height),
-            );
+            let (x1, y1) = ((hi[0].ceil().max(0.0) as u32).min(width), (hi[1].ceil().max(0.0) as u32).min(height));
             if x1 <= x0 || y1 <= y0 {
                 return None;
             }
             let (w, h) = (x1 - x0, y1 - y0);
             let mut drawn = Selection::from_coverage(Tiled::new(w, h, 0));
             for &(ring, how) in shapes.outlines {
-                let shape: Vec<(f32, f32)> = ring
-                    .iter()
-                    .map(|&i| (points[i][0] - x0 as f32, points[i][1] - y0 as f32))
-                    .collect();
+                let shape: Vec<(f32, f32)> = ring.iter().map(|&i| (points[i][0] - x0 as f32, points[i][1] - y0 as f32)).collect();
                 drawn = drawn.combine(&Selection::polygon(w, h, &shape), how);
             }
             let drawn = drawn.expand(shapes.grow * iod).feather(shapes.feather * iod);
@@ -886,21 +893,41 @@ mod tests {
         let points = face_with_lids();
         let products = makeup(&[&points], &Selection::all(600, 500));
         let order: Vec<_> = products.iter().map(|(product, _)| *product).collect();
-        assert_eq!(order, [Product::Blush, Product::Brows, Product::EyeShadow, Product::Eyeliner, Product::Lipstick]);
-        let [blush, brows, shadow, liner, lipstick] = &products[..] else { unreachable!() };
+        assert_eq!(
+            order,
+            [Product::Blush, Product::Brows, Product::EyeShadow, Product::Eyeliner, Product::Lipstick]
+        );
+        let [blush, brows, shadow, liner, lipstick] = &products[..] else {
+            unreachable!()
+        };
         // Both sides alike.
         for cx in [250, 350] {
             // Eyeliner just above the lashes (a thin line, soft where it
             // meets the eye), eye shadow up to under the brow, and neither
             // in the eye.
-            assert!(liner.1.at(cx, 269) > 0.3 && liner.1.at(cx, 262) < 0.05, "{} {}", liner.1.at(cx, 269), liner.1.at(cx, 262));
-            assert!(shadow.1.at(cx, 262) > 0.8 && shadow.1.at(cx, 240) < 0.1, "{} {}", shadow.1.at(cx, 262), shadow.1.at(cx, 240));
+            assert!(
+                liner.1.at(cx, 269) > 0.3 && liner.1.at(cx, 262) < 0.05,
+                "{} {}",
+                liner.1.at(cx, 269),
+                liner.1.at(cx, 262)
+            );
+            assert!(
+                shadow.1.at(cx, 262) > 0.8 && shadow.1.at(cx, 240) < 0.1,
+                "{} {}",
+                shadow.1.at(cx, 262),
+                shadow.1.at(cx, 240)
+            );
             assert!(liner.1.at(cx, 281) < 0.01 && shadow.1.at(cx, 281) < 0.01);
             assert!(brows.1.at(cx, 240) > 0.9 && brows.1.at(cx, 262) < 0.05);
             // Blush between the apple of the cheek and the cheekbone,
             // fading out.
             let out = if cx == 250 { cx - 10 } else { cx + 10 };
-            assert!(blush.1.at(out, 337) > 0.4 && blush.1.at(out, 420) < 0.01, "{} {}", blush.1.at(out, 337), blush.1.at(out, 420));
+            assert!(
+                blush.1.at(out, 337) > 0.4 && blush.1.at(out, 420) < 0.01,
+                "{} {}",
+                blush.1.at(out, 337),
+                blush.1.at(out, 420)
+            );
         }
         // Lipstick on the lips, not the mouth between them.
         assert!(lipstick.1.at(300, 378) > 0.9 && lipstick.1.at(300, 400) < 0.01);
@@ -928,7 +955,12 @@ mod tests {
         let (srgb, points) = face_with_eyes();
         let all = Selection::all(600, 500);
         let eyes = whites(&srgb, &points, Whiten::Eyes, &all);
-        assert!(eyes.at(236, 280) > 0.9 && eyes.at(364, 280) > 0.9, "{} {}", eyes.at(236, 280), eyes.at(364, 280));
+        assert!(
+            eyes.at(236, 280) > 0.9 && eyes.at(364, 280) > 0.9,
+            "{} {}",
+            eyes.at(236, 280),
+            eyes.at(364, 280)
+        );
         // Not the irises (grown to 6.9 px), nor the mouth.
         assert!(eyes.at(250, 280) < 0.01 && eyes.at(355, 280) < 0.01 && eyes.at(300, 400) < 0.01);
         let teeth = whites(&srgb, &points, Whiten::Teeth, &all);
@@ -974,10 +1006,20 @@ mod tests {
         }
         let skin = Selection::all(600, 500);
         let (under, cheek) = under_eyes(&points, &skin);
-        assert!(under.at(250, 303) > 0.9 && under.at(350, 303) > 0.9, "{} {}", under.at(250, 303), under.at(350, 303));
+        assert!(
+            under.at(250, 303) > 0.9 && under.at(350, 303) > 0.9,
+            "{} {}",
+            under.at(250, 303),
+            under.at(350, 303)
+        );
         // Not the lashes (6 px below the lid, fading in from there), nor
         // the cheek.
-        assert!(under.at(250, 289) < 0.05 && under.at(250, 295) < 0.6 && under.at(250, 320) < 0.05, "{} {}", under.at(250, 289), under.at(250, 295));
+        assert!(
+            under.at(250, 289) < 0.05 && under.at(250, 295) < 0.6 && under.at(250, 320) < 0.05,
+            "{} {}",
+            under.at(250, 289),
+            under.at(250, 295)
+        );
         assert!(cheek.at(250, 320) > 0.99 && cheek.at(350, 320) > 0.99 && cheek.at(250, 300) < 0.01 && cheek.at(250, 335) < 0.01);
         // Only where there's skin.
         let left = Selection::rectangle(600, 500, (0.0, 0.0), (300.0, 500.0));
@@ -1020,9 +1062,7 @@ mod tests {
                     for x in 0..ow {
                         let (sx, sy) = (x * w / ow, y * h / oh);
                         let (p, k) = (image.get(sx, sy), found.at(sx, sy) * 0.6);
-                        ppm.extend(
-                            [0, 1, 2].map(|c| (f32::from(p[c] >> 8) * (1.0 - k) + [255.0, 0.0, 80.0][c] * k) as u8),
-                        );
+                        ppm.extend([0, 1, 2].map(|c| (f32::from(p[c] >> 8) * (1.0 - k) + [255.0, 0.0, 80.0][c] * k) as u8));
                     }
                 }
             });
@@ -1035,11 +1075,7 @@ mod tests {
         let image = Raster::new(600, 400, vec![[30000, 30000, 30000, 65535]; 600 * 400]);
         let doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
         let mut editor = Editor::new(doc).unwrap();
-        editor.set_selection(
-            "Rectangle",
-            Selection::rectangle(600, 400, (0.0, 0.0), (100.0, 100.0)),
-            Combine::Replace,
-        );
+        editor.set_selection("Rectangle", Selection::rectangle(600, 400, (0.0, 0.0), (100.0, 100.0)), Combine::Replace);
 
         let (tx, rx) = channel();
         let mut faces = FaceSelection {
@@ -1047,8 +1083,7 @@ mod tests {
         };
         assert_eq!(faces.poll(&mut editor), None);
         assert_eq!(faces.busy(), Some(Part::Skin));
-        tx.send(Ok(Selection::rectangle(600, 400, (300.0, 200.0), (400.0, 300.0))))
-            .unwrap();
+        tx.send(Ok(Selection::rectangle(600, 400, (300.0, 200.0), (400.0, 300.0)))).unwrap();
         assert_eq!(faces.poll(&mut editor), None);
         assert_eq!(faces.busy(), None);
         let selection = editor.doc.selection.as_ref().unwrap();

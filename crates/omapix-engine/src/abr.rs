@@ -79,7 +79,12 @@ impl AbrSample {
     /// Samples as normalized 0.0..=1.0 floating point paint amounts.
     pub fn to_unit(&self) -> Vec<f32> {
         if self.depth == 16 {
-            self.data.as_chunks::<2>().0.iter().map(|c| f32::from(u16::from_be_bytes(*c)) / 65535.0).collect()
+            self.data
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| f32::from(u16::from_be_bytes(*c)) / 65535.0)
+                .collect()
         } else {
             self.data.iter().map(|&v| f32::from(v) / 255.0).collect()
         }
@@ -90,10 +95,7 @@ impl AbrSample {
         if self.depth == 16 {
             self.data.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect()
         } else {
-            self.data
-                .iter()
-                .map(|&v| (u16::from(v) << 8) | u16::from(v))
-                .collect()
+            self.data.iter().map(|&v| (u16::from(v) << 8) | u16::from(v)).collect()
         }
     }
 }
@@ -170,10 +172,7 @@ struct Budget(usize);
 
 impl Budget {
     fn spend(&mut self, n: usize) -> Result<()> {
-        self.0 = self
-            .0
-            .checked_sub(n)
-            .ok_or_else(|| bad("abr samples exceed MAX_TOTAL_BYTES"))?;
+        self.0 = self.0.checked_sub(n).ok_or_else(|| bad("abr samples exceed MAX_TOTAL_BYTES"))?;
         Ok(())
     }
 }
@@ -229,9 +228,7 @@ fn read_ucs2(r: &mut ByteReader<'_>) -> Result<String> {
         return Err(bad("abr name length"));
     }
     let units: Vec<u16> = r.bytes(n * 2)?.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
-    Ok(String::from_utf16_lossy(&units)
-        .trim_end_matches('\0')
-        .to_string())
+    Ok(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string())
 }
 
 fn parse_v12(r: &mut ByteReader<'_>, version: u16, out: &mut AbrFile) -> Result<()> {
@@ -239,8 +236,7 @@ fn parse_v12(r: &mut ByteReader<'_>, version: u16, out: &mut AbrFile) -> Result<
     let mut budget = Budget(MAX_TOTAL_BYTES);
     for i in 0..count {
         if r.is_empty() {
-            out.warnings
-                .push(format!("file ends after {i} of {count} brushes"));
+            out.warnings.push(format!("file ends after {i} of {count} brushes"));
             break;
         }
         let ty = r.u16()?;
@@ -277,11 +273,7 @@ fn parse_v12(r: &mut ByteReader<'_>, version: u16, out: &mut AbrFile) -> Result<
                 2 => {
                     let _misc = b.u32()?;
                     let spacing = b.u16()?;
-                    let name = if version == 2 {
-                        read_ucs2(&mut b)?
-                    } else {
-                        String::new()
-                    };
+                    let name = if version == 2 { read_ucs2(&mut b)? } else { String::new() };
                     let anti_alias = b.u8()? != 0;
                     b.skip(8)?; // short bounds (superseded by 32-bit bounds)
                     let s = read_sample_body(&mut b, String::new(), &mut budget)?;
@@ -293,8 +285,7 @@ fn parse_v12(r: &mut ByteReader<'_>, version: u16, out: &mut AbrFile) -> Result<
                     }))
                 }
                 other => {
-                    out.warnings
-                        .push(format!("brush {}: unknown brush type {other} skipped", i + 1));
+                    out.warnings.push(format!("brush {}: unknown brush type {other} skipped", i + 1));
                     Ok(None)
                 }
             }
@@ -309,17 +300,11 @@ fn parse_v12(r: &mut ByteReader<'_>, version: u16, out: &mut AbrFile) -> Result<
     Ok(())
 }
 
-fn read_samp(
-    data: &[u8],
-    subversion: u16,
-    out: &mut AbrFile,
-    budget: &mut Budget,
-) -> Result<()> {
+fn read_samp(data: &[u8], subversion: u16, out: &mut AbrFile, budget: &mut Budget) -> Result<()> {
     let mut r = ByteReader::new(data);
     while r.remaining() >= 4 {
         if out.samples.len() >= MAX_BRUSHES {
-            out.warnings
-                .push("too many sampled tips; the rest were skipped".into());
+            out.warnings.push("too many sampled tips; the rest were skipped".into());
             break;
         }
         let len = r.u32()? as usize;
@@ -330,8 +315,7 @@ fn read_samp(
         let body = match r.bytes(padded.min(r.remaining())) {
             Ok(b) if b.len() >= len => b,
             _ => {
-                out.warnings
-                    .push(format!("sampled tip {}: truncated", out.samples.len() + 1));
+                out.warnings.push(format!("sampled tip {}: truncated", out.samples.len() + 1));
                 break;
             }
         };
@@ -345,9 +329,7 @@ fn read_samp(
         match parsed {
             Ok(s) => out.samples.push(s),
             Err(e) if e.to_string().contains("MAX_TOTAL_BYTES") => return Err(e),
-            Err(e) => out
-                .warnings
-                .push(format!("sampled tip {}: {e}; skipped", out.samples.len() + 1)),
+            Err(e) => out.warnings.push(format!("sampled tip {}: {e}; skipped", out.samples.len() + 1)),
         }
     }
     Ok(())
@@ -363,13 +345,9 @@ fn read_desc(data: &[u8], out: &mut AbrFile) {
                     }
                 }
             }
-            _ => out
-                .warnings
-                .push("brush settings (desc) hold no brush list".into()),
+            _ => out.warnings.push("brush settings (desc) hold no brush list".into()),
         },
-        Err(e) => out
-            .warnings
-            .push(format!("brush settings (desc) unreadable: {e}")),
+        Err(e) => out.warnings.push(format!("brush settings (desc) unreadable: {e}")),
     }
 }
 
@@ -382,8 +360,7 @@ fn parse_v6(r: &mut ByteReader<'_>, out: &mut AbrFile) -> Result<()> {
     while r.remaining() >= 12 {
         let sig = r.array::<4>()?;
         if &sig != b"8BIM" {
-            out.warnings
-                .push(format!("unexpected data at offset {} ignored", r.pos() - 4));
+            out.warnings.push(format!("unexpected data at offset {} ignored", r.pos() - 4));
             break;
         }
         let key = r.array::<4>()?;
@@ -391,17 +368,13 @@ fn parse_v6(r: &mut ByteReader<'_>, out: &mut AbrFile) -> Result<()> {
         let data = match r.bytes(len) {
             Ok(d) => d,
             Err(_) => {
-                out.warnings
-                    .push(format!("section {} truncated", String::from_utf8_lossy(&key)));
+                out.warnings.push(format!("section {} truncated", String::from_utf8_lossy(&key)));
                 r.bytes(r.remaining())?
             }
         };
         // Sections are padded to 4 bytes; tolerate writers that do or don't pad.
         let pad = (4 - len % 4) % 4;
-        if pad > 0
-            && r.peek_rest().get(..4) != Some(b"8BIM")
-            && r.peek_rest().get(pad..pad + 4) == Some(b"8BIM")
-        {
+        if pad > 0 && r.peek_rest().get(..4) != Some(b"8BIM") && r.peek_rest().get(pad..pad + 4) == Some(b"8BIM") {
             r.skip(pad)?;
         }
         match &key {
@@ -412,9 +385,7 @@ fn parse_v6(r: &mut ByteReader<'_>, out: &mut AbrFile) -> Result<()> {
             },
             b"desc" => read_desc(data, out),
             b"phry" | b"lPdc" => {} // Hierarchy & tool presets not needed for tips
-            k => out
-                .warnings
-                .push(format!("section {} ignored", String::from_utf8_lossy(k))),
+            k => out.warnings.push(format!("section {} ignored", String::from_utf8_lossy(k))),
         }
     }
     Ok(())
@@ -424,21 +395,14 @@ fn parse_v6(r: &mut ByteReader<'_>, out: &mut AbrFile) -> Result<()> {
 pub fn parse(data: &[u8]) -> Result<AbrFile> {
     let mut r = ByteReader::new(data);
     let version = r.u16()?;
-    let mut out = AbrFile {
-        version,
-        ..Default::default()
-    };
+    let mut out = AbrFile { version, ..Default::default() };
     match version {
         1 | 2 => parse_v12(&mut r, version, &mut out)?,
         6..=10 => parse_v6(&mut r, &mut out)?,
         v => return Err(bad(format!("brush file version {v}"))),
     }
     if out.legacy.is_empty() && out.samples.is_empty() && out.presets.is_empty() {
-        let why = out
-            .warnings
-            .first()
-            .map(|w| format!(" ({w})"))
-            .unwrap_or_default();
+        let why = out.warnings.first().map(|w| format!(" ({w})")).unwrap_or_default();
         return Err(bad(format!("the brush file holds no readable brushes{why}")));
     }
     Ok(out)
@@ -447,12 +411,7 @@ pub fn parse(data: &[u8]) -> Result<AbrFile> {
 // ------------------------------------------------------------------ writing
 
 fn write_sample_body(o: &mut Vec<u8>, s: &AbrSample, rle: bool) -> Result<()> {
-    if s.width == 0
-        || s.height == 0
-        || s.width > MAX_EDGE
-        || s.height > MAX_EDGE
-        || !matches!(s.depth, 8 | 16)
-    {
+    if s.width == 0 || s.height == 0 || s.width > MAX_EDGE || s.height > MAX_EDGE || !matches!(s.depth, 8 | 16) {
         return Err(bad("brush sample size or depth invalid"));
     }
     for v in [0i32, 0, s.height as i32, s.width as i32] {
@@ -461,12 +420,7 @@ fn write_sample_body(o: &mut Vec<u8>, s: &AbrSample, rle: bool) -> Result<()> {
     o.put_u16(s.depth);
     o.put_u8(u8::from(rle));
     if rle {
-        let enc = patterns::encode_plane_rle(
-            &s.data,
-            s.width as usize,
-            s.height as usize,
-            s.depth,
-        )?;
+        let enc = patterns::encode_plane_rle(&s.data, s.width as usize, s.height as usize, s.depth)?;
         o.put(&enc);
     } else {
         o.put(&s.data);
@@ -500,8 +454,7 @@ pub fn write_v12(version: u16, brushes: &[LegacyBrush], rle: bool) -> Result<Vec
             }
             LegacyTip::Sampled(s) => {
                 if version == 2 {
-                    let units: Vec<u16> =
-                        b.name.encode_utf16().chain(std::iter::once(0)).collect();
+                    let units: Vec<u16> = b.name.encode_utf16().chain(std::iter::once(0)).collect();
                     body.put_u32(units.len() as u32);
                     for u in units {
                         body.put_u16(u);
@@ -532,13 +485,7 @@ fn section(o: &mut Vec<u8>, key: &[u8; 4], data: &[u8]) {
 }
 
 /// Writes a v6 (`subversion` 1 or 2) file: sampled tips, embedded patterns and preset descriptors.
-pub fn write_v6(
-    subversion: u16,
-    samples: &[AbrSample],
-    patterns: &[PsdPattern],
-    presets: &[Descriptor],
-    rle: bool,
-) -> Result<Vec<u8>> {
+pub fn write_v6(subversion: u16, samples: &[AbrSample], patterns: &[PsdPattern], presets: &[Descriptor], rle: bool) -> Result<Vec<u8>> {
     if !matches!(subversion, 1 | 2) {
         return Err(bad(format!("brush file subversion {subversion}")));
     }
@@ -605,11 +552,7 @@ mod tests {
                         },
                     },
                     LegacyBrush {
-                        name: if version == 2 {
-                            "Leaf ✓".into()
-                        } else {
-                            String::new()
-                        },
+                        name: if version == 2 { "Leaf ✓".into() } else { String::new() },
                         spacing: 40,
                         anti_alias: false,
                         tip: LegacyTip::Sampled(sample("", 13, 9, 8)),
@@ -633,17 +576,15 @@ mod tests {
     #[test]
     fn v6_round_trip_both_subversions() {
         let samples = vec![sample("$abc", 20, 11, 8), sample("$def", 5, 5, 16)];
-        let preset = Descriptor::new("brushPreset")
-            .with("Nm  ", Value::Text(UnicodeString::new_nul("Grass")))
-            .with(
-                "Brsh",
-                Value::Descriptor(
-                    Descriptor::new("sampledBrush")
-                        .with("sampledData", Value::Text(UnicodeString::new_nul("$abc")))
-                        .with("Dmtr", Value::Double(42.0))
-                        .with("Spcn", Value::Double(25.0)),
-                ),
-            );
+        let preset = Descriptor::new("brushPreset").with("Nm  ", Value::Text(UnicodeString::new_nul("Grass"))).with(
+            "Brsh",
+            Value::Descriptor(
+                Descriptor::new("sampledBrush")
+                    .with("sampledData", Value::Text(UnicodeString::new_nul("$abc")))
+                    .with("Dmtr", Value::Double(42.0))
+                    .with("Spcn", Value::Double(25.0)),
+            ),
+        );
         for sub in [1u16, 2] {
             for rle in [false, true] {
                 let bytes = write_v6(sub, &samples, &[], std::slice::from_ref(&preset), rle).unwrap();
@@ -670,26 +611,21 @@ mod tests {
         // Absurd sample bounds
         let mut s = sample("", 2, 2, 8);
         s.width = MAX_EDGE + 1;
-        assert!(write_v12(
-            1,
-            &[LegacyBrush {
-                name: String::new(),
-                spacing: 1,
-                anti_alias: true,
-                tip: LegacyTip::Sampled(s)
-            }],
-            false
-        )
-        .is_err());
+        assert!(
+            write_v12(
+                1,
+                &[LegacyBrush {
+                    name: String::new(),
+                    spacing: 1,
+                    anti_alias: true,
+                    tip: LegacyTip::Sampled(s)
+                }],
+                false
+            )
+            .is_err()
+        );
 
-        let good = write_v6(
-            2,
-            &[sample("$a", 30, 30, 8)],
-            &[],
-            &[Descriptor::new("brushPreset")],
-            true,
-        )
-        .unwrap();
+        let good = write_v6(2, &[sample("$a", 30, 30, 8)], &[], &[Descriptor::new("brushPreset")], true).unwrap();
         for cut in 0..good.len() {
             let _ = parse(&good[..cut]);
         }

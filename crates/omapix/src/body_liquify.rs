@@ -25,13 +25,22 @@ pub fn unload() {
 }
 
 const SLIDERS: [Group<Shape>; 4] = [
-    ("Posture", true, 0.0, None, &[("Level Shoulders", "Brings the shoulders level, each half way to the other", |s| &mut s.level)]),
+    (
+        "Posture",
+        true,
+        0.0,
+        None,
+        &[("Level Shoulders", "Brings the shoulders level, each half way to the other", |s| &mut s.level)],
+    ),
     (
         "Head",
         true,
         -100.0,
         None,
-        &[("Head Size", "A larger head", |s| &mut s.head), ("Neck Length", "A longer neck", |s| &mut s.neck)],
+        &[
+            ("Head Size", "A larger head", |s| &mut s.head),
+            ("Neck Length", "A longer neck", |s| &mut s.neck),
+        ],
     ),
     (
         "Torso",
@@ -69,7 +78,11 @@ impl Sliders for Body {
     fn find(doc: &Document) -> Result<Vec<Body>, String> {
         let image = doc.composite();
         let srgb = srgb(&image, &doc.profile)?;
-        let image = Image { pixels: &srgb, width: image.width() as usize, height: image.height() as usize };
+        let image = Image {
+            pixels: &srgb,
+            width: image.width() as usize,
+            height: image.height() as usize,
+        };
         Ok(poses(&image)?.iter().filter_map(|pose| pose.body(&image)).collect())
     }
 
@@ -124,14 +137,33 @@ mod tests {
             .map(|k| {
                 let (x, y) = ((k % SIZE) as f32 * 4.0 + 2.0 - 300.0, (k / SIZE) as f32 * 4.0 + 2.0);
                 let torso = x.abs() <= 60.0 && (200.0..=420.0).contains(&y);
-                if torso || x.hypot(y - 130.0) <= 40.0 || (x.abs() <= 15.0 && (130.0..=200.0).contains(&y)) { 1.0 } else { 0.0 }
+                if torso || x.hypot(y - 130.0) <= 40.0 || (x.abs() <= 15.0 && (130.0..=200.0).contains(&y)) {
+                    1.0
+                } else {
+                    0.0
+                }
             })
             .collect();
         let pair = |x: f32, y: f32| [[300.0 + x, y, 1.0], [300.0 - x, y, 1.0]];
-        let mut joints = Joints { ears: pair(20.0, 130.0), shoulders: pair(50.0, 200.0), hips: pair(30.0, 360.0), ..Default::default() };
+        let mut joints = Joints {
+            ears: pair(20.0, 130.0),
+            shoulders: pair(50.0, 200.0),
+            hips: pair(30.0, 360.0),
+            ..Default::default()
+        };
         joints.shoulders[0][1] += drop;
         joints.shoulders[1][1] -= drop;
-        Body::new(&joints, &Matte { centre: [300.0; 2], side: 600.0, angle: 0.0, size: SIZE, cover: &cover }).unwrap()
+        Body::new(
+            &joints,
+            &Matte {
+                centre: [300.0; 2],
+                side: 600.0,
+                angle: 0.0,
+                size: SIZE,
+                cover: &cover,
+            },
+        )
+        .unwrap()
     }
 
     /// Liquify open on a grey image with a red spot, 16 px across, at the
@@ -139,7 +171,11 @@ mod tests {
     fn liquifying() -> Editor {
         let pixels = (0..W * H).map(|i| {
             let (x, y) = ((i % W) as f32 - 248.0, (i / W) as f32 - 300.0);
-            if x.hypot(y) <= 8.0 { [65535, 0, 0, 65535] } else { [30000, 30000, 30000, 65535] }
+            if x.hypot(y) <= 8.0 {
+                [65535, 0, 0, 65535]
+            } else {
+                [30000, 30000, 30000, 65535]
+            }
         });
         let image = Raster::new(W, H, pixels.collect());
         let mut editor = Editor::new(Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16)).unwrap();
@@ -214,10 +250,16 @@ mod tests {
     fn faces_and_bodies_are_shaped_together_and_undone_in_turn() {
         let mut editor = liquifying();
         editor.set_liquify_figures(editor.active, vec![a_face()]);
-        let narrow = Shape { waist: -100.0, ..Default::default() };
+        let narrow = Shape {
+            waist: -100.0,
+            ..Default::default()
+        };
         editor.shape_liquify::<Body>(&[narrow]);
         editor.end_liquify_stroke();
-        let wide_eyed = reshape::Shape { eye_size: 100.0, ..Default::default() };
+        let wide_eyed = reshape::Shape {
+            eye_size: 100.0,
+            ..Default::default()
+        };
         editor.shape_liquify::<Face>(&[wide_eyed]);
         editor.end_liquify_stroke();
         assert!(red(&editor, 259, 300));

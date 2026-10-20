@@ -46,14 +46,7 @@ pub struct Document {
 
 impl Document {
     /// A document with the given layers, bottom first.
-    pub fn new(
-        path: PathBuf,
-        profile: ColorProfile,
-        source_bits: u8,
-        width: u32,
-        height: u32,
-        layers: Vec<Layer>,
-    ) -> Self {
+    pub fn new(path: PathBuf, profile: ColorProfile, source_bits: u8, width: u32, height: u32, layers: Vec<Layer>) -> Self {
         let next_id = layers.iter().map(|l| l.id).max().unwrap_or(0) + 1;
         Self {
             path,
@@ -72,21 +65,9 @@ impl Document {
     }
 
     /// A single-layer document from a flat image, like opening a TIFF in Photoshop.
-    pub fn from_image(
-        path: PathBuf,
-        raster: &Raster,
-        profile: ColorProfile,
-        source_bits: u8,
-    ) -> Self {
+    pub fn from_image(path: PathBuf, raster: &Raster, profile: ColorProfile, source_bits: u8) -> Self {
         let (w, h) = (raster.width(), raster.height());
-        Self::new(
-            path,
-            profile,
-            source_bits,
-            w,
-            h,
-            vec![Layer::from_raster(1, "Background", raster)],
-        )
+        Self::new(path, profile, source_bits, w, h, vec![Layer::from_raster(1, "Background", raster)])
     }
 
     /// A new image with no file yet: one white layer in sRGB, like File › New
@@ -99,9 +80,7 @@ impl Document {
 
     pub fn file_name(&self) -> String {
         let path = self.saved_path.as_ref().unwrap_or(&self.path);
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Untitled".into())
+        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Untitled".into())
     }
 
     /// A fresh id for a new layer.
@@ -115,9 +94,7 @@ impl Document {
     /// returning its id, or `None` if nothing is selected.
     pub fn save_selection(&mut self) -> Option<u64> {
         let pixels = self.selection.as_ref()?.coverage.clone();
-        let name = (1..)
-            .map(|n| format!("Alpha {n}"))
-            .find(|name| self.channels.iter().all(|c| &c.name != name))?;
+        let name = (1..).map(|n| format!("Alpha {n}")).find(|name| self.channels.iter().all(|c| &c.name != name))?;
         let id = self.next_layer_id();
         self.channels.push(AlphaChannel { id, name, pixels });
         Some(id)
@@ -328,8 +305,12 @@ mod tests {
         use crate::tiled::Orientation;
         let (w, h) = (3, 2);
         let pixels: Vec<Pixel> = vec![
-            [10, 0, 0, 65535], [20, 0, 0, 65535], [30, 0, 0, 65535],
-            [40, 0, 0, 65535], [50, 0, 0, 65535], [60, 0, 0, 65535],
+            [10, 0, 0, 65535],
+            [20, 0, 0, 65535],
+            [30, 0, 0, 65535],
+            [40, 0, 0, 65535],
+            [50, 0, 0, 65535],
+            [60, 0, 0, 65535],
         ];
         let image = Raster::new(w, h, pixels);
         let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
@@ -347,31 +328,11 @@ mod tests {
         });
 
         let orientations = [
-            (
-                Orientation::Rotate180,
-                3, 2,
-                vec![60, 50, 40, 30, 20, 10],
-            ),
-            (
-                Orientation::Rotate90Cw,
-                2, 3,
-                vec![40, 10, 50, 20, 60, 30],
-            ),
-            (
-                Orientation::Rotate90Ccw,
-                2, 3,
-                vec![30, 60, 20, 50, 10, 40],
-            ),
-            (
-                Orientation::FlipHorizontal,
-                3, 2,
-                vec![30, 20, 10, 60, 50, 40],
-            ),
-            (
-                Orientation::FlipVertical,
-                3, 2,
-                vec![40, 50, 60, 10, 20, 30],
-            ),
+            (Orientation::Rotate180, 3, 2, vec![60, 50, 40, 30, 20, 10]),
+            (Orientation::Rotate90Cw, 2, 3, vec![40, 10, 50, 20, 60, 30]),
+            (Orientation::Rotate90Ccw, 2, 3, vec![30, 60, 20, 50, 10, 40]),
+            (Orientation::FlipHorizontal, 3, 2, vec![30, 20, 10, 60, 50, 40]),
+            (Orientation::FlipVertical, 3, 2, vec![40, 50, 60, 10, 20, 30]),
         ];
 
         for (orient, ew, eh, expected_r) in orientations {
@@ -438,10 +399,7 @@ mod tests {
                     d.selection.as_ref().unwrap().coverage.get(x, y),
                     doc.selection.as_ref().unwrap().coverage.get(sx, sy)
                 );
-                assert_eq!(
-                    d.channels[0].pixels.get(x, y),
-                    doc.channels[0].pixels.get(sx, sy)
-                );
+                assert_eq!(d.channels[0].pixels.get(x, y), doc.channels[0].pixels.get(sx, sy));
             }
             assert!(!d.selection.as_ref().unwrap().outlines.is_empty());
         }
@@ -460,10 +418,7 @@ mod tests {
             d.selection.as_ref().unwrap().coverage.to_vec(),
             doc.selection.as_ref().unwrap().coverage.to_vec()
         );
-        assert_eq!(
-            d.channels[0].pixels.to_vec(),
-            doc.channels[0].pixels.to_vec()
-        );
+        assert_eq!(d.channels[0].pixels.to_vec(), doc.channels[0].pixels.to_vec());
     }
 
     #[test]
@@ -475,7 +430,11 @@ mod tests {
         top.mask = Some(crate::layer::Mask::white(300, 200));
         doc.layers.push(top);
         doc.selection = Some(Selection::rectangle(300, 200, (0.0, 0.0), (10.0, 10.0)));
-        doc.channels.push(AlphaChannel { id: 99, name: "Alpha 1".into(), pixels: Tiled::new(300, 200, 65535) });
+        doc.channels.push(AlphaChannel {
+            id: 99,
+            name: "Alpha 1".into(),
+            pixels: Tiled::new(300, 200, 65535),
+        });
 
         // 100 px more on the left and 50 on top, filled white on the bottom layer only.
         let mut big = doc.clone();

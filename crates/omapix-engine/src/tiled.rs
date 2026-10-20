@@ -98,9 +98,7 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
     /// A tile's pixels (row-major, always a full 256×256 even at image
     /// edges), or `None` if it was never written and reads as the fill value.
     pub fn tile(&self, col: u32, row: u32) -> Option<&[T]> {
-        self.tiles[self.index(col, row)]
-            .as_deref()
-            .map(Vec::as_slice)
+        self.tiles[self.index(col, row)].as_deref().map(Vec::as_slice)
     }
 
     /// Writable pixels of a tile, copying it first if it is shared.
@@ -127,12 +125,7 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
 
     /// Build every tile in parallel from a function of (col, row) that
     /// returns the tile's pixels, or `None` to leave it empty.
-    pub fn from_tiles(
-        width: u32,
-        height: u32,
-        fill: T,
-        f: impl Fn(u32, u32) -> Option<Vec<T>> + Sync,
-    ) -> Self {
+    pub fn from_tiles(width: u32, height: u32, fill: T, f: impl Fn(u32, u32) -> Option<Vec<T>> + Sync) -> Self {
         let mut out = Self::new(width, height, fill);
         let cols = out.cols;
         out.tiles.par_iter_mut().enumerate().for_each(|(i, slot)| {
@@ -178,11 +171,7 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
         if dx == 0 && dy == 0 && (width, height) == (self.width, self.height) {
             return self.clone();
         }
-        let (w, h, t) = (
-            i64::from(self.width),
-            i64::from(self.height),
-            i64::from(TILE),
-        );
+        let (w, h, t) = (i64::from(self.width), i64::from(self.height), i64::from(TILE));
         let (dx, dy) = (i64::from(dx), i64::from(dy));
         Self::from_tiles(width, height, fill, |col, row| {
             let (x0, y0) = (i64::from(col) * t, i64::from(row) * t);
@@ -192,11 +181,8 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
             let (sx0, sy0) = ((x0 - dx).max(0), (y0 - dy).max(0));
             let (sx1, sy1) = ((x1 - dx).min(w), (y1 - dy).min(h));
             let whole = sx1 - sx0 == x1 - x0 && sy1 - sy0 == y1 - y0;
-            let empty = sx0 >= sx1
-                || sy0 >= sy1
-                || (sy0 / t..=(sy1 - 1) / t).all(|r| {
-                    (sx0 / t..=(sx1 - 1) / t).all(|c| self.tile(c as u32, r as u32).is_none())
-                });
+            let empty =
+                sx0 >= sx1 || sy0 >= sy1 || (sy0 / t..=(sy1 - 1) / t).all(|r| (sx0 / t..=(sx1 - 1) / t).all(|c| self.tile(c as u32, r as u32).is_none()));
             if empty && (whole || uncovered == fill) {
                 return None;
             }
@@ -257,9 +243,7 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
             let sy0 = corners.iter().map(|c| c.1).min().unwrap();
             let sy1 = corners.iter().map(|c| c.1).max().unwrap();
 
-            let empty = (sy0 / TILE..=sy1 / TILE).all(|r| {
-                (sx0 / TILE..=sx1 / TILE).all(|c| self.tile(c, r).is_none())
-            });
+            let empty = (sy0 / TILE..=sy1 / TILE).all(|r| (sx0 / TILE..=sx1 / TILE).all(|c| self.tile(c, r).is_none()));
             if empty {
                 return None;
             }
@@ -291,36 +275,29 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
     pub fn same_tiles(&self, other: &Self) -> bool {
         self.width == other.width
             && self.height == other.height
-            && self
-                .tiles
-                .iter()
-                .zip(&other.tiles)
-                .all(|(a, b)| match (a, b) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                    _ => false,
-                })
+            && self.tiles.iter().zip(&other.tiles).all(|(a, b)| match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            })
     }
 
     /// Copy of the whole image in one contiguous row-major buffer.
     pub fn to_vec(&self) -> Vec<T> {
         let (w, h) = (self.width as usize, self.height as usize);
         let mut out = vec![self.fill; w * h];
-        out.par_chunks_mut(w * TILE as usize)
-            .enumerate()
-            .for_each(|(row, band)| {
-                for col in 0..self.cols {
-                    let Some(tile) = self.tile(col, row as u32) else {
-                        continue;
-                    };
-                    let x0 = (col * TILE) as usize;
-                    let tw = (TILE as usize).min(w - x0);
-                    for (ty, line) in band.chunks_mut(w).enumerate() {
-                        line[x0..x0 + tw]
-                            .copy_from_slice(&tile[ty * TILE as usize..ty * TILE as usize + tw]);
-                    }
+        out.par_chunks_mut(w * TILE as usize).enumerate().for_each(|(row, band)| {
+            for col in 0..self.cols {
+                let Some(tile) = self.tile(col, row as u32) else {
+                    continue;
+                };
+                let x0 = (col * TILE) as usize;
+                let tw = (TILE as usize).min(w - x0);
+                for (ty, line) in band.chunks_mut(w).enumerate() {
+                    line[x0..x0 + tw].copy_from_slice(&tile[ty * TILE as usize..ty * TILE as usize + tw]);
                 }
-            });
+            }
+        });
         out
     }
 
@@ -329,27 +306,25 @@ impl<T: Copy + PartialEq + Send + Sync> Tiled<T> {
     pub fn crop(&self, x0: u32, y0: u32, w: u32, h: u32) -> Vec<T> {
         let mut out = vec![self.fill; w as usize * h as usize];
         let x_end = (x0 + w).min(self.width);
-        out.par_chunks_mut(w.max(1) as usize)
-            .enumerate()
-            .for_each(|(dy, line)| {
-                let y = y0 + dy as u32;
-                if y >= self.height {
-                    return;
+        out.par_chunks_mut(w.max(1) as usize).enumerate().for_each(|(dy, line)| {
+            let y = y0 + dy as u32;
+            if y >= self.height {
+                return;
+            }
+            let (row, ty) = (y / TILE, (y % TILE) as usize);
+            let mut x = x0;
+            while x < x_end {
+                let col = x / TILE;
+                let end = ((col + 1) * TILE).min(x_end);
+                if let Some(tile) = self.tile(col, row) {
+                    let at = ty * TILE as usize + (x % TILE) as usize;
+                    let n = (end - x) as usize;
+                    let o = (x - x0) as usize;
+                    line[o..o + n].copy_from_slice(&tile[at..at + n]);
                 }
-                let (row, ty) = (y / TILE, (y % TILE) as usize);
-                let mut x = x0;
-                while x < x_end {
-                    let col = x / TILE;
-                    let end = ((col + 1) * TILE).min(x_end);
-                    if let Some(tile) = self.tile(col, row) {
-                        let at = ty * TILE as usize + (x % TILE) as usize;
-                        let n = (end - x) as usize;
-                        let o = (x - x0) as usize;
-                        line[o..o + n].copy_from_slice(&tile[at..at + n]);
-                    }
-                    x = end;
-                }
-            });
+                x = end;
+            }
+        });
         out
     }
 

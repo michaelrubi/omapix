@@ -287,7 +287,11 @@ mod tests {
     fn at_fifty_the_large_blur_is_three_twentieths_of_the_eyes_distance() {
         let [small, large] = Evening::default().radii(100.0);
         assert!((small - 4.0).abs() < 0.01 && (large - 15.0).abs() < 0.01, "{small} {large}");
-        let larger = Evening { size: 100.0, ..Default::default() }.radii(100.0);
+        let larger = Evening {
+            size: 100.0,
+            ..Default::default()
+        }
+        .radii(100.0);
         assert!((larger[0] - small).abs() < 0.01 && (larger[1] - 30.0).abs() < 0.01);
     }
 

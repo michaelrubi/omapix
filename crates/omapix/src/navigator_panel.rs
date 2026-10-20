@@ -54,11 +54,7 @@ impl NavigatorPanel {
                 match &mut self.texture {
                     Some(t) => t.set(image, egui::TextureOptions::LINEAR),
                     None => {
-                        self.texture = Some(ui.ctx().load_texture(
-                            "navigator-thumb",
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        ));
+                        self.texture = Some(ui.ctx().load_texture("navigator-thumb", image, egui::TextureOptions::LINEAR));
                     }
                 }
                 self.cached_revision = rev;
@@ -83,12 +79,7 @@ impl NavigatorPanel {
         painter.rect_filled(rect, 0.0, theme.darker_background);
 
         if let Some(texture) = &self.texture {
-            painter.image(
-                texture.id(),
-                rect,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            painter.image(texture.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme.muted), egui::StrokeKind::Outside);
 
@@ -121,11 +112,7 @@ impl NavigatorPanel {
             if !ui.memory(|m| m.has_focus(ui.id().with("zoom_text"))) {
                 *text = zoom_label;
             }
-            let edit = ui.add(
-                egui::TextEdit::singleline(text)
-                    .id(ui.id().with("zoom_text"))
-                    .desired_width(52.0),
-            );
+            let edit = ui.add(egui::TextEdit::singleline(text).id(ui.id().with("zoom_text")).desired_width(52.0));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let clean = text.trim().trim_end_matches('%');
                 if let Ok(val) = clean.parse::<f32>()
@@ -141,8 +128,7 @@ impl NavigatorPanel {
 
             let mut slider_val = zoom_to_slider(current_zoom);
             let prev_slider = slider_val;
-            let slider = egui::Slider::new(&mut slider_val, 0.0..=(ZOOM_STEPS.len() - 1) as f64)
-                .show_value(false);
+            let slider = egui::Slider::new(&mut slider_val, 0.0..=(ZOOM_STEPS.len() - 1) as f64).show_value(false);
             if ui.add(slider).changed() && (slider_val - prev_slider).abs() > 0.001 {
                 let new_zoom = slider_to_zoom(slider_val);
                 editor.canvas.set_zoom(new_zoom);
@@ -210,10 +196,7 @@ mod tests {
             let image = Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
             let doc = Document::from_image("test.tif".into(), &image, ColorProfile::srgb(), 16);
             let mut editor = Editor::new(doc).unwrap();
-            editor.canvas.lay_out_for_test(
-                Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0)),
-                2.0,
-            );
+            editor.canvas.lay_out_for_test(Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 100.0)), 2.0);
             Self {
                 ctx: egui::Context::default(),
                 panel: NavigatorPanel::default(),
@@ -260,9 +243,7 @@ mod tests {
         ]);
 
         let dragged_pt = pos2(200.0, 120.0);
-        h.frame(vec![
-            Event::PointerMoved(dragged_pt),
-        ]);
+        h.frame(vec![Event::PointerMoved(dragged_pt)]);
 
         h.frame(vec![
             Event::PointerMoved(dragged_pt),

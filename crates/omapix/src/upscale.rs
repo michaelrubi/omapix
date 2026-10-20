@@ -5,9 +5,9 @@
 //! enlargement, and its opacity or a mask holds the model back.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
-use std::sync::Arc;
 
 use omapix_ai::upscale::Upscaler;
 use omapix_engine::{Layer, Raster, upscale};
@@ -17,7 +17,12 @@ use crate::editor::Editor;
 /// The image being enlarged: the result, how many model squares are done
 /// of how many, the document it was started on (its file and size), and the
 /// size it's going to.
-type Running = (Receiver<Result<Raster, String>>, Arc<(AtomicUsize, AtomicUsize)>, (PathBuf, u32, u32), (u32, u32));
+type Running = (
+    Receiver<Result<Raster, String>>,
+    Arc<(AtomicUsize, AtomicUsize)>,
+    (PathBuf, u32, u32),
+    (u32, u32),
+);
 
 #[derive(Default)]
 pub struct Upscaling {
@@ -45,11 +50,18 @@ impl Upscaling {
             let result = (|| {
                 let mut model = Upscaler::load(factor((doc.width, doc.height), (width, height)))?;
                 let squares = (model.size, model.factor);
-                upscale::upscale(&doc.composite(), &doc.profile, (width, height), squares, |s| model.upscale(s), |done, total| {
-                    shared.0.store(done, Ordering::Relaxed);
-                    shared.1.store(total, Ordering::Relaxed);
-                    ctx.request_repaint();
-                })
+                upscale::upscale(
+                    &doc.composite(),
+                    &doc.profile,
+                    (width, height),
+                    squares,
+                    |s| model.upscale(s),
+                    |done, total| {
+                        shared.0.store(done, Ordering::Relaxed);
+                        shared.1.store(total, Ordering::Relaxed);
+                        ctx.request_repaint();
+                    },
+                )
             })();
             let _ = tx.send(result);
             ctx.request_repaint();
@@ -112,7 +124,12 @@ mod tests {
     fn running(from: (u32, u32), to: (u32, u32)) -> (std::sync::mpsc::Sender<Result<Raster, String>>, Upscaling) {
         let (tx, rx) = channel();
         let progress = Arc::new((AtomicUsize::new(3), AtomicUsize::new(8)));
-        (tx, Upscaling { running: Some((rx, progress, ("t.tif".into(), from.0, from.1), to)) })
+        (
+            tx,
+            Upscaling {
+                running: Some((rx, progress, ("t.tif".into(), from.0, from.1), to)),
+            },
+        )
     }
 
     #[test]

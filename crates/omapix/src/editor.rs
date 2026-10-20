@@ -12,16 +12,13 @@ use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
 use omapix_engine::composite::GroupCache;
 use omapix_engine::layer::Layer;
 use omapix_engine::moving::Lifted;
-use omapix_engine::transform::{Affine, Resampling, transformed};
-use omapix_engine::warp::{self, Field, Patch};
 use omapix_engine::reduced::Reduced;
 use omapix_engine::reshape::{self, Face, Shape};
 use omapix_engine::selection::{Channel, Combine, Selection};
 use omapix_engine::tiled::{TILE, TILE_PIXELS, Tiled};
-use omapix_engine::{
-    ColorProfile, DisplayTransform, Document, NoiseOptions, Pixel, Proof, Raster, composite, filters,
-    ops,
-};
+use omapix_engine::transform::{Affine, Resampling, transformed};
+use omapix_engine::warp::{self, Field, Patch};
+use omapix_engine::{ColorProfile, DisplayTransform, Document, NoiseOptions, Pixel, Proof, Raster, composite, filters, ops};
 
 use crate::canvas::{Canvas, Render};
 use crate::live::{self, LiveFrame, LiveStack, Settings, Table};
@@ -68,11 +65,7 @@ pub enum View {
     QuickMask,
     /// One layer of what frequency separation would make: at `fine` alone
     /// (two bands), or at `fine` and `coarse` (three).
-    Separation {
-        fine: f32,
-        coarse: Option<f32>,
-        band: SeparationBand,
-    },
+    Separation { fine: f32, coarse: Option<f32>, band: SeparationBand },
     /// What a Filter menu filter would do to `layer`, or with `mask` to
     /// its mask.
     Filter {
@@ -100,10 +93,7 @@ impl View {
     /// Whether it's rendered whole by [`render_view`], rather than tile by
     /// tile, in place, by [`draw_tiles`].
     fn whole(self) -> bool {
-        matches!(
-            self,
-            View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. } | View::Alpha(_)
-        )
+        matches!(self, View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. } | View::Alpha(_))
     }
 }
 
@@ -464,10 +454,7 @@ impl Editor {
         let transform = DisplayTransform::to_srgb(&doc.profile).map_err(|e| e.to_string())?;
         let canvas = Canvas::new(doc.width, doc.height, transform);
         let active = doc.layers.last().map_or(0, |l| l.id);
-        let overlay_colour =
-            doc.profile
-                .from_srgb8([255, 0, 0])
-                .unwrap_or([u16::MAX, 0, 0, u16::MAX]);
+        let overlay_colour = doc.profile.from_srgb8([255, 0, 0]).unwrap_or([u16::MAX, 0, 0, u16::MAX]);
         Ok(Self {
             doc,
             active,
@@ -647,11 +634,11 @@ impl Editor {
     /// it live on the GPU until it ends; otherwise render it on the CPU
     /// (as when a group is given a blend mode of its own).
     fn show_edit_live(&mut self, before: &[Layer]) {
-        let fits = live::only_settings_changed(before, &self.doc.layers, self.active)
-            && live::can_show(&self.doc, self.active, false);
-        let showing = self.live_view.as_ref().is_some_and(|v| {
-            v.edit.is_some() && v.subject == self.active && v.until.is_none()
-        });
+        let fits = live::only_settings_changed(before, &self.doc.layers, self.active) && live::can_show(&self.doc, self.active, false);
+        let showing = self
+            .live_view
+            .as_ref()
+            .is_some_and(|v| v.edit.is_some() && v.subject == self.active && v.until.is_none());
         if !fits {
             self.live_view = None;
         } else if !showing {
@@ -697,12 +684,7 @@ impl Editor {
     }
 
     /// Run a slow edit on a background thread as one undo step.
-    pub fn edit_in_background(
-        &mut self,
-        label: &str,
-        f: impl FnOnce(&mut Document, &mut u64) + Send + 'static,
-        ctx: &egui::Context,
-    ) {
+    pub fn edit_in_background(&mut self, label: &str, f: impl FnOnce(&mut Document, &mut u64) + Send + 'static, ctx: &egui::Context) {
         if self.job.is_some() {
             return;
         }
@@ -717,10 +699,7 @@ impl Editor {
             let _ = tx.send((doc, active));
             ctx.request_repaint();
         });
-        self.job = Some(Job {
-            label: label.to_owned(),
-            rx,
-        });
+        self.job = Some(Job { label: label.to_owned(), rx });
     }
 
     pub fn undo(&mut self) {
@@ -857,10 +836,7 @@ impl Editor {
         if self.doc.index_of(self.active).is_none() {
             self.active = self.doc.layers.last().map_or(0, |l| l.id);
         }
-        let has_mask = self
-            .doc
-            .layer(self.active)
-            .is_some_and(|l| l.mask.is_some());
+        let has_mask = self.doc.layer(self.active).is_some_and(|l| l.mask.is_some());
         if self.target == Target::Mask && !has_mask {
             self.target = Target::Pixels;
         }
@@ -870,30 +846,18 @@ impl Editor {
     /// heal strokes copy from the source image determined by `sample`. `tip`
     /// is the brush's sampled tip, if it isn't a round one.
     /// Returns false if there is nothing to paint on or a background job is running.
-    pub fn begin_stroke(
-        &mut self,
-        settings: BrushSettings,
-        paint: Paint,
-        sample: Sample,
-        tip: Option<std::sync::Arc<omapix_engine::tip::Tip>>,
-    ) -> bool {
+    pub fn begin_stroke(&mut self, settings: BrushSettings, paint: Paint, sample: Sample, tip: Option<std::sync::Arc<omapix_engine::tip::Tip>>) -> bool {
         if self.job.is_some() {
             return false;
         }
         let target = self.target;
-        let copying = matches!(
-            paint,
-            Paint::Clone { .. } | Paint::Heal { .. } | Paint::SpotHeal
-        );
+        let copying = matches!(paint, Paint::Clone { .. } | Paint::Heal { .. } | Paint::SpotHeal);
         let (w, h) = (self.doc.width, self.doc.height);
         let surface = match target {
             // Cloning and healing work on pixels only.
             Target::Mask | Target::QuickMask if copying => return false,
             Target::QuickMask => {
-                let sel = self
-                    .doc
-                    .selection
-                    .get_or_insert_with(|| Selection::all(w, h));
+                let sel = self.doc.selection.get_or_insert_with(|| Selection::all(w, h));
                 Surface::Mask(sel.coverage.clone())
             }
             Target::Mask => {
@@ -916,8 +880,7 @@ impl Editor {
                 Surface::Pixels(layer.pixels.clone())
             }
         };
-        let locked = target == Target::Pixels
-            && self.doc.layer(self.active).is_some_and(|l| l.lock_alpha());
+        let locked = target == Target::Pixels && self.doc.layer(self.active).is_some_and(|l| l.lock_alpha());
         let mut stroke = Stroke::new(settings, paint, surface);
         if let Some(tip) = tip {
             stroke = stroke.with_tip(tip);
@@ -986,10 +949,7 @@ impl Editor {
         let mut surface = match self.target {
             Target::QuickMask => {
                 let (w, h) = (self.doc.width, self.doc.height);
-                let sel = self
-                    .doc
-                    .selection
-                    .get_or_insert_with(|| Selection::all(w, h));
+                let sel = self.doc.selection.get_or_insert_with(|| Selection::all(w, h));
                 Surface::Mask(std::mem::replace(&mut sel.coverage, Tiled::new(0, 0, 0)))
             }
             Target::Mask => {
@@ -1005,10 +965,7 @@ impl Editor {
                 let Some(layer) = self.doc.layer_mut(*id) else {
                     return;
                 };
-                Surface::Pixels(std::mem::replace(
-                    &mut layer.pixels,
-                    Tiled::new(0, 0, [0; 4]),
-                ))
+                Surface::Pixels(std::mem::replace(&mut layer.pixels, Tiled::new(0, 0, [0; 4])))
             }
         };
         let changed = if finish {
@@ -1189,9 +1146,7 @@ impl Editor {
         }
         let lift = match (&self.doc.selection, self.target, &layer.mask) {
             (None, ..) => None,
-            (Some(sel), Target::Mask, Some(mask)) => {
-                Some(Lift::Mask(Lifted::mask(&mask.pixels, &sel.coverage, false, background)))
-            }
+            (Some(sel), Target::Mask, Some(mask)) => Some(Lift::Mask(Lifted::mask(&mask.pixels, &sel.coverage, false, background))),
             (Some(_), ..) if !layer.has_pixels() => return Err("Could not transform because the layer has no pixels"),
             (Some(sel), ..) => Some(Lift::Pixels(Lifted::pixels(&layer.pixels, &sel.coverage, false))),
         };
@@ -1224,10 +1179,7 @@ impl Editor {
     /// it can be.
     fn show_transform_live(&mut self) {
         let wanted = self.transforming.as_ref().map(|t| t.wanted);
-        self.live_view = self.start_live_view(true).map(|live| LiveView {
-            transform: wanted,
-            ..live
-        });
+        self.live_view = self.start_live_view(true).map(|live| LiveView { transform: wanted, ..live });
     }
 
     /// The Free Transform in progress: what's transformed, before it was
@@ -1395,7 +1347,9 @@ impl Editor {
             Some((before, stroke)) => (before, Some(stroke)),
             None => (liquifying.field.clone(), None),
         };
-        let areas = dabs.iter().filter_map(|&(centre, motion)| liquifying.field.dab(brush, centre, radius, amount, motion));
+        let areas = dabs
+            .iter()
+            .filter_map(|&(centre, motion)| liquifying.field.dab(brush, centre, radius, amount, motion));
         let area = areas.reduce(union);
         liquifying.stroke = stroke.into_iter().chain(area).reduce(union).map(|stroke| (before, stroke));
         if let Some(area) = area {
@@ -1496,7 +1450,11 @@ impl Editor {
         };
         let level = level.filter(|_| liquifying.shaping);
         let before = liquifying.shaped.as_ref().and_then(Field::extent);
-        liquifying.shaped = if liquifying.hidden { None } else { liquifying.figures.warp(width, height, level.unwrap_or(0)) };
+        liquifying.shaped = if liquifying.hidden {
+            None
+        } else {
+            liquifying.figures.warp(width, height, level.unwrap_or(0))
+        };
         let after = liquifying.shaped.as_ref().and_then(Field::extent);
         // Where the brushes have been, they may show a face from elsewhere.
         let area = [before, after, liquifying.field.extent()].into_iter().flatten().reduce(union);
@@ -1617,7 +1575,11 @@ impl Editor {
         let Some(liquifying) = &mut self.liquifying else {
             return;
         };
-        let (from, to) = if undo { (&mut liquifying.undo, &mut liquifying.redo) } else { (&mut liquifying.redo, &mut liquifying.undo) };
+        let (from, to) = if undo {
+            (&mut liquifying.undo, &mut liquifying.redo)
+        } else {
+            (&mut liquifying.redo, &mut liquifying.undo)
+        };
         match from.pop() {
             Some(LiquifyStep::Stroke(mut patch)) => {
                 let area = liquifying.field.swap(&mut patch);
@@ -1626,8 +1588,14 @@ impl Editor {
             }
             Some(LiquifyStep::Shapes(mut faces, mut bodies)) => {
                 let Figures { faces: face, bodies: body } = &mut liquifying.figures;
-                face.iter_mut().flatten().zip(&mut faces).for_each(|((_, shape), other)| std::mem::swap(shape, other));
-                body.iter_mut().flatten().zip(&mut bodies).for_each(|((_, shape), other)| std::mem::swap(shape, other));
+                face.iter_mut()
+                    .flatten()
+                    .zip(&mut faces)
+                    .for_each(|((_, shape), other)| std::mem::swap(shape, other));
+                body.iter_mut()
+                    .flatten()
+                    .zip(&mut bodies)
+                    .for_each(|((_, shape), other)| std::mem::swap(shape, other));
                 to.push(LiquifyStep::Shapes(faces, bodies));
                 self.reshape_liquify();
             }
@@ -1701,14 +1669,7 @@ impl Editor {
 
     /// Find the region of similar colours under `start`, matching Magic Wand and Paint Bucket.
     /// Returns `None` if `start` is outside the document bounds.
-    pub fn wand_region(
-        &self,
-        start: (u32, u32),
-        tolerance: u16,
-        contiguous: bool,
-        anti_alias: bool,
-        sample: Sample,
-    ) -> Option<Selection> {
+    pub fn wand_region(&self, start: (u32, u32), tolerance: u16, contiguous: bool, anti_alias: bool, sample: Sample) -> Option<Selection> {
         let (w, h) = (self.doc.width, self.doc.height);
         if start.0 >= w || start.1 >= h {
             return None;
@@ -1716,33 +1677,19 @@ impl Editor {
 
         let selection = if sample != Sample::All && self.target == Target::Mask {
             if let Some(mask) = self.doc.layer(self.active).and_then(|l| l.mask.as_ref()) {
-                Selection::magic_wand(
-                    w,
-                    h,
-                    start,
-                    tolerance,
-                    contiguous,
-                    anti_alias,
-                    |x, y| {
-                        let v = mask.pixels.get(x, y);
-                        [v, v, v, u16::MAX]
-                    },
-                )
+                Selection::magic_wand(w, h, start, tolerance, contiguous, anti_alias, |x, y| {
+                    let v = mask.pixels.get(x, y);
+                    [v, v, v, u16::MAX]
+                })
             } else {
                 Selection::from_coverage(Tiled::new(w, h, 0))
             }
-        } else if sample == Sample::Current
-            && !self.doc.layer(self.active).is_some_and(|l| l.has_pixels())
-        {
+        } else if sample == Sample::Current && !self.doc.layer(self.active).is_some_and(|l| l.has_pixels()) {
             Selection::from_coverage(Tiled::new(w, h, 0))
-        } else if let Some(selection) = (sample == Sample::All)
-            .then(|| self.canvas.render())
-            .flatten()
-            .and_then(|r| {
-                // All layers are already flattened on screen.
-                r.with_image(|img| Selection::magic_wand_raster(img, start, tolerance, contiguous, anti_alias))
-            })
-        {
+        } else if let Some(selection) = (sample == Sample::All).then(|| self.canvas.render()).flatten().and_then(|r| {
+            // All layers are already flattened on screen.
+            r.with_image(|img| Selection::magic_wand_raster(img, start, tolerance, contiguous, anti_alias))
+        }) {
             selection
         } else {
             let source = self.sample_source(sample);
@@ -1753,15 +1700,7 @@ impl Editor {
 
     /// Magic Wand: click to select similar colours, combining with the
     /// current selection using `how`.
-    pub fn magic_wand(
-        &mut self,
-        start: (u32, u32),
-        tolerance: u16,
-        contiguous: bool,
-        anti_alias: bool,
-        sample: Sample,
-        how: Combine,
-    ) -> bool {
+    pub fn magic_wand(&mut self, start: (u32, u32), tolerance: u16, contiguous: bool, anti_alias: bool, sample: Sample, how: Combine) -> bool {
         let Some(selection) = self.wand_region(start, tolerance, contiguous, anti_alias, sample) else {
             if how == Combine::Replace && self.doc.selection.is_some() {
                 return self.edit("Deselect", |doc, _| doc.selection = None);
@@ -1791,9 +1730,7 @@ impl Editor {
     pub fn set_selection(&mut self, label: &str, selection: Selection, how: Combine) {
         if self.edit(label, |doc, _| {
             let combined = match (&doc.selection, how) {
-                (Some(current), how) if how != Combine::Replace => {
-                    current.combine(&selection, how)
-                }
+                (Some(current), how) if how != Combine::Replace => current.combine(&selection, how),
                 (None, Combine::Subtract | Combine::Intersect) => return,
                 _ => selection,
             };
@@ -1815,12 +1752,7 @@ impl Editor {
         if self.doc.width.div_ceil(scale) > limit || self.doc.height.div_ceil(scale) > limit {
             return None;
         }
-        let region = (
-            x0 / scale,
-            y0 / scale,
-            x1.div_ceil(scale) - x0 / scale,
-            y1.div_ceil(scale) - y0 / scale,
-        );
+        let region = (x0 / scale, y0 / scale, x1.div_ceil(scale) - x0 / scale, y1.div_ceil(scale) - y0 / scale);
         let (doc, id, reduced) = (self.doc.clone(), self.active, Arc::clone(&self.reduced));
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -1874,17 +1806,8 @@ impl Editor {
             let original = &moving.original;
             moving.lift = Some(match (&moving.selection, moving.target, &original.mask) {
                 (None, ..) => None,
-                (Some(sel), Target::Mask, Some(mask)) => Some(Lift::Mask(Lifted::mask(
-                    &mask.pixels,
-                    &sel.coverage,
-                    moving.copy,
-                    moving.background,
-                ))),
-                (Some(sel), ..) => Some(Lift::Pixels(Lifted::pixels(
-                    &original.pixels,
-                    &sel.coverage,
-                    moving.copy,
-                ))),
+                (Some(sel), Target::Mask, Some(mask)) => Some(Lift::Mask(Lifted::mask(&mask.pixels, &sel.coverage, moving.copy, moving.background))),
+                (Some(sel), ..) => Some(Lift::Pixels(Lifted::pixels(&original.pixels, &sel.coverage, moving.copy))),
             });
             if moving.copy && moving.selection.is_none() {
                 let copies = self.doc.duplicate_layers(&moving.roots);
@@ -1967,10 +1890,7 @@ impl Editor {
             }
         }
         // Selecting another layer or targeting a layer mask leaves Quick Mask.
-        if self.view == View::QuickMask
-            && self.previewing.is_none()
-            && (self.target != Target::QuickMask || self.quick_mask_layer != Some(self.active))
-        {
+        if self.view == View::QuickMask && self.previewing.is_none() && (self.target != Target::QuickMask || self.quick_mask_layer != Some(self.active)) {
             self.exit_quick_mask();
         }
         if let View::Filter { layer, .. } = self.view
@@ -2006,9 +1926,7 @@ impl Editor {
                             self.canvas.set_render(Arc::new(render));
                         }
                     }
-                    Ok(Progress::Tiles(level, tiles)) => {
-                        self.canvas.invalidate_tiles(level, &tiles)
-                    }
+                    Ok(Progress::Tiles(level, tiles)) => self.canvas.invalidate_tiles(level, &tiles),
                     Ok(Progress::Visible) => rendering.visible = true,
                     Ok(Progress::Done) => self.rendered = rendering.target,
                     Err(TryRecvError::Empty) => break,
@@ -2027,12 +1945,7 @@ impl Editor {
         self.update_live_view();
         // A live transform whose view went (zoomed or scrolled away) is
         // shown live again from where it's on screen now.
-        if self
-            .transforming
-            .as_ref()
-            .is_some_and(|t| t.lift.is_none() && !t.started)
-            && self.live_view.is_none()
-        {
+        if self.transforming.as_ref().is_some_and(|t| t.lift.is_none() && !t.started) && self.live_view.is_none() {
             self.show_transform_live();
         }
         // One render at a time. Once what's on screen is drawn, a render
@@ -2087,11 +2000,7 @@ impl Editor {
         let failed = live.rx.is_none() && !covers || live.until.is_some() && live.stack.is_none();
         // Once the move's render is on screen and the canvas's tiles show it.
         let caught_up = live.until.is_some_and(|until| {
-            let rendered = self.rendered.0 >= until
-                || self
-                    .rendering
-                    .as_ref()
-                    .is_some_and(|r| r.visible && r.target.0 >= until);
+            let rendered = self.rendered.0 >= until || self.rendering.as_ref().is_some_and(|r| r.visible && r.target.0 >= until);
             rendered && self.canvas.fresh
         });
         if failed || caught_up {
@@ -2137,10 +2046,7 @@ impl Editor {
         let view = self.view;
         let colour = self.overlay_colour;
         let ctx = ctx.clone();
-        let in_place = self
-            .canvas
-            .render()
-            .filter(|_| !view.whole());
+        let in_place = self.canvas.render().filter(|_| !view.whole());
         if let Some(render) = in_place {
             let job = InPlace {
                 doc,
@@ -2157,11 +2063,7 @@ impl Editor {
             };
             std::thread::spawn(move || job.run());
         } else {
-            let base = self
-                .separation_base
-                .as_ref()
-                .filter(|(r, _)| *r == self.revision)
-                .map(|(_, b)| Arc::clone(b));
+            let base = self.separation_base.as_ref().filter(|(r, _)| *r == self.revision).map(|(_, b)| Arc::clone(b));
             std::thread::spawn(move || {
                 let rendered = render_view(&doc, view, colour, base);
                 let _ = tx.send(Progress::Whole(rendered));
@@ -2369,12 +2271,7 @@ fn moving_layers(doc: &Document, active: u64, roots: &[u64]) -> (Layer, Vec<Laye
 /// Render what `view` shows, with `colour` for the mask overlay. For
 /// separation previews, also return the flattened image used, so later
 /// radius changes can reuse it.
-pub(crate) fn render_view(
-    doc: &Document,
-    view: View,
-    colour: Pixel,
-    base: Option<Arc<Tiled<Pixel>>>,
-) -> Rendered {
+pub(crate) fn render_view(doc: &Document, view: View, colour: Pixel, base: Option<Arc<Tiled<Pixel>>>) -> Rendered {
     let all_tiles = || -> Vec<(u32, u32)> {
         (0..doc.height.div_ceil(TILE))
             .flat_map(|r| (0..doc.width.div_ceil(TILE)).map(move |c| (c, r)))
@@ -2390,11 +2287,7 @@ pub(crate) fn render_view(
             (Render::new(image), None)
         }
         View::Mask(_) | View::MaskOverlay(_) | View::QuickMask | View::Refined(_) | View::Channel(_) => {
-            let mut image = Raster::new(
-                doc.width,
-                doc.height,
-                vec![[0; 4]; doc.width as usize * doc.height as usize],
-            );
+            let mut image = Raster::new(doc.width, doc.height, vec![[0; 4]; doc.width as usize * doc.height as usize]);
             for tiles in all_tiles().chunks(BATCH) {
                 let data = draw_tiles(&doc.layers, view, colour, tiles, None, doc.selection.as_ref());
                 for (&(col, row), tile) in tiles.iter().zip(&data) {
@@ -2415,11 +2308,7 @@ pub(crate) fn render_view(
             };
             (Render::new(image), Some(base))
         }
-        View::Filter {
-            layer,
-            filter,
-            mask,
-        } => {
+        View::Filter { layer, filter, mask } => {
             let mut layers = doc.layers.clone();
             let target = layers.iter_mut().find(|l| l.id == layer);
             match (target, mask) {
@@ -2441,12 +2330,9 @@ pub(crate) fn render_view(
                 None => Arc::new(Tiled::from_raster(&doc.composite())),
             };
             let grain = ops::grain_layer(0, doc.width, doc.height, &options, Some(&base_tiled));
-            let index = doc
-                .index_of(layer)
-                .unwrap_or(preview_doc.layers.len().saturating_sub(1));
+            let index = doc.index_of(layer).unwrap_or(preview_doc.layers.len().saturating_sub(1));
             preview_doc.insert_above(index, grain);
-            let image =
-                composite::composite(&preview_doc.layers, preview_doc.width, preview_doc.height);
+            let image = composite::composite(&preview_doc.layers, preview_doc.width, preview_doc.height);
             (Render::new(image), Some(base_tiled))
         }
     }
@@ -2455,13 +2341,7 @@ pub(crate) fn render_view(
 /// Tint tiles with `colour` where `coverage` is less than MAX (masked / unselected),
 /// fading to clear where revealed / selected.
 /// `colour` over `out` where `coverage` hides, at `opacity` (of 65535).
-fn apply_overlay(
-    out: &mut [Vec<Pixel>],
-    tiles: &[(u32, u32)],
-    coverage: &Tiled<u16>,
-    colour: Pixel,
-    opacity: u32,
-) {
+fn apply_overlay(out: &mut [Vec<Pixel>], tiles: &[(u32, u32)], coverage: &Tiled<u16>, colour: Pixel, opacity: u32) {
     const MAX: u32 = u16::MAX as u32;
     for (tile, &(col, row)) in out.iter_mut().zip(tiles) {
         let values = coverage.tile(col, row);
@@ -2488,12 +2368,7 @@ fn draw_tiles(
     groups: Option<&GroupCache>,
     selection: Option<&Selection>,
 ) -> Vec<Vec<Pixel>> {
-    let mask = |id: u64| {
-        layers
-            .iter()
-            .find(|l| l.id == id)
-            .and_then(|l| l.mask.as_ref())
-    };
+    let mask = |id: u64| layers.iter().find(|l| l.id == id).and_then(|l| l.mask.as_ref());
     // `coverage` as opaque grey.
     let grey = |coverage: Option<&Tiled<u16>>| {
         tiles
@@ -2545,11 +2420,9 @@ fn draw_tiles(
             out
         }
         // The rest are drawn whole by `render_view`.
-        View::Image
-        | View::Separation { .. }
-        | View::Filter { .. }
-        | View::AddNoise { .. }
-        | View::Alpha(_) => composite::composite_tiles(layers, tiles, groups),
+        View::Image | View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. } | View::Alpha(_) => {
+            composite::composite_tiles(layers, tiles, groups)
+        }
     }
 }
 
@@ -2577,23 +2450,11 @@ impl InPlace {
     fn run(self) {
         let (w, h) = (self.doc.width, self.doc.height);
         let mut previewed = false;
-        if let Some((level, (x0, y0, x1, y1))) = self
-            .visible
-            .filter(|(level, _)| *level > 0 && !self.view.shows_selection())
-        {
-            let layers = self
-                .reduced
-                .lock()
-                .expect("reduced layers")
-                .layers(&self.doc.layers, level as u32);
+        if let Some((level, (x0, y0, x1, y1))) = self.visible.filter(|(level, _)| *level > 0 && !self.view.shows_selection()) {
+            let layers = self.reduced.lock().expect("reduced layers").layers(&self.doc.layers, level as u32);
             let scale = 1 << level;
             let size = (w.div_ceil(scale), h.div_ceil(scale));
-            let area = (
-                x0 / scale,
-                y0 / scale,
-                x1.div_ceil(scale),
-                y1.div_ceil(scale),
-            );
+            let area = (x0 / scale, y0 / scale, x1.div_ceil(scale), y1.div_ceil(scale));
             let (mut tiles, on_screen) = tile_order(size, area, 2);
             tiles.truncate(on_screen);
             if !self.draw(&layers, level, &tiles, Some(on_screen)) {
@@ -2616,40 +2477,17 @@ impl InPlace {
     /// the first `visible` of them are done. Those are drawn in one go, as
     /// they're never cancelled for an edit; the rest a tile per core at a
     /// time, to stop soon when cancelled. Returns false if cancelled.
-    fn draw(
-        &self,
-        layers: &[Layer],
-        level: usize,
-        tiles: &[(u32, u32)],
-        mut visible: Option<usize>,
-    ) -> bool {
+    fn draw(&self, layers: &[Layer], level: usize, tiles: &[(u32, u32)], mut visible: Option<usize>) -> bool {
         let (first, rest) = tiles.split_at(visible.unwrap_or(0).min(tiles.len()));
         let batches = rest.chunks(rayon::current_num_threads());
         let mut done = 0;
-        for batch in std::iter::once(first)
-            .filter(|b| !b.is_empty())
-            .chain(batches)
-        {
+        for batch in std::iter::once(first).filter(|b| !b.is_empty()).chain(batches) {
             if self.cancel.load(Ordering::Acquire) {
                 return false;
             }
-            let groups = if level == 0 {
-                &self.groups
-            } else {
-                &self.preview_groups
-            };
-            let data = draw_tiles(
-                layers,
-                self.view,
-                self.colour,
-                batch,
-                Some(groups),
-                self.doc.selection.as_ref(),
-            );
-            if !self
-                .render
-                .write_tiles(level, batch, &data, Some(&self.cancel))
-            {
+            let groups = if level == 0 { &self.groups } else { &self.preview_groups };
+            let data = draw_tiles(layers, self.view, self.colour, batch, Some(groups), self.doc.selection.as_ref());
+            if !self.render.write_tiles(level, batch, &data, Some(&self.cancel)) {
                 return false;
             }
             done += batch.len();
@@ -2668,24 +2506,15 @@ impl InPlace {
 /// y0, x1, y1) first, each nearest the middle of `area` first, and how many
 /// overlap. Tiles are kept together in blocks of `block` × `block`, the
 /// tiles under one display tile, so each display tile is redrawn once.
-fn tile_order(
-    (w, h): (u32, u32),
-    (x0, y0, x1, y1): (u32, u32, u32, u32),
-    block: u32,
-) -> (Vec<(u32, u32)>, usize) {
+fn tile_order((w, h): (u32, u32), (x0, y0, x1, y1): (u32, u32, u32, u32), block: u32) -> (Vec<(u32, u32)>, usize) {
     let t = TILE as f32;
     let middle = ((x0 + x1) as f32 / 2.0 / t, (y0 + y1) as f32 / 2.0 / t);
-    let on_screen = |col: u32, row: u32| {
-        col * TILE < x1 && (col + 1) * TILE > x0 && row * TILE < y1 && (row + 1) * TILE > y0
-    };
+    let on_screen = |col: u32, row: u32| col * TILE < x1 && (col + 1) * TILE > x0 && row * TILE < y1 && (row + 1) * TILE > y0;
     let mut tiles: Vec<_> = (0..h.div_ceil(TILE))
         .flat_map(|row| (0..w.div_ceil(TILE)).map(move |col| (col, row)))
         .map(|(col, row)| {
             let (bc, br) = (col / block, row / block);
-            let centre = (
-                (bc as f32 + 0.5) * block as f32,
-                (br as f32 + 0.5) * block as f32,
-            );
+            let centre = ((bc as f32 + 0.5) * block as f32, (br as f32 + 0.5) * block as f32);
             let distance = (centre.0 - middle.0).hypot(centre.1 - middle.1);
             (!on_screen(col, row), distance, (br, bc), (col, row))
         })
@@ -2721,12 +2550,8 @@ mod tests {
     #[test]
     fn stroke_paints_the_mask_when_it_is_targeted_and_undoes_in_one_step() {
         let mut e = editor();
-        e.edit("D&B", |doc, active| {
-            *active = ops::dodge_and_burn_layer(doc, 0)
-        });
-        e.edit("Mask", |doc, active| {
-            doc.layer_mut(*active).unwrap().mask = Some(Mask::white(600, 400))
-        });
+        e.edit("D&B", |doc, active| *active = ops::dodge_and_burn_layer(doc, 0));
+        e.edit("Mask", |doc, active| doc.layer_mut(*active).unwrap().mask = Some(Mask::white(600, 400)));
         e.target = Target::Mask;
         assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, None));
         e.stroke_to(100.0, 100.0, 1.0);
@@ -2738,17 +2563,7 @@ mod tests {
         // Pixels untouched.
         assert_eq!(layer.pixels.get(200, 100), [32768, 32768, 32768, 65535]);
         e.undo();
-        assert!(
-            e.doc
-                .layer(e.active)
-                .unwrap()
-                .mask
-                .as_ref()
-                .unwrap()
-                .pixels
-                .tile(0, 0)
-                .is_none()
-        );
+        assert!(e.doc.layer(e.active).unwrap().mask.as_ref().unwrap().pixels.tile(0, 0).is_none());
         assert_eq!(e.undo_label(), Some("Mask"));
     }
 
@@ -2760,14 +2575,8 @@ mod tests {
         e.undo();
         // Later moves of the abandoned stroke change nothing.
         e.stroke_to(300.0, 100.0, 1.0);
-        assert_eq!(
-            e.doc.layers[0].pixels.get(300, 100),
-            [30000, 30000, 30000, 65535]
-        );
-        assert_eq!(
-            e.doc.layers[0].pixels.get(100, 100),
-            [30000, 30000, 30000, 65535]
-        );
+        assert_eq!(e.doc.layers[0].pixels.get(300, 100), [30000, 30000, 30000, 65535]);
+        assert_eq!(e.doc.layers[0].pixels.get(100, 100), [30000, 30000, 30000, 65535]);
         e.redo();
         assert_eq!(e.doc.layers[0].pixels.get(100, 100), [0, 0, 0, 65535]);
     }
@@ -2858,9 +2667,7 @@ mod tests {
     /// mask hides tile (0, 0), half hides tile (1, 0), and reveals the rest.
     fn masked_editor() -> Editor {
         let mut e = editor();
-        e.edit("D&B", |doc, active| {
-            *active = ops::dodge_and_burn_layer(doc, 0)
-        });
+        e.edit("D&B", |doc, active| *active = ops::dodge_and_burn_layer(doc, 0));
         e.edit("Mask", |doc, active| {
             let mut mask = Mask::white(600, 400);
             mask.pixels.tile_mut(0, 0).fill(0);
@@ -2882,10 +2689,7 @@ mod tests {
         let half = render.sample_for_test(300, 100);
         assert!(near(half, [38883, 22500, 22500, 65535]), "{half:?}");
         // Revealed: the image as it is.
-        assert_eq!(
-            render.sample_for_test(300, 300),
-            [30000, 30000, 30000, 65535]
-        );
+        assert_eq!(render.sample_for_test(300, 300), [30000, 30000, 30000, 65535]);
     }
 
     #[test]
@@ -2961,9 +2765,7 @@ mod tests {
         e.set_view(View::Mask(top));
         e.update(&ctx);
         assert_eq!(e.view(), View::Mask(top));
-        e.edit("Delete Layer Mask", |doc, _| {
-            doc.layer_mut(top).unwrap().mask = None
-        });
+        e.edit("Delete Layer Mask", |doc, _| doc.layer_mut(top).unwrap().mask = None);
         e.update(&ctx);
         assert_eq!(e.view(), View::Image);
     }
@@ -3026,9 +2828,9 @@ mod tests {
         assert_eq!(e.target, Target::Pixels);
         let sel = e.doc.selection.as_ref().expect("selection present");
         assert_eq!(sel.coverage.get(100, 100), u16::MAX); // added
-        assert_eq!(sel.coverage.get(300, 300), 0);        // removed
+        assert_eq!(sel.coverage.get(300, 300), 0); // removed
         assert_eq!(sel.coverage.get(250, 250), u16::MAX); // retained from original rect
-        assert_eq!(sel.coverage.get(50, 50), 0);          // retained unselected
+        assert_eq!(sel.coverage.get(50, 50), 0); // retained unselected
         assert!(!sel.outlines.is_empty());
     }
 
@@ -3238,10 +3040,7 @@ mod tests {
         e.move_to(300, 0);
         e.end_move();
         let layer = e.doc.layer(e.active).unwrap();
-        assert_eq!(
-            (layer.pixels.get(25, 50), layer.pixels.get(325, 50)),
-            (RED, RED)
-        );
+        assert_eq!((layer.pixels.get(25, 50), layer.pixels.get(325, 50)), (RED, RED));
     }
 
     #[test]
@@ -3260,10 +3059,7 @@ mod tests {
             e.update(&ctx);
         }
         let layer = e.doc.layer(e.active).unwrap();
-        assert_eq!(
-            (layer.pixels.get(19, 5)[3], layer.pixels.get(20, 5)),
-            (0, RED)
-        );
+        assert_eq!((layer.pixels.get(19, 5)[3], layer.pixels.get(20, 5)), (0, RED));
         // Undo in the middle of a drag finishes it first, then undoes it.
         e.move_to(40, 0);
         e.undo();
@@ -3302,20 +3098,14 @@ mod tests {
 
         assert_eq!(e.history_count(), 4);
         assert_eq!(e.history_active_index(), 3);
-        assert_eq!(
-            e.history_labels(),
-            ["t.tif", "Step 1", "Step 2", "Step 3"]
-        );
+        assert_eq!(e.history_labels(), ["t.tif", "Step 1", "Step 2", "Step 3"]);
         assert_eq!(e.doc.layers[0].opacity, 0.4);
 
         // Jump back to Step 1 (index 1).
         e.jump_to_history(1);
         assert_eq!(e.history_active_index(), 1);
         assert_eq!(e.doc.layers[0].opacity, 0.8);
-        assert_eq!(
-            e.history_labels(),
-            ["t.tif", "Step 1", "Step 2", "Step 3"]
-        );
+        assert_eq!(e.history_labels(), ["t.tif", "Step 1", "Step 2", "Step 3"]);
 
         // Jump all the way back to initial state (index 0).
         e.jump_to_history(0);
@@ -3331,10 +3121,7 @@ mod tests {
         e.edit("Step 2B", |doc, _| doc.layers[0].opacity = 0.2);
         assert_eq!(e.history_count(), 4);
         assert_eq!(e.history_active_index(), 3);
-        assert_eq!(
-            e.history_labels(),
-            ["t.tif", "Step 1", "Step 2", "Step 2B"]
-        );
+        assert_eq!(e.history_labels(), ["t.tif", "Step 1", "Step 2", "Step 2B"]);
         assert_eq!(e.doc.layers[0].opacity, 0.2);
 
         // Clear history resets to just current state.
@@ -3353,15 +3140,8 @@ mod tests {
         e.stroke_to(250.0, 250.0, 1.0);
         e.stroke_to(290.0, 270.0, 1.0);
         e.end_stroke();
-        assert_eq!(
-            e.rendered,
-            (e.revision, e.view_generation),
-            "canvas kept current without a full render"
-        );
-        assert_eq!(
-            e.canvas.sample(270, 260),
-            Some(e.doc.composite().get(270, 260))
-        );
+        assert_eq!(e.rendered, (e.revision, e.view_generation), "canvas kept current without a full render");
+        assert_eq!(e.canvas.sample(270, 260), Some(e.doc.composite().get(270, 260)));
         assert_eq!(e.canvas.sample(270, 260), Some([0, 0, 65535, 65535]));
     }
 
@@ -3379,11 +3159,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut e = square_editor();
         e.edit("Layer", |doc, active| {
-            let mut top = Layer::from_raster(
-                9,
-                "top",
-                &Raster::new(600, 400, vec![[0, 40000, 0, 65535]; 600 * 400]),
-            );
+            let mut top = Layer::from_raster(9, "top", &Raster::new(600, 400, vec![[0, 40000, 0, 65535]; 600 * 400]));
             top.blend = BlendMode::Multiply;
             doc.layers.push(top);
             *active = 9;
@@ -3391,27 +3167,19 @@ mod tests {
         settle(&mut e, &ctx);
         let render = Arc::clone(e.canvas.render().unwrap());
         for step in 0..20 {
-            e.edit_live("Opacity", |doc| {
-                doc.layers[1].opacity = 1.0 - step as f32 / 25.0
-            });
+            e.edit_live("Opacity", |doc| doc.layers[1].opacity = 1.0 - step as f32 / 25.0);
             e.update(&ctx);
         }
         e.end_live();
         settle(&mut e, &ctx);
-        assert!(
-            Arc::ptr_eq(&render, e.canvas.render().unwrap()),
-            "drawn in place"
-        );
+        assert!(Arc::ptr_eq(&render, e.canvas.render().unwrap()), "drawn in place");
         assert_eq!(e.rendered, (e.revision, e.view_generation));
         let full = e.doc.composite();
         for (x, y) in [(0, 0), (50, 50), (599, 399), (300, 200)] {
             assert_eq!(e.canvas.sample(x, y), Some(full.get(x, y)));
         }
         let exact = Render::new(full);
-        assert_eq!(
-            render.level_for_test(2).pixels(),
-            exact.level_for_test(2).pixels()
-        );
+        assert_eq!(render.level_for_test(2).pixels(), exact.level_for_test(2).pixels());
     }
 
     #[test]
@@ -3446,21 +3214,10 @@ mod tests {
             .collect();
         // The half-size level has 2 × 1 tiles, one of them on screen. The
         // full size image has 3 × 2, the two on screen first.
-        assert_eq!(
-            steps,
-            [
-                "1:[(0, 0)]",
-                "visible",
-                "0:[(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]",
-                "done"
-            ]
-        );
+        assert_eq!(steps, ["1:[(0, 0)]", "visible", "0:[(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]", "done"]);
         let exact = Render::new(e.doc.composite());
         for level in 0..3 {
-            assert_eq!(
-                render.level_for_test(level).pixels(),
-                exact.level_for_test(level).pixels()
-            );
+            assert_eq!(render.level_for_test(level).pixels(), exact.level_for_test(level).pixels());
         }
     }
 
@@ -3632,33 +3389,15 @@ mod tests {
         // All Layers reads the image on screen, as rendered after an edit.
         e.canvas.set_render(Arc::new(Render::new(e.doc.composite())));
         // With top layer active:
-        assert_eq!(
-            e.sample(0, 0, SampleSize::Point, Sample::Current),
-            Some([65535, 65535, 0, 65535])
-        );
-        assert_eq!(
-            e.sample(0, 0, SampleSize::Point, Sample::CurrentAndBelow),
-            Some([65535, 65535, 0, 65535])
-        );
-        assert_eq!(
-            e.sample(0, 0, SampleSize::Point, Sample::All),
-            Some([65535, 65535, 0, 65535])
-        );
+        assert_eq!(e.sample(0, 0, SampleSize::Point, Sample::Current), Some([65535, 65535, 0, 65535]));
+        assert_eq!(e.sample(0, 0, SampleSize::Point, Sample::CurrentAndBelow), Some([65535, 65535, 0, 65535]));
+        assert_eq!(e.sample(0, 0, SampleSize::Point, Sample::All), Some([65535, 65535, 0, 65535]));
 
         // With bottom layer active:
         e.select_layers(1, Vec::new());
-        assert_eq!(
-            e.sample(0, 0, SampleSize::Point, Sample::Current),
-            Some([0, 0, 0, 65535])
-        );
-        assert_eq!(
-            e.sample(0, 0, SampleSize::Point, Sample::CurrentAndBelow),
-            Some([0, 0, 0, 65535])
-        );
-        assert_eq!(
-            e.sample(0, 0, SampleSize::Point, Sample::All),
-            Some([65535, 65535, 0, 65535])
-        );
+        assert_eq!(e.sample(0, 0, SampleSize::Point, Sample::Current), Some([0, 0, 0, 65535]));
+        assert_eq!(e.sample(0, 0, SampleSize::Point, Sample::CurrentAndBelow), Some([0, 0, 0, 65535]));
+        assert_eq!(e.sample(0, 0, SampleSize::Point, Sample::All), Some([65535, 65535, 0, 65535]));
     }
 
     #[test]
@@ -3753,7 +3492,8 @@ mod live_tests {
         doc.layers.push(patch);
         let mut e = Editor::new(doc).unwrap();
         e.live_limit = Some(16384);
-        e.canvas.lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0)), 1.0);
+        e.canvas
+            .lay_out_for_test(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0)), 1.0);
         e
     }
 
@@ -3924,9 +3664,7 @@ mod live_tests {
         // Once it ends it's rendered (after any render already under way),
         // and it's one undo step.
         e.end_live();
-        let rendering_it = |e: &Editor| {
-            e.rendered.0 == e.revision || e.rendering.as_ref().is_some_and(|r| r.target.0 == e.revision)
-        };
+        let rendering_it = |e: &Editor| e.rendered.0 == e.revision || e.rendering.as_ref().is_some_and(|r| r.target.0 == e.revision);
         for _ in 0..500 {
             e.update(&ctx);
             if rendering_it(&e) {
@@ -3975,7 +3713,9 @@ mod live_tests {
         e.active = id;
         let bend = |e: &mut Editor, y: f32| {
             e.edit_live("Curves", |doc| {
-                let Some(Adjustment::Curves(c)) = &mut doc.layers[2].adjustment else { unreachable!() };
+                let Some(Adjustment::Curves(c)) = &mut doc.layers[2].adjustment else {
+                    unreachable!()
+                };
                 c.master.points = vec![(0.0, 0.0), (0.5, y), (1.0, 1.0)];
             })
         };

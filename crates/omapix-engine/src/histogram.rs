@@ -78,11 +78,7 @@ impl Histogram {
                 pixels: 0,
             };
         }
-        let sum: f64 = bins
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| (i as f64) * (c as f64))
-            .sum();
+        let sum: f64 = bins.iter().enumerate().map(|(i, &c)| (i as f64) * (c as f64)).sum();
         let mean = sum / (pixels as f64);
         let variance: f64 = bins
             .iter()
@@ -106,12 +102,7 @@ impl Histogram {
             }
         }
 
-        HistogramStats {
-            mean,
-            std_dev,
-            median,
-            pixels,
-        }
+        HistogramStats { mean, std_dev, median, pixels }
     }
 
     /// Combine another histogram into this one.
@@ -145,11 +136,7 @@ impl Histogram {
                     let g = (px[1] >> 8) as usize;
                     let b = (px[2] >> 8) as usize;
                     // Luminance: 0.3 * R + 0.59 * G + 0.11 * B
-                    let lum16 = (19661 * u64::from(px[0])
-                        + 38666 * u64::from(px[1])
-                        + 7209 * u64::from(px[2])
-                        + 32768)
-                        >> 16;
+                    let lum16 = (19661 * u64::from(px[0]) + 38666 * u64::from(px[1]) + 7209 * u64::from(px[2]) + 32768) >> 16;
                     let lum = (lum16 >> 8).min(255) as usize;
                     hist.red[r] += 1;
                     hist.green[g] += 1;

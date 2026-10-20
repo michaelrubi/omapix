@@ -24,12 +24,7 @@ pub fn gaussian_blur(image: &Tiled<Pixel>, radius: f32) -> Tiled<Pixel> {
         .into_par_iter()
         .map(|p| {
             let a = f32::from(p[3]) / MAX;
-            [
-                f32::from(p[0]) * a,
-                f32::from(p[1]) * a,
-                f32::from(p[2]) * a,
-                f32::from(p[3]),
-            ]
+            [f32::from(p[0]) * a, f32::from(p[1]) * a, f32::from(p[2]) * a, f32::from(p[3])]
         })
         .collect();
 
@@ -159,16 +154,26 @@ pub struct SmartBlurOptions {
 /// settings (so it can be previewed live, then applied).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayerFilter {
-    GaussianBlur { radius: f32 },
-    HighPass { radius: f32 },
+    GaussianBlur {
+        radius: f32,
+    },
+    HighPass {
+        radius: f32,
+    },
     /// `amount` 1 = 100 %; `threshold` in levels (0–255), as in Photoshop.
-    UnsharpMask { amount: f32, radius: f32, threshold: f32 },
+    UnsharpMask {
+        amount: f32,
+        radius: f32,
+        threshold: f32,
+    },
     /// Noise added straight to the pixels (Omapix otherwise puts grain on
     /// its own layer); used on masks.
     AddNoise(NoiseOptions),
     SmartSharpen(SmartSharpenOptions),
     ReduceNoise(ReduceNoiseOptions),
-    MaskDensity { density: f32 },
+    MaskDensity {
+        density: f32,
+    },
     SmartBlur(SmartBlurOptions),
 }
 
@@ -190,11 +195,7 @@ impl LayerFilter {
         match *self {
             Self::GaussianBlur { radius } => gaussian_blur(image, radius),
             Self::HighPass { radius } => high_pass(image, radius),
-            Self::UnsharpMask {
-                amount,
-                radius,
-                threshold,
-            } => unsharp_mask(image, amount, radius, threshold),
+            Self::UnsharpMask { amount, radius, threshold } => unsharp_mask(image, amount, radius, threshold),
             Self::AddNoise(options) => add_noise(image, &options),
             Self::SmartSharpen(options) => smart_sharpen(image, &options),
             Self::ReduceNoise(options) => reduce_noise(image, &options),
@@ -278,10 +279,7 @@ fn blur_luminance(pixels: &[Pixel], w: usize, h: usize, radius: f32) -> Vec<f32>
         })
         .collect();
     let blurred = blur_buffer(buf, w, h, radius);
-    blurred
-        .into_par_iter()
-        .map(|[yb, a, _, _]| if a > 1e-6 { yb / a } else { 0.0 })
-        .collect()
+    blurred.into_par_iter().map(|[yb, a, _, _]| if a > 1e-6 { yb / a } else { 0.0 }).collect()
 }
 
 /// Apply a luminance offset equally to red, green and blue, keeping colour and alpha.
@@ -339,9 +337,7 @@ pub fn smart_sharpen(image: &Tiled<Pixel>, options: &SmartSharpenOptions) -> Til
             pixels
                 .into_par_iter()
                 .zip(blurred)
-                .map(|(p, yb)| {
-                    sharpen_pixel(p, pixel_luma(&p) - yb, noise_thresh, amount_scale, s_fade, h_fade)
-                })
+                .map(|(p, yb)| sharpen_pixel(p, pixel_luma(&p) - yb, noise_thresh, amount_scale, s_fade, h_fade))
                 .collect()
         }
         SharpenRemove::LensBlur => {
@@ -366,14 +362,7 @@ pub fn smart_sharpen(image: &Tiled<Pixel>, options: &SmartSharpenOptions) -> Til
 }
 
 #[inline]
-fn sharpen_pixel(
-    p: Pixel,
-    diff_raw: f32,
-    noise_thresh: f32,
-    amount_scale: f32,
-    s_fade: f32,
-    h_fade: f32,
-) -> Pixel {
+fn sharpen_pixel(p: Pixel, diff_raw: f32, noise_thresh: f32, amount_scale: f32, s_fade: f32, h_fade: f32) -> Pixel {
     if p[3] == 0 {
         return p;
     }
@@ -442,8 +431,7 @@ fn box_radii(sigma: f32) -> [usize; 3] {
     }
     let wu = wl + 2;
     let wlf = wl as f32;
-    let m = ((12.0 * sigma * sigma - n * wlf * wlf - 4.0 * n * wlf - 3.0 * n) / (-4.0 * wlf - 4.0))
-        .round() as i32;
+    let m = ((12.0 * sigma * sigma - n * wlf * wlf - 4.0 * n * wlf - 3.0 * n) / (-4.0 * wlf - 4.0)).round() as i32;
     let size = |i: i32| if i < m { wl } else { wu };
     [0, 1, 2].map(|i| ((size(i).max(1) - 1) / 2) as usize)
 }
@@ -490,17 +478,15 @@ fn transpose(src: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
     let mut out = vec![[0f32; 4]; w * h];
     // Output row x is input column x. Work in blocks of rows for cache locality.
     const BLOCK: usize = 64;
-    out.par_chunks_mut(h * BLOCK)
-        .enumerate()
-        .for_each(|(bi, block)| {
-            let x0 = bi * BLOCK;
-            for y in 0..h {
-                let line = &src[y * w..(y + 1) * w];
-                for (dx, out_row) in block.chunks_mut(h).enumerate() {
-                    out_row[y] = line[x0 + dx];
-                }
+    out.par_chunks_mut(h * BLOCK).enumerate().for_each(|(bi, block)| {
+        let x0 = bi * BLOCK;
+        for y in 0..h {
+            let line = &src[y * w..(y + 1) * w];
+            for (dx, out_row) in block.chunks_mut(h).enumerate() {
+                out_row[y] = line[x0 + dx];
             }
-        });
+        }
+    });
     out
 }
 
@@ -595,10 +581,7 @@ pub fn reduce_noise(image: &Tiled<Pixel>, options: &ReduceNoiseOptions) -> Tiled
     if w == 0 || h == 0 {
         return image.clone();
     }
-    if options.strength <= 0.0
-        && options.reduce_color_noise <= 0.0
-        && options.sharpen_details <= 0.0
-    {
+    if options.strength <= 0.0 && options.reduce_color_noise <= 0.0 && options.sharpen_details <= 0.0 {
         return image.clone();
     }
 
@@ -626,25 +609,14 @@ pub fn reduce_noise(image: &Tiled<Pixel>, options: &ReduceNoiseOptions) -> Tiled
             .map(|p| {
                 let y = pixel_luma(p);
                 let a = f32::from(p[3]) / MAX;
-                [
-                    (f32::from(p[0]) - y) * a,
-                    (f32::from(p[1]) - y) * a,
-                    (f32::from(p[2]) - y) * a,
-                    a,
-                ]
+                [(f32::from(p[0]) - y) * a, (f32::from(p[1]) - y) * a, (f32::from(p[2]) - y) * a, a]
             })
             .collect();
         let blurred = blur_buffer(chroma_buf, w, h, 6.0);
         Some(
             blurred
                 .into_par_iter()
-                .map(|[cr, cg, cb, a]| {
-                    if a > 1e-6 {
-                        [cr / a, cg / a, cb / a]
-                    } else {
-                        [0.0, 0.0, 0.0]
-                    }
-                })
+                .map(|[cr, cg, cb, a]| if a > 1e-6 { [cr / a, cg / a, cb / a] } else { [0.0, 0.0, 0.0] })
                 .collect::<Vec<[f32; 3]>>(),
         )
     } else {
@@ -666,11 +638,7 @@ pub fn reduce_noise(image: &Tiled<Pixel>, options: &ReduceNoiseOptions) -> Tiled
             let ocb = f32::from(p[2]) - y_orig;
             let (cr, cg, cb) = if let Some(ref smoothed) = smoothed_chroma {
                 let [scr, scg, scb] = smoothed[i];
-                (
-                    ocr + k_chroma * (scr - ocr),
-                    ocg + k_chroma * (scg - ocg),
-                    ocb + k_chroma * (scb - ocb),
-                )
+                (ocr + k_chroma * (scr - ocr), ocg + k_chroma * (scg - ocg), ocb + k_chroma * (scb - ocb))
             } else {
                 (ocr, ocg, ocb)
             };
@@ -835,15 +803,7 @@ fn sample_noise(x: u32, y: u32, ch: u32, seed: u64, dist: NoiseDistribution) -> 
     }
 }
 
-fn grain_sample(
-    x: u32,
-    y: u32,
-    ch: u32,
-    seed: u64,
-    size: f32,
-    roughness: f32,
-    dist: NoiseDistribution,
-) -> f32 {
+fn grain_sample(x: u32, y: u32, ch: u32, seed: u64, size: f32, roughness: f32, dist: NoiseDistribution) -> f32 {
     let fine = sample_noise(x, y, ch, seed.wrapping_add(101), dist);
     if size <= 1.001 {
         return fine;
@@ -874,12 +834,7 @@ fn grain_sample(
 /// Generate a tiled raster filled with 50 % grey carrying noise according
 /// to `options`. If `options.tonal_falloff` is true and `base` is provided,
 /// grain amplitude decreases in deep shadows and bright highlights.
-pub fn generate_grain(
-    width: u32,
-    height: u32,
-    options: &NoiseOptions,
-    base: Option<&Tiled<Pixel>>,
-) -> Tiled<Pixel> {
+pub fn generate_grain(width: u32, height: u32, options: &NoiseOptions, base: Option<&Tiled<Pixel>>) -> Tiled<Pixel> {
     const MID_GREY: Pixel = [32768, 32768, 32768, 65535];
     if width == 0 || height == 0 || options.amount <= 0.0 {
         return Tiled::new(width, height, MID_GREY);
@@ -946,7 +901,13 @@ mod tests {
         // A reddish half and a lighter reddish half, with a hard edge at x = 50.
         let (w, h) = (100u32, 10u32);
         let px: Vec<Pixel> = (0..w * h)
-            .map(|i| if i % w < 50 { [30000, 20000, 20000, 65535] } else { [40000, 30000, 30000, 65535] })
+            .map(|i| {
+                if i % w < 50 {
+                    [30000, 20000, 20000, 65535]
+                } else {
+                    [40000, 30000, 30000, 65535]
+                }
+            })
             .collect();
         let img = Tiled::from_slice(w, h, [0; 4], &px);
         let out = unsharp_mask(&img, 1.0, 2.0, 0.0);
@@ -965,12 +926,7 @@ mod tests {
 
     #[test]
     fn smart_sharpen_flat_areas_unchanged() {
-        let img = Tiled::from_slice(
-            60,
-            20,
-            [0; 4],
-            &vec![[15000, 25000, 35000, 65535]; 60 * 20],
-        );
+        let img = Tiled::from_slice(60, 20, [0; 4], &vec![[15000, 25000, 35000, 65535]; 60 * 20]);
         for remove in [SharpenRemove::GaussianBlur, SharpenRemove::LensBlur] {
             let opts = SmartSharpenOptions {
                 amount: 300.0,
@@ -997,7 +953,13 @@ mod tests {
     fn smart_sharpen_steepens_edges() {
         let (w, h) = (100u32, 10u32);
         let px: Vec<Pixel> = (0..w * h)
-            .map(|i| if i % w < 50 { [30000, 30000, 30000, 65535] } else { [40000, 40000, 40000, 65535] })
+            .map(|i| {
+                if i % w < 50 {
+                    [30000, 30000, 30000, 65535]
+                } else {
+                    [40000, 40000, 40000, 65535]
+                }
+            })
             .collect();
         let img = Tiled::from_slice(w, h, [0; 4], &px);
 
@@ -1037,14 +999,23 @@ mod tests {
         let out_lens = smart_sharpen(&img, &opts_lens);
         let gauss_boost = out_gauss.get(50, 5)[0] - 40000;
         let lens_boost = out_lens.get(50, 5)[0] - 40000;
-        assert!(lens_boost > gauss_boost, "lens blur boost {lens_boost} should exceed gaussian boost {gauss_boost}");
+        assert!(
+            lens_boost > gauss_boost,
+            "lens blur boost {lens_boost} should exceed gaussian boost {gauss_boost}"
+        );
     }
 
     #[test]
     fn smart_sharpen_keeps_colour() {
         let (w, h) = (100u32, 10u32);
         let px: Vec<Pixel> = (0..w * h)
-            .map(|i| if i % w < 50 { [30000, 20000, 15000, 65535] } else { [45000, 32000, 28000, 65535] })
+            .map(|i| {
+                if i % w < 50 {
+                    [30000, 20000, 15000, 65535]
+                } else {
+                    [45000, 32000, 28000, 65535]
+                }
+            })
             .collect();
         let img = Tiled::from_slice(w, h, [0; 4], &px);
 
@@ -1102,7 +1073,11 @@ mod tests {
             ..opts_no_reduction
         };
         let out_suppressed = smart_sharpen(&img, &opts_full_reduction);
-        assert_eq!(out_suppressed.to_vec(), img.to_vec(), "100% reduce noise should leave low-amplitude texture alone");
+        assert_eq!(
+            out_suppressed.to_vec(),
+            img.to_vec(),
+            "100% reduce noise should leave low-amplitude texture alone"
+        );
     }
 
     #[test]
@@ -1110,7 +1085,13 @@ mod tests {
         let (w, h) = (100u32, 10u32);
         // Step edge in deep shadows (5000 to 10000, normalized < 0.16)
         let px: Vec<Pixel> = (0..w * h)
-            .map(|i| if i % w < 50 { [5000, 5000, 5000, 65535] } else { [10000, 10000, 10000, 65535] })
+            .map(|i| {
+                if i % w < 50 {
+                    [5000, 5000, 5000, 65535]
+                } else {
+                    [10000, 10000, 10000, 65535]
+                }
+            })
             .collect();
         let img = Tiled::from_slice(w, h, [0; 4], &px);
 
@@ -1132,17 +1113,15 @@ mod tests {
 
         let boost_nofade = out_nofade.get(50, 5)[0] - 10000;
         let boost_fade = out_fade.get(50, 5)[0] - 10000;
-        assert!(boost_fade < boost_nofade, "shadow fade should reduce edge boost: {boost_fade} vs {boost_nofade}");
+        assert!(
+            boost_fade < boost_nofade,
+            "shadow fade should reduce edge boost: {boost_fade} vs {boost_nofade}"
+        );
     }
 
     #[test]
     fn flat_image_stays_flat() {
-        let img = Tiled::from_slice(
-            300,
-            200,
-            [0; 4],
-            &vec![[1000, 20000, 60000, 65535]; 300 * 200],
-        );
+        let img = Tiled::from_slice(300, 200, [0; 4], &vec![[1000, 20000, 60000, 65535]; 300 * 200]);
         let out = gaussian_blur(&img, 5.0);
         for (x, y) in [(0, 0), (150, 100), (299, 199)] {
             let p = out.get(x, y);
@@ -1336,12 +1315,7 @@ mod tests {
     #[test]
     fn reduce_noise_flat_image_with_noise_gets_lower_std_dev() {
         let (w, h) = (60u32, 60u32);
-        let flat = Tiled::from_slice(
-            w,
-            h,
-            [0; 4],
-            &vec![[30000, 30000, 30000, 65535]; (w * h) as usize],
-        );
+        let flat = Tiled::from_slice(w, h, [0; 4], &vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
         let noisy = add_noise(
             &flat,
             &NoiseOptions {
@@ -1570,10 +1544,7 @@ mod tests {
         for y in 10..30 {
             for x in 10..30 {
                 let p = out.get(x, y);
-                assert!(
-                    p[0].abs_diff(30000) < 100,
-                    "noise was not smoothed: {p:?} at ({x}, {y})"
-                );
+                assert!(p[0].abs_diff(30000) < 100, "noise was not smoothed: {p:?} at ({x}, {y})");
             }
         }
     }
@@ -1620,11 +1591,7 @@ mod tests {
             })
             .collect();
         let img = Tiled::from_slice(w, h, [0; 4], &px);
-        for mode in [
-            SmartBlurMode::Normal,
-            SmartBlurMode::EdgeOnly,
-            SmartBlurMode::OverlayEdge,
-        ] {
+        for mode in [SmartBlurMode::Normal, SmartBlurMode::EdgeOnly, SmartBlurMode::OverlayEdge] {
             let opts = SmartBlurOptions {
                 radius: 2.0,
                 threshold: 25.0,
@@ -1634,11 +1601,7 @@ mod tests {
             let out = smart_blur(&img, &opts);
             for y in 0..h {
                 for x in 0..w {
-                    assert_eq!(
-                        out.get(x, y)[3],
-                        img.get(x, y)[3],
-                        "alpha changed in mode {mode:?} at ({x}, {y})"
-                    );
+                    assert_eq!(out.get(x, y)[3], img.get(x, y)[3], "alpha changed in mode {mode:?} at ({x}, {y})");
                 }
             }
         }
@@ -1703,8 +1666,18 @@ mod tests {
             })
             .collect();
         let image = Tiled::from_slice(w, h, [0; 4], &pixels);
-        let smart_sharpen = LayerFilter::SmartSharpen(SmartSharpenOptions { radius: 5.0, ..Default::default() });
-        for filter in [LayerFilter::UnsharpMask { amount: 2.0, radius: 2.0, threshold: 0.0 }, smart_sharpen] {
+        let smart_sharpen = LayerFilter::SmartSharpen(SmartSharpenOptions {
+            radius: 5.0,
+            ..Default::default()
+        });
+        for filter in [
+            LayerFilter::UnsharpMask {
+                amount: 2.0,
+                radius: 2.0,
+                threshold: 0.0,
+            },
+            smart_sharpen,
+        ] {
             let whole = filter.apply(&image);
             // In the middle, and at the image's corner.
             for (x, y) in [(130, 130), (0, 0)] {
@@ -1713,4 +1686,3 @@ mod tests {
         }
     }
 }
-

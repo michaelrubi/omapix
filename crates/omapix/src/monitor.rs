@@ -113,7 +113,10 @@ fn choices(path: &Path) -> Vec<(String, String)> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(path, TEMPLATE));
+            let written = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(path, TEMPLATE));
             if let Err(e) = written {
                 log::warn!("couldn't write {}: {e}", path.display());
             }
@@ -125,10 +128,7 @@ fn choices(path: &Path) -> Vec<(String, String)> {
         }
     };
     match toml::from_str::<toml::Table>(&text) {
-        Ok(table) => table
-            .into_iter()
-            .filter_map(|(key, value)| Some((key, value.as_str()?.to_owned())))
-            .collect(),
+        Ok(table) => table.into_iter().filter_map(|(key, value)| Some((key, value.as_str()?.to_owned()))).collect(),
         Err(e) => {
             log::warn!("monitors.toml: {e}");
             Vec::new()

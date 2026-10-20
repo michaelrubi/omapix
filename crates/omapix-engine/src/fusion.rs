@@ -130,8 +130,7 @@ pub fn fuse(images: &[&Tiled<Pixel>]) -> Tiled<Pixel> {
     };
     let (w, h) = (first.width() as usize, first.height() as usize);
     // Each one's share of the say at each pixel.
-    let mut shares: Vec<Vec<f32>> =
-        images.iter().map(|image| image.to_vec().par_iter().map(|&p| say(p)).collect()).collect();
+    let mut shares: Vec<Vec<f32>> = images.iter().map(|image| image.to_vec().par_iter().map(|&p| say(p)).collect()).collect();
     let total: Vec<f32> = (0..w * h).into_par_iter().map(|i| shares.iter().map(|s| s[i]).sum()).collect();
     for share in &mut shares {
         share.par_iter_mut().zip(&total).for_each(|(s, t)| *s = if *t > 0.0 { *s / t } else { 0.0 });

@@ -109,11 +109,7 @@ struct Rename {
 
 impl Rename {
     fn new(id: u64, text: String) -> Self {
-        Self {
-            id,
-            text,
-            needs_focus: true,
-        }
+        Self { id, text, needs_focus: true }
     }
 }
 
@@ -163,11 +159,7 @@ impl LayersPanel {
     pub fn row_beside(&self, doc: &Document, active: u64, up: bool) -> Option<u64> {
         let rows = self.rows(doc, active);
         let at = rows.iter().position(|&id| id == active)?;
-        if up {
-            at.checked_sub(1).map(|i| rows[i])
-        } else {
-            rows.get(at + 1).copied()
-        }
+        if up { at.checked_sub(1).map(|i| rows[i]) } else { rows.get(at + 1).copied() }
     }
 
     /// Alt+] / Alt+[: select just the layer on the row above or below, as
@@ -201,14 +193,7 @@ impl LayersPanel {
         let open = !self.expanded.contains(&id);
         let mut targets = vec![id];
         if recursive {
-            targets.extend(
-                editor
-                    .doc
-                    .layers
-                    .iter()
-                    .filter(|l| l.is_group && editor.doc.is_inside(l.id, id))
-                    .map(|l| l.id),
-            );
+            targets.extend(editor.doc.layers.iter().filter(|l| l.is_group && editor.doc.is_inside(l.id, id)).map(|l| l.id));
         }
         for g in targets {
             if open {
@@ -263,11 +248,7 @@ impl LayersPanel {
                 (TRASH, Command::DeleteLayer, "Delete layer"),
             ];
             for (icon, cmd, tip) in buttons {
-                if ui
-                    .add_enabled(!busy, Button::new(icon).frame(false))
-                    .on_hover_text(tip)
-                    .clicked()
-                {
+                if ui.add_enabled(!busy, Button::new(icon).frame(false)).on_hover_text(tip).clicked() {
                     // Alt+click adds a black mask, as in Photoshop.
                     let hide = cmd == Command::AddMask && ui.input(|i| i.modifiers.alt);
                     command = Some(if hide { Command::AddMaskHideAll } else { cmd });
@@ -321,9 +302,7 @@ impl LayersPanel {
         ui.add_enabled_ui(can_modify, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Opacity");
-                let slider = Slider::new(&mut opacity, 0.0..=100.0)
-                    .suffix("%")
-                    .fixed_decimals(0);
+                let slider = Slider::new(&mut opacity, 0.0..=100.0).suffix("%").fixed_decimals(0);
                 if ui.add(slider).changed() {
                     editor.edit_live("Opacity", |doc| {
                         if let Some(l) = doc.layer_mut(id) {
@@ -336,7 +315,13 @@ impl LayersPanel {
         ui.horizontal(|ui| {
             ui.label("Lock");
             let buttons = [
-                (LOCK_TRANSPARENT, locks.transparency, has_pixels, "Lock transparent pixels (/)", Command::LockTransparent),
+                (
+                    LOCK_TRANSPARENT,
+                    locks.transparency,
+                    has_pixels,
+                    "Lock transparent pixels (/)",
+                    Command::LockTransparent,
+                ),
                 (LOCK_PIXELS, locks.pixels, has_pixels, "Lock image pixels", Command::LockPixels),
                 (LOCK_POSITION, locks.position, true, "Lock position", Command::LockPosition),
                 (LOCK, locks.all, true, "Lock all (Ctrl+/)", Command::LockAll),
@@ -362,13 +347,10 @@ impl LayersPanel {
             return;
         };
         let doc = &editor.doc;
-        let over_caret = self.rows.iter().any(|(id, _)| {
-            doc.layer(*id).is_some_and(|l| l.is_group)
-                && ui
-                    .ctx()
-                    .read_response(caret_id(*id))
-                    .is_some_and(|r| r.rect.contains(pointer))
-        });
+        let over_caret = self
+            .rows
+            .iter()
+            .any(|(id, _)| doc.layer(*id).is_some_and(|l| l.is_group) && ui.ctx().read_response(caret_id(*id)).is_some_and(|r| r.rect.contains(pointer)));
         if over_caret {
             return;
         }
@@ -386,15 +368,10 @@ impl LayersPanel {
         };
         self.clip_line = Some(upper);
         ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
-        ui.painter()
-            .hline(x, y, egui::Stroke::new(2.0, theme.accent));
+        ui.painter().hline(x, y, egui::Stroke::new(2.0, theme.accent));
         if ui.input(|i| i.pointer.primary_clicked()) {
             let clipped = doc.layer(upper).is_some_and(|l| l.clipped);
-            let label = if clipped {
-                "Release Clipping Mask"
-            } else {
-                "Create Clipping Mask"
-            };
+            let label = if clipped { "Release Clipping Mask" } else { "Create Clipping Mask" };
             editor.edit(label, |doc, _| {
                 doc.toggle_clipping(upper);
             });
@@ -402,26 +379,15 @@ impl LayersPanel {
     }
 
     /// While a row is dragged, show where it would land; on release, move it.
-    fn reorder(
-        &mut self,
-        ui: &mut Ui,
-        editor: &mut Editor,
-        theme: &Theme,
-        rows: &[(u64, egui::Rect)],
-    ) {
+    fn reorder(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme, rows: &[(u64, egui::Rect)]) {
         let Some(dragged) = self.dragging else { return };
         let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) else {
             return;
         };
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         // Dragging one of several selected layers drags them all.
-        let moving = if editor.is_selected(dragged) {
-            editor.selected()
-        } else {
-            vec![dragged]
-        };
-        let target = drop_target(&editor.doc, rows, &self.expanded, pointer)
-            .filter(|d| can_drop(&editor.doc, &moving, d.place));
+        let moving = if editor.is_selected(dragged) { editor.selected() } else { vec![dragged] };
+        let target = drop_target(&editor.doc, rows, &self.expanded, pointer).filter(|d| can_drop(&editor.doc, &moving, d.place));
         if let Some(Drop { marker, .. }) = &target {
             let stroke = egui::Stroke::new(2.0, theme.accent);
             match *marker {
@@ -431,8 +397,7 @@ impl LayersPanel {
                     ui.painter().hline(left..=right, y, stroke);
                 }
                 Marker::Row(rect) => {
-                    ui.painter()
-                        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+                    ui.painter().rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
                 }
             }
         }
@@ -449,9 +414,7 @@ impl LayersPanel {
         // Dropping where it already is isn't an edit.
         let mut moved = editor.doc.clone();
         moved.move_layers(&moving, place);
-        let shape = |doc: &Document| -> Vec<(u64, Option<u64>)> {
-            doc.layers.iter().map(|l| (l.id, l.parent)).collect()
-        };
+        let shape = |doc: &Document| -> Vec<(u64, Option<u64>)> { doc.layers.iter().map(|l| (l.id, l.parent)).collect() };
         if shape(&moved) != shape(&editor.doc) {
             let label = if moving.len() > 1 { "Move Layers" } else { "Move Layer" };
             editor.edit(label, |doc, _| {
@@ -486,49 +449,31 @@ impl LayersPanel {
         let shown = visible && ancestors(doc, id).all(|g| doc.layer(g).is_some_and(|l| l.visible));
         let expanded = self.expanded.contains(&id);
         let has_groups = doc.layers.iter().any(|l| l.is_group);
-        let fill = if highlighted {
-            theme.selection
-        } else {
-            egui::Color32::TRANSPARENT
-        };
-        let dimmed = self
-            .dragging
-            .is_some_and(|d| d == id || editor.is_selected(d) && highlighted);
+        let fill = if highlighted { theme.selection } else { egui::Color32::TRANSPARENT };
+        let dimmed = self.dragging.is_some_and(|d| d == id || editor.is_selected(d) && highlighted);
         let frame = egui::Frame::new()
             .fill(fill)
             .inner_margin(egui::Margin::symmetric(4, 3))
             .multiply_with_opacity(if dimmed { 0.5 } else { 1.0 });
         // The whole row senses clicks and drags beneath its widgets, so the
         // eye, thumbnails and name still get their own clicks.
-        let builder = egui::UiBuilder::new()
-            .id(row_id(id))
-            .sense(Sense::click_and_drag());
+        let builder = egui::UiBuilder::new().id(row_id(id)).sense(Sense::click_and_drag());
         let row = ui.scope_builder(builder, |ui| {
             frame
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         let eye = if visible { EYE } else { EYE_OFF };
-                        let eye_colour = if shown {
-                            theme.foreground
-                        } else {
-                            theme.dark_foreground
-                        };
+                        let eye_colour = if shown { theme.foreground } else { theme.dark_foreground };
                         let eye_button = ui
-                            .add_sized(
-                                [EYE_WIDTH, 18.0],
-                                Button::new(RichText::new(eye).color(eye_colour)).frame(false),
-                            )
+                            .add_sized([EYE_WIDTH, 18.0], Button::new(RichText::new(eye).color(eye_colour)).frame(false))
                             .on_hover_text("Show/hide");
                         if eye_button.clicked() {
-                            editor.edit(
-                                if visible { "Hide Layer" } else { "Show Layer" },
-                                |doc, _| {
-                                    if let Some(l) = doc.layer_mut(id) {
-                                        l.visible = !l.visible;
-                                    }
-                                },
-                            );
+                            editor.edit(if visible { "Hide Layer" } else { "Show Layer" }, |doc, _| {
+                                if let Some(l) = doc.layer_mut(id) {
+                                    l.visible = !l.visible;
+                                }
+                            });
                         }
 
                         if depth > 0 {
@@ -536,8 +481,7 @@ impl LayersPanel {
                         }
                         if is_group {
                             let caret = if expanded { CARET_DOWN } else { CARET_RIGHT };
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(12.0, 18.0), Sense::hover());
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 18.0), Sense::hover());
                             ui.painter().text(
                                 rect.center(),
                                 egui::Align2::CENTER_CENTER,
@@ -559,13 +503,8 @@ impl LayersPanel {
                         if clipped {
                             // Indented, with an arrow down to what it's
                             // clipped to, as in Photoshop.
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(CLIPPED).color(theme.dark_foreground),
-                                )
-                                .selectable(false),
-                            )
-                            .on_hover_text("Clipped to the layer below (Ctrl+Alt+G releases)");
+                            ui.add(egui::Label::new(RichText::new(CLIPPED).color(theme.dark_foreground)).selectable(false))
+                                .on_hover_text("Clipped to the layer below (Ctrl+Alt+G releases)");
                         }
 
                         // Pixel thumbnail (or the adjustment or folder icon),
@@ -575,26 +514,19 @@ impl LayersPanel {
                             let folder = if expanded { FOLDER_OPEN } else { FOLDER };
                             ui.add_sized(
                                 [THUMB, 24.0],
-                                egui::Label::new(RichText::new(folder).size(20.0).color(theme.accent))
-                                    .selectable(false),
+                                egui::Label::new(RichText::new(folder).size(20.0).color(theme.accent)).selectable(false),
                             )
                             .on_hover_text("Layer group");
                             None
                         } else if adjustment {
                             // Not selectable, so clicks fall through to the row.
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(SLIDERS).size(18.0).color(theme.accent),
-                                )
-                                .selectable(false),
-                            )
-                            .on_hover_text("Adjustment layer");
+                            ui.add(egui::Label::new(RichText::new(SLIDERS).size(18.0).color(theme.accent)).selectable(false))
+                                .on_hover_text("Adjustment layer");
                             None
                         } else {
                             let targeted = selected && editor.target == Target::Pixels;
                             let response = self.thumbnail(ui, editor, id, false, targeted, theme);
-                            let (command, shift, alt) =
-                                ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
+                            let (command, shift, alt) = ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
                             if response.double_clicked() {
                                 self.command = Some(Command::BlendingOptions);
                             } else if response.clicked() && command {
@@ -617,9 +549,7 @@ impl LayersPanel {
                             let targeted = selected && editor.target == Target::Mask;
                             let response = self
                                 .thumbnail(ui, editor, id, true, targeted, theme)
-                                .on_hover_text(
-                                    "Layer mask — click to paint on it, Shift+click to disable",
-                                );
+                                .on_hover_text("Layer mask — click to paint on it, Shift+click to disable");
                             if response.secondary_clicked() {
                                 editor.active = id;
                                 editor.target = Target::Mask;
@@ -628,30 +558,19 @@ impl LayersPanel {
                                 mask_context_menu(ui, editor, &mut self.command, id, enabled);
                             });
                             if response.clicked() {
-                                let (command, shift, alt) =
-                                    ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
+                                let (command, shift, alt) = ui.input(|i| (i.modifiers.command, i.modifiers.shift, i.modifiers.alt));
                                 if command {
                                     load_mask(editor, id, Combine::from_modifiers(shift, alt));
                                 } else if alt {
                                     // Alt+click shows the mask on its own, or goes back.
                                     editor.active = id;
                                     editor.target = Target::Mask;
-                                    let view = if editor.view() == View::Mask(id) {
-                                        View::Image
-                                    } else {
-                                        View::Mask(id)
-                                    };
+                                    let view = if editor.view() == View::Mask(id) { View::Image } else { View::Mask(id) };
                                     editor.set_view(view);
                                 } else if shift {
-                                    let label = if enabled {
-                                        "Disable Layer Mask"
-                                    } else {
-                                        "Enable Layer Mask"
-                                    };
+                                    let label = if enabled { "Disable Layer Mask" } else { "Enable Layer Mask" };
                                     editor.edit(label, |doc, _| {
-                                        if let Some(m) =
-                                            doc.layer_mut(id).and_then(|l| l.mask.as_mut())
-                                        {
+                                        if let Some(m) = doc.layer_mut(id).and_then(|l| l.mask.as_mut()) {
                                             m.enabled = !m.enabled;
                                         }
                                     });
@@ -663,47 +582,27 @@ impl LayersPanel {
                             if !enabled {
                                 // Photoshop crosses out a disabled mask.
                                 let r = response.rect;
-                                ui.painter().line_segment(
-                                    [r.left_top(), r.right_bottom()],
-                                    egui::Stroke::new(2.0, theme.red),
-                                );
-                                ui.painter().line_segment(
-                                    [r.right_top(), r.left_bottom()],
-                                    egui::Stroke::new(2.0, theme.red),
-                                );
+                                ui.painter().line_segment([r.left_top(), r.right_bottom()], egui::Stroke::new(2.0, theme.red));
+                                ui.painter().line_segment([r.right_top(), r.left_bottom()], egui::Stroke::new(2.0, theme.red));
                             }
                         }
 
-                        let name_response =
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let name_response = ui
+                            .with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if locks.any() {
                                     let (icon, tooltip) = if locks.all {
                                         (LOCK, "All locked")
                                     } else {
                                         (LOCK_OUTLINE, "Partially locked")
                                     };
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(icon).small().color(theme.dark_foreground),
-                                        )
-                                        .selectable(false),
-                                    )
-                                    .on_hover_text(tooltip);
+                                    ui.add(egui::Label::new(RichText::new(icon).small().color(theme.dark_foreground)).selectable(false))
+                                        .on_hover_text(tooltip);
                                 }
                                 if blend != BlendMode::Normal && blend != BlendMode::PassThrough {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(blend.name())
-                                                .small()
-                                                .color(theme.dark_foreground),
-                                        )
-                                        .selectable(false),
-                                    );
+                                    ui.add(egui::Label::new(RichText::new(blend.name()).small().color(theme.dark_foreground)).selectable(false));
                                 }
-                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    self.name(ui, editor, id, &name, selected, clip_base)
-                                })
-                                .inner
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| self.name(ui, editor, id, &name, selected, clip_base))
+                                    .inner
                             })
                             .inner;
 
@@ -718,8 +617,7 @@ impl LayersPanel {
         let response = row.response;
         // A click on the line between rows with Alt held is for clipping.
         let on_line = self.clip_line.is_some();
-        let thumb_clicked = pixel_thumb.as_ref().is_some_and(|r| r.clicked())
-            || ui.ctx().read_response(thumb_id(id, true)).is_some_and(|r| r.clicked());
+        let thumb_clicked = pixel_thumb.as_ref().is_some_and(|r| r.clicked()) || ui.ctx().read_response(thumb_id(id, true)).is_some_and(|r| r.clicked());
         if response.drag_started() && editor.busy().is_none() && !on_line {
             self.dragging = Some(id);
         }
@@ -729,17 +627,11 @@ impl LayersPanel {
             self.click(ui, editor, id);
         }
 
-        let row_secondary = response.secondary_clicked()
-            || name_response.secondary_clicked()
-            || pixel_thumb.as_ref().is_some_and(|r| r.secondary_clicked());
+        let row_secondary = response.secondary_clicked() || name_response.secondary_clicked() || pixel_thumb.as_ref().is_some_and(|r| r.secondary_clicked());
         if row_secondary {
             // Right-clicking one of several selected layers keeps them all
             // selected, for the menu to act on.
-            let others = if editor.is_selected(id) {
-                editor.selected()
-            } else {
-                Vec::new()
-            };
+            let others = if editor.is_selected(id) { editor.selected() } else { Vec::new() };
             select_with(editor, id, others);
         }
         let mut popup = egui::Popup::context_menu(&response);
@@ -755,15 +647,7 @@ impl LayersPanel {
 
     /// A small preview of a layer's pixels or mask, rebuilt only when its
     /// tiles change.
-    fn thumbnail(
-        &mut self,
-        ui: &mut Ui,
-        editor: &Editor,
-        id: u64,
-        mask: bool,
-        targeted: bool,
-        theme: &Theme,
-    ) -> egui::Response {
+    fn thumbnail(&mut self, ui: &mut Ui, editor: &Editor, id: u64, mask: bool, targeted: bool, theme: &Theme) -> egui::Response {
         let (w, h) = (editor.doc.width as f32, editor.doc.height as f32);
         let size = if w >= h {
             egui::vec2(THUMB, THUMB * h / w)
@@ -783,10 +667,7 @@ impl LayersPanel {
         };
 
         let key = (id, mask);
-        let stale = self
-            .thumbs
-            .get(&key)
-            .is_none_or(|t| !t.source.same(&source));
+        let stale = self.thumbs.get(&key).is_none_or(|t| !t.source.same(&source));
         if stale {
             let px = (size * ui.pixels_per_point()).round();
             let image = source.render(px.x as usize, px.y as usize, editor.canvas.transform());
@@ -796,11 +677,7 @@ impl LayersPanel {
                     t.source = source;
                 }
                 None => {
-                    let texture = ui.ctx().load_texture(
-                        format!("thumb-{id}-{mask}"),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
+                    let texture = ui.ctx().load_texture(format!("thumb-{id}-{mask}"), image, egui::TextureOptions::LINEAR);
                     self.thumbs.insert(key, Thumb { source, texture });
                 }
             }
@@ -824,15 +701,7 @@ impl LayersPanel {
         response
     }
 
-    fn name(
-        &mut self,
-        ui: &mut Ui,
-        editor: &mut Editor,
-        id: u64,
-        name: &str,
-        selected: bool,
-        clip_base: bool,
-    ) -> egui::Response {
+    fn name(&mut self, ui: &mut Ui, editor: &mut Editor, id: u64, name: &str, selected: bool, clip_base: bool) -> egui::Response {
         if let Some(rename) = &mut self.renaming
             && rename.id == id
         {
@@ -943,13 +812,7 @@ fn name_id(layer: u64) -> egui::Id {
     row_id(layer).with(("name", layer))
 }
 
-fn menu_item(
-    ui: &mut Ui,
-    text: &str,
-    shortcut: Option<String>,
-    enabled: bool,
-    action: impl FnOnce(),
-) {
+fn menu_item(ui: &mut Ui, text: &str, shortcut: Option<String>, enabled: bool, action: impl FnOnce()) {
     let mut button = Button::new(text);
     if let Some(s) = shortcut {
         button = button.shortcut_text(s);
@@ -960,22 +823,12 @@ fn menu_item(
     }
 }
 
-fn mask_menu_items(
-    ui: &mut Ui,
-    editor: &mut Editor,
-    command: &mut Option<Command>,
-    id: u64,
-    enabled: bool,
-) {
+fn mask_menu_items(ui: &mut Ui, editor: &mut Editor, command: &mut Option<Command>, id: u64, enabled: bool) {
     menu_item(ui, "Delete Layer Mask", None, true, || {
         *command = Some(Command::DeleteMask);
     });
 
-    let toggle_label = if enabled {
-        "Disable Layer Mask"
-    } else {
-        "Enable Layer Mask"
-    };
+    let toggle_label = if enabled { "Disable Layer Mask" } else { "Enable Layer Mask" };
     menu_item(ui, toggle_label, None, true, || {
         *command = Some(Command::ToggleMask);
     });
@@ -988,9 +841,7 @@ fn mask_menu_items(
     menu_item(
         ui,
         "Invert Mask",
-        Command::Invert
-            .shortcut()
-            .map(|s| ui.ctx().format_shortcut(&s)),
+        Command::Invert.shortcut().map(|s| ui.ctx().format_shortcut(&s)),
         true,
         || {
             editor.active = id;
@@ -1000,11 +851,7 @@ fn mask_menu_items(
     );
 
     let viewing = editor.view() == View::Mask(id);
-    let view_label = if viewing {
-        "Exit Mask View"
-    } else {
-        "View Mask"
-    };
+    let view_label = if viewing { "Exit Mask View" } else { "View Mask" };
     menu_item(ui, view_label, Some("Alt+click".into()), true, || {
         editor.active = id;
         editor.target = Target::Mask;
@@ -1042,9 +889,7 @@ fn mask_menu_items(
         ("Intersect Selection with Mask", Combine::Intersect),
     ];
     for (label, how) in saves {
-        menu_item(ui, label, None, has_selection && unlocked, || {
-            selection_to_mask(editor, id, label, how)
-        });
+        menu_item(ui, label, None, has_selection && unlocked, || selection_to_mask(editor, id, label, how));
     }
 }
 
@@ -1070,23 +915,11 @@ fn selection_to_mask(editor: &mut Editor, id: u64, label: &str, how: Combine) {
     });
 }
 
-fn mask_context_menu(
-    ui: &mut Ui,
-    editor: &mut Editor,
-    command: &mut Option<Command>,
-    id: u64,
-    enabled: bool,
-) {
+fn mask_context_menu(ui: &mut Ui, editor: &mut Editor, command: &mut Option<Command>, id: u64, enabled: bool) {
     mask_menu_items(ui, editor, command, id, enabled);
 }
 
-fn layer_context_menu(
-    ui: &mut Ui,
-    editor: &mut Editor,
-    command: &mut Option<Command>,
-    renaming: &mut Option<Rename>,
-    id: u64,
-) {
+fn layer_context_menu(ui: &mut Ui, editor: &mut Editor, command: &mut Option<Command>, renaming: &mut Option<Rename>, id: u64) {
     let Some(layer) = editor.doc.layer(id) else {
         return;
     };
@@ -1181,11 +1014,7 @@ fn select_with(editor: &mut Editor, id: u64, others: Vec<u64>) {
     editor.select_layers(id, others);
     let layer = editor.doc.layer(id);
     let no_pixels = layer.is_some_and(|l| !l.has_pixels() && l.mask.is_some());
-    editor.target = if no_pixels {
-        Target::Mask
-    } else {
-        Target::Pixels
-    };
+    editor.target = if no_pixels { Target::Mask } else { Target::Pixels };
 }
 
 /// The groups a layer is in, innermost first.
@@ -1204,12 +1033,7 @@ struct Drop {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Marker {
     /// A line between rows, across `left..right`, indented `depth` levels.
-    Line {
-        y: f32,
-        depth: usize,
-        left: f32,
-        right: f32,
-    },
+    Line { y: f32, depth: usize, left: f32, right: f32 },
     /// A group row outlined: it lands at the top of that group.
     Row(egui::Rect),
 }
@@ -1218,12 +1042,7 @@ enum Marker {
 /// first). Over the top half of a row it goes above that row, over the
 /// bottom half below it, or at the top of the group if the row is an open
 /// group. Over the middle of a group's row, it goes into the group.
-fn drop_target(
-    doc: &Document,
-    rows: &[(u64, egui::Rect)],
-    expanded: &HashSet<u64>,
-    pointer: egui::Pos2,
-) -> Option<Drop> {
+fn drop_target(doc: &Document, rows: &[(u64, egui::Rect)], expanded: &HashSet<u64>, pointer: egui::Pos2) -> Option<Drop> {
     let (&(first, first_rect), &(last, last_rect)) = (rows.first()?, rows.last()?);
     let line = |y: f32, depth: usize| Marker::Line {
         y,
@@ -1334,19 +1153,14 @@ mod tests {
         fn frame(&mut self, events: Vec<Event>) -> Option<Command> {
             self.time += 0.05;
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    pos2(0.0, 0.0),
-                    vec2(300.0, 600.0),
-                )),
+                screen_rect: Some(egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 600.0))),
                 time: Some(self.time),
                 events: [vec![Event::ModifiersChanged(self.modifiers)], events].concat(),
                 ..Default::default()
             };
             let (panel, editor, theme) = (&mut self.panel, &mut self.editor, &self.theme);
             let mut command = None;
-            let mut output = self
-                .ctx
-                .run_ui(input, |ui| command = panel.show(ui, editor, theme));
+            let mut output = self.ctx.run_ui(input, |ui| command = panel.show(ui, editor, theme));
             // There's no renderer to upload textures to.
             output.textures_delta.clear();
             command
@@ -1410,8 +1224,7 @@ mod tests {
 
         fn secondary_click(&mut self, pos: egui::Pos2) -> Option<Command> {
             self.time += 1.0;
-            self.secondary_button(pos, true)
-                .or(self.secondary_button(pos, false))
+            self.secondary_button(pos, true).or(self.secondary_button(pos, false))
         }
 
         fn double_click(&mut self, pos: egui::Pos2) -> Option<Command> {
@@ -1428,19 +1241,13 @@ mod tests {
         h.secondary_click(pos);
         assert_eq!(h.editor.active, background);
         assert_eq!(h.editor.target, Target::Pixels);
-        assert!(egui::Popup::is_id_open(
-            &h.ctx,
-            row_id(background).with("popup")
-        ));
+        assert!(egui::Popup::is_id_open(&h.ctx, row_id(background).with("popup")));
 
         // Right-clicking the name also opens the row's context menu.
         let name_pos = h.name_point(MULTIPLY);
         h.secondary_click(name_pos);
         assert_eq!(h.editor.active, MULTIPLY);
-        assert!(egui::Popup::is_id_open(
-            &h.ctx,
-            row_id(MULTIPLY).with("popup")
-        ));
+        assert!(egui::Popup::is_id_open(&h.ctx, row_id(MULTIPLY).with("popup")));
     }
 
     #[test]
@@ -1548,10 +1355,7 @@ mod tests {
         h.secondary_click(mask_pos);
         assert_eq!(h.editor.active, CURVES);
         assert_eq!(h.editor.target, Target::Mask);
-        assert!(egui::Popup::is_id_open(
-            &h.ctx,
-            thumb_id(CURVES, true).with("popup")
-        ));
+        assert!(egui::Popup::is_id_open(&h.ctx, thumb_id(CURVES, true).with("popup")));
     }
 
     #[test]
@@ -1888,19 +1692,11 @@ mod tests {
         h.modifiers = egui::Modifiers::COMMAND;
         h.click(h.thumb_point(background));
         assert!(h.editor.doc.selection.is_some());
-        assert_eq!(
-            h.editor.selected(),
-            [background],
-            "Ctrl+click on thumbnail must not toggle layer selection"
-        );
+        assert_eq!(h.editor.selected(), [background], "Ctrl+click on thumbnail must not toggle layer selection");
 
         // Ctrl+click on name still toggles multi-selection!
         h.click(h.name_point(MULTIPLY));
-        assert_eq!(
-            h.editor.selected(),
-            [background, MULTIPLY],
-            "Ctrl+click on name must toggle multi-selection"
-        );
+        assert_eq!(h.editor.selected(), [background, MULTIPLY], "Ctrl+click on name must toggle multi-selection");
 
         // Ctrl+click on mask thumbnail loads mask into selection.
         h.click(h.mask_point(CURVES));
@@ -1980,8 +1776,7 @@ mod tests {
         assert_eq!(h.editor.selected(), [MULTIPLY]);
 
         // Add a mask to CURVES. When stepping back up to it, target becomes Mask.
-        h.editor.doc.layer_mut(CURVES).unwrap().mask =
-            Some(omapix_engine::layer::Mask::white(60, 40));
+        h.editor.doc.layer_mut(CURVES).unwrap().mask = Some(omapix_engine::layer::Mask::white(60, 40));
         h.panel.step_selection(&mut h.editor, true);
         assert_eq!(h.editor.active, CURVES);
         assert_eq!(h.editor.target, Target::Mask);

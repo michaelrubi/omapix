@@ -17,8 +17,8 @@ pub mod descriptor;
 pub mod document;
 pub mod dynamics;
 pub mod export;
-pub mod filters;
 pub mod fill;
+pub mod filters;
 pub mod fusion;
 pub mod groups;
 pub mod histogram;
@@ -35,16 +35,16 @@ pub mod psd;
 pub(crate) mod psd_io;
 pub mod pyramid;
 pub mod raster;
-pub mod refine;
 pub mod reduced;
+pub mod refine;
 pub mod reshape;
 pub mod retouch;
 pub mod selection;
 pub mod shine;
 pub mod skin;
 pub mod tiled;
-pub mod tip;
 pub mod tiles;
+pub mod tip;
 pub mod tone;
 pub mod toning;
 pub mod transform;
@@ -60,8 +60,7 @@ pub use color::{ColorProfile, DisplayTransform, Proof};
 pub use descriptor::{Descriptor, Id, UnicodeString, Value, VersionedDescriptor};
 pub use document::{AlphaChannel, Document};
 pub use filters::{
-    generate_grain, NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove,
-    SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions,
+    NoiseDistribution, NoiseOptions, ReduceNoiseOptions, SharpenRemove, SmartBlurMode, SmartBlurOptions, SmartBlurQuality, SmartSharpenOptions, generate_grain,
 };
 pub use histogram::{Histogram, HistogramStats};
 pub use layer::{Layer, Locks, Mask};
@@ -74,10 +73,7 @@ pub use tiled::Orientation;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("could not read {path}: {source}")]
-    Read {
-        path: String,
-        source: std::io::Error,
-    },
+    Read { path: String, source: std::io::Error },
     #[error("TIFF: {0}")]
     Tiff(#[from] tiff::TiffError),
     #[error("{0}")]

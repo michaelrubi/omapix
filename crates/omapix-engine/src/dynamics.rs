@@ -242,7 +242,14 @@ fn random(seed: u64, index: u64, stream: u64) -> f32 {
 mod tests {
     use super::*;
 
-    const AT: Step = Step { x: 100.0, y: 50.0, diameter: 40.0, most: 1.0, flow: 0.8, direction: 0.0 };
+    const AT: Step = Step {
+        x: 100.0,
+        y: 50.0,
+        diameter: 40.0,
+        most: 1.0,
+        flow: 0.8,
+        direction: 0.0,
+    };
 
     /// The dabs of 500 steps.
     fn many(d: &Dynamics, at: &Step) -> Vec<Dab> {
@@ -253,7 +260,17 @@ mod tests {
     #[test]
     fn a_plain_brush_lays_one_dab_where_the_step_is() {
         let dabs = many(&Dynamics::default(), &AT);
-        let plain = Dab { x: 100.0, y: 50.0, radius: 20.0, angle: 0.0, roundness: 1.0, flip_x: false, flip_y: false, most: 1.0, flow: 0.8 };
+        let plain = Dab {
+            x: 100.0,
+            y: 50.0,
+            radius: 20.0,
+            angle: 0.0,
+            roundness: 1.0,
+            flip_x: false,
+            flip_y: false,
+            most: 1.0,
+            flow: 0.8,
+        };
         assert_eq!(dabs.len(), 500);
         assert!(dabs.iter().all(|d| *d == plain));
     }
@@ -295,14 +312,21 @@ mod tests {
 
     #[test]
     fn scattering_strays_across_the_stroke_or_both_ways_and_lays_several_dabs() {
-        let across = Dynamics { scatter: 2.0, count: 4, ..Default::default() };
+        let across = Dynamics {
+            scatter: 2.0,
+            count: 4,
+            ..Default::default()
+        };
         let dabs = many(&across, &AT);
         assert_eq!(dabs.len(), 2000);
         // Going east, they stray up and down by up to two radii.
         assert!(dabs.iter().all(|d| (d.x - 100.0).abs() < 1e-3 && (d.y - 50.0).abs() <= 40.0));
         assert!(dabs.iter().any(|d| d.y < 15.0) && dabs.iter().any(|d| d.y > 85.0));
         // Going north, left and right.
-        let north = Step { direction: std::f32::consts::FRAC_PI_2, ..AT };
+        let north = Step {
+            direction: std::f32::consts::FRAC_PI_2,
+            ..AT
+        };
         assert!(many(&across, &north).iter().all(|d| (d.y - 50.0).abs() < 1e-3 && (d.x - 100.0).abs() <= 40.0));
 
         let both = Dynamics { both_axes: true, ..across };
@@ -319,8 +343,17 @@ mod tests {
 
     #[test]
     fn transfer_lowers_opacity_and_flow_and_direction_turns_the_tip() {
-        let d = Dynamics { opacity_jitter: 0.5, flow_jitter: 1.0, angle: 30.0, angle_follows: true, ..Default::default() };
-        let north = Step { direction: std::f32::consts::FRAC_PI_2, ..AT };
+        let d = Dynamics {
+            opacity_jitter: 0.5,
+            flow_jitter: 1.0,
+            angle: 30.0,
+            angle_follows: true,
+            ..Default::default()
+        };
+        let north = Step {
+            direction: std::f32::consts::FRAC_PI_2,
+            ..AT
+        };
         let dabs = many(&d, &north);
         assert!(dabs.iter().all(|d| d.most > 0.5 && d.most <= 1.0 && d.flow >= 0.0 && d.flow <= 0.8));
         assert!(dabs.iter().any(|d| d.most < 0.55) && dabs.iter().any(|d| d.flow < 0.05) && dabs.iter().any(|d| d.flow > 0.75));
@@ -330,10 +363,20 @@ mod tests {
 
     #[test]
     fn a_tip_is_mirrored_always_or_as_often_as_not() {
-        let always = many(&Dynamics { flip_x: true, ..Default::default() }, &AT);
+        let always = many(
+            &Dynamics {
+                flip_x: true,
+                ..Default::default()
+            },
+            &AT,
+        );
         assert!(always.iter().all(|d| d.flip_x && !d.flip_y));
         // With jitter, about half of them each way, and not the same half.
-        let jitter = Dynamics { flip_x_jitter: true, flip_y_jitter: true, ..Default::default() };
+        let jitter = Dynamics {
+            flip_x_jitter: true,
+            flip_y_jitter: true,
+            ..Default::default()
+        };
         let dabs = many(&jitter, &AT);
         let (x, y) = (dabs.iter().filter(|d| d.flip_x).count(), dabs.iter().filter(|d| d.flip_y).count());
         assert!((200..300).contains(&x) && (200..300).contains(&y), "{x} {y}");
@@ -355,9 +398,23 @@ mod tests {
     #[test]
     fn spacing_sets_the_distance_between_steps() {
         assert_eq!(Dynamics::default().step(100.0), 10.0);
-        assert_eq!(Dynamics { spacing: 0.25, ..Default::default() }.step(100.0), 25.0);
+        assert_eq!(
+            Dynamics {
+                spacing: 0.25,
+                ..Default::default()
+            }
+            .step(100.0),
+            25.0
+        );
         // Never closer than half a pixel.
         assert_eq!(Dynamics::default().step(2.0), 0.5);
-        assert_eq!(Dynamics { spacing: 0.0, ..Default::default() }.step(100.0), 1.0);
+        assert_eq!(
+            Dynamics {
+                spacing: 0.0,
+                ..Default::default()
+            }
+            .step(100.0),
+            1.0
+        );
     }
 }

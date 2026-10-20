@@ -3,9 +3,7 @@
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use egui::{
-    Color32, ComboBox, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2,
-};
+use egui::{Color32, ComboBox, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
 use omapix_engine::Histogram;
 
 use crate::editor::Editor;
@@ -93,9 +91,7 @@ impl HistogramPanel {
             self.last_update = Instant::now();
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
-                let hist = render
-                    .with_image(Histogram::from_raster)
-                    .unwrap_or_default();
+                let hist = render.with_image(Histogram::from_raster).unwrap_or_default();
                 let _ = tx.send((rev, hist));
                 ctx.request_repaint();
             });
@@ -160,22 +156,19 @@ impl HistogramPanel {
             };
 
             ui.add_space(4.0);
-            egui::Grid::new("histogram-stats")
-                .num_columns(4)
-                .spacing(vec2(8.0, 2.0))
-                .show(ui, |ui| {
-                    ui.label(RichText::new("Mean:").small().color(theme.dark_foreground));
-                    ui.label(RichText::new(format!("{:.2}", stats.mean)).small());
-                    ui.label(RichText::new("Median:").small().color(theme.dark_foreground));
-                    ui.label(RichText::new(format!("{}", stats.median)).small());
-                    ui.end_row();
+            egui::Grid::new("histogram-stats").num_columns(4).spacing(vec2(8.0, 2.0)).show(ui, |ui| {
+                ui.label(RichText::new("Mean:").small().color(theme.dark_foreground));
+                ui.label(RichText::new(format!("{:.2}", stats.mean)).small());
+                ui.label(RichText::new("Median:").small().color(theme.dark_foreground));
+                ui.label(RichText::new(format!("{}", stats.median)).small());
+                ui.end_row();
 
-                    ui.label(RichText::new("Std Dev:").small().color(theme.dark_foreground));
-                    ui.label(RichText::new(format!("{:.2}", stats.std_dev)).small());
-                    ui.label(RichText::new("Pixels:").small().color(theme.dark_foreground));
-                    ui.label(RichText::new(format!("{}", stats.pixels)).small());
-                    ui.end_row();
-                });
+                ui.label(RichText::new("Std Dev:").small().color(theme.dark_foreground));
+                ui.label(RichText::new(format!("{:.2}", stats.std_dev)).small());
+                ui.label(RichText::new("Pixels:").small().color(theme.dark_foreground));
+                ui.label(RichText::new(format!("{}", stats.pixels)).small());
+                ui.end_row();
+            });
         }
     }
 }
@@ -192,24 +185,11 @@ fn scale(channels: &[&[u32; 256]]) -> f32 {
 
 /// Draw a histogram onto `painter` over `rect`.
 /// `channel`: 0 = Luminance/foreground, 1 = Red, 2 = Green, 3 = Blue.
-pub fn draw_histogram(
-    painter: &egui::Painter,
-    rect: Rect,
-    bins: &[u32; 256],
-    channel: usize,
-    theme: &Theme,
-) {
+pub fn draw_histogram(painter: &egui::Painter, rect: Rect, bins: &[u32; 256], channel: usize, theme: &Theme) {
     draw_histogram_scaled(painter, rect, bins, channel, None, theme);
 }
 
-pub fn draw_histogram_scaled(
-    painter: &egui::Painter,
-    rect: Rect,
-    bins: &[u32; 256],
-    channel: usize,
-    scale_max: Option<f32>,
-    theme: &Theme,
-) {
+pub fn draw_histogram_scaled(painter: &egui::Painter, rect: Rect, bins: &[u32; 256], channel: usize, scale_max: Option<f32>, theme: &Theme) {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }

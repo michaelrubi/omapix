@@ -78,13 +78,7 @@ pub fn patch(image: &Raster, profile: &ColorProfile, selection: &Selection, size
 /// length), so a tall selection gets a tall patch and keeps more of its
 /// detail than in a square. Small selections get more of their
 /// surroundings rather than being enlarged. `None` with nothing selected.
-pub fn patch_of_cells(
-    image: &Raster,
-    profile: &ColorProfile,
-    selection: &Selection,
-    cell: usize,
-    cells: usize,
-) -> Result<Option<Patch>> {
+pub fn patch_of_cells(image: &Raster, profile: &ColorProfile, selection: &Selection, cell: usize, cells: usize) -> Result<Option<Patch>> {
     let Some([bx, by, bw, bh]) = selection.bounds() else {
         return Ok(None);
     };
@@ -120,7 +114,9 @@ pub fn empty(image: &Raster, overlap: f32) -> Option<Selection> {
         return None;
     }
     let (w, h) = (image.width(), image.height());
-    let soft = Selection::from_coverage(Tiled::from_slice(w, h, 0, &clear)).expand(overlap).feather(overlap / 2.0);
+    let soft = Selection::from_coverage(Tiled::from_slice(w, h, 0, &clear))
+        .expand(overlap)
+        .feather(overlap / 2.0);
     let coverage: Vec<u16> = soft.coverage.to_vec().into_iter().zip(clear).map(|(soft, clear)| soft.max(clear)).collect();
     Some(Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage)))
 }
@@ -130,12 +126,13 @@ fn cut(image: &Raster, profile: &ColorProfile, selection: &Selection, rect: [u32
     let [x, y, cw, ch] = rect;
 
     // The patch in sRGB, as planes.
-    let crop: Vec<Pixel> = (0..ch).flat_map(|py| (0..cw).map(move |px| (px, py))).map(|(px, py)| image.get(x + px, y + py)).collect();
+    let crop: Vec<Pixel> = (0..ch)
+        .flat_map(|py| (0..cw).map(move |px| (px, py)))
+        .map(|(px, py)| image.get(x + px, y + py))
+        .collect();
     let srgb = color::convert(&Tiled::from_slice(cw, ch, [0; 4], &crop), profile, &ColorProfile::srgb())?.to_raster();
     let (cw, ch) = (cw as usize, ch as usize);
-    let planes: Vec<Vec<f32>> = (0..3)
-        .map(|c| srgb.pixels().par_iter().map(|p| f32::from(p[c]) / 65535.0).collect())
-        .collect();
+    let planes: Vec<Vec<f32>> = (0..3).map(|c| srgb.pixels().par_iter().map(|p| f32::from(p[c]) / 65535.0).collect()).collect();
     let image = planes.iter().flat_map(|plane| resample(plane, cw, ch, width, height)).collect();
     let clear: Vec<f32> = srgb.pixels().par_iter().map(|p| 1.0 - f32::from(p[3]) / 65535.0).collect();
     let empty = resample(&clear, cw, ch, width, height);
@@ -168,14 +165,7 @@ fn cut(image: &Raster, profile: &ColorProfile, selection: &Selection, rect: [u32
 /// A layer `width` × `height` holding the model's answer `filled` (planes
 /// like [`Patch::image`]) over the patch, in `profile`'s colour space,
 /// masked to `selection`.
-pub fn layer(
-    id: u64,
-    name: &str,
-    patch: &Patch,
-    filled: &[f32],
-    profile: &ColorProfile,
-    selection: &Selection,
-) -> Result<Layer> {
+pub fn layer(id: u64, name: &str, patch: &Patch, filled: &[f32], profile: &ColorProfile, selection: &Selection) -> Result<Layer> {
     let [x, y, cw, ch] = patch.rect;
     let planes: Vec<Vec<f32>> = filled
         .chunks(patch.width * patch.height)
@@ -309,7 +299,11 @@ mod tests {
         let (image, selection) = scene(500, 300, [0, 0, 50, 50]);
         let edge = super::patch(&image, &ColorProfile::srgb(), &selection, 256).unwrap().unwrap();
         assert_eq!(edge.rect, [0, 0, 256, 256]);
-        assert!(super::patch(&image, &ColorProfile::srgb(), &Selection::from_coverage(Tiled::new(500, 300, 0)), 256).unwrap().is_none());
+        assert!(
+            super::patch(&image, &ColorProfile::srgb(), &Selection::from_coverage(Tiled::new(500, 300, 0)), 256)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -349,7 +343,9 @@ mod tests {
     #[test]
     fn a_canvas_with_room_round_the_picture_selects_the_room_and_a_soft_overlap() {
         // 200 × 100 with the right-hand 60 columns transparent.
-        let pixels = (0..200 * 100).map(|i| if i % 200 < 140 { [30000, 30000, 30000, 65535] } else { [0; 4] }).collect();
+        let pixels = (0..200 * 100)
+            .map(|i| if i % 200 < 140 { [30000, 30000, 30000, 65535] } else { [0; 4] })
+            .collect();
         let image = Raster::new(200, 100, pixels);
         let selection = empty(&image, 10.0).unwrap();
         let at = |x: u32| selection.coverage.get(x, 50);
@@ -386,7 +382,9 @@ mod tests {
         assert_eq!(layer.pixels.get(199, 220)[3], 0);
         assert_eq!(layer.pixels.get(250, 240)[3], 0);
         // Only the tiles the selection touches.
-        let tiles = (0..4).flat_map(|row| (0..5).map(move |col| (col, row))).filter(|&(col, row)| layer.pixels.tile(col, row).is_some());
+        let tiles = (0..4)
+            .flat_map(|row| (0..5).map(move |col| (col, row)))
+            .filter(|&(col, row)| layer.pixels.tile(col, row).is_some());
         assert_eq!(tiles.collect::<Vec<_>>(), [(0, 0), (1, 0)]);
         let mask = &layer.mask.as_ref().unwrap().pixels;
         assert_eq!((mask.get(250, 220), mask.get(199, 220)), (65535, 0));

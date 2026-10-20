@@ -74,16 +74,10 @@ mod tests {
     #[test]
     fn edge_tiles_clamp_to_image() {
         let first = bounds(1000, 600, 0, 0);
-        assert_eq!(
-            (first.tex_x, first.tex_y, first.tex_w, first.tex_h),
-            (0, 0, 513, 513)
-        );
+        assert_eq!((first.tex_x, first.tex_y, first.tex_w, first.tex_h), (0, 0, 513, 513));
         let last = bounds(1000, 600, 1, 1);
         assert_eq!((last.x, last.y, last.w, last.h), (512, 512, 488, 88));
-        assert_eq!(
-            (last.tex_x, last.tex_y, last.tex_w, last.tex_h),
-            (511, 511, 489, 89)
-        );
+        assert_eq!((last.tex_x, last.tex_y, last.tex_w, last.tex_h), (511, 511, 489, 89));
         assert_eq!(grid(1000, 600), (2, 2));
     }
 }

@@ -48,10 +48,7 @@ impl Default for Hotkeys {
 }
 
 impl Hotkeys {
-    pub(crate) fn from_overrides(
-        command_overrides: HashMap<Command, Option<KeyboardShortcut>>,
-        tool_overrides: HashMap<ToolGroup, Option<Key>>,
-    ) -> Self {
+    pub(crate) fn from_overrides(command_overrides: HashMap<Command, Option<KeyboardShortcut>>, tool_overrides: HashMap<ToolGroup, Option<Key>>) -> Self {
         let mut commands = HashMap::new();
         for &cmd in Command::ALL {
             let sc = match command_overrides.get(&cmd) {
@@ -113,21 +110,14 @@ impl Hotkeys {
         for &cmd in Command::ALL {
             if let Some(sc) = self.command(cmd) {
                 let key = format_shortcut(&sc);
-                by_shortcut
-                    .entry(key)
-                    .or_insert_with(|| (sc, Vec::new()))
-                    .1
-                    .push(cmd);
+                by_shortcut.entry(key).or_insert_with(|| (sc, Vec::new())).1.push(cmd);
             }
         }
 
         for (sc_str, (_sc, cmds)) in &by_shortcut {
             if cmds.len() > 1 {
                 let names: Vec<_> = cmds.iter().map(|c| format!("{c:?}")).collect();
-                warnings.push(format!(
-                    "Hotkeys: clash between commands {} on shortcut {sc_str}",
-                    names.join(" and ")
-                ));
+                warnings.push(format!("Hotkeys: clash between commands {} on shortcut {sc_str}", names.join(" and ")));
             }
         }
 
@@ -137,9 +127,7 @@ impl Hotkeys {
                 let sc_str = format_shortcut(&tool_sc);
                 if let Some((_sc, cmds)) = by_shortcut.get(&sc_str) {
                     for cmd in cmds {
-                        warnings.push(format!(
-                            "Hotkeys: clash between command {cmd:?} and tool {group:?} on shortcut {sc_str}"
-                        ));
+                        warnings.push(format!("Hotkeys: clash between command {cmd:?} and tool {group:?} on shortcut {sc_str}"));
                     }
                 }
             }
@@ -154,20 +142,14 @@ impl Hotkeys {
         for (k, groups) in &by_tool_key {
             if groups.len() > 1 {
                 let names: Vec<_> = groups.iter().map(|g| format!("{g:?}")).collect();
-                warnings.push(format!(
-                    "Hotkeys: clash between tools {} on key {}",
-                    names.join(" and "),
-                    k.symbol_or_name()
-                ));
+                warnings.push(format!("Hotkeys: clash between tools {} on key {}", names.join(" and "), k.symbol_or_name()));
             }
         }
     }
 }
 
 pub(crate) fn modifier_count(s: &KeyboardShortcut) -> usize {
-    (s.modifiers.alt as usize)
-        + (s.modifiers.shift as usize)
-        + ((s.modifiers.command || s.modifiers.ctrl || s.modifiers.mac_cmd) as usize)
+    (s.modifiers.alt as usize) + (s.modifiers.shift as usize) + ((s.modifiers.command || s.modifiers.ctrl || s.modifiers.mac_cmd) as usize)
 }
 
 pub(crate) fn format_shortcut(s: &KeyboardShortcut) -> String {
@@ -225,8 +207,7 @@ pub(crate) fn parse_shortcut(s: &str) -> Result<Option<KeyboardShortcut>, String
         return Err(format!("missing key in shortcut {s:?}"));
     }
 
-    let key = Key::from_name(key_str)
-        .ok_or_else(|| format!("unknown key {key_str:?} in shortcut {s:?}"))?;
+    let key = Key::from_name(key_str).ok_or_else(|| format!("unknown key {key_str:?} in shortcut {s:?}"))?;
 
     Ok(Some(KeyboardShortcut::new(modifiers, key)))
 }
@@ -261,10 +242,7 @@ pub(crate) fn parse_file(s: &str) -> (Hotkeys, Vec<String>) {
     let file: HotkeysFile = match toml::from_str(s) {
         Ok(f) => f,
         Err(e) => {
-            return (
-                Hotkeys::default(),
-                vec![format!("Hotkeys: failed to parse hotkeys.toml: {e}")],
-            );
+            return (Hotkeys::default(), vec![format!("Hotkeys: failed to parse hotkeys.toml: {e}")]);
         }
     };
 
@@ -279,9 +257,7 @@ pub(crate) fn parse_file(s: &str) -> (Hotkeys, Vec<String>) {
                     command_overrides.insert(cmd, sc);
                 }
                 Err(_) => {
-                    warnings.push(format!(
-                        "Hotkeys: invalid shortcut '{val}' for command '{key}'"
-                    ));
+                    warnings.push(format!("Hotkeys: invalid shortcut '{val}' for command '{key}'"));
                 }
             },
             None => {
@@ -330,7 +306,10 @@ pub(crate) fn load() -> Vec<String> {
     // With no file yet (or an empty one), write one listing everything that
     // can be changed, all commented out, so there's something to edit.
     if text.trim().is_empty() {
-        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, template()));
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, template()));
         if let Err(e) = written {
             log::warn!("Hotkeys: couldn't write {}: {e}", path.display());
         }
@@ -516,16 +495,8 @@ MadeUpCommand = "Ctrl+K"
 MadeUpTool = "X"
 "#;
         let (_, warnings) = parse_file(toml);
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("unknown command 'MadeUpCommand'")),
-            "got: {warnings:?}"
-        );
-        assert!(
-            warnings.iter().any(|w| w.contains("unknown tool 'MadeUpTool'")),
-            "got: {warnings:?}"
-        );
+        assert!(warnings.iter().any(|w| w.contains("unknown command 'MadeUpCommand'")), "got: {warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("unknown tool 'MadeUpTool'")), "got: {warnings:?}");
     }
 
     #[test]
@@ -539,10 +510,7 @@ StampVisible = "E"
         let order = hotkeys.keyboard_order();
         let pos_merge = order.iter().position(|&c| c == Command::MergeDown).unwrap();
         let pos_stamp = order.iter().position(|&c| c == Command::StampVisible).unwrap();
-        assert!(
-            pos_merge < pos_stamp,
-            "MergeDown (3 mods) should come before StampVisible (0 mods)"
-        );
+        assert!(pos_merge < pos_stamp, "MergeDown (3 mods) should come before StampVisible (0 mods)");
     }
 
     #[test]
@@ -576,10 +544,7 @@ Eyedropper = "U"
                     modifiers,
                 },
             ];
-            let input = egui::RawInput {
-                events,
-                ..Default::default()
-            };
+            let input = egui::RawInput { events, ..Default::default() };
             let mut pressed = Vec::new();
             let mut out = ctx.run_ui(input, |ui| {
                 pressed = Command::pressed_with(ui.ctx(), &mut false, &hotkeys);

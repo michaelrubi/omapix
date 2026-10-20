@@ -4,13 +4,8 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use egui::{
-    Color32, ComboBox, Id, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, Vec2, pos2, vec2,
-};
-use omapix_engine::adjust::{
-    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation,
-    Levels, SelectiveColor,
-};
+use egui::{Color32, ComboBox, Id, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, Vec2, pos2, vec2};
+use omapix_engine::adjust::{Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation, Levels, SelectiveColor};
 
 use crate::editor::Editor;
 use crate::histogram_panel::draw_histogram;
@@ -65,11 +60,7 @@ impl PropertiesPanel {
         if self.cached_layer_id != id {
             self.selected = None;
         }
-        if needs_histogram
-            && (self.cached_layer_id != id
-                || self.cached_revision != editor.revision()
-                || self.histogram.is_none())
-        {
+        if needs_histogram && (self.cached_layer_id != id || self.cached_revision != editor.revision() || self.histogram.is_none()) {
             self.histogram = Some(editor.doc.histogram_below(id));
             self.cached_layer_id = id;
             self.cached_revision = editor.revision();
@@ -83,21 +74,11 @@ impl PropertiesPanel {
                     adjustment = match adjustment {
                         Adjustment::Curves(_) => Adjustment::Curves(Curves::default()),
                         Adjustment::Levels(_) => Adjustment::Levels(Levels::default()),
-                        Adjustment::HueSaturation(_) => {
-                            Adjustment::HueSaturation(HueSaturation::default())
-                        }
-                        Adjustment::ColorBalance(_) => {
-                            Adjustment::ColorBalance(ColorBalance::default())
-                        }
-                        Adjustment::SelectiveColor(_) => {
-                            Adjustment::SelectiveColor(SelectiveColor::default())
-                        }
-                        Adjustment::ChannelMixer(_) => {
-                            Adjustment::ChannelMixer(ChannelMixer::default())
-                        }
-                        Adjustment::ColorLookup(_) => {
-                            Adjustment::ColorLookup(ColorLookup::default())
-                        }
+                        Adjustment::HueSaturation(_) => Adjustment::HueSaturation(HueSaturation::default()),
+                        Adjustment::ColorBalance(_) => Adjustment::ColorBalance(ColorBalance::default()),
+                        Adjustment::SelectiveColor(_) => Adjustment::SelectiveColor(SelectiveColor::default()),
+                        Adjustment::ChannelMixer(_) => Adjustment::ChannelMixer(ChannelMixer::default()),
+                        Adjustment::ColorLookup(_) => Adjustment::ColorLookup(ColorLookup::default()),
                     };
                 }
             });
@@ -148,13 +129,11 @@ impl PropertiesPanel {
         ui.add_space(4.0);
         let names = ["RGB", "Red", "Green", "Blue"];
         let channel = self.channel;
-        ComboBox::from_id_salt("curves-channel")
-            .selected_text(names[self.channel])
-            .show_ui(ui, |ui| {
-                for (i, name) in names.iter().enumerate() {
-                    ui.selectable_value(&mut self.channel, i, *name);
-                }
-            });
+        ComboBox::from_id_salt("curves-channel").selected_text(names[self.channel]).show_ui(ui, |ui| {
+            for (i, name) in names.iter().enumerate() {
+                ui.selectable_value(&mut self.channel, i, *name);
+            }
+        });
         if self.channel != channel {
             self.selected = None;
         }
@@ -174,12 +153,7 @@ impl PropertiesPanel {
         let side = ui.available_width().min(300.0);
         let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
         let response = ui.interact(rect, curves_id(), Sense::click_and_drag());
-        let to_screen = |(x, y): (f32, f32)| {
-            pos2(
-                rect.left() + x * rect.width(),
-                rect.bottom() - y * rect.height(),
-            )
-        };
+        let to_screen = |(x, y): (f32, f32)| pos2(rect.left() + x * rect.width(), rect.bottom() - y * rect.height());
         let to_curve = |p: Pos2| {
             (
                 ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
@@ -237,10 +211,7 @@ impl PropertiesPanel {
             painter.line_segment([to_screen((t, 0.0)), to_screen((t, 1.0))], grid);
             painter.line_segment([to_screen((0.0, t)), to_screen((1.0, t))], grid);
         }
-        painter.line_segment(
-            [to_screen((0.0, 0.0)), to_screen((1.0, 1.0))],
-            Stroke::new(1.0, theme.muted),
-        );
+        painter.line_segment([to_screen((0.0, 0.0)), to_screen((1.0, 1.0))], Stroke::new(1.0, theme.muted));
         let line: Vec<Pos2> = (0..=128)
             .map(|i| {
                 let x = i as f32 / 128.0;
@@ -283,10 +254,7 @@ impl PropertiesPanel {
 
     fn color_balance(&mut self, ui: &mut Ui, b: &mut ColorBalance) {
         ui.horizontal(|ui| {
-            for (i, name) in ["Shadows", "Midtones", "Highlights"]
-                .into_iter()
-                .enumerate()
-            {
+            for (i, name) in ["Shadows", "Midtones", "Highlights"].into_iter().enumerate() {
                 ui.selectable_value(&mut self.tone, i, name);
             }
         });
@@ -295,18 +263,10 @@ impl PropertiesPanel {
             2 => &mut b.highlights,
             _ => &mut b.midtones,
         };
-        for (value, (left, right)) in
-            values
-                .iter_mut()
-                .zip([("Cyan", "Red"), ("Magenta", "Green"), ("Yellow", "Blue")])
-        {
+        for (value, (left, right)) in values.iter_mut().zip([("Cyan", "Red"), ("Magenta", "Green"), ("Yellow", "Blue")]) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(left).small());
-                ui.add(
-                    Slider::new(value, -100.0..=100.0)
-                        .fixed_decimals(0)
-                        .show_value(true),
-                );
+                ui.add(Slider::new(value, -100.0..=100.0).fixed_decimals(0).show_value(true));
                 ui.label(RichText::new(right).small());
             });
         }
@@ -327,12 +287,7 @@ impl PropertiesPanel {
         ui.add_space(4.0);
         let values = &mut s.ranges[self.selective_color_range];
         for (value, label) in values.iter_mut().zip(["Cyan", "Magenta", "Yellow", "Black"]) {
-            ui.add(
-                Slider::new(value, -100.0..=100.0)
-                    .text(label)
-                    .fixed_decimals(0)
-                    .suffix("%"),
-            );
+            ui.add(Slider::new(value, -100.0..=100.0).text(label).fixed_decimals(0).suffix("%"));
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -368,19 +323,10 @@ impl PropertiesPanel {
             }
         };
         for (value, label) in values.iter_mut().zip(["Red", "Green", "Blue", "Constant"]) {
-            ui.add(
-                Slider::new(value, -200.0..=200.0)
-                    .text(label)
-                    .fixed_decimals(0)
-                    .suffix("%"),
-            );
+            ui.add(Slider::new(value, -200.0..=200.0).text(label).fixed_decimals(0).suffix("%"));
         }
         let total = values[0] + values[1] + values[2];
-        ui.label(
-            RichText::new(format!("Total: {:.0}%", total))
-                .small()
-                .color(theme.dark_foreground),
-        );
+        ui.label(RichText::new(format!("Total: {:.0}%", total)).small().color(theme.dark_foreground));
         ui.add_space(4.0);
         ui.checkbox(&mut m.monochrome, "Monochrome");
     }
@@ -398,11 +344,7 @@ impl PropertiesPanel {
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("3D LUT:").small());
-            let name = if lut.is_empty() {
-                "(None)"
-            } else {
-                &lut.title
-            };
+            let name = if lut.is_empty() { "(None)" } else { &lut.title };
             ui.label(RichText::new(name).strong());
         });
 
@@ -456,53 +398,26 @@ impl PropertiesPanel {
             draw_histogram(&painter, rect, bins, 0, theme);
         }
         let bx = rect.left() + l.in_black.clamp(0.0, 1.0) * rect.width();
-        painter.line_segment(
-            [pos2(bx, rect.top()), pos2(bx, rect.bottom())],
-            Stroke::new(1.0, theme.dark_foreground),
-        );
+        painter.line_segment([pos2(bx, rect.top()), pos2(bx, rect.bottom())], Stroke::new(1.0, theme.dark_foreground));
         let wx = rect.left() + l.in_white.clamp(0.0, 1.0) * rect.width();
-        painter.line_segment(
-            [pos2(wx, rect.top()), pos2(wx, rect.bottom())],
-            Stroke::new(1.0, theme.foreground),
-        );
+        painter.line_segment([pos2(wx, rect.top()), pos2(wx, rect.bottom())], Stroke::new(1.0, theme.foreground));
         let mid_t = 0.5f32.powf(l.gamma);
-        let mx = rect.left()
-            + (l.in_black + (l.in_white - l.in_black) * mid_t).clamp(0.0, 1.0) * rect.width();
-        painter.line_segment(
-            [pos2(mx, rect.top()), pos2(mx, rect.bottom())],
-            Stroke::new(1.0, theme.muted),
-        );
-        painter.rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(1.0, theme.selection),
-            egui::StrokeKind::Outside,
-        );
+        let mx = rect.left() + (l.in_black + (l.in_white - l.in_black) * mid_t).clamp(0.0, 1.0) * rect.width();
+        painter.line_segment([pos2(mx, rect.top()), pos2(mx, rect.bottom())], Stroke::new(1.0, theme.muted));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme.selection), egui::StrokeKind::Outside);
 
         ui.add_space(4.0);
 
         // Shown on Photoshop's 0–255 scale.
         fn level(ui: &mut Ui, label: &str, value: &mut f32) {
             let mut v = *value * 255.0;
-            if ui
-                .add(
-                    Slider::new(&mut v, 0.0..=255.0)
-                        .text(label)
-                        .fixed_decimals(0),
-                )
-                .changed()
-            {
+            if ui.add(Slider::new(&mut v, 0.0..=255.0).text(label).fixed_decimals(0)).changed() {
                 *value = v / 255.0;
             }
         }
         ui.label(RichText::new("Input").small());
         level(ui, "Black", &mut l.in_black);
-        ui.add(
-            Slider::new(&mut l.gamma, 0.1..=9.99)
-                .text("Midtones")
-                .fixed_decimals(2)
-                .logarithmic(true),
-        );
+        ui.add(Slider::new(&mut l.gamma, 0.1..=9.99).text("Midtones").fixed_decimals(2).logarithmic(true));
         level(ui, "White", &mut l.in_white);
         ui.label(RichText::new("Output").small());
         level(ui, "Black", &mut l.out_black);
@@ -520,11 +435,7 @@ fn curves_id() -> Id {
 
 /// Add a point at `p` between its neighbours; returns its index.
 fn insert_point(curve: &mut Curve, (x, y): (f32, f32)) -> usize {
-    let i = curve
-        .points
-        .iter()
-        .position(|&(px, _)| px > x)
-        .unwrap_or(curve.points.len());
+    let i = curve.points.iter().position(|&(px, _)| px > x).unwrap_or(curve.points.len());
     curve.points.insert(i, (x, y));
     i
 }
@@ -532,35 +443,15 @@ fn insert_point(curve: &mut Curve, (x, y): (f32, f32)) -> usize {
 /// Move point `i`, keeping points in order along the input axis.
 fn move_point(curve: &mut Curve, i: usize, (x, y): (f32, f32)) {
     const GAP: f32 = 0.01;
-    let lo = if i == 0 {
-        0.0
-    } else {
-        curve.points[i - 1].0 + GAP
-    };
-    let hi = if i + 1 == curve.points.len() {
-        1.0
-    } else {
-        curve.points[i + 1].0 - GAP
-    };
+    let lo = if i == 0 { 0.0 } else { curve.points[i - 1].0 + GAP };
+    let hi = if i + 1 == curve.points.len() { 1.0 } else { curve.points[i + 1].0 - GAP };
     curve.points[i] = (x.clamp(lo, hi.max(lo)), y);
 }
 
 fn hue_saturation(ui: &mut Ui, h: &mut HueSaturation) {
-    ui.add(
-        Slider::new(&mut h.hue, -180.0..=180.0)
-            .text("Hue")
-            .fixed_decimals(0),
-    );
-    ui.add(
-        Slider::new(&mut h.saturation, -100.0..=100.0)
-            .text("Saturation")
-            .fixed_decimals(0),
-    );
-    ui.add(
-        Slider::new(&mut h.lightness, -100.0..=100.0)
-            .text("Lightness")
-            .fixed_decimals(0),
-    );
+    ui.add(Slider::new(&mut h.hue, -180.0..=180.0).text("Hue").fixed_decimals(0));
+    ui.add(Slider::new(&mut h.saturation, -100.0..=100.0).text("Saturation").fixed_decimals(0));
+    ui.add(Slider::new(&mut h.lightness, -100.0..=100.0).text("Lightness").fixed_decimals(0));
 }
 
 #[cfg(test)]
@@ -581,26 +472,14 @@ mod tests {
     #[test]
     fn properties_panel_renders_selective_color_and_channel_mixer() {
         let (w, h) = (10, 10);
-        let image = omapix_engine::Raster::new(
-            w,
-            h,
-            vec![[30000, 30000, 30000, 65535]; (w * h) as usize],
-        );
-        let mut doc = omapix_engine::Document::from_image(
-            "t.tif".into(),
-            &image,
-            omapix_engine::ColorProfile::srgb(),
-            16,
-        );
+        let image = omapix_engine::Raster::new(w, h, vec![[30000, 30000, 30000, 65535]; (w * h) as usize]);
+        let mut doc = omapix_engine::Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
         let sc = Adjustment::SelectiveColor(SelectiveColor::default());
-        doc.layers
-            .push(omapix_engine::Layer::adjustment(101, sc, w, h));
+        doc.layers.push(omapix_engine::Layer::adjustment(101, sc, w, h));
         let cm = Adjustment::ChannelMixer(ChannelMixer::default());
-        doc.layers
-            .push(omapix_engine::Layer::adjustment(102, cm, w, h));
+        doc.layers.push(omapix_engine::Layer::adjustment(102, cm, w, h));
         let cl = Adjustment::ColorLookup(ColorLookup::default());
-        doc.layers
-            .push(omapix_engine::Layer::adjustment(103, cl, w, h));
+        doc.layers.push(omapix_engine::Layer::adjustment(103, cl, w, h));
 
         let mut editor = Editor::new(doc).unwrap();
         let mut panel = PropertiesPanel::default();
@@ -641,23 +520,12 @@ mod tests {
     #[test]
     fn properties_panel_renders_curves_and_levels_with_histogram() {
         let (w, h) = (20, 20);
-        let image = omapix_engine::Raster::new(
-            w,
-            h,
-            vec![[40000, 20000, 10000, 65535]; (w * h) as usize],
-        );
-        let mut doc = omapix_engine::Document::from_image(
-            "t.tif".into(),
-            &image,
-            omapix_engine::ColorProfile::srgb(),
-            16,
-        );
+        let image = omapix_engine::Raster::new(w, h, vec![[40000, 20000, 10000, 65535]; (w * h) as usize]);
+        let mut doc = omapix_engine::Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
         let curves = Adjustment::Curves(Curves::default());
-        doc.layers
-            .push(omapix_engine::Layer::adjustment(101, curves, w, h));
+        doc.layers.push(omapix_engine::Layer::adjustment(101, curves, w, h));
         let levels = Adjustment::Levels(Levels::default());
-        doc.layers
-            .push(omapix_engine::Layer::adjustment(102, levels, w, h));
+        doc.layers.push(omapix_engine::Layer::adjustment(102, levels, w, h));
 
         let mut editor = Editor::new(doc).unwrap();
         let mut panel = PropertiesPanel::default();
@@ -703,16 +571,10 @@ mod tests {
     #[test]
     fn curve_points_are_grabbed_where_the_button_went_down() {
         let image = omapix_engine::Raster::new(8, 8, vec![[30000, 30000, 30000, 65535]; 64]);
-        let mut doc = omapix_engine::Document::from_image(
-            "t.tif".into(),
-            &image,
-            omapix_engine::ColorProfile::srgb(),
-            16,
-        );
+        let mut doc = omapix_engine::Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
         let mut curves = Curves::default();
         insert_point(&mut curves.master, (0.5, 0.5));
-        doc.layers
-            .push(omapix_engine::Layer::adjustment(101, Adjustment::Curves(curves), 8, 8));
+        doc.layers.push(omapix_engine::Layer::adjustment(101, Adjustment::Curves(curves), 8, 8));
         let mut editor = Editor::new(doc).unwrap();
         editor.active = 101;
         let (ctx, mut panel) = (egui::Context::default(), PropertiesPanel::default());

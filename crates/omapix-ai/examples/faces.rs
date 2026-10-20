@@ -49,10 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         found = faces.detect(&image)?;
         let detect = t.elapsed();
         let t = Instant::now();
-        marks = found
-            .iter()
-            .map(|f| faces.landmarks(&image, f))
-            .collect::<Result<Vec<_>, _>>()?;
+        marks = found.iter().map(|f| faces.landmarks(&image, f)).collect::<Result<Vec<_>, _>>()?;
         let landmarks = t.elapsed();
         let t = Instant::now();
         seg = faces.segment(&image, &whole)?;
@@ -79,10 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (sx, sy) = ((x as f32 + 0.5) * scale, (y as f32 + 0.5) * scale);
         let s = srgb[sy as usize * w + sx as usize];
         // The whole image's segmentation covers the square `whole`.
-        let (u, v) = (
-            (sx - (w as f32 - side) / 2.0) / side,
-            (sy - (h as f32 - side) / 2.0) / side,
-        );
+        let (u, v) = ((sx - (w as f32 - side) / 2.0) / side, (sy - (h as f32 - side) / 2.0) / side);
         let p = seg[(v * SEGMENT_SIZE as f32) as usize * SEGMENT_SIZE + (u * SEGMENT_SIZE as f32) as usize];
         *pixel = image::Rgb(tint(s, &p));
     }
@@ -130,8 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for x in 0..n {
                 let to8 = |p: [f32; 3]| [p[0], p[1], p[2], 1.0].map(|v| (v * 255.0) as u8);
                 img.put_pixel(x, y, image::Rgb(to8(face[(y * n + x) as usize])[..3].try_into()?));
-                let s = seg
-                    [(y as usize * SEGMENT_SIZE / n as usize) * SEGMENT_SIZE + x as usize * SEGMENT_SIZE / n as usize];
+                let s = seg[(y as usize * SEGMENT_SIZE / n as usize) * SEGMENT_SIZE + x as usize * SEGMENT_SIZE / n as usize];
                 img.put_pixel(n + x, y, image::Rgb(tint(to8(people[(y * n + x) as usize]), &s)));
             }
         }
@@ -164,12 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (a, b) = (at(points[a]), at(points[ring[(k + 1) % ring.len()]]));
                 for t in 0..=40 {
                     let f = t as f32 / 40.0;
-                    dot(
-                        &mut img,
-                        [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f],
-                        colour,
-                        0,
-                    );
+                    dot(&mut img, [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], colour, 0);
                 }
             }
         }
@@ -187,8 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (sx, sy) = (((x as f32 + 0.5) * scale) as u32, ((y as f32 + 0.5) * scale) as u32);
         let s = srgb[sy as usize * w + sx as usize];
         let k = f32::from(coverage.get(sx, sy)) / 65535.0;
-        *pixel =
-            image::Rgb([0, 1, 2].map(|c| (f32::from(s[c]) * (1.0 - 0.6 * k) + [255.0, 0.0, 80.0][c] * 0.6 * k) as u8));
+        *pixel = image::Rgb([0, 1, 2].map(|c| (f32::from(s[c]) * (1.0 - 0.6 * k) + [255.0, 0.0, 80.0][c] * 0.6 * k) as u8));
     }
     img.save(out.join("skin.png"))?;
     Ok(())

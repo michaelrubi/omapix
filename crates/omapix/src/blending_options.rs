@@ -29,20 +29,12 @@ struct Drag {
 
 impl BlendingOptions {
     pub fn new(layer: u64) -> Self {
-        Self {
-            layer,
-            dragging: None,
-        }
+        Self { layer, dragging: None }
     }
 
     /// Draw the dialog. Returns `Some(true)` for OK, `Some(false)` for
     /// Cancel, `None` while it stays open.
-    pub fn show(
-        &mut self,
-        ctx: &egui::Context,
-        editor: &mut Editor,
-        theme: &Theme,
-    ) -> Option<bool> {
+    pub fn show(&mut self, ctx: &egui::Context, editor: &mut Editor, theme: &Theme) -> Option<bool> {
         let id = self.layer;
         let layer = editor.doc.layer(id)?;
         let name = layer.name.clone();
@@ -50,8 +42,7 @@ impl BlendingOptions {
         let mut blend_if = original;
         let mut result = None;
 
-        let area = egui::Modal::default_area(egui::Id::new("blending"))
-            .anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
+        let area = egui::Modal::default_area(egui::Id::new("blending")).anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
         let response = egui::Modal::new(egui::Id::new("blending"))
             .area(area)
             .backdrop_color(Color32::TRANSPARENT)
@@ -68,31 +59,18 @@ impl BlendingOptions {
                         (BlendIfChannel::Green, "Green"),
                         (BlendIfChannel::Blue, "Blue"),
                     ];
-                    let current = names
-                        .iter()
-                        .find(|(c, _)| *c == blend_if.channel)
-                        .map_or("Gray", |(_, n)| n);
-                    ComboBox::from_id_salt("blend-if-channel")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (channel, label) in names {
-                                ui.selectable_value(&mut blend_if.channel, channel, label);
-                            }
-                        });
+                    let current = names.iter().find(|(c, _)| *c == blend_if.channel).map_or("Gray", |(_, n)| n);
+                    ComboBox::from_id_salt("blend-if-channel").selected_text(current).show_ui(ui, |ui| {
+                        for (channel, label) in names {
+                            ui.selectable_value(&mut blend_if.channel, channel, label);
+                        }
+                    });
                 });
                 ui.add_space(6.0);
                 for underlying in [false, true] {
-                    let range = if underlying {
-                        &mut blend_if.underlying
-                    } else {
-                        &mut blend_if.this
-                    };
+                    let range = if underlying { &mut blend_if.underlying } else { &mut blend_if.this };
                     ui.horizontal(|ui| {
-                        ui.label(if underlying {
-                            "Underlying Layer"
-                        } else {
-                            "This Layer"
-                        });
+                        ui.label(if underlying { "Underlying Layer" } else { "This Layer" });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(readout(*range)).monospace());
                         });
@@ -101,11 +79,9 @@ impl BlendingOptions {
                     ui.add_space(6.0);
                 }
                 ui.label(
-                    RichText::new(
-                        "Drag a handle to move it; Alt+drag to split it for a smooth transition.",
-                    )
-                    .small()
-                    .color(theme.dark_foreground),
+                    RichText::new("Drag a handle to move it; Alt+drag to split it for a smooth transition.")
+                        .small()
+                        .color(theme.dark_foreground),
                 );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -129,9 +105,7 @@ impl BlendingOptions {
         if blend_if != original {
             editor.edit_live("Blending Options", |doc| {
                 if let Some(layer) = doc.layer_mut(id) {
-                    layer.blend_if = (!blend_if.is_neutral()
-                        || blend_if.channel != BlendIfChannel::Gray)
-                        .then_some(blend_if);
+                    layer.blend_if = (!blend_if.is_neutral() || blend_if.channel != BlendIfChannel::Gray).then_some(blend_if);
                 }
             });
         }
@@ -140,12 +114,8 @@ impl BlendingOptions {
 
     /// A black-to-white bar with four handles below it.
     fn slider(&mut self, ui: &mut Ui, range: &mut [f32; 4], underlying: bool, theme: &Theme) {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click_and_drag());
-        let bar = Rect::from_min_max(
-            rect.min + vec2(6.0, 0.0),
-            pos2(rect.max.x - 6.0, rect.min.y + 12.0),
-        );
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click_and_drag());
+        let bar = Rect::from_min_max(rect.min + vec2(6.0, 0.0), pos2(rect.max.x - 6.0, rect.min.y + 12.0));
         let x_of = |v: f32| bar.left() + v * bar.width();
         let value_at = |p: Pos2| ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0);
 
@@ -160,11 +130,7 @@ impl BlendingOptions {
                     // Overlapping handles: pick by which side the pointer is on.
                     let pair = if h < 2 { [0, 1] } else { [2, 3] };
                     let handle = if range[pair[0]] == range[pair[1]] && split {
-                        if pointer.x < x_of(range[pair[0]]) {
-                            pair[0]
-                        } else {
-                            pair[1]
-                        }
+                        if pointer.x < x_of(range[pair[0]]) { pair[0] } else { pair[1] }
                     } else {
                         h
                     };
@@ -203,12 +169,7 @@ impl BlendingOptions {
         mesh.add_triangle(base, base + 1, base + 2);
         mesh.add_triangle(base, base + 2, base + 3);
         painter.add(Shape::mesh(mesh));
-        painter.rect_stroke(
-            bar,
-            0.0,
-            Stroke::new(1.0, theme.muted),
-            egui::StrokeKind::Outside,
-        );
+        painter.rect_stroke(bar, 0.0, Stroke::new(1.0, theme.muted), egui::StrokeKind::Outside);
 
         for (h, &v) in range.iter().enumerate() {
             let x = x_of(v);
@@ -221,11 +182,7 @@ impl BlendingOptions {
                 3 if range[2] != range[3] => (x, x + 6.0),
                 _ => (x - 6.0, x + 6.0),
             };
-            let points = vec![
-                pos2(x, top),
-                pos2(right, top + 10.0),
-                pos2(left, top + 10.0),
-            ];
+            let points = vec![pos2(x, top), pos2(right, top + 10.0), pos2(left, top + 10.0)];
             let (fill, edge) = if h < 2 {
                 (Color32::BLACK, Color32::WHITE)
             } else {
@@ -276,11 +233,7 @@ fn moved(drag: Drag, value: f32) -> [f32; 4] {
 fn readout(r: [f32; 4]) -> String {
     let v = |x: f32| (x * 255.0).round() as u32;
     let pair = |a: f32, b: f32| {
-        if v(a) == v(b) {
-            format!("{}", v(a))
-        } else {
-            format!("{}/{}", v(a), v(b))
-        }
+        if v(a) == v(b) { format!("{}", v(a)) } else { format!("{}/{}", v(a), v(b)) }
     };
     format!("{}   {}", pair(r[0], r[1]), pair(r[2], r[3]))
 }
@@ -313,18 +266,12 @@ mod tests {
         let out = moved(drag(1, true, r, 0.3), 0.9);
         assert!(out[1] <= out[2], "{out:?}");
         let out = moved(drag(0, false, r, 0.2), 1.0);
-        assert!(
-            out[0] <= out[1] && out[1] <= out[2] && out[2] <= out[3],
-            "{out:?}"
-        );
+        assert!(out[0] <= out[1] && out[1] <= out[2] && out[2] <= out[3], "{out:?}");
     }
 
     #[test]
     fn readout_shows_splits_like_photoshop() {
         assert_eq!(readout([0.0, 0.0, 1.0, 1.0]), "0   255");
-        assert_eq!(
-            readout([0.0, 40.0 / 255.0, 200.0 / 255.0, 1.0]),
-            "0/40   200/255"
-        );
+        assert_eq!(readout([0.0, 40.0 / 255.0, 200.0 / 255.0, 1.0]), "0/40   200/255");
     }
 }

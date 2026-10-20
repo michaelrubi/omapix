@@ -33,14 +33,7 @@ impl Affine {
     pub fn then(&self, next: &Affine) -> Affine {
         let [a, b, c, d, e, f] = self.0;
         let [p, q, r, s, t, u] = next.0;
-        Affine([
-            p * a + q * d,
-            p * b + q * e,
-            p * c + q * f + r,
-            s * a + t * d,
-            s * b + t * e,
-            s * c + t * f + u,
-        ])
+        Affine([p * a + q * d, p * b + q * e, p * c + q * f + r, s * a + t * d, s * b + t * e, s * c + t * f + u])
     }
 
     pub fn apply(&self, (x, y): (f64, f64)) -> (f64, f64) {
@@ -82,8 +75,7 @@ impl Affine {
     fn whole_pixel_move(&self) -> Option<(i32, i32)> {
         let [a, b, c, d, e, f] = self.0;
         let whole = |v: f64| (v - v.round()).abs() < 1e-6;
-        (a == 1.0 && b == 0.0 && d == 0.0 && e == 1.0 && whole(c) && whole(f))
-            .then(|| (c.round() as i32, f.round() as i32))
+        (a == 1.0 && b == 0.0 && d == 0.0 && e == 1.0 && whole(c) && whole(f)).then(|| (c.round() as i32, f.round() as i32))
     }
 }
 
@@ -484,8 +476,7 @@ mod tests {
 
     #[test]
     fn resizing_down_averages_and_keeps_the_square_in_place() {
-        let px: Vec<Pixel> =
-            (0..600 * 400).map(|i| if i % 2 == 0 { [65535; 4] } else { [0, 0, 0, 65535] }).collect();
+        let px: Vec<Pixel> = (0..600 * 400).map(|i| if i % 2 == 0 { [65535; 4] } else { [0, 0, 0, 65535] }).collect();
         let out = resized(&Tiled::from_slice(600, 400, [0; 4], &px), 150, 100, Resampling::Bicubic);
         assert!((out.get(75, 50)[0] as i32 - 32768).abs() < 2000, "{:?}", out.get(75, 50));
         // The square from 100 to 200 lands from 50 to 100 at half size.
@@ -520,8 +511,7 @@ mod tests {
     fn shrinking_averages_rather_than_skipping() {
         // Alternate black and white columns shrunk to a quarter come out
         // mid grey, not all one or the other.
-        let px: Vec<Pixel> =
-            (0..600 * 400).map(|i| if i % 2 == 0 { [65535; 4] } else { [0, 0, 0, 65535] }).collect();
+        let px: Vec<Pixel> = (0..600 * 400).map(|i| if i % 2 == 0 { [65535; 4] } else { [0, 0, 0, 65535] }).collect();
         let image = Tiled::from_slice(600, 400, [0; 4], &px);
         let out = transformed(&image, &Affine::scale_about(0.25, 0.25, (0.0, 0.0)), [0; 4], Resampling::Bicubic);
         let v = out.get(50, 50)[0];
