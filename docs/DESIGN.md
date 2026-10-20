@@ -196,6 +196,7 @@ All follow Photoshop.
 | Bring forward / Send backward | Ctrl+] / Ctrl+[ |
 | Invert (layer or mask) | Ctrl+I |
 | Curves / Levels / Hue/Sat / Color Balance layer | Ctrl+M / Ctrl+L / Ctrl+U / Ctrl+B |
+| Curves point at a pixel's tone (Curves layer selected) | Ctrl+click on the image (Shift: on red, green and blue) |
 | Select all / Deselect / Inverse | Ctrl+A / Ctrl+D / Ctrl+Shift+I |
 | Feather selection | Shift+F6 |
 | Fill foreground / background | Alt+Backspace / Ctrl+Backspace |

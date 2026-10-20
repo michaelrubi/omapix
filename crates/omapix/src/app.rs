@@ -3581,6 +3581,32 @@ impl App {
         });
     }
 
+    /// Ctrl+click on the image with a Curves layer selected: a point at the
+    /// pixel's tone, as below the layer. Returns whether the click was
+    /// Curves' (anything else with Ctrl, such as Auto-Select, then doesn't
+    /// happen).
+    fn add_curves_point(&mut self, p: Pos2, each: bool) -> bool {
+        let Some(editor) = &mut self.editor else {
+            return false;
+        };
+        let id = editor.active;
+        let Some(omapix_engine::adjust::Adjustment::Curves(mut curves)) = editor.doc.layer(id).and_then(|l| l.adjustment.clone()) else {
+            return false;
+        };
+        let inside = p.x >= 0.0 && p.y >= 0.0;
+        if let Some(sample) = editor.doc.sample_below(id, p.x as u32, p.y as u32).filter(|_| inside) {
+            let sample = [0, 1, 2].map(|c| f32::from(sample[c]) / 65535.0);
+            if curves.add_sampled_point(self.properties.channel(), sample, each) {
+                editor.edit("Curves", |doc, _| {
+                    if let Some(layer) = doc.layer_mut(id) {
+                        layer.adjustment = Some(omapix_engine::adjust::Adjustment::Curves(curves));
+                    }
+                });
+            }
+        }
+        true
+    }
+
     fn apply_eyedropper(&mut self, eyedropper: Eyedropper, x: u32, y: u32) {
         let Some(editor) = &mut self.editor else {
             return;
@@ -3908,6 +3934,15 @@ impl App {
         }
         if let ToolInput::BrushDrag { size, hardness } = input {
             self.tools.drag_brush(size, hardness);
+            return;
+        }
+        // With Curves selected, Ctrl+click on the image adds a point at the
+        // pixel's tone to the channel shown (Shift: to red, green and blue).
+        if modifiers.command
+            && self.properties.eyedropper.is_none()
+            && let ToolInput::StrokeBegin(p) = input
+            && self.add_curves_point(p, modifiers.shift)
+        {
             return;
         }
         let pressure = self.pen_pressure();
@@ -7072,6 +7107,49 @@ mod tests {
         app.properties.eyedropper = Some(Eyedropper::Gray);
         app.tool_input(ToolInput::StrokeBegin(egui::pos2(70.0, 70.0)), egui::Modifiers::NONE);
         assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Set Gray Point"));
+    }
+
+    #[test]
+    fn ctrl_click_on_the_image_adds_a_curves_point_at_the_pixels_tone() {
+        use omapix_engine::adjust::{Adjustment, Curves};
+
+        let mut app = test_app();
+        let (w, h) = (app.editor.as_ref().unwrap().doc.width, app.editor.as_ref().unwrap().doc.height);
+        app.editor
+            .as_mut()
+            .unwrap()
+            .doc
+            .layers
+            .push(Layer::adjustment(200, Adjustment::Curves(Curves::default()), w, h));
+        app.editor.as_mut().unwrap().active = 200;
+        // Even with the Move tool, whose Ctrl+click would pick a layer.
+        app.tools.select(crate::tools::Tool::Move);
+        let curves = |app: &App| match &app.editor.as_ref().unwrap().doc.layer(200).unwrap().adjustment {
+            Some(Adjustment::Curves(c)) => c.clone(),
+            _ => panic!("expected Curves"),
+        };
+
+        // A plain click doesn't add one.
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::NONE);
+        app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
+        assert_eq!(curves(&app).master.points.len(), 2);
+
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(150.0, 150.0)), egui::Modifiers::COMMAND);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!((editor.active, editor.undo_label()), (200, Some("Curves")));
+        let sample = editor.doc.sample_below(200, 150, 150).unwrap();
+        let tone = omapix_engine::adjust::luminance([0, 1, 2].map(|c| f32::from(sample[c]) / 65535.0));
+        let points = curves(&app).master.points;
+        assert_eq!(points.len(), 3);
+        assert!((points[1].0 - tone).abs() < 1e-6 && (points[1].1 - tone).abs() < 1e-6, "{points:?}");
+
+        // Shift adds one to each of red, green and blue.
+        app.tool_input(
+            ToolInput::StrokeBegin(egui::pos2(20.0, 20.0)),
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        );
+        let c = curves(&app);
+        assert!(c.red.points.len() + c.green.points.len() + c.blue.points.len() > 6, "{c:?}");
     }
 
     #[test]
