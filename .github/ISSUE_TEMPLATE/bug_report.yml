@@ -1,0 +1,41 @@
+name: Bug report
+description: Something that doesn't work, or works differently from Photoshop
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Version
+      description: The commit you built (`git rev-parse --short HEAD`), or the package version (`pacman -Q omapix-git`).
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Distribution, compositor and GPU
+      placeholder: Arch, Hyprland, NVIDIA RTX 4070
+    validations:
+      required: true
+  - type: textarea
+    id: file
+    attributes:
+      label: The file, if it's about one
+      description: Its format, bit depth and size, and the file itself if you can share it.
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: For a crash or anything odd, the output of running Omapix from a terminal with `RUST_LOG=info omapix photo.tif`.
+      render: text
+  - type: textarea
+    id: ai
+    attributes:
+      label: AI features
+      description: For an AI feature, what Help › AI Models shows for the model, including whether it says GPU or CPU.
