@@ -97,11 +97,13 @@ cargo run --release -- path/to/image.tif
 
 ### As an Arch package
 
-[packaging/arch/PKGBUILD](packaging/arch/PKGBUILD) builds `omapix-git`
-from the newest commit. It isn't on the AUR yet.
+[packaging/arch/omapix/PKGBUILD](packaging/arch/omapix/PKGBUILD) builds
+`omapix` from the latest release, and
+[packaging/arch/PKGBUILD](packaging/arch/PKGBUILD) builds `omapix-git` from
+the newest commit. Neither is on the AUR yet.
 
 ```bash
-cd packaging/arch
+cd packaging/arch/omapix
 makepkg -si
 ```
 
