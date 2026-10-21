@@ -1510,6 +1510,9 @@ impl Tools {
             percent(ui, "Flow", &mut s.flow);
             ui.toggle_value(&mut s.flow_pressure, "✒").on_hover_text("A pen's pressure sets the flow");
             ui.toggle_value(&mut s.size_pressure, "⊙").on_hover_text("A pen's pressure sets the size");
+            percent(ui, "Smoothing", &mut s.smoothing);
+            ui.toggle_value(&mut s.pulled_string, "〰")
+                .on_hover_text("Pulled String Mode: the brush moves only when the pointer pulls the string taut (its length is the Smoothing)");
             ui.separator();
             if self.tool == Tool::SpotHealing {
                 self.sample_options(ui);
@@ -2470,6 +2473,44 @@ mod tests {
         // A tool with no brush shows the Brush tool's.
         tools.tool = Tool::Move;
         at(&frame(&mut tools, vec![]), "Brush");
+    }
+
+    #[test]
+    fn the_options_bar_has_smoothing_and_pulled_string_mode() {
+        let ctx = egui::Context::default();
+        let theme = Theme::default();
+        let mut tools = Tools::default();
+        let mut frame = |tools: &mut Tools, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1600.0, 40.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| tools.options_bar(ui, Target::Pixels, &theme));
+            out.textures_delta.clear();
+            fn texts(shape: &egui::Shape, found: &mut Vec<(String, Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => found.push((t.galley.text().to_owned(), t.visual_bounding_rect().center())),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, found)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| texts(&s.shape, &mut found));
+            found
+        };
+        let drawn = frame(&mut tools, vec![]);
+        assert!(drawn.iter().any(|(t, _)| t == "Smoothing"), "{drawn:?}");
+        let string = drawn.iter().find(|(t, _)| t == "〰").unwrap().1;
+        let button = |pressed| egui::Event::PointerButton {
+            pos: string,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut tools, vec![egui::Event::PointerMoved(string), button(true)]);
+        frame(&mut tools, vec![button(false)]);
+        assert!(tools.brush.pulled_string);
     }
 
     #[test]

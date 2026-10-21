@@ -60,6 +60,13 @@ pub struct BrushSettings {
     /// The sampled tip it stamps ([`Tip::id`]), or none for a round one.
     /// The stroke is given the tip itself ([`Stroke::with_tip`]).
     pub tip: Option<u64>,
+    /// Photoshop's Smoothing, 0–1: the brush follows the pointer at a lag,
+    /// so a shaky hand paints a smooth line. It catches up when the stroke
+    /// ends.
+    pub smoothing: f32,
+    /// Pulled String Mode: the brush moves only when the pointer pulls a
+    /// string of up to 100 screen pixels taut, then along it.
+    pub pulled_string: bool,
 }
 
 impl Default for BrushSettings {
@@ -74,9 +81,14 @@ impl Default for BrushSettings {
             flow_pressure: false,
             dynamics: Dynamics::default(),
             tip: None,
+            smoothing: 0.0,
+            pulled_string: false,
         }
     }
 }
+
+/// The string Pulled String Mode pulls at full Smoothing, in screen pixels.
+const STRING: f32 = 100.0;
 
 /// What a stroke does to the surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -151,6 +163,12 @@ pub struct Stroke {
     dual_coverage: HashMap<(u32, u32), Vec<f32>>,
     dual_carried: f32,
     dual_dabs: u64,
+    /// Smoothing: where the brush is (and the pen's pressure it has
+    /// there), where the pointer is, and how many image pixels a screen
+    /// pixel is (for Pulled String Mode).
+    brush: Option<(f32, f32, f32)>,
+    pointer: Option<(f32, f32, f32)>,
+    image_per_screen: f32,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     /// The last point, and the pen's pressure there.
@@ -182,6 +200,9 @@ impl Stroke {
             dual_coverage: HashMap::new(),
             dual_carried: 0.0,
             dual_dabs: 0,
+            brush: None,
+            pointer: None,
+            image_per_screen: 1.0,
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -209,6 +230,13 @@ impl Stroke {
     /// a Texture it's left out.
     pub fn with_pattern(mut self, pattern: &Pattern) -> Self {
         self.pattern = self.settings.dynamics.texture.map(|texture| pattern.levelled(&texture));
+        self
+    }
+
+    /// Pulled String Mode's string is in screen pixels: how many image
+    /// pixels one of them is, at the zoom the stroke is painted at.
+    pub fn at_zoom(mut self, zoom: f32) -> Self {
+        self.image_per_screen = 1.0 / zoom.max(0.01);
         self
     }
 
@@ -317,8 +345,36 @@ impl Stroke {
 
     /// Continue the stroke to (x, y) in image pixels, with a pen's
     /// `pressure` there (0–1; 1 for a mouse), laying evenly spaced dabs
-    /// along the way. Returns the tiles whose coverage changed.
+    /// along the way. With Smoothing, the brush goes only part of the way
+    /// to the pointer. Returns the tiles whose coverage changed.
     pub fn add_point(&mut self, x: f32, y: f32, pressure: f32) -> Vec<(u32, u32)> {
+        let amount = self.settings.smoothing.clamp(0.0, 1.0);
+        self.pointer = Some((x, y, pressure));
+        let Some((bx, by, bp)) = self.brush.filter(|_| amount > 0.0) else {
+            self.brush = Some((x, y, pressure));
+            return self.lay_to(x, y, pressure);
+        };
+        // How far towards the pointer the brush goes this time. Its pen
+        // pressure goes with it, so a brush trailing behind a quick stroke
+        // doesn't take the lift's light pressure early (PhotoCraft's
+        // b768970d).
+        let f = if self.settings.pulled_string {
+            let string = amount * STRING * self.image_per_screen;
+            let far = (x - bx).hypot(y - by);
+            if far <= string {
+                return Vec::new();
+            }
+            (far - string) / far
+        } else {
+            1.0 - amount.min(0.95)
+        };
+        let to = (bx + (x - bx) * f, by + (y - by) * f, bp + (pressure - bp) * f);
+        self.brush = Some(to);
+        self.lay_to(to.0, to.1, to.2)
+    }
+
+    /// Lay the stroke on to (x, y), at `pressure` there.
+    fn lay_to(&mut self, x: f32, y: f32, pressure: f32) -> Vec<(u32, u32)> {
         let mut touched = Vec::new();
         let pressure = pressure.clamp(0.0, 1.0);
         match self.last {
@@ -589,16 +645,28 @@ impl Stroke {
     /// left out of it, so a selection drawn along an edge keeps that edge's
     /// colour from bleeding in.
     pub fn finish(&mut self, surface: &mut Surface) -> Vec<(u32, u32)> {
+        // A smoothed brush catches up with the pointer, its pressure going
+        // to the pen's last on the way.
+        let mut waited = match (self.brush, self.pointer) {
+            (Some(brush), Some((x, y, pressure))) if brush != (x, y, pressure) => {
+                self.brush = self.pointer;
+                let caught = self.lay_to(x, y, pressure);
+                self.apply(surface, &caught);
+                caught
+            }
+            _ => Vec::new(),
+        };
         // A click that never moved: the dab that was waiting to know which
         // way the stroke went.
-        let mut waited = Vec::new();
         if let (true, Some((x, y, pressure))) = (self.waiting, self.last) {
             self.waiting = false;
-            self.step(x, y, pressure, 0.0, &mut waited);
-            self.dual_step(x, y, 0.0, &mut waited);
-            waited.sort_unstable();
-            waited.dedup();
-            self.apply(surface, &waited);
+            let mut more = Vec::new();
+            self.step(x, y, pressure, 0.0, &mut more);
+            self.dual_step(x, y, 0.0, &mut more);
+            more.sort_unstable();
+            more.dedup();
+            self.apply(surface, &more);
+            waited.extend(more);
         }
         if self.paint == Paint::SpotHeal {
             let Some((dx, dy)) = self.find_source() else {
@@ -1651,6 +1719,49 @@ mod tests {
             }),
             [false, false, true, false]
         );
+    }
+
+    #[test]
+    fn smoothing_lags_the_brush_and_catches_up_at_the_end() {
+        let settings = |smoothing: f32, pulled_string: bool| BrushSettings {
+            smoothing,
+            pulled_string,
+            ..hard(10.0, Dynamics::default())
+        };
+        // A shaky line: along y = 100, jumping 30 px up and down each point.
+        let shaky: Vec<(f32, f32)> = (0..=20).map(|i| (50.0 + i as f32 * 10.0, if i % 2 == 0 { 70.0 } else { 130.0 })).collect();
+        // Away from its ends (where it starts and catches up).
+        let painted_rows = |out: &Tiled<Pixel>| (0..200).filter(|&y| (90..210).any(|x| out.get(x, y)[0] == 0)).count();
+        let (raw, smooth) = (stroked(settings(0.0, false), &shaky, true), stroked(settings(0.8, false), &shaky, true));
+        // Unsmoothed it reaches both 70 and 130; smoothed it stays near the middle.
+        assert!(
+            painted_rows(&raw) > 60 && painted_rows(&smooth) < 40,
+            "{} {}",
+            painted_rows(&raw),
+            painted_rows(&smooth)
+        );
+        // It finishes where the pointer stopped.
+        assert_eq!(smooth.get(250, 70)[0], 0);
+
+        // Pulled String Mode: moving less than the string does nothing,
+        // further pulls the brush along behind the pointer.
+        let pulled = settings(0.3, true);
+        let mut out = Surface::Pixels(white(300, 200));
+        let mut s = Stroke::new(pulled, Paint::Color([0, 0, 0, 65535]), out.clone()).at_zoom(2.0);
+        s.add_point(50.0, 100.0, 1.0);
+        // The string is 30 screen pixels, 15 image pixels at 200 %.
+        assert!(s.add_point(60.0, 100.0, 1.0).is_empty());
+        assert!(!s.add_point(100.0, 100.0, 1.0).is_empty());
+        assert_eq!(s.brush.map(|b| b.0.round()), Some(85.0));
+        s.finish(&mut out);
+        assert_eq!(s.brush.map(|b| b.0), Some(100.0));
+
+        // The lagging brush keeps the pressure where it is: lifting the pen
+        // far ahead of it doesn't thin it at once.
+        let mut s = Stroke::new(settings(0.9, false), Paint::Color([0, 0, 0, 65535]), Surface::Pixels(white(300, 200)));
+        s.add_point(10.0, 100.0, 1.0);
+        s.add_point(290.0, 100.0, 0.0);
+        assert!(s.brush.unwrap().2 > 0.8, "{:?}", s.brush);
     }
 
     #[test]

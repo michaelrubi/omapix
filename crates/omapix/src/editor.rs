@@ -881,7 +881,7 @@ impl Editor {
             }
         };
         let locked = target == Target::Pixels && self.doc.layer(self.active).is_some_and(|l| l.lock_alpha());
-        let mut stroke = Stroke::new(settings, paint, surface);
+        let mut stroke = Stroke::new(settings, paint, surface).at_zoom(self.canvas.zoom());
         stroke = stroke.with_parts(&parts);
         if locked {
             stroke = stroke.keeping_alpha();
