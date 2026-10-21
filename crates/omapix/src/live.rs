@@ -124,6 +124,10 @@ pub struct LiveFrame {
     /// Free Transform's transform of the subject, in image pixels.
     pub transform: Option<Affine>,
     pub settings: Option<Settings>,
+    /// While a stroke is painted on the subject: its pixels now, at the
+    /// stack's level, for the GPU to bring the tiles that changed up to
+    /// date.
+    pub painted: Option<Tiled<Pixel>>,
 }
 
 pub struct LiveStack {
@@ -139,6 +143,8 @@ pub struct LiveStack {
     pub layers: Vec<LiveLayer>,
     /// How many slots the layers keep what's below them in.
     pub slots: usize,
+    /// The subject's pixels at this level, as its layer was cropped from.
+    pub subject_pixels: Tiled<Pixel>,
 }
 
 /// A layer of a live stack, by its place in the document.
@@ -455,6 +461,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
         below: below(from),
         layers: live,
         slots,
+        subject_pixels: layers[index].pixels.clone(),
     })
 }
 

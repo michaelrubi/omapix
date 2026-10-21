@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor};
 use eframe::wgpu;
 use omapix_engine::layer::BlendIf;
+use omapix_engine::tiled::{TILE, Tiled};
 use omapix_engine::{DisplayTransform, Pixel};
 use wgpu::util::DeviceExt;
 
@@ -78,7 +79,12 @@ struct Uploaded {
     kept: Vec<wgpu::Texture>,
     display_uniform: wgpu::Buffer,
     display_group: wgpu::BindGroup,
+    painting: Option<Painting>,
 }
+
+/// The subject's pixels: their texture, the area of the level it holds
+/// (x0, y0, w, h), and the pixels it shows.
+type Painting = (wgpu::Texture, (u32, u32, u32, u32), Tiled<Pixel>);
 
 struct Pass {
     uniform: wgpu::Buffer,
@@ -273,6 +279,7 @@ impl LiveGpu {
             write_lut(queue, &texture, data, LUT_SIZE);
             texture
         };
+        let mut painting = None;
         for layer in &stack.layers {
             let nothing = ([0; 2], [0; 2]);
             let (pixels, lut, before, plane, fill, kind) = match &layer.source {
@@ -288,6 +295,9 @@ impl LiveGpu {
                 Source::Group(Before::Kept(slot)) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 4),
                 Source::Isolated(slot) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 5),
             };
+            if let (true, Source::Pixels(plane), Some(view)) = (layer.subject, &layer.source, &pixels) {
+                painting = Some((view.texture().clone(), (plane.x0, plane.y0, plane.w, plane.h), stack.subject_pixels.clone()));
+            }
             let mask = layer.mask.as_ref().map(|m| {
                 let texture = upload(device, queue, wgpu::TextureFormat::R16Uint, (m.w, m.h), &m.data);
                 (texture, rect(m.x0, m.y0, m.w, m.h), f32::from(m.fill) / 65535.0)
@@ -380,6 +390,7 @@ impl LiveGpu {
             kept: kept.into_iter().map(|k| k.0).collect(),
             display_uniform,
             display_group,
+            painting,
         });
     }
 }
@@ -401,6 +412,10 @@ impl CallbackTrait for LiveDraw {
             gpu.upload(device, queue, self);
         }
         let uploaded = gpu.uploaded.as_mut().expect("just uploaded");
+        if let (Some(now), Some((texture, area, shown))) = (&self.frame.painted, &mut uploaded.painting) {
+            repaint(queue, texture, *area, shown, now);
+            *shown = now.clone();
+        }
         let offset = [self.frame.offset.0, self.frame.offset.1];
         let inverse = self.frame.transform.and_then(|t| t.inverse()).map(|t| t.coefficients());
         for (i, pass) in uploaded.passes.iter_mut().enumerate() {
@@ -520,6 +535,44 @@ fn upload<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, format: 
 
 fn upload_pixels(device: &wgpu::Device, queue: &wgpu::Queue, plane: &Plane<Pixel>) -> wgpu::TextureView {
     upload(device, queue, wgpu::TextureFormat::Rgba16Uint, (plane.w, plane.h), &plane.data)
+}
+
+/// Bring the tiles of `texture` (holding `area` of a layer) that differ
+/// between `was` and `now` up to date.
+fn repaint(queue: &wgpu::Queue, texture: &wgpu::Texture, (x0, y0, w, h): (u32, u32, u32, u32), was: &Tiled<Pixel>, now: &Tiled<Pixel>) {
+    let (x1, y1) = ((x0 + w).min(now.width()), (y0 + h).min(now.height()));
+    for row in y0 / TILE..y1.div_ceil(TILE) {
+        for col in x0 / TILE..x1.div_ceil(TILE) {
+            if now.same_tile(was, col, row) {
+                continue;
+            }
+            let (ax, ay) = ((col * TILE).max(x0), (row * TILE).max(y0));
+            let (bx, by) = (((col + 1) * TILE).min(x1), ((row + 1) * TILE).min(y1));
+            if ax >= bx || ay >= by {
+                continue;
+            }
+            let tile = now.tile(col, row);
+            let data: Vec<Pixel> = (ay..by)
+                .flat_map(|y| (ax..bx).map(move |x| ((y - row * TILE) * TILE + x - col * TILE) as usize))
+                .map(|i| tile.map_or(now.fill(), |t| t[i]))
+                .collect();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: ax - x0, y: ay - y0, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&data),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some((bx - ax) * 8),
+                    rows_per_image: Some(by - ay),
+                },
+                extent((bx - ax, by - ay, 1)),
+            );
+        }
+    }
 }
 
 fn lut_texture(device: &wgpu::Device, n: usize) -> wgpu::Texture {
@@ -670,6 +723,7 @@ mod tests {
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack: Arc::new(stack),
+                painted: None,
                 offset,
                 transform,
                 settings: None,
@@ -775,6 +829,7 @@ mod tests {
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack,
+                painted: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(Settings {
@@ -835,6 +890,7 @@ mod tests {
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack,
+                painted: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(Settings {
@@ -909,6 +965,7 @@ mod tests {
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack,
+                painted: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(settings),
@@ -967,6 +1024,40 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn live_painting_matches_the_cpu() {
+        let (device, queue) = device();
+        let mut doc = document(BlendMode::Overlay, true);
+        let (w, h) = (doc.width, doc.height);
+        let stack = live::build(&doc, &doc.layers, doc.layers[1].id, false, 0, (0, 0, w, h)).unwrap();
+        // Painted after the stack was made.
+        for (x, y) in (12..30).flat_map(|x| (5..20).map(move |y| (x, y))) {
+            doc.layers[1].pixels.tile_mut(0, 0)[(y * TILE + x) as usize] = [1000, 50000, 9000, 40000];
+        }
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack: Arc::new(stack),
+                painted: Some(doc.layers[1].pixels.clone()),
+                offset: (0, 0),
+                transform: None,
+                settings: None,
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(&device, &queue, draw);
+        let cpu = composite::composite(&doc.layers, w, h);
+        let worst = cpu
+            .pixels()
+            .iter()
+            .zip(&gpu)
+            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+            .fold(0.0, f32::max);
+        assert!(worst < 4e-3, "off by {worst}");
+    }
+
+    #[test]
+    #[ignore]
     fn live_free_transform_matches_the_cpu_preview() {
         let (device, queue) = device();
         let t = Affine::scale_about(1.3, 1.1, (25.0, 20.0)).then(&Affine::rotate_about(0.4, (25.0, 20.0)));
@@ -992,6 +1083,7 @@ mod tests {
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack: Arc::new(stack),
+                painted: None,
                 offset: (0, 0),
                 transform: None,
                 settings: None,
@@ -1101,6 +1193,7 @@ mod tests {
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack,
+                painted: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(settings),
