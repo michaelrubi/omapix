@@ -1020,6 +1020,15 @@ mod tests {
         (g.clipped, g.opacity) = (true, 0.6);
         doc.layers[0].opacity = 0.9;
         check(&doc, "a clipping mask in a clipped group");
+        // Layers clipped to the Curves, which has a mask, with the patch
+        // moving below them.
+        let mut doc = document(BlendMode::SoftLight, true);
+        for _ in 0..2 {
+            let mut layer = doc.layers[2].clone();
+            (layer.id, layer.clipped, layer.opacity) = (doc.next_layer_id(), true, 0.5);
+            doc.layers.push(layer);
+        }
+        check(&doc, "clipped to an adjustment");
 
         // The clipped Curves, edited.
         let mut doc = document(BlendMode::Normal, true);
