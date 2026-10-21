@@ -3699,7 +3699,7 @@ mod live_tests {
     }
 
     #[test]
-    fn a_groups_opacity_shows_live_until_it_gets_a_blend_mode() {
+    fn a_groups_opacity_shows_live_and_its_blend_mode_once_it_has_one() {
         let ctx = egui::Context::default();
         let mut e = editor();
         let group = e.doc.group_layer(1);
@@ -3715,10 +3715,21 @@ mod live_tests {
         // The patch in it is part of what's below; the group's end fades it.
         assert_eq!(frame.stack.layers.len(), 1);
         assert!(frame.stack.layers[0].subject && matches!(frame.stack.layers[0].source, live::Source::Group(_)));
-        // Composited on its own, it's not for the GPU.
+        // Given a blend mode, it's composited differently: on the CPU.
         edit(&mut e, &|g| g.blend = BlendMode::Normal);
         e.update(&ctx);
         assert!(e.canvas.live.is_none());
+        e.end_live();
+        settle(&mut e, &ctx);
+        // Then its opacity and mode show live again, its layers composited
+        // to stand in for it.
+        edit(&mut e, &|g| g.opacity = 0.4);
+        settle(&mut e, &ctx);
+        edit(&mut e, &|g| g.blend = BlendMode::Screen);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.settings.expect("an edit").mode, BlendMode::Screen);
+        assert!(frame.stack.layers[0].subject && matches!(frame.stack.layers[0].source, live::Source::Pixels(_)));
         e.end_live();
     }
 
@@ -3880,6 +3891,16 @@ mod bench {
         let patch = doc.layers[0].id;
         time("live stack for a move at 100 % (2560×1440)", &mut || {
             std::hint::black_box(live::build(&doc, &doc.layers, patch, true, 0, (1000, 1000, 2560, 1440)));
+        });
+        // The layers above in a group composited on its own.
+        let mut isolated = doc.clone();
+        let group = isolated.group_layers(&[isolated.layers[1].id, isolated.layers[2].id]).unwrap();
+        isolated.layer_mut(group).unwrap().blend = omapix_engine::BlendMode::Multiply;
+        time("live stack, an isolated group above", &mut || {
+            std::hint::black_box(live::build(&isolated, &isolated.layers, patch, true, 0, (1000, 1000, 2560, 1440)));
+        });
+        time("live stack, editing the isolated group", &mut || {
+            std::hint::black_box(live::build(&isolated, &isolated.layers, group, false, 0, (1000, 1000, 2560, 1440)));
         });
         // Zoomed out to fit: level 2 (1500×1000), whole image on screen.
         let mut reduced = Reduced::default();

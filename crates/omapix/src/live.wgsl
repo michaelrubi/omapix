@@ -19,7 +19,8 @@ struct Layer {
     mode: u32,
     // 0: pixels, 1: an adjustment, 2: the first (nothing below it), 3: the
     // end of a group that fades, with what was below its layers in `pixels`,
-    // 4: the same, with it in `kept`.
+    // 4: the same, with it in `kept`, 5: the end of an isolated group, its
+    // contents in `below` and what was below the group in `kept`.
     kind: u32,
     has_mask: u32,
     lut_size: u32,
@@ -28,7 +29,8 @@ struct Layer {
     // 1: the layer is drawn through `inverse` (Free Transform), sampled
     // between its pixels, rather than moved by `offset`.
     transformed: u32,
-    pad: u32,
+    // 1: the first in an isolated group, blended onto nothing.
+    fresh: u32,
     // Level pixel on the layer shown at level pixel (x, y): (a·x + b·y + c,
     // d·x + e·y + f), as (a, b, c, d) and (e, f).
     inverse_abcd: vec4<f32>,
@@ -269,7 +271,7 @@ fn blend(mode: u32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
 fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let r = vec2<i32>(position.xy);
     var dst = vec4<f32>(0.0);
-    if p.kind != 2u {
+    if p.kind != 2u && p.fresh == 0u {
         dst = textureLoad(below, r, 0);
     }
     let q = r + p.region_origin - p.offset;
@@ -284,6 +286,23 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let cb = dst.rgb;
     let a_b = dst.a;
+
+    // An isolated group's contents blend onto what was below the group
+    // like a single layer (composite.rs `blend_one`).
+    if p.kind == 5u {
+        let back = textureLoad(kept, r, 0);
+        let a_s = dst.a * coverage;
+        if a_s <= 0.0 {
+            return back;
+        }
+        var blended = cb;
+        if back.a > 0.0 {
+            blended = blend(p.mode, back.rgb, cb);
+        }
+        let a_o = a_s + back.a * (1.0 - a_s);
+        let co = a_s * (1.0 - back.a) * cb + a_s * back.a * blended + (1.0 - a_s) * back.a * back.rgb;
+        return vec4<f32>(co / a_o, a_o);
+    }
 
     // A Pass Through group's opacity and mask fade what its layers made
     // back towards what was below them, premultiplied (composite.rs `mix`).
