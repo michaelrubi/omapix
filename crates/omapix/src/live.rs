@@ -113,6 +113,8 @@ pub struct Settings {
     pub opacity: f32,
     pub mode: BlendMode,
     pub lut: Option<Table>,
+    /// Blend If, unless it hides nothing.
+    pub blend_if: Option<BlendIf>,
 }
 
 /// What the canvas draws live this frame.
@@ -124,6 +126,12 @@ pub struct LiveFrame {
     /// Free Transform's transform of the subject, in image pixels.
     pub transform: Option<Affine>,
     pub settings: Option<Settings>,
+    /// While a stroke is painted on the subject: its pixels now, at the
+    /// stack's level, for the GPU to bring the tiles that changed up to
+    /// date.
+    pub painted: Option<Tiled<Pixel>>,
+    /// And its mask, while that's painted.
+    pub painted_mask: Option<Tiled<u16>>,
 }
 
 pub struct LiveStack {
@@ -139,6 +147,10 @@ pub struct LiveStack {
     pub layers: Vec<LiveLayer>,
     /// How many slots the layers keep what's below them in.
     pub slots: usize,
+    /// The subject's pixels at this level, as its layer was cropped from.
+    pub subject_pixels: Tiled<Pixel>,
+    /// And its mask, if it shows one.
+    pub subject_mask: Option<Tiled<u16>>,
 }
 
 /// A layer of a live stack, by its place in the document.
@@ -216,10 +228,18 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
         atop: false,
         base: false,
     };
-    // A clipped subject's stack starts at its base.
+    // A clipped subject's stack starts at its base, and one in groups
+    // composited on their own at the first layer of the outermost.
     let from = match base_of(subject) {
         Some(base) if subject.clipped => doc.index_of(base.id)?,
         _ => index,
+    };
+    let groups = std::iter::successors(subject.parent, |&g| doc.layer(g)?.parent).filter_map(|g| doc.layer(g));
+    let isolated = groups.filter(|g| !through(g)).filter_map(|g| Some(doc.span(doc.index_of(g.id)?).start)).min();
+    let from = match isolated {
+        Some(_) if subject.is_group => return None,
+        Some(start) => start.min(from),
+        None => from,
     };
     let mut out: Vec<Step> = Vec::new();
     // The groups above the subject that fade: where each starts, and the
@@ -277,9 +297,9 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
                     end: Some(End::Contents(start)),
                     ..layer(i)
                 });
-            } else if start <= index {
-                // Round the subject: what's below it would be what's below
-                // it in the group, onto nothing.
+            } else if start < from {
+                // Round where the stack starts: what's below that would be
+                // what's below it in the group, onto nothing.
                 return None;
             } else if let Some(first) = out.iter().position(|s| s.index >= start) {
                 // Its layers start onto nothing, with what's below them
@@ -313,9 +333,11 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
             continue;
         }
         let fades = l.opacity < 1.0 || l.mask.as_ref().is_some_and(|m| m.enabled) || l.blend_if.is_some_and(|b| !b.is_neutral());
-        if start <= index {
-            // The subject, or a group it's in: what's below the group
-            // doesn't change.
+        // Inside a group composited on its own, a group starting where the
+        // stack does has nothing below it.
+        if start < from || start == from && isolated.is_none() {
+            // The subject, or a group round where the stack starts: what's
+            // below the group doesn't change.
             if fades || i == index {
                 out.push(Step {
                     end: Some(End::Below(start)),
@@ -363,8 +385,8 @@ pub fn only_settings_changed(before: &[Layer], after: &[Layer], id: u64) -> bool
                     (Some(x), Some(y)) => x.enabled == y.enabled && x.pixels.same_tiles(&y.pixels),
                     _ => false,
                 };
-            let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group, a.blend_if) == (b.id, b.parent, b.visible, b.clipped, b.is_group, b.blend_if);
-            let same_settings = (a.opacity, a.blend, &a.adjustment) == (b.opacity, b.blend, &b.adjustment);
+            let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group) == (b.id, b.parent, b.visible, b.clipped, b.is_group);
+            let same_settings = (a.opacity, a.blend, &a.adjustment, a.blend_if) == (b.opacity, b.blend, &b.adjustment, b.blend_if);
             // A group that starts or stops passing through is made of other passes.
             let through = |l: &Layer| l.is_group && l.blend == BlendMode::PassThrough;
             same_pixels && same_place && (same_settings || a.id == id && through(a) == through(b))
@@ -455,6 +477,8 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
         below: below(from),
         layers: live,
         slots,
+        subject_pixels: layers[index].pixels.clone(),
+        subject_mask: layers[index].mask.as_ref().filter(|m| m.enabled).map(|m| m.pixels.clone()),
     })
 }
 
@@ -617,8 +641,14 @@ mod tests {
         assert_eq!(live.layers[1].keep, [0]);
         assert_eq!(live.slots, 2);
 
-        // Inside one, a layer moves on the CPU.
-        assert!(!can_show(&doc, patch, true));
+        // Inside them, the stack starts at the outer one's first layer,
+        // with what's below that composited beforehand.
+        let live = build(&doc, &doc.layers, patch, true, 0, all).unwrap();
+        assert_eq!(ends(&live), [None, Some(1), None, Some(0), None]);
+        assert!(live.layers[0].subject && live.layers[0].fresh);
+        assert_eq!(live.below.data[0], [30000, 30000, 30000, 65535]);
+        // But not a group inside one.
+        assert!(!can_show(&doc, inner, false));
         // Editing the outer group, its layers stand in for it, and what's
         // below it is below them.
         let live = build(&doc, &doc.layers, outer, false, 0, all).unwrap();
@@ -706,11 +736,13 @@ mod tests {
         assert_eq!(live.below.data, composite::composite(&hidden.layers, 300, 200).pixels());
         assert_eq!(live.below.data[0], [45000, 15000, 15000, 65535]);
 
-        // A group round it that's composited on its own or hidden, on the CPU.
+        // A group round it that's composited on its own starts the stack;
+        // a hidden one leaves it on the CPU.
         for group in [inner, outer] {
             let set = |doc: &mut Document, f: &dyn Fn(&mut Layer)| f(doc.layer_mut(group).unwrap());
             set(&mut doc, &|g| g.blend = BlendMode::Normal);
-            assert!(!can_show(&doc, patch, true), "an isolated group");
+            let live = build(&doc, &doc.layers, patch, true, 0, (0, 0, 300, 200)).unwrap();
+            assert!(live.layers.iter().any(|l| matches!(l.source, Source::Isolated(_))), "an isolated group");
             set(&mut doc, &|g| g.blend = BlendMode::PassThrough);
             set(&mut doc, &|g| g.visible = false);
             assert!(!can_show(&doc, patch, true), "a hidden group");

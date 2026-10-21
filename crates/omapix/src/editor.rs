@@ -341,9 +341,13 @@ impl Figure for Body {
 struct LiveView {
     /// The layer moved or edited.
     subject: u64,
-    /// The stack being made in the background, then made.
-    rx: Option<Receiver<Option<LiveStack>>>,
+    /// The stack being made in the background, then made, with the
+    /// subject's shrunk copy zoomed out.
+    rx: Option<Receiver<(Option<LiveStack>, Option<Reduced>)>>,
     stack: Option<Arc<LiveStack>>,
+    /// For a stroke: the subject's pixels at the level on screen are sent
+    /// each frame, shrunk with this zoomed out.
+    painting: Option<Option<Reduced>>,
     /// How far the drag has moved, in image pixels.
     offset: (i32, i32),
     /// For a Free Transform: the transform showing.
@@ -415,6 +419,9 @@ pub struct Editor {
     /// Last revision drawn straight into the canvas by a brush stroke.
     /// Background renders of older revisions are thrown away.
     painted: u64,
+    /// Tiles a stroke shown live has changed that the canvas's own tiles
+    /// don't show yet.
+    painted_live: std::collections::HashSet<(u32, u32)>,
     /// The mask overlay's red, in the document's colour space.
     overlay_colour: Pixel,
     /// The active layer when entering Quick Mask.
@@ -484,6 +491,7 @@ impl Editor {
             live_view: None,
             live_limit: crate::gpu::max_side(),
             painted: 0,
+            painted_live: Default::default(),
             overlay_colour,
             quick_mask_layer: None,
             hide_selection_edges: false,
@@ -911,7 +919,29 @@ impl Editor {
         let before = self.snapshot(label);
         self.push_undo(before);
         self.stroke = Some((stroke, self.active));
+        if matches!(target, Target::Pixels | Target::Mask) {
+            self.show_stroke_live();
+        }
         true
+    }
+
+    /// Show a stroke on the active layer's pixels live on the GPU: with the
+    /// last stroke's view, if nothing else has changed since, or a new one.
+    fn show_stroke_live(&mut self) {
+        let revision = self.revision;
+        if let Some(view) = self
+            .live_view
+            .as_mut()
+            .filter(|v| v.painting.is_some() && v.subject == self.active && v.stack.is_some() && v.until == Some(revision))
+        {
+            view.until = None;
+            return;
+        }
+        self.live_view = self.start_live_view(false).map(|v| LiveView {
+            edit: None,
+            painting: Some(None),
+            ..v
+        });
     }
 
     /// Continue the stroke to an image position, with a pen's `pressure`
@@ -944,6 +974,9 @@ impl Editor {
         if self.stroke.is_some() {
             self.paint_tiles(&[], true);
             self.stroke = None;
+            if let Some(view) = self.live_view.as_mut().filter(|v| v.painting.is_some() && v.until.is_none()) {
+                view.until = Some(self.revision);
+            }
         }
     }
 
@@ -1021,6 +1054,15 @@ impl Editor {
         if let Some(rendering) = &self.rendering {
             rendering.cancel.store(true, Ordering::Release);
         }
+        // Shown live, the GPU draws it; the canvas catches up once the
+        // stroke's over, or here if the live view goes first.
+        let live = self.live_view.as_ref().is_some_and(|v| v.painting.is_some() && v.until.is_none()) && self.canvas.live.is_some();
+        if live {
+            self.painted_live.extend(changed);
+            return;
+        }
+        let stale: Vec<_> = self.painted_live.drain().filter(|t| !changed.contains(t)).collect();
+        let changed = &[changed, &stale].concat();
         let Some(render) = self.canvas.render() else {
             return;
         };
@@ -1773,12 +1815,14 @@ impl Editor {
             } else {
                 reduced.lock().expect("reduced layers").layers(&doc.layers, level as u32)
             };
-            let _ = tx.send(live::build(&doc, &layers, id, moving, level, region));
+            let own = (level > 0).then(|| reduced.lock().expect("reduced layers").only(id));
+            let _ = tx.send((live::build(&doc, &layers, id, moving, level, region), own));
         });
         Some(LiveView {
             subject: self.active,
             rx: Some(rx),
             stack: None,
+            painting: None,
             offset: (0, 0),
             transform: None,
             edit: (!moving).then_some(None),
@@ -1993,9 +2037,12 @@ impl Editor {
         };
         if let Some(rx) = &live.rx {
             match rx.try_recv() {
-                Ok(stack) => {
+                Ok((stack, own)) => {
                     live.rx = None;
                     live.stack = stack.map(Arc::new);
+                    if let Some(painting) = &mut live.painting {
+                        *painting = own;
+                    }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => live.rx = None,
@@ -2015,6 +2062,9 @@ impl Editor {
             let rendered = self.rendered.0 >= until || self.rendering.as_ref().is_some_and(|r| r.visible && r.target.0 >= until);
             rendered && self.canvas.fresh
         });
+        if caught_up {
+            self.painted_live.clear();
+        }
         if failed || caught_up {
             self.live_view = None;
             self.canvas.live = None;
@@ -2037,15 +2087,26 @@ impl Editor {
                     opacity: layer.opacity,
                     mode: layer.blend,
                     lut,
+                    blend_if: layer.blend_if.filter(|b| !b.is_neutral()),
                 })
             }
             _ => None,
         };
+        // A stroke's layer as it is now, at the level on screen.
+        let painted = match (&mut live.painting, layer, &live.stack) {
+            (Some(None), Some(layer), Some(s)) if s.level == 0 => Some(layer.clone()),
+            (Some(Some(own)), Some(layer), Some(s)) => own.layers(std::slice::from_ref(layer), s.level as u32).pop(),
+            _ => None,
+        };
+        let painted_mask = painted.as_ref().and_then(|l| l.mask.as_ref()).filter(|m| m.enabled).map(|m| m.pixels.clone());
+        let painted = painted.map(|l| l.pixels);
         self.canvas.live = live.stack.as_ref().map(|s| LiveFrame {
             stack: Arc::clone(s),
             offset: live.offset,
             transform: live.transform,
             settings,
+            painted,
+            painted_mask,
         });
     }
 
@@ -3560,6 +3621,56 @@ mod live_tests {
     }
 
     #[test]
+    fn strokes_are_painted_live_and_the_canvas_catches_up_once_they_end() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let blue = [0, 0, 65535, 65535];
+        let brush = BrushSettings {
+            size: 40.0,
+            hardness: 1.0,
+            ..Default::default()
+        };
+        let begin = |e: &mut Editor| assert!(e.begin_stroke(brush, Paint::Color(blue), Sample::Current, Default::default()));
+        begin(&mut e);
+        settle(&mut e, &ctx);
+        e.stroke_to(100.0, 100.0, 1.0);
+        e.stroke_to(300.0, 100.0, 1.0);
+        e.update(&ctx);
+        // The GPU is sent the layer as painted; the canvas's tiles wait.
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.painted.expect("the stroke's pixels").get(200, 100), blue);
+        assert!(e.painted_live.contains(&(0, 0)) && e.painted_live.contains(&(1, 0)));
+        e.end_stroke();
+        e.update(&ctx);
+        assert!(e.canvas.live.is_some(), "until the canvas has drawn it");
+        // The next stroke, straight after, carries on with the same stack.
+        begin(&mut e);
+        e.update(&ctx);
+        assert_eq!(e.canvas.live.clone().expect("still live").stack.id, frame.stack.id);
+        // If the live view goes, the tiles it painted are drawn with the
+        // next ones.
+        e.live_view = None;
+        e.update(&ctx);
+        e.stroke_to(100.0, 300.0, 1.0);
+        assert!(e.painted_live.is_empty());
+        e.end_stroke();
+        assert_eq!(e.undo_label(), Some("Brush Stroke"));
+
+        // A mask is painted live too.
+        e.edit("Mask", |doc, active| {
+            doc.layer_mut(*active).unwrap().mask = Some(omapix_engine::layer::Mask::white(600, 400))
+        });
+        e.target = Target::Mask;
+        assert!(e.begin_stroke(brush, Paint::Mask(0), Sample::Current, Default::default()));
+        settle(&mut e, &ctx);
+        e.stroke_to(100.0, 200.0, 1.0);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.painted_mask.expect("the mask as painted").get(100, 200), 0);
+        e.end_stroke();
+    }
+
+    #[test]
     fn free_transform_shows_live_and_is_made_once_applied() {
         let ctx = egui::Context::default();
         let mut e = editor();
@@ -3761,6 +3872,22 @@ mod live_tests {
         e.update(&ctx);
         let again = e.canvas.live.clone().unwrap().settings.unwrap().lut.unwrap();
         assert!(Arc::ptr_eq(&first, &again));
+    }
+
+    #[test]
+    fn blend_if_drags_show_live() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        let split = omapix_engine::layer::BlendIf {
+            this: [0.0, 0.3, 1.0, 1.0],
+            ..Default::default()
+        };
+        e.edit_live("Blend If", |doc| doc.layer_mut(patch).unwrap().blend_if = Some(split));
+        settle(&mut e, &ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.settings.expect("an edit").blend_if, Some(split));
+        e.end_live();
     }
 
     #[test]

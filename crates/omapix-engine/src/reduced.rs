@@ -23,12 +23,21 @@ pub struct Reduced {
 
 /// A layer's pixels and mask, as last shrunk, and what they were shrunk
 /// from.
+#[derive(Clone)]
 struct Entry {
     pixels: (Tiled<Pixel>, Tiled<Pixel>),
     mask: Option<(Tiled<u16>, Tiled<u16>)>,
 }
 
 impl Reduced {
+    /// Just layer `id`'s shrunk copy, to be kept up to date on its own.
+    pub fn only(&self, id: u64) -> Self {
+        Self {
+            level: self.level,
+            layers: self.layers.get(&id).map(|e| (id, e.clone())).into_iter().collect(),
+        }
+    }
+
     /// `layers` shrunk by 2^`level` each way (box-filtered, like the display
     /// pyramid), with everything else about them unchanged.
     pub fn layers(&mut self, layers: &[Layer], level: u32) -> Vec<Layer> {
