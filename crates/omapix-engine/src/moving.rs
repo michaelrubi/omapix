@@ -35,6 +35,13 @@ fn scale(v: u16, k: u16) -> u16 {
     ((u32::from(v) * u32::from(k) + MAX / 2) / MAX) as u16
 }
 
+impl<T> Lifted<T> {
+    /// What stays where it was, and what moves.
+    pub fn parts(&self) -> (&Tiled<T>, &Tiled<T>) {
+        (&self.below, &self.lifted)
+    }
+}
+
 impl Lifted<Pixel> {
     /// Lift the selected pixels. Partly selected pixels are split between
     /// what moves and what stays by alpha. With `copy` (Alt+drag), the

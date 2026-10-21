@@ -5546,6 +5546,19 @@ impl eframe::App for App {
                 } else {
                     selection.map_or(&[][..], |s| &s.outlines[..])
                 };
+                // Moved with what it lifts, while that's shown live.
+                let shifted: Vec<Vec<(f32, f32)>>;
+                let outlines = match editor.selection_moved() {
+                    Some(t) => {
+                        let moved = |&(x, y): &(f32, f32)| {
+                            let (x, y) = t.apply((x.into(), y.into()));
+                            (x as f32, y as f32)
+                        };
+                        shifted = outlines.iter().map(|o| o.iter().map(moved).collect()).collect();
+                        &shifted[..]
+                    }
+                    None => outlines,
+                };
                 let modifiers = ui.input(|i| i.modifiers);
                 // An armed Curves or Levels eyedropper, or Free Transform, takes the
                 // pointer from the tools.

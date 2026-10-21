@@ -23,6 +23,7 @@ struct Layer {
     // contents in `below` and what was below the group in `kept`, 6: the
     // end of a group things are clipped to, its contents cut by its mask.
     kind: u32,
+    // 0: none, 1: a mask, 2: one that hides where it's high.
     has_mask: u32,
     lut_size: u32,
     opacity: f32,
@@ -77,10 +78,14 @@ fn mask_at(q: vec2<i32>) -> f32 {
     if p.has_mask == 0u {
         return 1.0;
     }
-    if !inside(q, p.mask_origin, p.mask_size) {
-        return p.mask_fill;
+    var m = p.mask_fill;
+    if inside(q, p.mask_origin, p.mask_size) {
+        m = f32(textureLoad(mask, q - p.mask_origin, 0).r) / 65535.0;
     }
-    return f32(textureLoad(mask, q - p.mask_origin, 0).r) / 65535.0;
+    if p.has_mask == 2u {
+        return 1.0 - m;
+    }
+    return m;
 }
 
 struct Sampled {

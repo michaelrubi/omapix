@@ -919,9 +919,7 @@ impl Editor {
         let before = self.snapshot(label);
         self.push_undo(before);
         self.stroke = Some((stroke, self.active));
-        if matches!(target, Target::Pixels | Target::Mask) {
-            self.show_stroke_live();
-        }
+        self.show_stroke_live();
         true
     }
 
@@ -929,10 +927,11 @@ impl Editor {
     /// last stroke's view, if nothing else has changed since, or a new one.
     fn show_stroke_live(&mut self) {
         let revision = self.revision;
+        let subject = if self.target == Target::QuickMask { live::QUICK_MASK } else { self.active };
         if let Some(view) = self
             .live_view
             .as_mut()
-            .filter(|v| v.painting.is_some() && v.subject == self.active && v.stack.is_some() && v.until == Some(revision))
+            .filter(|v| v.painting.is_some() && v.subject == subject && v.stack.is_some() && v.until == Some(revision))
         {
             view.until = None;
             return;
@@ -1125,8 +1124,12 @@ impl Editor {
         if !original.can_move() || contents.iter().any(|l| !l.can_move()) {
             return false;
         }
-        let simple = !copy && self.doc.selection.is_none() && roots == [self.active];
-        self.live_view = simple.then(|| self.start_live_view(true)).flatten();
+        // A layer's pixels, or what a selection lifts of them, are shown
+        // moving live.
+        let simple = match &self.doc.selection {
+            None => !copy && roots == [self.active],
+            Some(_) => self.target == Target::Pixels && original.has_pixels(),
+        };
         self.moving = Some(Moving {
             label: label.to_owned(),
             original,
@@ -1140,6 +1143,7 @@ impl Editor {
             applied: (0, 0),
             wanted: (0, 0),
         });
+        self.live_view = simple.then(|| self.start_live_view(true)).flatten();
         true
     }
 
@@ -1213,7 +1217,8 @@ impl Editor {
         };
         let [x, y, w, h] = bounds.ok_or("Could not transform because the selected area is empty")?;
         let (x, y, w, h) = (f64::from(x), f64::from(y), f64::from(w), f64::from(h));
-        let whole = lift.is_none();
+        // The whole layer, or what's lifted of its pixels, shows live.
+        let live = !matches!(lift, Some(Lift::Mask(_)));
         self.transforming = Some(Transforming {
             original: layer.clone(),
             selection: self.doc.selection.clone(),
@@ -1223,7 +1228,7 @@ impl Editor {
             wanted: Affine::IDENTITY,
             started: false,
         });
-        if whole {
+        if live {
             self.show_transform_live();
         }
         Ok(())
@@ -1799,7 +1804,31 @@ impl Editor {
     fn start_live_view(&self, moving: bool) -> Option<LiveView> {
         let limit = self.live_limit?;
         let (level, (x0, y0, x1, y1)) = self.canvas.visible_area()?;
-        if self.view != View::Image || !live::can_show(&self.doc, self.active, moving) {
+        // A Quick Mask stroke paints the overlay, on top of everything.
+        let quick_mask = self.stroke.is_some() && self.target == Target::QuickMask && self.view == View::QuickMask;
+        let (mut doc, mut id) = (self.doc.clone(), if quick_mask { live::QUICK_MASK } else { self.active });
+        if quick_mask {
+            doc.layers.push(self.quick_mask_overlay());
+        }
+        // A move or Free Transform of a selection's pixels moves what it
+        // lifts, split from what stays (here as a placeholder, to see if
+        // it can be shown).
+        let lift_moved = self
+            .moving
+            .as_ref()
+            .filter(|m| m.target == Target::Pixels && m.original.has_pixels())
+            .and_then(|m| Some((m.selection.as_ref()?.coverage.clone(), m.copy, m.original.pixels.clone())));
+        let lift_transformed = self
+            .transforming
+            .as_ref()
+            .filter(|t| matches!(t.lift, Some(Lift::Pixels(_))))
+            .and_then(|t| Some((t.selection.as_ref()?.coverage.clone(), false, t.original.pixels.clone())));
+        let lifting = lift_moved.or(lift_transformed).filter(|_| moving);
+        if let Some((.., pixels)) = &lifting {
+            doc = live::lifted(&doc, id, pixels.clone(), pixels.clone())?;
+            id = live::LIFTED;
+        }
+        if self.view != View::Image && !quick_mask || !live::can_show(&doc, id, moving) {
             return None;
         }
         let scale = 1u32 << level;
@@ -1807,9 +1836,18 @@ impl Editor {
             return None;
         }
         let region = (x0 / scale, y0 / scale, x1.div_ceil(scale) - x0 / scale, y1.div_ceil(scale) - y0 / scale);
-        let (doc, id, reduced) = (self.doc.clone(), self.active, Arc::clone(&self.reduced));
+        let reduced = Arc::clone(&self.reduced);
         let (tx, rx) = channel();
         std::thread::spawn(move || {
+            if let Some((coverage, copy, pixels)) = lifting {
+                let lift = Lifted::pixels(&pixels, &coverage, copy);
+                let (stays, lifted) = lift.parts();
+                for (part, pixels) in [(live::STAYS, stays), (live::LIFTED, lifted)] {
+                    if let Some(layer) = doc.layer_mut(part) {
+                        layer.pixels = pixels.clone();
+                    }
+                }
+            }
             let layers = if level == 0 {
                 doc.layers.clone()
             } else {
@@ -1819,7 +1857,7 @@ impl Editor {
             let _ = tx.send((live::build(&doc, &layers, id, moving, level, region), own));
         });
         Some(LiveView {
-            subject: self.active,
+            subject: id,
             rx: Some(rx),
             stack: None,
             painting: None,
@@ -2070,9 +2108,11 @@ impl Editor {
             self.canvas.live = None;
             return;
         }
+        let opacity = OVERLAY_OPACITY as f32 / u16::MAX as f32;
+        let overlay = (live.subject == live::QUICK_MASK).then(|| live::quick_mask_layer(&self.doc, self.overlay_colour, opacity));
+        let layer = overlay.as_ref().or_else(|| self.doc.layer(live.subject));
         // An edit's settings as they are now; its adjustment's table is
         // made again only when the adjustment changes.
-        let layer = self.doc.layer(live.subject);
         let settings = match (&mut live.edit, layer) {
             (Some(cached), Some(layer)) => {
                 let lut = layer.adjustment.as_ref().map(|a| match cached {
@@ -2108,6 +2148,18 @@ impl Editor {
             painted,
             painted_mask,
         });
+    }
+
+    /// How the selection has been moved or transformed, while what it
+    /// lifts is shown live (it changes for real when that ends).
+    pub fn selection_moved(&self) -> Option<Affine> {
+        let live = self.live_view.as_ref().filter(|l| l.subject == live::LIFTED && l.until.is_none())?;
+        Some(live.transform.unwrap_or(Affine::translate(live.offset.0.into(), live.offset.1.into())))
+    }
+
+    /// Quick Mask's overlay as a layer, for the GPU to show.
+    fn quick_mask_overlay(&self) -> Layer {
+        live::quick_mask_layer(&self.doc, self.overlay_colour, OVERLAY_OPACITY as f32 / u16::MAX as f32)
     }
 
     /// Render the current state in the background: in place over what the
@@ -2414,18 +2466,24 @@ pub(crate) fn render_view(doc: &Document, view: View, colour: Pixel, base: Optio
 /// Tint tiles with `colour` where `coverage` is less than MAX (masked / unselected),
 /// fading to clear where revealed / selected.
 /// `colour` over `out` where `coverage` hides, at `opacity` (of 65535).
-fn apply_overlay(out: &mut [Vec<Pixel>], tiles: &[(u32, u32)], coverage: &Tiled<u16>, colour: Pixel, opacity: u32) {
+pub(crate) fn apply_overlay(out: &mut [Vec<Pixel>], tiles: &[(u32, u32)], coverage: &Tiled<u16>, colour: Pixel, opacity: u32) {
     const MAX: u32 = u16::MAX as u32;
     for (tile, &(col, row)) in out.iter_mut().zip(tiles) {
         let values = coverage.tile(col, row);
         for (i, pixel) in tile.iter_mut().enumerate() {
             let v = values.map_or(coverage.fill(), |t| t[i]);
             let a = (MAX - v as u32) * opacity / MAX;
-            // Opaque colour over the pixel, so it shows on
-            // transparent areas too.
-            for (c, k) in pixel.iter_mut().zip(colour) {
-                *c = ((*c as u32 * (MAX - a) + k as u32 * a) / MAX) as u16;
+            // Opaque colour over the pixel (straight alpha), so it shows
+            // on transparent areas too.
+            let below = pixel[3] as u32 * (MAX - a) / MAX;
+            let alpha = a + below;
+            if alpha == 0 {
+                continue;
             }
+            for (c, k) in pixel.iter_mut().zip(colour).take(3) {
+                *c = ((k as u32 * a + *c as u32 * below) / alpha) as u16;
+            }
+            pixel[3] = alpha as u16;
         }
     }
 }
@@ -3668,6 +3726,19 @@ mod live_tests {
         let frame = e.canvas.live.clone().expect("shown live");
         assert_eq!(frame.painted_mask.expect("the mask as painted").get(100, 200), 0);
         e.end_stroke();
+
+        // And Quick Mask: its overlay is a layer on top, with the selection
+        // as painted for its mask.
+        e.enter_quick_mask();
+        assert!(e.begin_stroke(brush, Paint::Mask(0), Sample::Current, Default::default()));
+        settle(&mut e, &ctx);
+        e.stroke_to(300.0, 300.0, 1.0);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert!(frame.stack.layers.last().is_some_and(|l| l.subject && l.inverted));
+        assert_eq!(frame.painted_mask.expect("the selection as painted").get(300, 300), 0);
+        e.end_stroke();
+        assert_eq!(e.undo_label(), Some("Quick Mask"));
     }
 
     #[test]
@@ -3728,11 +3799,21 @@ mod live_tests {
         let frame = e.canvas.live.clone().expect("shown live");
         assert_eq!((frame.stack.level, frame.transform), (1, Some(t)));
         assert_eq!(e.undo_label(), None);
-        // With a selection, it's transformed on the CPU as before.
+        // With a selection, what it lifts is shown transformed, and the
+        // selection with it.
         e.cancel_transform();
         e.edit("Marquee", |doc, _| doc.selection = Some(Selection::rectangle(600, 400, (0.0, 0.0), (8.0, 8.0))));
         e.begin_transform(0).unwrap();
-        assert!(e.live_view.is_none());
+        settle(&mut e, &ctx);
+        let t = Affine::translate(10.0, 4.0);
+        e.transform_to(t);
+        e.update(&ctx);
+        assert_eq!(e.canvas.live.clone().expect("shown live").transform, Some(t));
+        assert_eq!(e.selection_moved(), Some(t));
+        e.commit_transform();
+        assert_eq!(e.selection_moved(), None);
+        assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(10, 4), [65535, 0, 0, 65535]);
+        assert!(e.doc.selection.as_ref().unwrap().coverage.get(12, 6) > 0);
     }
 
     #[test]
@@ -3904,13 +3985,45 @@ mod live_tests {
         let ctx = egui::Context::default();
         let mut e = editor();
         let patch = e.active;
-        // With a selection.
-        e.doc.selection = Some(Selection::all(600, 400));
-        assert!(e.begin_move("Move", false, 0));
+        // A copy, as a new layer.
+        assert!(e.begin_move("Move", true, 0));
         e.move_to(10, 5);
         e.update(&ctx);
         assert!(e.canvas.live.is_none());
-        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(10, 5), [65535, 0, 0, 65535]);
+        assert_ne!(e.active, patch);
+        assert_eq!(e.doc.layer(e.active).unwrap().pixels.get(10, 5), [65535, 0, 0, 65535]);
+        e.end_move();
+    }
+
+    #[test]
+    fn what_a_selection_lifts_moves_live_with_its_outline() {
+        let ctx = egui::Context::default();
+        let red = [65535, 0, 0, 65535];
+        let mut e = editor();
+        let patch = e.active;
+        e.doc.selection = Some(Selection::all(600, 400));
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(10, 5);
+        settle(&mut e, &ctx);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.offset, (10, 5));
+        assert_eq!(e.selection_moved(), Some(Affine::translate(10.0, 5.0)));
+        // The layer is shown as what stays and, moving, what's lifted.
+        assert!(frame.stack.layers.iter().any(|l| l.subject));
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0), red);
+        e.end_move();
+        assert_eq!(e.selection_moved(), None);
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(10, 5), red);
+        assert_eq!(e.doc.layer(patch).unwrap().pixels.get(0, 0)[3], 0);
+        assert!(e.doc.selection.as_ref().unwrap().coverage.get(5, 2) == 0);
+        // Not a mask's values, though.
+        e.edit("Mask", |doc, active| {
+            doc.layer_mut(*active).unwrap().mask = Some(omapix_engine::layer::Mask::white(600, 400))
+        });
+        e.target = Target::Mask;
+        assert!(e.begin_move("Move", false, 0));
+        assert!(e.live_view.is_none());
         e.end_move();
     }
 
@@ -4034,6 +4147,24 @@ mod bench {
         clipped.layers[2].clipped = true;
         time("live stack, Curves clipped to a layer above", &mut || {
             std::hint::black_box(live::build(&clipped, &clipped.layers, patch, true, 0, (1000, 1000, 2560, 1440)));
+        });
+        // What a selection of half the image lifts, moved.
+        let half = Selection::rectangle(doc.width, doc.height, (0.0, 0.0), (3000.0, 4000.0));
+        let mut split = None;
+        time("lift half a 24 MP layer (selection move)", &mut || {
+            let lift = Lifted::pixels(base, &half.coverage, false);
+            let (stays, lifted) = lift.parts();
+            split = live::lifted(&doc, patch, stays.clone(), lifted.clone());
+        });
+        let split = split.unwrap();
+        time("live stack, moving what it lifts", &mut || {
+            std::hint::black_box(live::build(&split, &split.layers, live::LIFTED, true, 0, (1000, 1000, 2560, 1440)));
+        });
+        let mut quick = doc.clone();
+        quick.selection = Some(half);
+        quick.layers.push(live::quick_mask_layer(&quick, [65535, 0, 0, 65535], 0.5));
+        time("live stack, a Quick Mask stroke", &mut || {
+            std::hint::black_box(live::build(&quick, &quick.layers, live::QUICK_MASK, false, 0, (1000, 1000, 2560, 1440)));
         });
         // Zoomed out to fit: level 2 (1500×1000), whole image on screen.
         let mut reduced = Reduced::default();
