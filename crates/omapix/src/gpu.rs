@@ -95,6 +95,8 @@ struct Pass {
     keep: Vec<usize>,
     /// The subject's pass, and its adjustment's table as last uploaded.
     subject: Option<(wgpu::Texture, Option<Table>)>,
+    /// The pass an edit's settings go to.
+    edited: bool,
 }
 
 /// `Layer` in live.wgsl.
@@ -274,7 +276,15 @@ impl LiveGpu {
             atop: false,
             blend_if: None,
         };
-        let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, None, &[][..], false)];
+        let mut sources = vec![(
+            below,
+            Some(upload_pixels(device, queue, &stack.below)),
+            None,
+            None,
+            None,
+            &[][..],
+            (false, false),
+        )];
         let table_texture = |data: &[[f32; 3]]| {
             let texture = lut_texture(device, LUT_SIZE);
             write_lut(queue, &texture, data, LUT_SIZE);
@@ -295,6 +305,7 @@ impl LiveGpu {
                 Source::Adjustment(table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
                 Source::Group(Before::Kept(slot)) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 4),
                 Source::Isolated(slot) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 5),
+                Source::Masked => (None, None, None, nothing, [0.0; 4], 6),
             };
             if let (true, Source::Pixels(plane), Some(view)) = (layer.subject, &layer.source, &pixels) {
                 painting.0 = Some((view.texture().clone(), (plane.x0, plane.y0, plane.w, plane.h), stack.subject_pixels.clone()));
@@ -320,13 +331,13 @@ impl LiveGpu {
                 atop: layer.atop,
                 blend_if: layer.blend_if,
             };
-            sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], layer.subject));
+            sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], (layer.subject, layer.edited)));
         }
 
         let passes = sources
             .into_iter()
             .enumerate()
-            .map(|(i, (params, pixels, mask, lut, before, keep, subject))| {
+            .map(|(i, (params, pixels, mask, lut, before, keep, (subject, edited)))| {
                 let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("live layer"),
                     contents: &params.bytes([0, 0], None),
@@ -356,6 +367,7 @@ impl LiveGpu {
                     params,
                     keep: keep.to_vec(),
                     subject: subject.then(|| (lut.unwrap_or_else(|| table_texture(&[])), None)),
+                    edited,
                 }
             })
             .collect::<Vec<_>>();
@@ -429,23 +441,24 @@ impl CallbackTrait for LiveDraw {
         for (i, pass) in uploaded.passes.iter_mut().enumerate() {
             let mut params = pass.params;
             let (mut moved, mut through) = ([0, 0], None);
-            if let Some((lut, uploaded_lut)) = &mut pass.subject {
+            if pass.subject.is_some() {
                 (moved, through) = (offset, inverse);
-                if let Some(Settings {
+            }
+            if pass.edited
+                && let Some(Settings {
                     opacity,
                     mode,
                     lut: table,
                     blend_if,
                 }) = &self.frame.settings
+            {
+                (params.opacity, params.mode, params.blend_if) = (*opacity, *mode as u32, *blend_if);
+                // An adjustment's new table, when it's changed.
+                if let (Some(table), Some((lut, uploaded_lut))) = (table, &mut pass.subject)
+                    && !uploaded_lut.as_ref().is_some_and(|u| Arc::ptr_eq(u, table))
                 {
-                    (params.opacity, params.mode, params.blend_if) = (*opacity, *mode as u32, *blend_if);
-                    // An adjustment's new table, when it's changed.
-                    if let Some(table) = table
-                        && !uploaded_lut.as_ref().is_some_and(|u| Arc::ptr_eq(u, table))
-                    {
-                        write_lut(queue, lut, table, LUT_SIZE);
-                        *uploaded_lut = Some(Arc::clone(table));
-                    }
+                    write_lut(queue, lut, table, LUT_SIZE);
+                    *uploaded_lut = Some(Arc::clone(table));
                 }
             }
             queue.write_buffer(&pass.uniform, 0, &params.bytes(moved, through));
@@ -994,6 +1007,138 @@ mod tests {
         clip(&mut doc, 1);
         clip(&mut doc, 2);
         check(&doc, "clipped itself");
+        // A group clipped to the patch, Pass Through or not, with the patch
+        // moving or inside it.
+        for mode in [BlendMode::PassThrough, BlendMode::Screen] {
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[2].id, doc.layers[3].id];
+            let group = doc.group_layers(&ids).unwrap();
+            let g = doc.layer_mut(group).unwrap();
+            (g.clipped, g.blend, g.opacity) = (true, mode, 0.7);
+            check(&doc, &format!("a clipped group, {mode:?}"));
+        }
+        let mut doc = document(BlendMode::Multiply, true);
+        let base = doc.layers[0].id;
+        let ids = [doc.layers[1].id, doc.layers[2].id];
+        let group = doc.group_layers(&ids).unwrap();
+        doc.layer_mut(group).unwrap().clipped = true;
+        doc.layer_mut(base).unwrap().opacity = 0.8;
+        check(&doc, "inside a clipped group");
+        // A clipping mask inside one.
+        let mut doc = document(BlendMode::Overlay, true);
+        doc.layers[2].clipped = true;
+        let ids = [doc.layers[1].id, doc.layers[2].id];
+        let group = doc.group_layers(&ids).unwrap();
+        let g = doc.layer_mut(group).unwrap();
+        (g.clipped, g.opacity) = (true, 0.6);
+        doc.layers[0].opacity = 0.9;
+        check(&doc, "a clipping mask in a clipped group");
+        // Layers clipped to the Curves, which has a mask, with the patch
+        // moving below them.
+        let mut doc = document(BlendMode::SoftLight, true);
+        for _ in 0..2 {
+            let mut layer = doc.layers[2].clone();
+            (layer.id, layer.clipped, layer.opacity) = (doc.next_layer_id(), true, 0.5);
+            doc.layers.push(layer);
+        }
+        check(&doc, "clipped to an adjustment");
+        // Clipped to a group with a mask, Pass Through or not, with the patch
+        // moving below it and inside it.
+        for mode in [BlendMode::PassThrough, BlendMode::Multiply] {
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[2].id];
+            let group = doc.group_layers(&ids).unwrap();
+            doc.layers[4].clipped = true;
+            doc.layer_mut(group).unwrap().blend = mode;
+            fade(&mut doc, group, 0.7);
+            check(&doc, &format!("clipped to a group, {mode:?}"));
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[1].id, doc.layers[2].id];
+            let group = doc.group_layers(&ids).unwrap();
+            doc.layers[4].clipped = true;
+            doc.layer_mut(group).unwrap().blend = mode;
+            fade(&mut doc, group, 0.7);
+            check(&doc, &format!("inside a group clipped to, {mode:?}"));
+        }
+
+        // The base's own opacity and mode, edited.
+        let mut doc = document(BlendMode::Normal, true);
+        clip(&mut doc, 2);
+        let (w, h) = (doc.width, doc.height);
+        let stack = Arc::new(live::build(&doc, &doc.layers, doc.layers[1].id, false, 0, (0, 0, w, h)).unwrap());
+        (doc.layers[1].opacity, doc.layers[1].blend) = (0.5, BlendMode::Multiply);
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack,
+                painted: None,
+                painted_mask: None,
+                offset: (0, 0),
+                transform: None,
+                settings: Some(Settings {
+                    opacity: 0.5,
+                    mode: BlendMode::Multiply,
+                    lut: None,
+                    blend_if: None,
+                }),
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(&device, &queue, draw);
+        let cpu = composite::composite(&doc.layers, w, h);
+        let worst = cpu
+            .pixels()
+            .iter()
+            .zip(&gpu)
+            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+            .fold(0.0, f32::max);
+        assert!(worst < 4e-3, "a base, edited: off by {worst}");
+
+        // A clipped group's settings, and those of a group something's
+        // clipped to, edited.
+        for clipped_to in [false, true] {
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[2].id];
+            let group = doc.group_layers(&ids).unwrap();
+            if clipped_to {
+                doc.layers[4].clipped = true;
+                fade(&mut doc, group, 1.0);
+            } else {
+                doc.layer_mut(group).unwrap().clipped = true;
+            }
+            let (w, h) = (doc.width, doc.height);
+            let stack = Arc::new(live::build(&doc, &doc.layers, group, false, 0, (0, 0, w, h)).unwrap());
+            let g = doc.layer_mut(group).unwrap();
+            (g.opacity, g.blend) = (0.55, BlendMode::Screen);
+            let draw = LiveDraw {
+                frame: LiveFrame {
+                    stack,
+                    painted: None,
+                    painted_mask: None,
+                    offset: (0, 0),
+                    transform: None,
+                    settings: Some(Settings {
+                        opacity: 0.55,
+                        mode: BlendMode::Screen,
+                        lut: None,
+                        blend_if: None,
+                    }),
+                },
+                display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            let gpu = composite_on_gpu(&device, &queue, draw);
+            let cpu = composite::composite(&doc.layers, w, h);
+            let worst = cpu
+                .pixels()
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+                .fold(0.0, f32::max);
+            assert!(worst < 4e-3, "a group, clipped to: {clipped_to}, edited: off by {worst}");
+        }
 
         // The clipped Curves, edited.
         let mut doc = document(BlendMode::Normal, true);
@@ -1082,40 +1227,44 @@ mod tests {
     #[ignore]
     fn live_painting_matches_the_cpu() {
         let (device, queue) = device();
-        let mut doc = document(BlendMode::Overlay, true);
-        let (w, h) = (doc.width, doc.height);
-        let stack = live::build(&doc, &doc.layers, doc.layers[1].id, false, 0, (0, 0, w, h)).unwrap();
-        // Painted after the stack was made.
-        for (x, y) in (12..30).flat_map(|x| (5..20).map(move |y| (x, y))) {
-            doc.layers[1].pixels.tile_mut(0, 0)[(y * TILE + x) as usize] = [1000, 50000, 9000, 40000];
+        // Alone, then with the layer above clipped to it.
+        for clipped in [false, true] {
+            let mut doc = document(BlendMode::Overlay, true);
+            doc.layers[2].clipped = clipped;
+            let (w, h) = (doc.width, doc.height);
+            let stack = live::build(&doc, &doc.layers, doc.layers[1].id, false, 0, (0, 0, w, h)).unwrap();
+            // Painted after the stack was made.
+            for (x, y) in (12..30).flat_map(|x| (5..20).map(move |y| (x, y))) {
+                doc.layers[1].pixels.tile_mut(0, 0)[(y * TILE + x) as usize] = [1000, 50000, 9000, 40000];
+            }
+            // And its mask.
+            let mask = &mut doc.layers[1].mask.as_mut().unwrap().pixels;
+            for (x, y) in (20..50).flat_map(|x| (10..35).map(move |y| (x, y))) {
+                mask.tile_mut(0, 0)[(y * TILE + x) as usize] = 9000;
+            }
+            let draw = LiveDraw {
+                frame: LiveFrame {
+                    stack: Arc::new(stack),
+                    painted: Some(doc.layers[1].pixels.clone()),
+                    painted_mask: Some(doc.layers[1].mask.as_ref().unwrap().pixels.clone()),
+                    offset: (0, 0),
+                    transform: None,
+                    settings: None,
+                },
+                display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            let gpu = composite_on_gpu(&device, &queue, draw);
+            let cpu = composite::composite(&doc.layers, w, h);
+            let worst = cpu
+                .pixels()
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+                .fold(0.0, f32::max);
+            assert!(worst < 4e-3, "clipped: {clipped}, off by {worst}");
         }
-        // And its mask.
-        let mask = &mut doc.layers[1].mask.as_mut().unwrap().pixels;
-        for (x, y) in (20..50).flat_map(|x| (10..35).map(move |y| (x, y))) {
-            mask.tile_mut(0, 0)[(y * TILE + x) as usize] = 9000;
-        }
-        let draw = LiveDraw {
-            frame: LiveFrame {
-                stack: Arc::new(stack),
-                painted: Some(doc.layers[1].pixels.clone()),
-                painted_mask: Some(doc.layers[1].mask.as_ref().unwrap().pixels.clone()),
-                offset: (0, 0),
-                transform: None,
-                settings: None,
-            },
-            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
-            origin: [0.0; 2],
-            scale: 1.0,
-        };
-        let gpu = composite_on_gpu(&device, &queue, draw);
-        let cpu = composite::composite(&doc.layers, w, h);
-        let worst = cpu
-            .pixels()
-            .iter()
-            .zip(&gpu)
-            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
-            .fold(0.0, f32::max);
-        assert!(worst < 4e-3, "off by {worst}");
     }
 
     #[test]

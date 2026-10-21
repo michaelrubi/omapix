@@ -76,6 +76,9 @@ pub enum Source {
     /// them, kept in this slot, with the group's mode, opacity and mask.
     /// Or of a clipping mask, with its base's mode and opacity.
     Isolated(usize),
+    /// The end of a group things are clipped to: what its layers made is
+    /// cut by its mask, for them to blend onto.
+    Masked,
 }
 
 /// What was below a group's layers.
@@ -94,6 +97,9 @@ pub struct LiveLayer {
     pub opacity: f32,
     /// The layer being moved or edited.
     pub subject: bool,
+    /// Where an edit's settings go: the subject, or for a clipping mask's
+    /// base, the end where it's blended with them.
+    pub edited: bool,
     /// The slots to keep what's below this layer in, for the ends of the
     /// groups that start with it.
     pub keep: Vec<usize>,
@@ -180,6 +186,8 @@ enum End {
     Isolated(usize),
     Contents(usize),
     Clip(usize),
+    Fade(usize),
+    Masked,
 }
 
 /// The slot of a group that starts onto nothing: one never kept into.
@@ -191,14 +199,16 @@ const NOTHING: usize = usize::MAX;
 fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
     let index = doc.index_of(id)?;
     let subject = &doc.layers[index];
-    // Clipping masks are of plain pixel layers, with no groups in them.
+    // Clipping masks are of pixel layers or groups (and groups can be
+    // clipped to them, as layers composited on their own), or of
+    // adjustment layers (with no groups clipped to them).
     let base_of = |l: &Layer| doc.clip_base(l.id).and_then(|b| doc.layer(b));
     let clips = |l: &Layer| {
         let pixels = |l: &Layer| !l.is_group && l.adjustment.is_none();
         if l.clipped {
-            !l.is_group && base_of(l).is_some_and(pixels)
+            base_of(l).is_some_and(|b| pixels(b) || b.is_group || b.adjustment.is_some() && !l.is_group)
         } else {
-            !doc.is_clip_base(l.id) || pixels(l)
+            true
         }
     };
     let plain = clips;
@@ -211,9 +221,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
     // shows unclipped, but would clip to what's below the group.
     let stray = |l: &Layer| l.clipped && l.parent.is_some() && doc.clip_base(l.id).is_none();
     let hidden_group = subject.is_group && !subject.visible;
-    // A base's own opacity and mode are blended after what's clipped to it.
-    let edited_base = !moving && doc.is_clip_base(subject.id);
-    if !kind || !plain(subject) || !groups_shown(subject) || hidden_group || edited_base {
+    if !kind || !plain(subject) || !groups_shown(subject) || hidden_group {
         return None;
     }
     if (subject.parent.is_some() || subject.is_group) && doc.layers[..index].iter().any(stray) {
@@ -230,12 +238,21 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
     };
     // A clipped subject's stack starts at its base, and one in groups
     // composited on their own at the first layer of the outermost.
+    let start_of = |l: &Layer| Some(doc.span(doc.index_of(l.id)?).start);
     let from = match base_of(subject) {
-        Some(base) if subject.clipped => doc.index_of(base.id)?,
+        Some(base) if subject.clipped => start_of(base)?,
         _ => index,
     };
+    // A clipped group's starts at its base; a group things are clipped to
+    // is composited on its own.
     let groups = std::iter::successors(subject.parent, |&g| doc.layer(g)?.parent).filter_map(|g| doc.layer(g));
-    let isolated = groups.filter(|g| !through(g)).filter_map(|g| Some(doc.span(doc.index_of(g.id)?).start)).min();
+    let isolated = groups
+        .filter_map(|g| match base_of(g) {
+            Some(base) if g.clipped => start_of(base),
+            _ if !through(g) || doc.is_clip_base(g.id) => start_of(g),
+            _ => None,
+        })
+        .min();
     let from = match isolated {
         Some(_) if subject.is_group => return None,
         Some(start) => start.min(from),
@@ -245,38 +262,75 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
     // The groups above the subject that fade: where each starts, and the
     // slot what's below it is kept in.
     let mut kept: Vec<(usize, usize)> = Vec::new();
-    // The clipping mask being blended: its base, its last layer, and the
-    // slot what was below its base is kept in.
-    let mut clip: Option<(usize, usize, usize)> = None;
+    // The clipping masks being blended, innermost last: each one's base,
+    // its last layer, and the slot what was below its base is kept in
+    // (`None` for an adjustment layer's, which is given one at its end).
+    let mut clips: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    // A slot for a group or clipping mask from place `start`: one no group
+    // inside it uses, nor a clipping mask round it.
+    let free = |kept: &[(usize, usize)], clips: &[(usize, usize, Option<usize>)], start: usize| {
+        let inside = kept.iter().filter(|(s, _)| *s >= start).map(|(_, slot)| slot + 1);
+        inside.chain(clips.iter().filter_map(|c| c.2).map(|slot| slot + 1)).max().unwrap_or(0)
+    };
+    // An adjustment layer's clipping mask: the layers clipped to it blend
+    // onto what's below as usual, then are faded back through its mask
+    // to how they were after it.
+    let fade = |out: &mut Vec<Step>, kept: &mut Vec<(usize, usize)>, clips: &[(usize, usize, Option<usize>)], base: usize| {
+        let Some(first) = out.iter().position(|s| s.index > base) else {
+            return;
+        };
+        let slot = free(kept, clips, base + 1);
+        kept.push((base + 1, slot));
+        out[first].keep.push(slot);
+        out.push(Step {
+            end: Some(End::Fade(slot)),
+            ..layer(base)
+        });
+    };
+    // Hidden, or in a clipping mask whose base is.
+    let clipped_away = |l: &Layer| std::iter::successors(Some(l), |a| a.parent.and_then(|g| doc.layer(g))).any(|a| a.clipped && !base_of(a).is_some_and(shown));
     for (i, l) in doc.layers.iter().enumerate().skip(from) {
-        if let Some((base, last, slot)) = clip
+        while let Some(&(base, last, slot)) = clips.last()
             && i > last
         {
-            out.push(Step {
-                end: Some(End::Clip(slot)),
-                ..layer(base)
-            });
-            clip = None;
+            clips.pop();
+            match slot {
+                Some(slot) => out.push(Step {
+                    end: Some(End::Clip(slot)),
+                    ..layer(base)
+                }),
+                None => fade(&mut out, &mut kept, &clips, base),
+            }
         }
         if !plain(l) {
             return None;
         }
-        if !shown(l) || l.clipped && !base_of(l).is_some_and(shown) {
+        // A group being edited: its layers, composited, stand in for it.
+        if subject.is_group && (doc.span(index).start..index).contains(&i) {
             continue;
         }
-        if l.clipped {
-            out.push(Step { atop: true, ..layer(i) });
+        if !shown(l) || clipped_away(l) {
+            continue;
+        }
+        if l.clipped && !l.is_group {
+            let atop = base_of(l).is_some_and(|b| b.adjustment.is_none());
+            out.push(Step { atop, ..layer(i) });
             continue;
         }
         if !l.is_group && doc.is_clip_base(l.id) {
-            // The layers clipped to it come straight after it.
+            // The layers clipped to it are the siblings straight after it.
             let last = (i + 1..doc.layers.len())
-                .take_while(|&j| doc.layers[j].clipped && doc.layers[j].parent == l.parent)
+                .filter(|&j| doc.layers[j].parent == l.parent)
+                .take_while(|&j| doc.layers[j].clipped)
                 .last()?;
-            let inside = kept.iter().filter(|(s, _)| *s >= i);
-            let slot = inside.map(|(_, slot)| slot + 1).max().unwrap_or(0);
+            if l.adjustment.is_some() {
+                clips.push((i, last, None));
+                out.push(layer(i));
+                continue;
+            }
+            let slot = free(&kept, &clips, i);
             kept.push((i, slot));
-            clip = Some((i, last, slot));
+            clips.push((i, last, Some(slot)));
             out.push(Step {
                 keep: vec![slot],
                 fresh: true,
@@ -290,11 +344,35 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
             continue;
         }
         let start = doc.span(i).start;
-        if !through(l) {
-            if i == index {
-                // The subject: its layers, composited, stand in for it.
+        let base = doc.is_clip_base(l.id);
+        if !through(l) || l.clipped || base {
+            if i == index && base {
+                // Drawn plainly onto nothing, cut by its mask, for what's
+                // clipped to it; its own settings go to the end.
+                let last = (i + 1..doc.layers.len())
+                    .filter(|&j| doc.layers[j].parent == l.parent)
+                    .take_while(|&j| doc.layers[j].clipped)
+                    .last()?;
+                let slot = free(&kept, &clips, i);
+                kept.push((i, slot));
+                clips.push((i, last, Some(slot)));
                 out.push(Step {
                     end: Some(End::Contents(start)),
+                    keep: vec![slot],
+                    fresh: true,
+                    base: true,
+                    ..layer(i)
+                });
+                out.push(Step {
+                    end: Some(End::Masked),
+                    ..layer(i)
+                });
+            } else if i == index {
+                // The subject: its layers, composited, stand in for it,
+                // clipped if it is.
+                out.push(Step {
+                    end: Some(End::Contents(start)),
+                    atop: l.clipped,
                     ..layer(i)
                 });
             } else if start < from {
@@ -320,15 +398,33 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
                 }
                 out[first].keep.clear();
                 kept.retain(|&(s, _)| out.iter().position(|step| step.index >= s) != Some(first));
-                let inside = kept.iter().filter(|(s, _)| *s >= start);
-                let slot = inside.map(|(_, slot)| slot + 1).max().unwrap_or(0);
+                let slot = free(&kept, &clips, start);
                 kept.push((start, slot));
                 out[first].keep.push(slot);
                 out[first].fresh = true;
+                if base {
+                    // What's clipped to it blends onto its layers, cut by
+                    // its mask, before that's blended like the group.
+                    let last = (i + 1..doc.layers.len())
+                        .filter(|&j| doc.layers[j].parent == l.parent)
+                        .take_while(|&j| doc.layers[j].clipped)
+                        .last()?;
+                    clips.push((i, last, Some(slot)));
+                    out.push(Step {
+                        end: Some(End::Masked),
+                        ..layer(i)
+                    });
+                    continue;
+                }
+                // Clipped, it's blended only where its base is.
                 out.push(Step {
                     end: Some(End::Isolated(slot)),
+                    atop: l.clipped,
                     ..layer(i)
                 });
+            } else if base {
+                // Nothing in it shows, so nor does what's clipped to it.
+                return None;
             }
             continue;
         }
@@ -345,9 +441,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
                 });
             }
         } else if fades && let Some(first) = out.iter().position(|s| s.index >= start) {
-            // A slot no group inside this one is using.
-            let inside = kept.iter().filter(|(s, _)| *s >= start);
-            let slot = inside.map(|(_, slot)| slot + 1).max().unwrap_or(0);
+            let slot = free(&kept, &clips, start);
             kept.push((start, slot));
             out[first].keep.push(slot);
             out.push(Step {
@@ -356,11 +450,14 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
             });
         }
     }
-    if let Some((base, _, slot)) = clip {
-        out.push(Step {
-            end: Some(End::Clip(slot)),
-            ..layer(base)
-        });
+    while let Some((base, _, slot)) = clips.pop() {
+        match slot {
+            Some(slot) => out.push(Step {
+                end: Some(End::Clip(slot)),
+                ..layer(base)
+            }),
+            None => fade(&mut out, &mut kept, &clips, base),
+        }
     }
     // The subject itself may be hidden; there's still nothing to fall back
     // for.
@@ -442,8 +539,11 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
         .into_iter()
         .map(|step| {
             let layer = &layers[step.index];
-            let clip_end = matches!(step.end, Some(End::Clip(_)));
+            let clip_end = matches!(step.end, Some(End::Clip(_) | End::Fade(_)));
+            let fade = matches!(step.end, Some(End::Fade(_)));
+            let masked = matches!(step.end, Some(End::Masked));
             let subject = step.index == index && !clip_end;
+            let edited = step.index == index && if step.base { false } else { !fade && !masked };
             // A moving layer is uploaded whole, as any of it may be dragged
             // into view; the rest only where they're seen.
             let area = if subject && moving { whole } else { region };
@@ -453,17 +553,27 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 (Some(End::Isolated(s)), _) => Source::Isolated(slot(s)),
                 (Some(End::Contents(start)), _) => Source::Pixels(contents(start, step.index)),
                 (Some(End::Clip(s)), _) => Source::Isolated(slot(s)),
+                (Some(End::Fade(s)), _) => Source::Group(Before::Kept(slot(s))),
+                (Some(End::Masked), _) => Source::Masked,
                 (None, Some(a)) => Source::Adjustment(a.prepare().lut(LUT_SIZE)),
                 (None, None) => Source::Pixels(Plane::crop(&layer.pixels, area)),
             };
-            let mask = layer.mask.as_ref().filter(|m| m.enabled && !clip_end);
+            // A group drawn as a base is cut by its mask after.
+            let plain_group = step.base && matches!(step.end, Some(End::Contents(_)));
+            let mask = layer.mask.as_ref().filter(|m| m.enabled && (!clip_end || fade) && !plain_group);
             LiveLayer {
                 source,
                 mask: mask.map(|m| Plane::crop(&m.pixels, area)),
-                mode: if step.base { BlendMode::Normal } else { layer.blend },
-                blend_if: layer.blend_if.filter(|b| !b.is_neutral() && !step.base),
-                opacity: if step.base { 1.0 } else { layer.opacity },
+                // A group that passes through blends as one layer anyway.
+                mode: if step.base || layer.blend == BlendMode::PassThrough && clip_end {
+                    BlendMode::Normal
+                } else {
+                    layer.blend
+                },
+                blend_if: layer.blend_if.filter(|b| !b.is_neutral() && !step.base && !fade && !masked),
+                opacity: if step.base || fade || masked { 1.0 } else { layer.opacity },
                 subject,
+                edited,
                 keep: step.keep,
                 fresh: step.fresh,
                 atop: step.atop,
@@ -518,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn clipping_blend_if_groups_and_adjustments_move_on_the_cpu() {
+    fn which_clipping_masks_and_groups_show_live() {
         let mut doc = doc();
         let (background, patch, curves) = (doc.layers[0].id, doc.layers[1].id, doc.layers[3].id);
         assert!(!can_show(&doc, curves, true), "an adjustment layer");
@@ -528,7 +638,9 @@ mod tests {
         doc.layers[2].clipped = true;
         assert!(can_show(&doc, patch, true), "clipped layer above");
         assert!(can_show(&doc, doc.layers[2].id, true), "moving the clipped layer");
-        assert!(!can_show(&doc, patch, false), "but the base's own settings");
+        let live = build(&doc, &doc.layers, patch, false, 0, (0, 0, 300, 200)).unwrap();
+        let edited: Vec<_> = live.layers.iter().map(|l| (l.subject, l.edited)).collect();
+        assert_eq!(edited[..3], [(true, false), (false, false), (false, true)], "the base's settings go to its end");
         doc.layers[3].clipped = true;
         assert!(can_show(&doc, curves, false));
         doc.layers[2].clipped = false;
@@ -537,11 +649,26 @@ mod tests {
         let mut more = Layer::adjustment(id, Adjustment::Curves(Curves::default()), 300, 200);
         more.clipped = true;
         doc.layers.push(more);
-        assert!(!can_show(&doc, id, false), "clipped to an adjustment");
+        // Clipped to an adjustment, it blends as usual, then a fade through
+        // the adjustment's mask, from what was kept after it.
+        let live = build(&doc, &doc.layers, id, false, 0, (0, 0, 300, 200)).expect("clipped to an adjustment");
+        assert_eq!(live.layers.len(), 3);
+        assert_eq!(live.layers[1].keep, [0]);
+        assert!(!live.layers[1].atop && live.layers[1].subject);
+        assert!(matches!(live.layers[2].source, Source::Group(Before::Kept(0))) && live.layers[2].mask.is_some());
+        assert!(can_show(&doc, curves, false), "and the adjustment edited");
         doc.layers.pop();
         let inner = doc.group_layer(1);
         doc.layer_mut(inner).unwrap().clipped = true;
-        assert!(!can_show(&doc, background, true), "a clipped group");
+        assert!(can_show(&doc, background, true), "a clipped group");
+        assert!(can_show(&doc, patch, true), "a layer in one");
+        assert!(can_show(&doc, inner, false), "and one being edited");
+        doc.layer_mut(inner).unwrap().clipped = false;
+        doc.layers[3].clipped = true;
+        assert!(can_show(&doc, doc.layers[3].id, false), "clipped to a group");
+        assert!(can_show(&doc, patch, true), "in a group something's clipped to");
+        assert!(can_show(&doc, inner, false), "and the group's own settings");
+        doc.layers[3].clipped = false;
         doc.ungroup(doc.index_of(inner).unwrap());
         // Groups above are fine, Pass Through or composited on their own.
         let group = doc.group_layer(2);
