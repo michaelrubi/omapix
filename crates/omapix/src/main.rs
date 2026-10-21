@@ -2,6 +2,7 @@ mod app;
 mod auto_retouch;
 mod blending_options;
 mod body_liquify;
+mod bridge;
 mod brushes;
 mod canvas;
 mod channels_panel;
@@ -61,6 +62,13 @@ fn main() -> eframe::Result {
         args.remove(0);
     }
     let paths: Vec<PathBuf> = args.into_iter().map(PathBuf::from).collect();
+    // With an Omapix already running, they open as tabs in its window.
+    if !paths.is_empty()
+        && let Some(socket) = bridge::socket()
+        && bridge::hand_off(&socket, &paths, round_trip)
+    {
+        return Ok(());
+    }
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
