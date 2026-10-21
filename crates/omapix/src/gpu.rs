@@ -103,6 +103,8 @@ struct Params {
     mask_fill: f32,
     /// The first in an isolated group, blended onto nothing.
     fresh: bool,
+    /// Clipped: source-atop.
+    atop: bool,
 }
 
 impl Params {
@@ -118,7 +120,8 @@ impl Params {
         words.extend([self.opacity, self.mask_fill].map(f32::to_bits));
         words.extend([u32::from(inverse.is_some()), self.fresh.into()]);
         let [a, b, c, d, e, f] = inverse.unwrap_or_default();
-        words.extend([a, b, c, d, e, f, 0.0, 0.0].map(|v| (v as f32).to_bits()));
+        words.extend([a, b, c, d, e, f].map(|v| (v as f32).to_bits()));
+        words.extend([self.atop.into(), 0]);
         bytemuck::cast_slice(&words).to_vec()
     }
 }
@@ -257,6 +260,7 @@ impl LiveGpu {
             opacity: 1.0,
             mask_fill: 1.0,
             fresh: false,
+            atop: false,
         };
         let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, None, &[][..], false)];
         let table_texture = |data: &[[f32; 3]]| {
@@ -294,6 +298,7 @@ impl LiveGpu {
                 opacity: layer.opacity,
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
                 fresh: layer.fresh,
+                atop: layer.atop,
             };
             sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], layer.subject));
         }
@@ -845,6 +850,76 @@ mod tests {
             .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
             .fold(0.0, f32::max);
         assert!(worst < 4e-3, "its own opacity and mode: off by {worst}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_clipping_masks_match_the_cpu() {
+        let (device, queue) = device();
+        let clip = |doc: &mut Document, i: usize| doc.layers[i].clipped = true;
+        // The layer above clipped to the patch as it moves, in every mode.
+        for &mode in BlendMode::MENU.iter().flat_map(|g| g.iter()) {
+            let mut doc = document(mode, false);
+            clip(&mut doc, 2);
+            let worst = worst_difference(&device, &queue, &doc, (5, -3), None);
+            assert!(worst < 2e-4, "{mode:?}: off by {worst}");
+        }
+        let check = |doc: &Document, what: &str| {
+            let worst = worst_difference(&device, &queue, doc, (-7, 4), None);
+            assert!(worst < 4e-3, "{what}: off by {worst}");
+        };
+        // The Curves clipped to the layer above, then that in a group of its
+        // own.
+        let mut doc = document(BlendMode::Overlay, true);
+        doc.layers[1].opacity = 0.8;
+        clip(&mut doc, 3);
+        check(&doc, "above it");
+        let ids = [doc.layers[2].id, doc.layers[3].id];
+        let group = doc.group_layers(&ids).unwrap();
+        doc.layer_mut(group).unwrap().blend = BlendMode::Multiply;
+        check(&doc, "in an isolated group");
+        // The patch clipped to the background, with the layer above too.
+        let mut doc = document(BlendMode::Multiply, true);
+        doc.layers[0].opacity = 0.9;
+        clip(&mut doc, 1);
+        clip(&mut doc, 2);
+        check(&doc, "clipped itself");
+
+        // The clipped Curves, edited.
+        let mut doc = document(BlendMode::Normal, true);
+        clip(&mut doc, 3);
+        let (w, h) = (doc.width, doc.height);
+        let stack = Arc::new(live::build(&doc, &doc.layers, doc.layers[3].id, false, 0, (0, 0, w, h)).unwrap());
+        let layer = &mut doc.layers[3];
+        let mut c = Curves::default();
+        c.master.points.insert(1, (0.5, 0.3));
+        layer.adjustment = Some(Adjustment::Curves(c));
+        layer.opacity = 0.6;
+        let settings = Settings {
+            opacity: 0.6,
+            mode: BlendMode::Normal,
+            lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+        };
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack,
+                offset: (0, 0),
+                transform: None,
+                settings: Some(settings),
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(&device, &queue, draw);
+        let cpu = composite::composite(&doc.layers, w, h);
+        let worst = cpu
+            .pixels()
+            .iter()
+            .zip(&gpu)
+            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+            .fold(0.0, f32::max);
+        assert!(worst < 4e-3, "a clipped Curves, edited: off by {worst}");
     }
 
     #[test]

@@ -34,7 +34,11 @@ struct Layer {
     // Level pixel on the layer shown at level pixel (x, y): (a·x + b·y + c,
     // d·x + e·y + f), as (a, b, c, d) and (e, f).
     inverse_abcd: vec4<f32>,
-    inverse_ef: vec4<f32>,
+    inverse_ef: vec2<f32>,
+    // 1: clipped, so blended only where there's something below, keeping
+    // its alpha (source-atop).
+    atop: u32,
+    pad: u32,
 };
 
 @group(0) @binding(0) var below: texture_2d<f32>;
@@ -343,6 +347,12 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         return dst;
     }
     let cs = src.rgb;
+    if p.atop == 1u {
+        if a_b <= 0.0 {
+            return dst;
+        }
+        return vec4<f32>(cb + (blend(p.mode, cb, cs) - cb) * a_s, a_b);
+    }
     var blended = cs;
     if a_b > 0.0 {
         blended = blend(p.mode, cb, cs);
