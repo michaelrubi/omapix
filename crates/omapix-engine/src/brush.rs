@@ -22,6 +22,7 @@ use rayon::prelude::*;
 
 use crate::Pixel;
 use crate::dynamics::{Dab, Dynamics, Step, grain, mix};
+use crate::texture::{self, Levelled, Pattern};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::tip::Tip;
 use crate::toning::{self, ToneRange};
@@ -132,6 +133,8 @@ pub struct Stroke {
     keep_alpha: bool,
     /// The picture each dab stamps, in place of a round one.
     tip: Option<Arc<Tip>>,
+    /// Texture's pattern, levelled as its settings say.
+    pattern: Option<Levelled>,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     /// The last point, and the pen's pressure there.
@@ -158,6 +161,7 @@ impl Stroke {
             limit: None,
             keep_alpha: false,
             tip: None,
+            pattern: None,
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -181,6 +185,13 @@ impl Stroke {
         self
     }
 
+    /// Work `pattern` into the paint, as the brush's Texture says. Without
+    /// a Texture it's left out.
+    pub fn with_pattern(mut self, pattern: &Pattern) -> Self {
+        self.pattern = self.settings.dynamics.texture.map(|texture| pattern.levelled(&texture));
+        self
+    }
+
     /// Change only colour, keeping each pixel's alpha, as painting on a
     /// layer with Lock Transparent Pixels does. Erasing then does nothing.
     pub fn keeping_alpha(mut self) -> Self {
@@ -199,17 +210,27 @@ impl Stroke {
         out
     }
 
-    /// How much paint a pixel gets where the stroke covers `c` of it. With
-    /// Wet Edges that's half where the stroke is solid and more towards its
-    /// edge, where coverage runs out, so that paint gathers along the edge
-    /// as watercolour does and a stroke crossing itself gets no darker.
+    /// How much paint pixel `i` of tile (col, row) gets where the stroke
+    /// covers `c` of it. With Wet Edges that's half where the stroke is
+    /// solid and more towards its edge, where coverage runs out, so that
+    /// paint gathers along the edge as watercolour does and a stroke
+    /// crossing itself gets no darker. A Texture into the stroke as a whole
+    /// is worked in after that.
     #[inline]
-    fn laid(&self, c: f32) -> f32 {
-        if !self.settings.dynamics.wet_edges {
-            return c;
+    fn laid(&self, c: f32, col: u32, row: u32, i: usize) -> f32 {
+        let c = if self.settings.dynamics.wet_edges {
+            let t = ((c - 0.6) / 0.4).clamp(0.0, 1.0);
+            c * (1.0 - 0.5 * t * t * (3.0 - 2.0 * t))
+        } else {
+            c
+        };
+        match (&self.pattern, self.settings.dynamics.texture) {
+            (Some(pattern), Some(texture)) if !texture.each_tip => {
+                let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
+                texture::combine(texture.mode, c, pattern.at(x, y), texture.depth.clamp(0.0, 1.0))
+            }
+            _ => c,
         }
-        let t = ((c - 0.6) / 0.4).clamp(0.0, 1.0);
-        c * (1.0 - 0.5 * t * t * (3.0 - 2.0 * t))
     }
 
     /// Selection coverage (0–1) of pixel `i` in tile (col, row).
@@ -331,6 +352,8 @@ impl Stroke {
         let hardness = self.settings.hardness.clamp(0.0, 1.0);
         let (sin, cos) = dab.angle.sin_cos();
         let noise = self.settings.dynamics.noise;
+        // Texture Each Tip: the pattern worked into this dab at its depth.
+        let texture = self.settings.dynamics.texture.filter(|t| t.each_tip).zip(self.pattern.as_ref());
         // A mirrored tip is read backwards.
         let (flip_x, flip_y) = (if dab.flip_x { -1.0 } else { 1.0 }, if dab.flip_y { -1.0 } else { 1.0 });
         // A sampled tip: which of its sizes to read, and how many of its
@@ -385,6 +408,12 @@ impl Stroke {
                         let all = if grain(px, py) < shape { 1.0 } else { 0.0 };
                         shape += (all - shape) * 0.7;
                     }
+                    if let Some((t, pattern)) = texture {
+                        shape = texture::combine(t.mode, shape, pattern.at(px, py), dab.depth);
+                        if shape <= 0.0 {
+                            continue;
+                        }
+                    }
                     let c = &mut cov[((py - ty) * TILE + (px - tx)) as usize];
                     *c += (most - *c).max(0.0) * flow * shape;
                     hit = true;
@@ -428,7 +457,7 @@ impl Stroke {
                     let mut out: Vec<Pixel> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
                     let (tx, ty) = (col * TILE, row * TILE);
                     for i in 0..TILE_PIXELS {
-                        let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
+                        let a = self.laid(cov[i], col, row, i) * opacity * self.limit_at(col, row, i);
                         out[i] = if self.paint == Paint::SpotHeal {
                             // Show where the stroke is until it heals on release.
                             self.paint_onto(out[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
@@ -462,7 +491,7 @@ impl Stroke {
                     let cov = self.coverage.get(&(col, row))?;
                     let mut out: Vec<u16> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[u16]>::to_vec);
                     for i in 0..TILE_PIXELS {
-                        let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
+                        let a = self.laid(cov[i], col, row, i) * opacity * self.limit_at(col, row, i);
                         let v = f32::from(out[i]);
                         out[i] = match self.paint {
                             Paint::Tone { range, burn, .. } => (toning::tone_curve(v / MAX, a, range, burn) * MAX).round() as u16,
@@ -567,7 +596,7 @@ impl Stroke {
             let base: Vec<Pixel> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
             let out = dst.tile_mut(col, row);
             for i in 0..TILE_PIXELS {
-                let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
+                let a = self.laid(cov[i], col, row, i) * opacity * self.limit_at(col, row, i);
                 let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
                 if a <= 0.0 || x >= w || y >= h {
                     out[i] = base[i];
@@ -1556,6 +1585,54 @@ mod tests {
             }),
             [false, false, true, false]
         );
+    }
+
+    #[test]
+    fn texture_works_a_pattern_into_each_dab_or_the_whole_stroke() {
+        use crate::texture::{Mode, Pattern, Texture};
+        // Stripes four pixels wide: black, then white.
+        let stripes = Pattern::new("stripes".into(), 8, 1, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]).unwrap();
+        let paint = |texture: Option<Texture>| {
+            let settings = BrushSettings {
+                dynamics: Dynamics {
+                    texture,
+                    ..Dynamics::default()
+                },
+                ..hard(60.0, Dynamics::default())
+            };
+            let mut out = Surface::Pixels(white(300, 200));
+            let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone()).with_pattern(&stripes);
+            for x in [100.0, 200.0] {
+                let tiles = s.add_point(x, 100.0, 1.0);
+                s.apply(&mut out, &tiles);
+            }
+            let Surface::Pixels(out) = out else { unreachable!() };
+            out
+        };
+        let texture = Texture {
+            pattern: stripes.id(),
+            ..Texture::default()
+        };
+        let (plain, whole, each) = (paint(None), paint(Some(texture)), paint(Some(Texture { each_tip: true, ..texture })));
+        // Black paint on white. Without a Texture it's solid; with one, it
+        // all goes where the pattern is white (x = 150, 6 in its 8) and
+        // none where it's black (154, 2 in 8).
+        assert_eq!((plain.get(150, 100)[0], plain.get(154, 100)[0]), (0, 0));
+        for out in [&whole, &each] {
+            assert_eq!((out.get(150, 100)[0], out.get(154, 100)[0]), (0, 65535));
+        }
+        // Half depth lays half the paint on the black stripes.
+        let half = paint(Some(Texture { depth: 0.5, ..texture }));
+        assert!((30000..36000).contains(&half.get(154, 100)[0]), "{:?}", half.get(154, 100));
+        // Height at low depth paints only the pattern's hollows (black),
+        // there 61 % (12 × 5 % into the pattern).
+        let height = paint(Some(Texture {
+            mode: Mode::Height,
+            depth: 0.05,
+            ..texture
+        }));
+        assert_eq!(height.get(150, 100)[0], 65535);
+        assert!((24000..27000).contains(&height.get(154, 100)[0]), "{:?}", height.get(154, 100));
     }
 
     #[test]
