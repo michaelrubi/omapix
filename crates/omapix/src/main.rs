@@ -83,6 +83,14 @@ fn main() -> eframe::Result {
     // Omapix doesn't wake a laptop's discrete GPU and drain the battery.
     if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
         setup.power_preference = PowerPreference::LowPower;
+        // What the GPU has: egui asks for 8192 px textures whatever it is,
+        // so a GPU with less makes no device at all, and one with more
+        // can't show larger live views (as PhotoCraft's 436ca356).
+        setup.device_descriptor = std::sync::Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
+            label: Some("omapix"),
+            required_limits: adapter.limits(),
+            ..Default::default()
+        });
     }
 
     eframe::run_native("omapix", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, paths, round_trip)))))

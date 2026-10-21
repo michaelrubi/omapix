@@ -354,11 +354,25 @@ struct Stack {
     exif: Option<String>,
 }
 
+/// Whether a file of OpenRaster `version` says how each group is isolated
+/// (0.0.6 and later), as PhotoCraft's f61ed26e reads it.
+fn explicit_isolation_since(version: Option<&str>) -> bool {
+    let Some(core) = version.and_then(|v| v.trim().split(['-', '+']).next()) else {
+        return false;
+    };
+    let parts: Vec<Option<u32>> = core.split('.').map(|p| p.parse().ok()).collect();
+    match parts.as_slice() {
+        [Some(major), Some(minor), Some(patch)] => [*major, *minor, *patch] >= [0, 0, 6],
+        _ => false,
+    }
+}
+
 fn parse_stack(xml: &str) -> Result<Stack> {
     let mut reader = quick_xml::Reader::from_str(xml);
     let (mut w, mut h) = (0, 0);
     let mut round_trip = None;
     let mut exif = None;
+    let mut explicit_isolation = false;
     let mut layers = Vec::new();
     let mut channels = Vec::new();
     // The stacks we're inside: `None` for the image's own stack, or the
@@ -389,6 +403,7 @@ fn parse_stack(xml: &str) -> Result<Stack> {
                 h = num("h").unwrap_or(0.0) as u32;
                 round_trip = attrs.get("omapix:round-trip").cloned();
                 exif = attrs.get("omapix:exif").cloned();
+                explicit_isolation = explicit_isolation_since(attrs.get("version").map(String::as_str));
                 continue;
             }
             "stack" if open.is_empty() => {
@@ -418,12 +433,19 @@ fn parse_stack(xml: &str) -> Result<Stack> {
             )
         });
         let blend = attrs.get("composite-op").and_then(|op| BlendMode::from_ora_name(op));
-        // A group that isn't isolated and has no mode of its own passes
-        // through.
-        let isolated = attrs.get("isolation").is_some_and(|v| v == "isolate");
-        let blend = match blend {
-            None | Some(BlendMode::Normal) if is_group && !isolated => BlendMode::PassThrough,
-            _ => blend.unwrap_or_default(),
+        // Before OpenRaster 0.0.6, a group that isn't isolated and has no
+        // mode of its own passes through. Since, only `auto` does, whatever
+        // its mode, and a group without `isolation` is isolated.
+        let isolation = attrs.get("isolation").map(|v| v.trim());
+        let pass_through = if explicit_isolation {
+            isolation == Some("auto")
+        } else {
+            isolation != Some("isolate") && matches!(blend, None | Some(BlendMode::Normal))
+        };
+        let blend = if is_group && pass_through {
+            BlendMode::PassThrough
+        } else {
+            blend.unwrap_or_default()
         };
         layers.push(LayerEntry {
             name: attrs.get("name").cloned().unwrap_or_else(|| if is_group { "Group" } else { "Layer" }.into()),
@@ -736,5 +758,28 @@ mod tests {
                 ("Bottom", false, BlendMode::Normal, None),
             ]
         );
+    }
+
+    #[test]
+    fn groups_without_isolation_are_isolated_since_openraster_0_0_6() {
+        let blends = |version: &str| {
+            let xml = format!(
+                r#"<image {version} w="10" h="10"><stack>
+                    <stack name="Plain"/>
+                    <stack name="Auto" isolation=" auto " composite-op="svg:screen"/>
+                    <stack name="Isolated" isolation="isolate"/>
+                    <stack name="Screen" composite-op="svg:screen"/>
+                </stack></image>"#
+            );
+            parse_stack(&xml).unwrap().layers.iter().map(|e| e.blend).collect::<Vec<_>>()
+        };
+        use BlendMode::{Normal, PassThrough, Screen};
+        for version in [r#"version="0.0.6""#, r#"version=" 0.0.6+krita ""#, r#"version="0.1.0""#] {
+            assert_eq!(blends(version), [Normal, PassThrough, Normal, Screen], "{version}");
+        }
+        // Older, unknown or none: inferred from the group's mode, as before.
+        for version in ["", r#"version="0.0.5""#, r#"version="0.0""#, r#"version="unknown""#] {
+            assert_eq!(blends(version), [PassThrough, Screen, Normal, Screen], "{version}");
+        }
     }
 }
