@@ -95,6 +95,8 @@ struct Pass {
     keep: Vec<usize>,
     /// The subject's pass, and its adjustment's table as last uploaded.
     subject: Option<(wgpu::Texture, Option<Table>)>,
+    /// The pass an edit's settings go to.
+    edited: bool,
 }
 
 /// `Layer` in live.wgsl.
@@ -274,7 +276,15 @@ impl LiveGpu {
             atop: false,
             blend_if: None,
         };
-        let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, None, &[][..], false)];
+        let mut sources = vec![(
+            below,
+            Some(upload_pixels(device, queue, &stack.below)),
+            None,
+            None,
+            None,
+            &[][..],
+            (false, false),
+        )];
         let table_texture = |data: &[[f32; 3]]| {
             let texture = lut_texture(device, LUT_SIZE);
             write_lut(queue, &texture, data, LUT_SIZE);
@@ -321,13 +331,13 @@ impl LiveGpu {
                 atop: layer.atop,
                 blend_if: layer.blend_if,
             };
-            sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], layer.subject));
+            sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], (layer.subject, layer.edited)));
         }
 
         let passes = sources
             .into_iter()
             .enumerate()
-            .map(|(i, (params, pixels, mask, lut, before, keep, subject))| {
+            .map(|(i, (params, pixels, mask, lut, before, keep, (subject, edited)))| {
                 let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("live layer"),
                     contents: &params.bytes([0, 0], None),
@@ -357,6 +367,7 @@ impl LiveGpu {
                     params,
                     keep: keep.to_vec(),
                     subject: subject.then(|| (lut.unwrap_or_else(|| table_texture(&[])), None)),
+                    edited,
                 }
             })
             .collect::<Vec<_>>();
@@ -430,23 +441,24 @@ impl CallbackTrait for LiveDraw {
         for (i, pass) in uploaded.passes.iter_mut().enumerate() {
             let mut params = pass.params;
             let (mut moved, mut through) = ([0, 0], None);
-            if let Some((lut, uploaded_lut)) = &mut pass.subject {
+            if pass.subject.is_some() {
                 (moved, through) = (offset, inverse);
-                if let Some(Settings {
+            }
+            if pass.edited
+                && let Some(Settings {
                     opacity,
                     mode,
                     lut: table,
                     blend_if,
                 }) = &self.frame.settings
+            {
+                (params.opacity, params.mode, params.blend_if) = (*opacity, *mode as u32, *blend_if);
+                // An adjustment's new table, when it's changed.
+                if let (Some(table), Some((lut, uploaded_lut))) = (table, &mut pass.subject)
+                    && !uploaded_lut.as_ref().is_some_and(|u| Arc::ptr_eq(u, table))
                 {
-                    (params.opacity, params.mode, params.blend_if) = (*opacity, *mode as u32, *blend_if);
-                    // An adjustment's new table, when it's changed.
-                    if let Some(table) = table
-                        && !uploaded_lut.as_ref().is_some_and(|u| Arc::ptr_eq(u, table))
-                    {
-                        write_lut(queue, lut, table, LUT_SIZE);
-                        *uploaded_lut = Some(Arc::clone(table));
-                    }
+                    write_lut(queue, lut, table, LUT_SIZE);
+                    *uploaded_lut = Some(Arc::clone(table));
                 }
             }
             queue.write_buffer(&pass.uniform, 0, &params.bytes(moved, through));
@@ -1048,6 +1060,40 @@ mod tests {
             fade(&mut doc, group, 0.7);
             check(&doc, &format!("inside a group clipped to, {mode:?}"));
         }
+
+        // The base's own opacity and mode, edited.
+        let mut doc = document(BlendMode::Normal, true);
+        clip(&mut doc, 2);
+        let (w, h) = (doc.width, doc.height);
+        let stack = Arc::new(live::build(&doc, &doc.layers, doc.layers[1].id, false, 0, (0, 0, w, h)).unwrap());
+        (doc.layers[1].opacity, doc.layers[1].blend) = (0.5, BlendMode::Multiply);
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack,
+                painted: None,
+                painted_mask: None,
+                offset: (0, 0),
+                transform: None,
+                settings: Some(Settings {
+                    opacity: 0.5,
+                    mode: BlendMode::Multiply,
+                    lut: None,
+                    blend_if: None,
+                }),
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(&device, &queue, draw);
+        let cpu = composite::composite(&doc.layers, w, h);
+        let worst = cpu
+            .pixels()
+            .iter()
+            .zip(&gpu)
+            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+            .fold(0.0, f32::max);
+        assert!(worst < 4e-3, "a base, edited: off by {worst}");
 
         // The clipped Curves, edited.
         let mut doc = document(BlendMode::Normal, true);

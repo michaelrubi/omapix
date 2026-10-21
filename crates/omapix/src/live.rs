@@ -97,6 +97,9 @@ pub struct LiveLayer {
     pub opacity: f32,
     /// The layer being moved or edited.
     pub subject: bool,
+    /// Where an edit's settings go: the subject, or for a clipping mask's
+    /// base, the end where it's blended with them.
+    pub edited: bool,
     /// The slots to keep what's below this layer in, for the ends of the
     /// groups that start with it.
     pub keep: Vec<usize>,
@@ -442,14 +445,6 @@ pub fn can_show(doc: &Document, id: u64, moving: bool) -> bool {
     stack(doc, id, moving).is_some()
 }
 
-/// Whether layer `id`'s opacity, blend mode and adjustment can be edited
-/// live: not a clipping mask's pixel base's, which are blended after what's
-/// clipped to it (painting it can be shown, though).
-pub fn can_edit(doc: &Document, id: u64) -> bool {
-    let base = doc.is_clip_base(id) && doc.layer(id).is_some_and(|l| l.adjustment.is_none());
-    !base && can_show(doc, id, false)
-}
-
 /// Whether `after` differs from `before` only in layer `id`'s opacity,
 /// blend mode and adjustment settings: what a live edit can show. A group
 /// can't start or stop passing through.
@@ -523,6 +518,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
             let fade = matches!(step.end, Some(End::Fade(_)));
             let masked = matches!(step.end, Some(End::Masked));
             let subject = step.index == index && !clip_end;
+            let edited = step.index == index && if step.base { false } else { !fade && !masked };
             // A moving layer is uploaded whole, as any of it may be dragged
             // into view; the rest only where they're seen.
             let area = if subject && moving { whole } else { region };
@@ -550,6 +546,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 blend_if: layer.blend_if.filter(|b| !b.is_neutral() && !step.base && !fade && !masked),
                 opacity: if step.base || fade || masked { 1.0 } else { layer.opacity },
                 subject,
+                edited,
                 keep: step.keep,
                 fresh: step.fresh,
                 atop: step.atop,
@@ -614,8 +611,9 @@ mod tests {
         doc.layers[2].clipped = true;
         assert!(can_show(&doc, patch, true), "clipped layer above");
         assert!(can_show(&doc, doc.layers[2].id, true), "moving the clipped layer");
-        assert!(!can_edit(&doc, patch), "but the base's own settings");
-        assert!(can_show(&doc, patch, false), "though painting it is");
+        let live = build(&doc, &doc.layers, patch, false, 0, (0, 0, 300, 200)).unwrap();
+        let edited: Vec<_> = live.layers.iter().map(|l| (l.subject, l.edited)).collect();
+        assert_eq!(edited[..3], [(true, false), (false, false), (false, true)], "the base's settings go to its end");
         doc.layers[3].clipped = true;
         assert!(can_show(&doc, curves, false));
         doc.layers[2].clipped = false;
