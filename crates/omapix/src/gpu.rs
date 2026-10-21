@@ -108,7 +108,8 @@ struct Params {
     pixel_fill: [f32; 4],
     mode: u32,
     kind: u32,
-    has_mask: bool,
+    /// 0: none, 1: a mask, 2: one that hides where it's high.
+    has_mask: u32,
     opacity: f32,
     mask_fill: f32,
     /// The first in an isolated group, blended onto nothing.
@@ -127,7 +128,7 @@ impl Params {
             words.extend(v.map(|x| x as u32));
         }
         words.extend(self.pixel_fill.map(f32::to_bits));
-        words.extend([self.mode, self.kind, self.has_mask.into(), LUT_SIZE as u32]);
+        words.extend([self.mode, self.kind, self.has_mask, LUT_SIZE as u32]);
         words.extend([self.opacity, self.mask_fill].map(f32::to_bits));
         words.extend([u32::from(inverse.is_some()), self.fresh.into()]);
         let [a, b, c, d, e, f] = inverse.unwrap_or_default();
@@ -269,7 +270,7 @@ impl LiveGpu {
             pixel_fill: unit(stack.below.fill),
             mode: 0,
             kind: 2,
-            has_mask: false,
+            has_mask: 0,
             opacity: 1.0,
             mask_fill: 1.0,
             fresh: false,
@@ -324,7 +325,7 @@ impl LiveGpu {
                 pixel_fill: fill,
                 mode: layer.mode as u32,
                 kind,
-                has_mask: mask.is_some(),
+                has_mask: mask.as_ref().map_or(0, |_| if layer.inverted { 2 } else { 1 }),
                 opacity: layer.opacity,
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
                 fresh: layer.fresh,
@@ -1304,6 +1305,110 @@ mod tests {
                 .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
                 .fold(0.0, f32::max);
             assert!(worst < 4e-3, "clipped: {clipped}, off by {worst}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn live_selection_moves_match_the_cpu() {
+        let (device, queue) = device();
+        let t = Affine::scale_about(1.3, 1.1, (25.0, 20.0)).then(&Affine::rotate_about(0.4, (25.0, 20.0)));
+        // Moved, alone and with the layer above clipped to it, then
+        // transformed.
+        for (clipped, transform) in [(false, None), (true, None), (false, Some(t))] {
+            let mut doc = document(BlendMode::Overlay, true);
+            doc.layers[2].clipped = clipped;
+            let (w, h) = (doc.width, doc.height);
+            // A selection with soft edges.
+            let coverage = Tiled::from_slice(
+                w,
+                h,
+                0,
+                &(0..w * h)
+                    .map(|i| {
+                        let (x, y) = (i % w, i / w);
+                        if (15..35).contains(&x) && (10..25).contains(&y) {
+                            ((x - 14) * 3000).min(65535) as u16
+                        } else {
+                            0
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let id = doc.layers[1].id;
+            let lift = omapix_engine::moving::Lifted::pixels(&doc.layers[1].pixels, &coverage, false);
+            let (stays, lifted) = lift.parts();
+            let split = live::lifted(&doc, id, stays.clone(), lifted.clone()).unwrap();
+            let stack = live::build(&split, &split.layers, live::LIFTED, true, 0, (0, 0, w, h)).unwrap();
+            let draw = LiveDraw {
+                frame: LiveFrame {
+                    stack: Arc::new(stack),
+                    painted: None,
+                    painted_mask: None,
+                    offset: (7, 4),
+                    transform,
+                    settings: None,
+                },
+                display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            let gpu = composite_on_gpu(&device, &queue, draw);
+            doc.layers[1].pixels = match transform {
+                Some(t) => lift.drop_transformed(&t, Resampling::Bilinear),
+                None => lift.drop_at(7, 4),
+            };
+            let cpu = composite::composite(&doc.layers, w, h);
+            let worst = cpu
+                .pixels()
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+                .fold(0.0, f32::max);
+            assert!(worst < 4e-3, "clipped: {clipped}, transformed: {}, off by {worst}", transform.is_some());
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn live_quick_mask_matches_the_cpu() {
+        let (device, queue) = device();
+        let red = [65535, 0, 0, 65535];
+        // Over the image, and over transparency.
+        for background in [true, false] {
+            let mut doc = document(BlendMode::Overlay, false);
+            doc.layers[0].visible = background;
+            let (w, h) = (doc.width, doc.height);
+            doc.selection = Some(omapix_engine::selection::Selection::all(w, h));
+            let mut shown = doc.clone();
+            shown.layers.push(live::quick_mask_layer(&doc, red, 0.5));
+            let stack = live::build(&shown, &shown.layers, live::QUICK_MASK, false, 0, (0, 0, w, h)).unwrap();
+            // The selection painted after the stack was made.
+            let coverage = &mut doc.selection.as_mut().unwrap().coverage;
+            for (x, y) in (5..45).flat_map(|x| (3..30).map(move |y| (x, y))) {
+                coverage.tile_mut(0, 0)[(y * TILE + x) as usize] = (x * 1500) as u16;
+            }
+            let draw = LiveDraw {
+                frame: LiveFrame {
+                    stack: Arc::new(stack),
+                    painted: None,
+                    painted_mask: Some(coverage.clone()),
+                    offset: (0, 0),
+                    transform: None,
+                    settings: None,
+                },
+                display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            let gpu = composite_on_gpu(&device, &queue, draw);
+            let mut cpu = composite::composite_tiles(&doc.layers, &[(0, 0)], None);
+            crate::editor::apply_overlay(&mut cpu, &[(0, 0)], &doc.selection.as_ref().unwrap().coverage, red, 32768);
+            let worst = (0..w * h)
+                .map(|i| (cpu[0][((i / w) * TILE + i % w) as usize], gpu[i as usize]))
+                .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+                .fold(0.0, f32::max);
+            assert!(worst < 4e-3, "background: {background}, off by {worst}");
         }
     }
 

@@ -17,9 +17,9 @@
 //! opacity or a mask then fades what its layers made back towards what was
 //! below them. A group composited on its own (any other mode) has its
 //! layers blended onto nothing, then what they made blended onto what was
-//! below it, with the group's mode, opacity and mask. Anything else
-//! (clipping, Blend If, a subject inside a group composited on its own)
-//! stays on the CPU as before.
+//! below it, with the group's mode, opacity and mask. Clipping masks and
+//! Blend If are handled too. Quick Mask's overlay and what a selection
+//! lifts are shown as made-up layers ([`quick_mask_layer`], [`lifted`]).
 
 use std::sync::Arc;
 
@@ -27,10 +27,50 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use omapix_engine::composite;
-use omapix_engine::layer::{BlendIf, Layer};
+use omapix_engine::layer::{BlendIf, Layer, Mask};
 use omapix_engine::tiled::{TILE, Tiled};
 use omapix_engine::transform::Affine;
 use omapix_engine::{BlendMode, Document, Pixel};
+
+/// Quick Mask's overlay, shown live as a layer on top of the document.
+pub const QUICK_MASK: u64 = u64::MAX;
+
+/// Quick Mask's overlay as a layer: `colour` at `opacity`, where the
+/// selection's coverage doesn't reach (see [`LiveLayer::inverted`]).
+pub fn quick_mask_layer(doc: &Document, colour: Pixel, opacity: f32) -> Layer {
+    let (w, h) = (doc.width, doc.height);
+    let mut layer = Layer::from_pixels(QUICK_MASK, "Quick Mask", Tiled::new(w, h, colour));
+    layer.opacity = opacity;
+    layer.mask = Some(Mask {
+        pixels: doc.selection.as_ref().map_or_else(|| Tiled::new(w, h, u16::MAX), |s| s.coverage.clone()),
+        enabled: true,
+    });
+    layer
+}
+
+/// The pixels a selection lifts, shown moving live (see [`lifted`]).
+pub const LIFTED: u64 = u64::MAX - 1;
+/// And what stays where it was.
+pub const STAYS: u64 = u64::MAX - 2;
+
+/// `doc` with the pixels of layer `id` split for a live move of what a
+/// selection lifts: in its place, a group composited on its own with the
+/// layer's settings, of what `stays` and, above that, what's `lifted`
+/// ([`LIFTED`]), as the move puts it down.
+pub fn lifted(doc: &Document, id: u64, stays: Tiled<Pixel>, lifted: Tiled<Pixel>) -> Option<Document> {
+    let index = doc.index_of(id)?;
+    let mut group = doc.layers[index].clone();
+    let part = |id, pixels| {
+        let mut layer = Layer::from_pixels(id, "", pixels);
+        layer.parent = Some(group.id);
+        layer
+    };
+    let parts = [part(STAYS, stays), part(LIFTED, lifted)];
+    (group.is_group, group.pixels) = (true, Tiled::new(doc.width, doc.height, [0; 4]));
+    let mut doc = doc.clone();
+    doc.layers.splice(index..=index, parts.into_iter().chain([group]));
+    Some(doc)
+}
 
 /// Points per side of an adjustment's 3D lookup table.
 pub const LUT_SIZE: usize = 33;
@@ -111,6 +151,8 @@ pub struct LiveLayer {
     pub atop: bool,
     /// How much it shows by its colour and the colour below.
     pub blend_if: Option<BlendIf>,
+    /// Its mask hides where it's high: Quick Mask's overlay.
+    pub inverted: bool,
 }
 
 /// The subject's settings this frame, while they're being edited.
@@ -580,6 +622,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 keep: step.keep,
                 fresh: step.fresh,
                 atop: step.atop,
+                inverted: layer.id == QUICK_MASK,
             }
         })
         .collect();
