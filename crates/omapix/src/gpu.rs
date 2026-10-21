@@ -1136,40 +1136,44 @@ mod tests {
     #[ignore]
     fn live_painting_matches_the_cpu() {
         let (device, queue) = device();
-        let mut doc = document(BlendMode::Overlay, true);
-        let (w, h) = (doc.width, doc.height);
-        let stack = live::build(&doc, &doc.layers, doc.layers[1].id, false, 0, (0, 0, w, h)).unwrap();
-        // Painted after the stack was made.
-        for (x, y) in (12..30).flat_map(|x| (5..20).map(move |y| (x, y))) {
-            doc.layers[1].pixels.tile_mut(0, 0)[(y * TILE + x) as usize] = [1000, 50000, 9000, 40000];
+        // Alone, then with the layer above clipped to it.
+        for clipped in [false, true] {
+            let mut doc = document(BlendMode::Overlay, true);
+            doc.layers[2].clipped = clipped;
+            let (w, h) = (doc.width, doc.height);
+            let stack = live::build(&doc, &doc.layers, doc.layers[1].id, false, 0, (0, 0, w, h)).unwrap();
+            // Painted after the stack was made.
+            for (x, y) in (12..30).flat_map(|x| (5..20).map(move |y| (x, y))) {
+                doc.layers[1].pixels.tile_mut(0, 0)[(y * TILE + x) as usize] = [1000, 50000, 9000, 40000];
+            }
+            // And its mask.
+            let mask = &mut doc.layers[1].mask.as_mut().unwrap().pixels;
+            for (x, y) in (20..50).flat_map(|x| (10..35).map(move |y| (x, y))) {
+                mask.tile_mut(0, 0)[(y * TILE + x) as usize] = 9000;
+            }
+            let draw = LiveDraw {
+                frame: LiveFrame {
+                    stack: Arc::new(stack),
+                    painted: Some(doc.layers[1].pixels.clone()),
+                    painted_mask: Some(doc.layers[1].mask.as_ref().unwrap().pixels.clone()),
+                    offset: (0, 0),
+                    transform: None,
+                    settings: None,
+                },
+                display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            let gpu = composite_on_gpu(&device, &queue, draw);
+            let cpu = composite::composite(&doc.layers, w, h);
+            let worst = cpu
+                .pixels()
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+                .fold(0.0, f32::max);
+            assert!(worst < 4e-3, "clipped: {clipped}, off by {worst}");
         }
-        // And its mask.
-        let mask = &mut doc.layers[1].mask.as_mut().unwrap().pixels;
-        for (x, y) in (20..50).flat_map(|x| (10..35).map(move |y| (x, y))) {
-            mask.tile_mut(0, 0)[(y * TILE + x) as usize] = 9000;
-        }
-        let draw = LiveDraw {
-            frame: LiveFrame {
-                stack: Arc::new(stack),
-                painted: Some(doc.layers[1].pixels.clone()),
-                painted_mask: Some(doc.layers[1].mask.as_ref().unwrap().pixels.clone()),
-                offset: (0, 0),
-                transform: None,
-                settings: None,
-            },
-            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
-            origin: [0.0; 2],
-            scale: 1.0,
-        };
-        let gpu = composite_on_gpu(&device, &queue, draw);
-        let cpu = composite::composite(&doc.layers, w, h);
-        let worst = cpu
-            .pixels()
-            .iter()
-            .zip(&gpu)
-            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
-            .fold(0.0, f32::max);
-        assert!(worst < 4e-3, "off by {worst}");
     }
 
     #[test]

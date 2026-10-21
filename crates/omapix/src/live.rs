@@ -218,8 +218,8 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
     // shows unclipped, but would clip to what's below the group.
     let stray = |l: &Layer| l.clipped && l.parent.is_some() && doc.clip_base(l.id).is_none();
     let hidden_group = subject.is_group && !subject.visible;
-    // A base's own opacity and mode are blended after what's clipped to it.
-    let edited_base = !moving && doc.is_clip_base(subject.id) && subject.adjustment.is_none() || subject.is_group && subject.clipped;
+    // A group being edited that's clipped or clipped to is drawn in parts.
+    let edited_base = subject.is_group && (subject.clipped || doc.is_clip_base(subject.id));
     if !kind || !plain(subject) || !groups_shown(subject) || hidden_group || edited_base {
         return None;
     }
@@ -442,6 +442,14 @@ pub fn can_show(doc: &Document, id: u64, moving: bool) -> bool {
     stack(doc, id, moving).is_some()
 }
 
+/// Whether layer `id`'s opacity, blend mode and adjustment can be edited
+/// live: not a clipping mask's pixel base's, which are blended after what's
+/// clipped to it (painting it can be shown, though).
+pub fn can_edit(doc: &Document, id: u64) -> bool {
+    let base = doc.is_clip_base(id) && doc.layer(id).is_some_and(|l| l.adjustment.is_none());
+    !base && can_show(doc, id, false)
+}
+
 /// Whether `after` differs from `before` only in layer `id`'s opacity,
 /// blend mode and adjustment settings: what a live edit can show. A group
 /// can't start or stop passing through.
@@ -606,7 +614,8 @@ mod tests {
         doc.layers[2].clipped = true;
         assert!(can_show(&doc, patch, true), "clipped layer above");
         assert!(can_show(&doc, doc.layers[2].id, true), "moving the clipped layer");
-        assert!(!can_show(&doc, patch, false), "but the base's own settings");
+        assert!(!can_edit(&doc, patch), "but the base's own settings");
+        assert!(can_show(&doc, patch, false), "though painting it is");
         doc.layers[3].clipped = true;
         assert!(can_show(&doc, curves, false));
         doc.layers[2].clipped = false;

@@ -642,7 +642,7 @@ impl Editor {
     /// it live on the GPU until it ends; otherwise render it on the CPU
     /// (as when a group is given a blend mode of its own).
     fn show_edit_live(&mut self, before: &[Layer]) {
-        let fits = live::only_settings_changed(before, &self.doc.layers, self.active) && live::can_show(&self.doc, self.active, false);
+        let fits = live::only_settings_changed(before, &self.doc.layers, self.active) && live::can_edit(&self.doc, self.active);
         let showing = self
             .live_view
             .as_ref()
