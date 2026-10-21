@@ -2480,7 +2480,7 @@ mod tests {
         let ctx = egui::Context::default();
         let theme = Theme::default();
         let mut tools = Tools::default();
-        let mut frame = |tools: &mut Tools, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
+        let frame = |tools: &mut Tools, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1600.0, 40.0))),
                 events,
