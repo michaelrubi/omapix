@@ -619,6 +619,8 @@ pub struct App {
     /// whenever Help › AI Models opens.
     models: HashMap<&'static str, bool>,
     models_check: Option<Receiver<HashMap<&'static str, bool>>>,
+    /// What agents and later launches ask over the live session's socket.
+    bridge: Option<Receiver<crate::bridge::Asked>>,
 }
 
 impl App {
@@ -723,6 +725,7 @@ impl App {
             body_liquify: Default::default(),
             models: HashMap::new(),
             models_check: Some(check_models(ctx)),
+            bridge: crate::bridge::socket().and_then(|socket| crate::bridge::listen(&socket, ctx)),
         };
         let warnings = crate::hotkeys::load();
         if !warnings.is_empty() {
@@ -805,6 +808,7 @@ impl App {
             body_liquify: Default::default(),
             models: HashMap::new(),
             models_check: None,
+            bridge: None,
         }
     }
 
@@ -1229,6 +1233,10 @@ impl App {
         {
             self.models = models;
             self.models_check = None;
+        }
+        while let Some((request, reply)) = self.bridge.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            let answer = self.answer(request, ctx);
+            let _ = reply.send(answer);
         }
         if let Some(theme) = self.theme_rx.try_iter().last() {
             ctx.set_visuals(theme.visuals());
@@ -4565,6 +4573,39 @@ impl App {
         match self.status.take() {
             Some((text, true, _)) => Err(text),
             status => Ok((doc, status.map(|(text, ..)| text))),
+        }
+    }
+
+    /// Do what the live session's socket asks (see bridge.rs).
+    fn answer(&mut self, request: crate::bridge::Request, ctx: &egui::Context) -> Result<serde_json::Value, String> {
+        use crate::bridge::Request;
+        match request {
+            Request::Open { paths, round_trip } => {
+                for path in paths {
+                    if round_trip {
+                        self.open_with(path, omapix_engine::io::load_round_trip, ctx);
+                    } else {
+                        self.open(path, ctx);
+                    }
+                }
+                Ok(serde_json::json!({}))
+            }
+            Request::Run(cmd) => {
+                if !self.enabled(cmd) {
+                    return Err(format!("{} can't be used on this image now", cmd.label().trim_end_matches('…')));
+                }
+                self.status = None;
+                self.run(cmd, ctx);
+                match &self.status {
+                    Some((text, true, _)) => Err(text.clone()),
+                    status => Ok(serde_json::json!({ "message": status.as_ref().map(|(text, ..)| text) })),
+                }
+            }
+            Request::Inspect => self
+                .editor
+                .as_ref()
+                .map(|e| crate::mcp::inspect(&e.doc))
+                .ok_or_else(|| "No image is open".into()),
         }
     }
 
@@ -10222,6 +10263,35 @@ mod tests {
         assert!(names.contains(&"Smooth Skin") && names.contains(&"Dodge & Burn"));
         assert_eq!(editor.undo_label(), Some("Auto Retouch"));
         assert_eq!(app.filters.auto_retouch, crate::auto_retouch::Preset::Natural.settings());
+    }
+
+    #[test]
+    fn a_command_over_the_live_sessions_socket_runs_on_the_image_showing() {
+        use std::io::{BufRead, Write};
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("omapix.sock");
+        app.bridge = crate::bridge::listen(&socket, &ctx);
+        let before = app.editor.as_ref().unwrap().doc.layers.len();
+        let agent = std::thread::spawn(move || {
+            let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"NewLayer"}}}"#;
+            writeln!(&stream, "{call}").unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(&stream).read_line(&mut line).unwrap();
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()
+        });
+        while !agent.is_finished() {
+            app.poll(&ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let reply = agent.join().unwrap();
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        assert_eq!(app.editor.as_ref().unwrap().doc.layers.len(), before + 1);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("New Layer"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

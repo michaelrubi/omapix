@@ -420,7 +420,8 @@ Michael's finishing workflow, from years of Topaz and Nik Collection: denoise fi
   - **Headless retouching and operations**: tools to run core engine pipelines headlessly without a display (`apply_frequency_separation`, `apply_auto_retouch`, `apply_denoise`, `add_adjustment_layer`) and save back to .ora or export.
   - **Quick export and conversions**: `export_document` converts and exports files to JPEG (with jpegli quality/progressive options) or PNG (with sRGB conversion, resizing, and metadata control).
   - **Settings management**: `get_settings` and `update_settings` to safely inspect and update configuration files in `~/.config/omapix/` (`hotkeys.toml`, `filters.toml`, `export.toml`, `tools.toml`).
-  - **Live session bridge (IPC)**: an optional Unix domain socket (`$XDG_RUNTIME_DIR/omapix.sock`) allowing an agent to query or control a running Omapix GUI instance, dispatching actions (`Command` enum) or adjusting layer opacities and visibility with live canvas updates.
+  - ~~**Live session bridge and one window**~~ (done): a running Omapix listens on `$XDG_RUNTIME_DIR/omapix.sock` for the same JSON-RPC (MCP) messages as `omapix --mcp`, acting on the image showing: `inspect_document`, `run_command` (any `Command` by its name, run as its menu item would be, refused when it's greyed out) and `open_documents`. `omapix a.tif` while Omapix is running hands the paths over and exits, and they open as tabs in its window; a `--round-trip` launch stays until that Omapix quits, so darktable still imports the TIFF afterwards. A socket left by a crash is replaced.
+    - Later: layer opacity and visibility tools, the window raised when files are handed over, and closing a round-trip tab ending its launch.
 
 ## 6. Performance
 
