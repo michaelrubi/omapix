@@ -3777,7 +3777,10 @@ mod live_tests {
         let ctx = egui::Context::default();
         let mut e = editor();
         let patch = e.active;
-        e.doc.layer_mut(patch).unwrap().clipped = true;
+        // In a clipped group.
+        let group = e.doc.group_layer(e.doc.index_of(patch).unwrap());
+        e.doc.layer_mut(group).unwrap().clipped = true;
+        e.active = patch;
         assert!(e.begin_move("Move", false, 0));
         e.move_to(10, 5);
         e.update(&ctx);
@@ -3901,6 +3904,11 @@ mod bench {
         });
         time("live stack, editing the isolated group", &mut || {
             std::hint::black_box(live::build(&isolated, &isolated.layers, group, false, 0, (1000, 1000, 2560, 1440)));
+        });
+        let mut clipped = doc.clone();
+        clipped.layers[2].clipped = true;
+        time("live stack, Curves clipped to a layer above", &mut || {
+            std::hint::black_box(live::build(&clipped, &clipped.layers, patch, true, 0, (1000, 1000, 2560, 1440)));
         });
         // Zoomed out to fit: level 2 (1500×1000), whole image on screen.
         let mut reduced = Reduced::default();
