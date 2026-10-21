@@ -38,7 +38,12 @@ struct Layer {
     // 1: clipped, so blended only where there's something below, keeping
     // its alpha (source-atop).
     atop: u32,
-    pad: u32,
+    // Blend If: 0 for none, else 1 + the channel (gray, red, green, blue),
+    // with this layer's range and the underlying one's, each [black,
+    // black split, white split, white].
+    blend_if: u32,
+    blend_this: vec4<f32>,
+    blend_under: vec4<f32>,
 };
 
 @group(0) @binding(0) var below: texture_2d<f32>;
@@ -135,6 +140,40 @@ fn lookup(table: texture_3d<f32>, size: u32, c: vec3<f32>) -> vec3<f32> {
     let c01 = mix(c001, c101, f.x);
     let c11 = mix(c011, c111, f.x);
     return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
+// Blend If's ranges, as layer.rs `BlendIf::factor`.
+fn blend_range(r: vec4<f32>, v: f32) -> f32 {
+    var rise = 1.0;
+    if v < r.x {
+        rise = 0.0;
+    } else if v < r.y {
+        rise = (v - r.x) / max(r.y - r.x, 1e-6);
+    }
+    var fall = 1.0;
+    if v > r.w {
+        fall = 0.0;
+    } else if v > r.z {
+        fall = (r.w - v) / max(r.w - r.z, 1e-6);
+    }
+    return rise * fall;
+}
+
+fn blend_pick(c: vec3<f32>) -> f32 {
+    switch p.blend_if {
+        case 2u: { return c.r; }
+        case 3u: { return c.g; }
+        case 4u: { return c.b; }
+        default: { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+    }
+}
+
+// How much of the layer shows, for its colour over the colour below.
+fn blend_if(own: vec3<f32>, under: vec3<f32>) -> f32 {
+    if p.blend_if == 0u {
+        return 1.0;
+    }
+    return blend_range(p.blend_this, blend_pick(own)) * blend_range(p.blend_under, blend_pick(under));
 }
 
 // Blend formulas, per channel (b: backdrop, s: source), from blend.rs.
@@ -295,7 +334,11 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // like a single layer (composite.rs `blend_one`).
     if p.kind == 5u {
         let back = textureLoad(kept, r, 0);
-        let a_s = dst.a * coverage;
+        var a_s = dst.a * coverage;
+        if a_s <= 0.0 {
+            return back;
+        }
+        a_s *= blend_if(cb, back.rgb);
         if a_s <= 0.0 {
             return back;
         }
@@ -315,17 +358,18 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         if p.kind == 3u {
             before = pixel_at(q);
         }
-        if coverage <= 0.0 {
+        let t = coverage * blend_if(cb, before.rgb);
+        if t <= 0.0 {
             return before;
         }
-        if coverage >= 1.0 {
+        if t >= 1.0 {
             return dst;
         }
-        let alpha = mix(before.a, a_b, coverage);
+        let alpha = mix(before.a, a_b, t);
         if alpha <= 0.0 {
             return vec4<f32>(0.0);
         }
-        return vec4<f32>(mix(before.rgb * before.a, cb * a_b, coverage) / alpha, alpha);
+        return vec4<f32>(mix(before.rgb * before.a, cb * a_b, t) / alpha, alpha);
     }
 
     // An adjustment blends the adjusted colour onto the original, leaving
@@ -334,19 +378,24 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         if a_b <= 0.0 || coverage <= 0.0 {
             return dst;
         }
-        let blended = blend(p.mode, cb, lookup(lut, p.lut_size, cb));
-        return vec4<f32>(cb + (blended - cb) * coverage, a_b);
+        let adjusted = lookup(lut, p.lut_size, cb);
+        let blended = blend(p.mode, cb, adjusted);
+        return vec4<f32>(cb + (blended - cb) * coverage * blend_if(adjusted, cb), a_b);
     }
 
     // Pixels: source-over with the blend mode (composite.rs `blend_source`).
     if p.transformed == 0u {
         src = pixel_at(q);
     }
-    let a_s = src.a * coverage;
+    var a_s = src.a * coverage;
     if a_s <= 0.0 {
         return dst;
     }
     let cs = src.rgb;
+    a_s *= blend_if(cs, cb);
+    if a_s <= 0.0 {
+        return dst;
+    }
     if p.atop == 1u {
         if a_b <= 0.0 {
             return dst;

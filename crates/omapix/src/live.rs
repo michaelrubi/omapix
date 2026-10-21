@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use omapix_engine::composite;
-use omapix_engine::layer::Layer;
+use omapix_engine::layer::{BlendIf, Layer};
 use omapix_engine::tiled::{TILE, Tiled};
 use omapix_engine::transform::Affine;
 use omapix_engine::{BlendMode, Document, Pixel};
@@ -103,6 +103,8 @@ pub struct LiveLayer {
     /// It's clipped: blended only where there's something below, which
     /// keeps its alpha.
     pub atop: bool,
+    /// How much it shows by its colour and the colour below.
+    pub blend_if: Option<BlendIf>,
 }
 
 /// The subject's settings this frame, while they're being edited.
@@ -187,7 +189,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
             !doc.is_clip_base(l.id) || pixels(l)
         }
     };
-    let plain = |l: &Layer| clips(l) && l.blend_if.is_none_or(|b| b.is_neutral());
+    let plain = clips;
     let through = |l: &Layer| l.is_group && l.blend == BlendMode::PassThrough;
     let kind = subject.has_pixels() || !moving && (subject.adjustment.is_some() || subject.is_group);
     let groups_shown = |l: &Layer| std::iter::successors(l.parent, |&g| doc.layer(g)?.parent).all(|g| doc.layer(g).is_some_and(|g| g.visible));
@@ -310,7 +312,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
             }
             continue;
         }
-        let fades = l.opacity < 1.0 || l.mask.as_ref().is_some_and(|m| m.enabled);
+        let fades = l.opacity < 1.0 || l.mask.as_ref().is_some_and(|m| m.enabled) || l.blend_if.is_some_and(|b| !b.is_neutral());
         if start <= index {
             // The subject, or a group it's in: what's below the group
             // doesn't change.
@@ -394,7 +396,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
     let contents = |start: usize, group: usize| {
         let mut alone = layers[start..=group].to_vec();
         let g = alone.last_mut().expect("the group");
-        (g.parent, g.blend, g.opacity, g.mask, g.visible) = (None, BlendMode::Normal, 1.0, None, true);
+        (g.parent, g.blend, g.opacity, g.mask, g.visible, g.blend_if) = (None, BlendMode::Normal, 1.0, None, true, None);
         let composited = composite::composite_tiles(&alone, &tiles, None);
         let by_tile: HashMap<_, _> = tiles.iter().zip(composited).collect();
         Plane::crop(&Tiled::from_tiles(lw, lh, [0; 4], |col, row| by_tile.get(&(col, row)).cloned()), region)
@@ -437,6 +439,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 source,
                 mask: mask.map(|m| Plane::crop(&m.pixels, area)),
                 mode: if step.base { BlendMode::Normal } else { layer.blend },
+                blend_if: layer.blend_if.filter(|b| !b.is_neutral() && !step.base),
                 opacity: if step.base { 1.0 } else { layer.opacity },
                 subject,
                 keep: step.keep,
@@ -551,6 +554,36 @@ mod tests {
         doc.layer_mut(patch).unwrap().visible = false;
         let live = build(&doc, &doc.layers, soft, true, 0, all).unwrap();
         assert_eq!(live.layers.len(), 1);
+    }
+
+    #[test]
+    fn blend_if_goes_with_each_layer_and_makes_groups_fade() {
+        use omapix_engine::layer::BlendIf;
+        let mut doc = doc();
+        let (patch, soft) = (doc.layers[1].id, doc.layers[2].id);
+        let split = BlendIf {
+            this: [0.0, 0.3, 1.0, 1.0],
+            ..BlendIf::default()
+        };
+        doc.layers[2].blend_if = Some(split);
+        doc.layers[3].blend_if = Some(BlendIf::default());
+        let all = (0, 0, 300, 200);
+        let live = build(&doc, &doc.layers, patch, true, 0, all).unwrap();
+        assert_eq!(live.layers[1].blend_if, Some(split));
+        assert_eq!(live.layers[2].blend_if, None, "it hides nothing");
+        // A Pass Through group with only Blend If still fades.
+        doc.layers[2].blend_if = None;
+        let group = doc.group_layer(2);
+        doc.layer_mut(group).unwrap().blend_if = Some(split);
+        let live = build(&doc, &doc.layers, patch, true, 0, all).unwrap();
+        assert!(matches!(live.layers[2].source, Source::Group(Before::Kept(0))) && live.layers[2].blend_if.is_some());
+        // A clipping mask's base has it at the end, not drawn plainly.
+        doc.ungroup(doc.index_of(group).unwrap());
+        doc.layer_mut(soft).unwrap().clipped = true;
+        doc.layers[1].blend_if = Some(split);
+        let live = build(&doc, &doc.layers, doc.layers[0].id, true, 0, all).unwrap();
+        assert_eq!(live.layers[1].blend_if, None);
+        assert_eq!(live.layers[3].blend_if, Some(split));
     }
 
     #[test]
