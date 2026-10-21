@@ -4,13 +4,15 @@
 //! protocol itself, on a thread of its own sharing winit's connection (as
 //! the patched clipboard does). Once a client takes tablet events the
 //! compositor no longer moves the mouse pointer with the pen, so the pen is
-//! handed to egui here as pointer events, with the pressure at each place
-//! it moved kept for the brushes. Its cursor has to be set here too.
+//! handed to egui here as pointer events, with the pressure, tilt and
+//! rotation at each place it moved kept for the brushes. Its cursor has to
+//! be set here too.
 
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 
 use egui::{CursorIcon, PointerButton, pos2};
+use omapix_engine::dynamics::Pen as Sample;
 use wayland_client::backend::Backend;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_registry, wl_seat};
@@ -31,8 +33,8 @@ const BTN_STYLUS2: u32 = 0x14c;
 /// What the pen did, in surface coordinates (logical pixels).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pen {
-    /// Where it moved to, and its pressure there.
-    Moved(f32, f32, f32),
+    /// Where it moved to, and what it reported there.
+    Moved(f32, f32, Sample),
     Button(PointerButton, bool),
     Gone,
 }
@@ -40,8 +42,9 @@ enum Pen {
 #[derive(Default)]
 struct Shared {
     events: Vec<Pen>,
-    /// The tip's pressure (0–1), while the pen's near the tablet.
-    pressure: Option<f32>,
+    /// The tip's pressure (0–1), tilt and rotation, while the pen's near
+    /// the tablet.
+    pen: Option<Sample>,
     /// The tool near the tablet, and its `proximity_in` serial, to set its
     /// cursor with.
     near: Option<(ZwpTabletToolV2, u32)>,
@@ -107,25 +110,25 @@ impl Tablet {
     }
 
     /// Hands what the pen did since the last frame to egui, with the keys
-    /// held. Returns where it moved (egui points) and its pressure at each,
-    /// so a stroke can take every place the pen reported, not only where it
-    /// ended up.
-    pub fn take(&mut self, raw: &mut egui::RawInput, zoom: f32, modifiers: egui::Modifiers) -> Vec<(egui::Pos2, f32)> {
+    /// held. Returns where it moved (egui points) and what it reported at
+    /// each, so a stroke can take every place the pen reported, not only
+    /// where it ended up.
+    pub fn take(&mut self, raw: &mut egui::RawInput, zoom: f32, modifiers: egui::Modifiers) -> Vec<(egui::Pos2, Sample)> {
         let pens = std::mem::take(&mut self.shared.lock().unwrap().events);
         let mut moves = Vec::new();
         for pen in pens {
             let event = event(pen, &mut self.last, zoom, modifiers);
-            if let (Pen::Moved(_, _, pressure), egui::Event::PointerMoved(at)) = (pen, &event) {
-                moves.push((*at, pressure));
+            if let (Pen::Moved(_, _, sample), egui::Event::PointerMoved(at)) = (pen, &event) {
+                moves.push((*at, sample));
             }
             raw.events.push(event);
         }
         moves
     }
 
-    /// The pen's pressure, 0–1, or 1 when painting with a mouse.
-    pub fn pressure(&self) -> f32 {
-        self.shared.lock().unwrap().pressure.unwrap_or(1.0)
+    /// What the pen reports now, or a mouse's full pressure, upright.
+    pub fn pen(&self) -> Sample {
+        self.shared.lock().unwrap().pen.unwrap_or_default()
     }
 
     /// Shows `icon` under the pen, as winit does under the mouse.
@@ -210,18 +213,27 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
             Event::ProximityIn { serial, .. } => {
                 shared.near = Some((tool.clone(), serial));
                 shared.cursor_shown = false;
-                shared.pressure = Some(0.0);
+                shared.pen = Some(Sample {
+                    pressure: 0.0,
+                    ..Sample::default()
+                });
             }
             Event::ProximityOut => {
                 shared.near = None;
-                shared.pressure = None;
+                shared.pen = None;
                 state.frame.push(Pen::Gone);
             }
-            // Its pressure is filled in at the frame's end, since the
-            // frame's pressure can come after its motion.
-            Event::Motion { x, y } => state.frame.push(Pen::Moved(x as f32, y as f32, 0.0)),
+            // Its pressure, tilt and rotation are filled in at the frame's
+            // end, since the frame's can come after its motion.
+            Event::Motion { x, y } => state.frame.push(Pen::Moved(x as f32, y as f32, Sample::default())),
             Event::Pressure { pressure } => {
-                shared.pressure = Some(pressure as f32 / 65535.0);
+                shared.pen.get_or_insert_default().pressure = pressure as f32 / 65535.0;
+            }
+            Event::Tilt { tilt_x, tilt_y } => {
+                shared.pen.get_or_insert_default().tilt = [tilt_x as f32, tilt_y as f32];
+            }
+            Event::Rotation { degrees } => {
+                shared.pen.get_or_insert_default().rotation = degrees as f32;
             }
             Event::Down { .. } => state.frame.push(Pen::Button(PointerButton::Primary, true)),
             Event::Up => state.frame.push(Pen::Button(PointerButton::Primary, false)),
@@ -234,10 +246,13 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
                 }
             }
             Event::Frame { .. } => {
-                let pressure = shared.pressure.unwrap_or(0.0);
+                let sample = shared.pen.unwrap_or(Sample {
+                    pressure: 0.0,
+                    ..Sample::default()
+                });
                 for pen in &mut state.frame {
-                    if let Pen::Moved(_, _, p) = pen {
-                        *p = pressure;
+                    if let Pen::Moved(_, _, s) = pen {
+                        *s = sample;
                     }
                 }
                 shared.events.append(&mut state.frame);
@@ -318,7 +333,19 @@ mod tests {
         let mut last = egui::Pos2::ZERO;
         let alt = egui::Modifiers::ALT;
         assert_eq!(
-            event(Pen::Moved(300.0, 150.0, 0.5), &mut last, 1.5, alt),
+            event(
+                Pen::Moved(
+                    300.0,
+                    150.0,
+                    Sample {
+                        pressure: 0.5,
+                        ..Sample::default()
+                    }
+                ),
+                &mut last,
+                1.5,
+                alt
+            ),
             egui::Event::PointerMoved(pos2(200.0, 100.0))
         );
         assert_eq!(

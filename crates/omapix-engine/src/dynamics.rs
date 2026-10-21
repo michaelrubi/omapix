@@ -59,6 +59,9 @@ pub struct Dynamics {
     pub angle_jitter: f32,
     /// The angle follows the stroke (Angle Jitter's Control: Direction).
     pub angle_follows: bool,
+    /// The angle follows the pen: the way it leans, or its barrel's
+    /// rotation (Angle Jitter's Control: Pen Tilt, Rotation).
+    pub angle_pen: PenAngle,
     /// How much flatter a dab can be at random (0–1).
     pub roundness_jitter: f32,
     /// The flattest that makes it, as a fraction of the tip's roundness.
@@ -91,6 +94,68 @@ pub struct Dynamics {
     pub dual: Option<DualBrush>,
     /// Color Dynamics: each dab's colour varied from the foreground's.
     pub colour: Option<ColorDynamics>,
+    /// Brush Pose: a tilt, rotation or pressure used in place of the pen's.
+    pub pose: Option<Pose>,
+}
+
+/// What of the pen the tip's angle follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PenAngle {
+    #[default]
+    Neither,
+    /// The way the pen leans.
+    Tilt,
+    /// The pen's barrel turning.
+    Rotation,
+}
+
+/// What a pen reports at a point: its pressure (0–1), how far it leans
+/// (degrees, to the right and towards you) and how far its barrel is
+/// turned (degrees, clockwise). A mouse presses fully, upright and
+/// unturned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pen {
+    pub pressure: f32,
+    pub tilt: [f32; 2],
+    pub rotation: f32,
+}
+
+impl Default for Pen {
+    fn default() -> Self {
+        Self {
+            pressure: 1.0,
+            tilt: [0.0; 2],
+            rotation: 0.0,
+        }
+    }
+}
+
+impl Pen {
+    /// Where it leans, anticlockwise from the right in radians (y runs
+    /// down the image); 0 upright.
+    fn leaning(&self) -> f32 {
+        if self.tilt == [0.0; 2] { 0.0 } else { (-self.tilt[1]).atan2(self.tilt[0]) }
+    }
+}
+
+/// Photoshop's Brush Pose: whichever of the pen's tilt, rotation and
+/// pressure it has replace the pen's, for a mouse too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Pose {
+    pub tilt: Option<[f32; 2]>,
+    pub rotation: Option<f32>,
+    pub pressure: Option<f32>,
+}
+
+impl Pose {
+    pub fn apply(&self, pen: Pen) -> Pen {
+        Pen {
+            pressure: self.pressure.map_or(pen.pressure, |p| p.clamp(0.0, 1.0)),
+            tilt: self.tilt.unwrap_or(pen.tilt),
+            rotation: self.rotation.unwrap_or(pen.rotation),
+        }
+    }
 }
 
 /// Photoshop's Color Dynamics: each dab (or each stroke) a colour between
@@ -283,6 +348,7 @@ impl Default for Dynamics {
             minimum_diameter: 0.0,
             angle_jitter: 0.0,
             angle_follows: false,
+            angle_pen: PenAngle::Neither,
             roundness_jitter: 0.0,
             minimum_roundness: 0.25,
             flip_x_jitter: false,
@@ -298,6 +364,7 @@ impl Default for Dynamics {
             texture: None,
             dual: None,
             colour: None,
+            pose: None,
         }
     }
 }
@@ -313,6 +380,8 @@ pub(crate) struct Step {
     pub most: f32,
     pub flow: f32,
     pub direction: f32,
+    /// The pen there.
+    pub pen: Pen,
 }
 
 /// One dab: its centre, radius, angle (radians, anticlockwise) and
@@ -362,6 +431,13 @@ impl Dynamics {
                 let diameter = at.diameter * (1.0 - unit(self.size_jitter) * r(SIZE)).max(unit(self.minimum_diameter));
                 let radius = (diameter / 2.0).max(0.5);
                 let followed = if self.angle_follows { at.direction.to_degrees() } else { 0.0 };
+                let followed = followed
+                    + match self.angle_pen {
+                        PenAngle::Neither => 0.0,
+                        PenAngle::Tilt => at.pen.leaning().to_degrees(),
+                        // Clockwise, where angles go anticlockwise.
+                        PenAngle::Rotation => -at.pen.rotation,
+                    };
                 let angle = self.angle + followed + either_way(ANGLE) * unit(self.angle_jitter) * 180.0;
                 let flatter = (1.0 - unit(self.roundness_jitter) * r(ROUNDNESS)).max(unit(self.minimum_roundness));
                 let roundness = (self.roundness.clamp(0.01, 1.0) * flatter).clamp(0.01, 1.0);
@@ -449,6 +525,11 @@ mod tests {
         most: 1.0,
         flow: 0.8,
         direction: 0.0,
+        pen: Pen {
+            pressure: 1.0,
+            tilt: [0.0; 2],
+            rotation: 0.0,
+        },
     };
 
     /// The dabs of 500 steps.
@@ -561,6 +642,80 @@ mod tests {
         assert!(dabs.iter().any(|d| d.most < 0.55) && dabs.iter().any(|d| d.flow < 0.05) && dabs.iter().any(|d| d.flow > 0.75));
         assert!(dabs.iter().all(|d| (d.angle.to_degrees() - 120.0).abs() < 1e-3));
         assert!(d.follows_direction());
+    }
+
+    #[test]
+    fn the_angle_follows_the_way_the_pen_leans_or_its_barrel() {
+        let at = |pen: Pen| Step { pen, ..AT };
+        let angle = |d: &Dynamics, pen: Pen| many(d, &at(pen))[0].angle.to_degrees();
+        let tilt = Dynamics {
+            angle: 10.0,
+            angle_pen: PenAngle::Tilt,
+            ..Default::default()
+        };
+        // Leaning right, towards you (down the image) and upright.
+        assert!(
+            (angle(
+                &tilt,
+                Pen {
+                    tilt: [40.0, 0.0],
+                    ..Pen::default()
+                }
+            ) - 10.0)
+                .abs()
+                < 1e-3
+        );
+        assert!(
+            (angle(
+                &tilt,
+                Pen {
+                    tilt: [0.0, 40.0],
+                    ..Pen::default()
+                }
+            ) + 80.0)
+                .abs()
+                < 1e-3
+        );
+        assert!((angle(&tilt, Pen::default()) - 10.0).abs() < 1e-3);
+        // The barrel turned 30° clockwise turns the tip 30° clockwise.
+        let rotation = Dynamics {
+            angle_pen: PenAngle::Rotation,
+            ..Default::default()
+        };
+        assert!(
+            (angle(
+                &rotation,
+                Pen {
+                    rotation: 30.0,
+                    ..Pen::default()
+                }
+            ) + 30.0)
+                .abs()
+                < 1e-3
+        );
+    }
+
+    #[test]
+    fn brush_pose_stands_in_for_what_it_has() {
+        let pen = Pen {
+            pressure: 0.3,
+            tilt: [10.0, 20.0],
+            rotation: 45.0,
+        };
+        let pose = Pose {
+            pressure: Some(0.8),
+            rotation: Some(90.0),
+            tilt: None,
+        };
+        assert_eq!(
+            pose.apply(pen),
+            Pen {
+                pressure: 0.8,
+                tilt: [10.0, 20.0],
+                rotation: 90.0
+            }
+        );
+        assert_eq!(Pose::default().apply(pen), pen);
     }
 
     #[test]

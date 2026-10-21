@@ -3,7 +3,7 @@
 
 use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
-use omapix_engine::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT};
+use omapix_engine::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT, PenAngle, Pose};
 use omapix_engine::selection::Combine;
 use omapix_engine::texture::{Mode, Texture};
 use omapix_engine::toning::ToneRange;
@@ -1124,6 +1124,19 @@ impl Tools {
                 ui.checkbox(&mut d.angle_follows, "Follow the stroke")
                     .on_hover_text("The tip turns the way the stroke goes (Photoshop's Control: Direction)");
                 ui.end_row();
+                ui.label("Follow the pen")
+                    .on_hover_text("The tip turns the way a pen leans, or as its barrel turns (Photoshop's Control: Pen Tilt, Rotation)");
+                let names = |a: PenAngle| match a {
+                    PenAngle::Neither => "Neither",
+                    PenAngle::Tilt => "Pen Tilt",
+                    PenAngle::Rotation => "Rotation",
+                };
+                ComboBox::from_id_salt("angle-pen").selected_text(names(d.angle_pen)).show_ui(ui, |ui| {
+                    for a in [PenAngle::Neither, PenAngle::Tilt, PenAngle::Rotation] {
+                        ui.selectable_value(&mut d.angle_pen, a, names(a));
+                    }
+                });
+                ui.end_row();
                 percent(ui, "Roundness Jitter", &mut d.roundness_jitter, "How much flatter a dab can be at random");
                 percent(ui, "Minimum Roundness", &mut d.minimum_roundness, "The flattest that makes it");
                 let (x, y) = (
@@ -1320,6 +1333,46 @@ impl Tools {
                             "Makes every dab more saturated, or greyer",
                         );
                     }
+                }
+
+                heading(ui, "Brush Pose");
+                let pose = d.pose.get_or_insert_default();
+                // Each ticked stands in for the pen's, with a mouse too.
+                let mut tilted = pose.tilt.is_some();
+                ui.label("");
+                ui.checkbox(&mut tilted, "Override Tilt").on_hover_text("Paint as if the pen leant this way");
+                ui.end_row();
+                if tilted != pose.tilt.is_some() {
+                    pose.tilt = tilted.then_some([0.0; 2]);
+                }
+                if let Some(tilt) = &mut pose.tilt {
+                    row(ui, "Tilt X", &mut tilt[0], -90.0..=90.0, 1.0, "°", "How far it leans to the right");
+                    row(ui, "Tilt Y", &mut tilt[1], -90.0..=90.0, 1.0, "°", "How far it leans towards you");
+                }
+                let mut turned = pose.rotation.is_some();
+                ui.label("");
+                ui.checkbox(&mut turned, "Override Rotation")
+                    .on_hover_text("Paint as if the pen's barrel were turned this far");
+                ui.end_row();
+                if turned != pose.rotation.is_some() {
+                    pose.rotation = turned.then_some(0.0);
+                }
+                if let Some(rotation) = &mut pose.rotation {
+                    row(ui, "Rotation", rotation, 0.0..=359.0, 1.0, "°", "How far the barrel is turned, clockwise");
+                }
+                let mut pressed = pose.pressure.is_some();
+                ui.label("");
+                ui.checkbox(&mut pressed, "Override Pressure")
+                    .on_hover_text("Paint as if the pen pressed this hard, or as a mouse would");
+                ui.end_row();
+                if pressed != pose.pressure.is_some() {
+                    pose.pressure = pressed.then_some(1.0);
+                }
+                if let Some(pressure) = &mut pose.pressure {
+                    percent(ui, "Pressure", pressure, "How hard it presses");
+                }
+                if d.pose == Some(Pose::default()) {
+                    d.pose = None;
                 }
 
                 heading(ui, "Other");
@@ -2441,7 +2494,7 @@ mod tests {
         let mut frame = |tools: &mut Tools, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
             time += 0.5;
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 900.0))),
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 2400.0))),
                 time: Some(time),
                 events,
                 ..Default::default()
@@ -2563,7 +2616,7 @@ mod tests {
         let mut frame = |tools: &mut Tools, brushes: &mut crate::brushes::Library, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
             time += 0.5;
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 1400.0))),
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 2400.0))),
                 time: Some(time),
                 events,
                 ..Default::default()
@@ -2650,6 +2703,16 @@ mod tests {
         assert_eq!(tools.brush.dynamics.colour, Some(omapix_engine::dynamics::ColorDynamics::default()));
         let drawn = frame(&mut tools, &mut brushes, vec![]);
         assert!(at(&drawn, "Foreground/Background Jitter").is_some() && at(&drawn, "Purity").is_some());
+
+        // Brush Pose: nothing until something's ticked, then that alone.
+        assert_eq!(tools.brush.dynamics.pose, None);
+        for events in click(at(&drawn, "Override Pressure").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        let pose = tools.brush.dynamics.pose.expect("a pose");
+        assert_eq!((pose.pressure, pose.tilt, pose.rotation), (Some(1.0), None, None));
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Pressure").is_some() && at(&drawn, "Tilt X").is_none() && at(&drawn, "Neither").is_some());
     }
 
     #[test]

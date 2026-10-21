@@ -21,7 +21,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::Pixel;
-use crate::dynamics::{Dab, Dynamics, Step, grain, mix};
+use crate::dynamics::{Dab, Dynamics, Pen, Step, grain, mix};
 use crate::texture::{self, Levelled, Pattern};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::tip::Tip;
@@ -176,6 +176,9 @@ pub struct Stroke {
     /// (so over its coverage it's their mean).
     background: Pixel,
     colours: HashMap<(u32, u32), Vec<[f32; 3]>>,
+    /// The pen's tilt and rotation as last reported, for the dabs that
+    /// follow them.
+    pen: Pen,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     /// The last point, and the pen's pressure there.
@@ -212,6 +215,7 @@ impl Stroke {
             image_per_screen: 1.0,
             background: [0; 4],
             colours: HashMap::new(),
+            pen: Pen::default(),
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -358,6 +362,15 @@ impl Stroke {
     /// along the way. With Smoothing, the brush goes only part of the way
     /// to the pointer. Returns the tiles whose coverage changed.
     pub fn add_point(&mut self, x: f32, y: f32, pressure: f32) -> Vec<(u32, u32)> {
+        self.add_pen_point(x, y, Pen { pressure, ..self.pen })
+    }
+
+    /// [`Stroke::add_point`] with all a pen reports there, which Brush
+    /// Pose can stand in for.
+    pub fn add_pen_point(&mut self, x: f32, y: f32, pen: Pen) -> Vec<(u32, u32)> {
+        let pen = self.settings.dynamics.pose.map_or(pen, |pose| pose.apply(pen));
+        self.pen = pen;
+        let pressure = pen.pressure;
         let amount = self.settings.smoothing.clamp(0.0, 1.0);
         self.pointer = Some((x, y, pressure));
         let Some((bx, by, bp)) = self.brush.filter(|_| amount > 0.0) else {
@@ -446,6 +459,7 @@ impl Stroke {
             most: if self.settings.opacity_pressure { pressure } else { 1.0 },
             flow: self.settings.flow * if self.settings.flow_pressure { pressure } else { 1.0 },
             direction,
+            pen: Pen { pressure, ..self.pen },
         };
         let dabs = self.settings.dynamics.dabs(self.seed, self.steps, &mut self.dabs, &at);
         self.steps += 1;
@@ -1809,6 +1823,38 @@ mod tests {
             ..ColorDynamics::default()
         }));
         assert!(grey.iter().all(|p| p[0] == p[1] && p[1] == p[2]), "{grey:?}");
+    }
+
+    #[test]
+    fn brush_pose_pressure_stands_in_for_the_pens() {
+        use crate::dynamics::{Pen, Pose};
+        let settings = BrushSettings {
+            dynamics: Dynamics {
+                pose: Some(Pose {
+                    pressure: Some(1.0),
+                    ..Pose::default()
+                }),
+                ..Dynamics::default()
+            },
+            size_pressure: true,
+            ..hard(40.0, Dynamics::default())
+        };
+        let mut out = Surface::Pixels(white(300, 200));
+        let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone());
+        for x in [50.0, 250.0] {
+            let tiles = s.add_pen_point(
+                x,
+                100.0,
+                Pen {
+                    pressure: 0.1,
+                    ..Pen::default()
+                },
+            );
+            s.apply(&mut out, &tiles);
+        }
+        let Surface::Pixels(out) = out else { unreachable!() };
+        // Full size, 40 px, though the pen pressed lightly.
+        assert_eq!(out.get(150, 118)[0], 0);
     }
 
     #[test]
