@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor};
 use eframe::wgpu;
+use omapix_engine::layer::BlendIf;
 use omapix_engine::{DisplayTransform, Pixel};
 use wgpu::util::DeviceExt;
 
@@ -105,6 +106,7 @@ struct Params {
     fresh: bool,
     /// Clipped: source-atop.
     atop: bool,
+    blend_if: Option<BlendIf>,
 }
 
 impl Params {
@@ -121,7 +123,9 @@ impl Params {
         words.extend([u32::from(inverse.is_some()), self.fresh.into()]);
         let [a, b, c, d, e, f] = inverse.unwrap_or_default();
         words.extend([a, b, c, d, e, f].map(|v| (v as f32).to_bits()));
-        words.extend([self.atop.into(), 0]);
+        words.extend([self.atop.into(), self.blend_if.map_or(0, |b| b.channel as u32 + 1)]);
+        let b = self.blend_if.unwrap_or_default();
+        words.extend(b.this.into_iter().chain(b.underlying).map(f32::to_bits));
         bytemuck::cast_slice(&words).to_vec()
     }
 }
@@ -261,6 +265,7 @@ impl LiveGpu {
             mask_fill: 1.0,
             fresh: false,
             atop: false,
+            blend_if: None,
         };
         let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, None, &[][..], false)];
         let table_texture = |data: &[[f32; 3]]| {
@@ -299,6 +304,7 @@ impl LiveGpu {
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
                 fresh: layer.fresh,
                 atop: layer.atop,
+                blend_if: layer.blend_if,
             };
             sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], layer.subject));
         }
@@ -920,6 +926,43 @@ mod tests {
             .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
             .fold(0.0, f32::max);
         assert!(worst < 4e-3, "a clipped Curves, edited: off by {worst}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_blend_if_matches_the_cpu() {
+        use omapix_engine::layer::{BlendIf, BlendIfChannel};
+        let (device, queue) = device();
+        let check = |doc: &Document, what: &str| {
+            let worst = worst_difference(&device, &queue, doc, (-7, 4), None);
+            assert!(worst < 4e-3, "{what}: off by {worst}");
+        };
+        let split = |channel| BlendIf {
+            channel,
+            this: [0.1, 0.3, 0.7, 0.95],
+            underlying: [0.0, 0.2, 0.8, 1.0],
+        };
+        // On the patch, the layer above and the Curves, in each channel.
+        for channel in [BlendIfChannel::Gray, BlendIfChannel::Red, BlendIfChannel::Green, BlendIfChannel::Blue] {
+            for i in 1..4 {
+                let mut doc = document(BlendMode::Overlay, true);
+                doc.layers[i].blend_if = Some(split(channel));
+                check(&doc, &format!("layer {i}, {channel:?}"));
+            }
+        }
+        // On groups above, one that passes through and one that doesn't,
+        // and on a clipping mask's base.
+        let mut doc = document(BlendMode::Multiply, true);
+        let ids = [doc.layers[2].id, doc.layers[3].id];
+        let group = doc.group_layers(&ids).unwrap();
+        doc.layer_mut(group).unwrap().blend_if = Some(split(BlendIfChannel::Gray));
+        check(&doc, "a group that passes through");
+        doc.layer_mut(group).unwrap().blend = BlendMode::Screen;
+        check(&doc, "an isolated group");
+        let mut doc = document(BlendMode::Normal, true);
+        doc.layers[3].clipped = true;
+        doc.layers[2].blend_if = Some(split(BlendIfChannel::Green));
+        check(&doc, "a clipping mask's base");
     }
 
     #[test]
