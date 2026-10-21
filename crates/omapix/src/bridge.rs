@@ -167,11 +167,11 @@ mod tests {
         dir.join("omapix.sock")
     }
 
-    /// Answer every request with `Ok`, as an app would, keeping them.
-    fn answer(rx: Receiver<Asked>) -> std::thread::JoinHandle<Vec<Request>> {
+    /// Answer `n` requests with `Ok`, as an app would, keeping them.
+    fn answer(rx: Receiver<Asked>, n: usize) -> std::thread::JoinHandle<Vec<Request>> {
         std::thread::spawn(move || {
             let mut asked = Vec::new();
-            while let Ok((request, reply)) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            for (request, reply) in rx.iter().take(n) {
                 let _ = reply.send(Ok(json!({})));
                 asked.push(request);
             }
@@ -185,7 +185,7 @@ mod tests {
         let rx = listen(&socket, &egui::Context::default()).unwrap();
         // A second Omapix doesn't take the socket over.
         assert!(listen(&socket, &egui::Context::default()).is_none());
-        let asked = answer(rx);
+        let asked = answer(rx, 1);
         assert!(hand_off(&socket, &[PathBuf::from("a.tif"), PathBuf::from("/photos/b.tif")], false));
         let asked = asked.join().unwrap();
         let Some(Request::Open { paths, round_trip: false }) = asked.first() else {
@@ -202,7 +202,7 @@ mod tests {
         assert!(socket.exists());
         // Nothing's listening, so there's no one to hand off to.
         assert!(!hand_off(&socket, &[PathBuf::from("/a.tif")], false));
-        let asked = answer(listen(&socket, &egui::Context::default()).unwrap());
+        let asked = answer(listen(&socket, &egui::Context::default()).unwrap(), 1);
         assert!(hand_off(&socket, &[PathBuf::from("/a.tif")], false));
         assert_eq!(asked.join().unwrap().len(), 1);
         std::fs::remove_dir_all(socket.parent().unwrap()).ok();
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn agents_get_the_tools_and_unknown_commands_are_refused_before_the_app() {
         let socket = socket_in("tools");
-        let asked = answer(listen(&socket, &egui::Context::default()).unwrap());
+        let asked = answer(listen(&socket, &egui::Context::default()).unwrap(), 1);
         let stream = UnixStream::connect(&socket).unwrap();
         let mut reader = BufReader::new(&stream);
         let mut send = |message: Value| {
