@@ -79,12 +79,13 @@ struct Uploaded {
     kept: Vec<wgpu::Texture>,
     display_uniform: wgpu::Buffer,
     display_group: wgpu::BindGroup,
-    painting: Option<Painting>,
+    /// The subject's pixels and mask, to bring up to date as they're painted.
+    painting: (Option<Painted<Pixel>>, Option<Painted<u16>>),
 }
 
-/// The subject's pixels: their texture, the area of the level it holds
-/// (x0, y0, w, h), and the pixels it shows.
-type Painting = (wgpu::Texture, (u32, u32, u32, u32), Tiled<Pixel>);
+/// A texture of the subject, the area of the level it holds (x0, y0, w,
+/// h), and what it shows.
+type Painted<T> = (wgpu::Texture, (u32, u32, u32, u32), Tiled<T>);
 
 struct Pass {
     uniform: wgpu::Buffer,
@@ -279,7 +280,7 @@ impl LiveGpu {
             write_lut(queue, &texture, data, LUT_SIZE);
             texture
         };
-        let mut painting = None;
+        let mut painting = (None, None);
         for layer in &stack.layers {
             let nothing = ([0; 2], [0; 2]);
             let (pixels, lut, before, plane, fill, kind) = match &layer.source {
@@ -296,12 +297,15 @@ impl LiveGpu {
                 Source::Isolated(slot) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 5),
             };
             if let (true, Source::Pixels(plane), Some(view)) = (layer.subject, &layer.source, &pixels) {
-                painting = Some((view.texture().clone(), (plane.x0, plane.y0, plane.w, plane.h), stack.subject_pixels.clone()));
+                painting.0 = Some((view.texture().clone(), (plane.x0, plane.y0, plane.w, plane.h), stack.subject_pixels.clone()));
             }
             let mask = layer.mask.as_ref().map(|m| {
                 let texture = upload(device, queue, wgpu::TextureFormat::R16Uint, (m.w, m.h), &m.data);
                 (texture, rect(m.x0, m.y0, m.w, m.h), f32::from(m.fill) / 65535.0)
             });
+            if let (true, Some(m), Some((view, ..)), Some(was)) = (layer.subject, &layer.mask, &mask, &stack.subject_mask) {
+                painting.1 = Some((view.texture().clone(), (m.x0, m.y0, m.w, m.h), was.clone()));
+            }
             let params = Params {
                 region_origin,
                 plane,
@@ -412,7 +416,11 @@ impl CallbackTrait for LiveDraw {
             gpu.upload(device, queue, self);
         }
         let uploaded = gpu.uploaded.as_mut().expect("just uploaded");
-        if let (Some(now), Some((texture, area, shown))) = (&self.frame.painted, &mut uploaded.painting) {
+        if let (Some(now), Some((texture, area, shown))) = (&self.frame.painted, &mut uploaded.painting.0) {
+            repaint(queue, texture, *area, shown, now);
+            *shown = now.clone();
+        }
+        if let (Some(now), Some((texture, area, shown))) = (&self.frame.painted_mask, &mut uploaded.painting.1) {
             repaint(queue, texture, *area, shown, now);
             *shown = now.clone();
         }
@@ -539,7 +547,13 @@ fn upload_pixels(device: &wgpu::Device, queue: &wgpu::Queue, plane: &Plane<Pixel
 
 /// Bring the tiles of `texture` (holding `area` of a layer) that differ
 /// between `was` and `now` up to date.
-fn repaint(queue: &wgpu::Queue, texture: &wgpu::Texture, (x0, y0, w, h): (u32, u32, u32, u32), was: &Tiled<Pixel>, now: &Tiled<Pixel>) {
+fn repaint<T: bytemuck::Pod + PartialEq + Send + Sync>(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    (x0, y0, w, h): (u32, u32, u32, u32),
+    was: &Tiled<T>,
+    now: &Tiled<T>,
+) {
     let (x1, y1) = ((x0 + w).min(now.width()), (y0 + h).min(now.height()));
     for row in y0 / TILE..y1.div_ceil(TILE) {
         for col in x0 / TILE..x1.div_ceil(TILE) {
@@ -552,7 +566,7 @@ fn repaint(queue: &wgpu::Queue, texture: &wgpu::Texture, (x0, y0, w, h): (u32, u
                 continue;
             }
             let tile = now.tile(col, row);
-            let data: Vec<Pixel> = (ay..by)
+            let data: Vec<T> = (ay..by)
                 .flat_map(|y| (ax..bx).map(move |x| ((y - row * TILE) * TILE + x - col * TILE) as usize))
                 .map(|i| tile.map_or(now.fill(), |t| t[i]))
                 .collect();
@@ -566,7 +580,7 @@ fn repaint(queue: &wgpu::Queue, texture: &wgpu::Texture, (x0, y0, w, h): (u32, u
                 bytemuck::cast_slice(&data),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some((bx - ax) * 8),
+                    bytes_per_row: Some((bx - ax) * size_of::<T>() as u32),
                     rows_per_image: Some(by - ay),
                 },
                 extent((bx - ax, by - ay, 1)),
@@ -724,6 +738,7 @@ mod tests {
             frame: LiveFrame {
                 stack: Arc::new(stack),
                 painted: None,
+                painted_mask: None,
                 offset,
                 transform,
                 settings: None,
@@ -830,6 +845,7 @@ mod tests {
             frame: LiveFrame {
                 stack,
                 painted: None,
+                painted_mask: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(Settings {
@@ -879,6 +895,29 @@ mod tests {
         let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
         assert!(worst < 4e-3, "one in another: off by {worst}");
 
+        // Moving a layer inside them: one, one in another starting with it,
+        // and with a clipped layer and a group that fades round them.
+        let mut doc = document();
+        let ids = [doc.layers[1].id, above];
+        let group = doc.group_layers(&ids).unwrap();
+        isolate(&mut doc, group, BlendMode::Multiply);
+        fade(&mut doc, group, 0.8);
+        let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
+        assert!(worst < 4e-3, "inside one: off by {worst}");
+        let inner = doc.group_layer(1);
+        isolate(&mut doc, inner, BlendMode::Screen);
+        let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
+        assert!(worst < 4e-3, "inside two: off by {worst}");
+        let mut doc = document();
+        doc.layers[2].clipped = true;
+        let ids = [doc.layers[1].id, above];
+        let group = doc.group_layers(&ids).unwrap();
+        isolate(&mut doc, group, BlendMode::Overlay);
+        let outer = doc.group_layer(doc.index_of(group).unwrap());
+        fade(&mut doc, outer, 0.6);
+        let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
+        assert!(worst < 4e-3, "clipped, in a group that fades: off by {worst}");
+
         // A group's own opacity and mode, edited.
         let mut doc = document();
         let group = doc.group_layers(&[doc.layers[1].id, above]).unwrap();
@@ -891,6 +930,7 @@ mod tests {
             frame: LiveFrame {
                 stack,
                 painted: None,
+                painted_mask: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(Settings {
@@ -966,6 +1006,7 @@ mod tests {
             frame: LiveFrame {
                 stack,
                 painted: None,
+                painted_mask: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(settings),
@@ -1033,10 +1074,16 @@ mod tests {
         for (x, y) in (12..30).flat_map(|x| (5..20).map(move |y| (x, y))) {
             doc.layers[1].pixels.tile_mut(0, 0)[(y * TILE + x) as usize] = [1000, 50000, 9000, 40000];
         }
+        // And its mask.
+        let mask = &mut doc.layers[1].mask.as_mut().unwrap().pixels;
+        for (x, y) in (20..50).flat_map(|x| (10..35).map(move |y| (x, y))) {
+            mask.tile_mut(0, 0)[(y * TILE + x) as usize] = 9000;
+        }
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack: Arc::new(stack),
                 painted: Some(doc.layers[1].pixels.clone()),
+                painted_mask: Some(doc.layers[1].mask.as_ref().unwrap().pixels.clone()),
                 offset: (0, 0),
                 transform: None,
                 settings: None,
@@ -1084,6 +1131,7 @@ mod tests {
             frame: LiveFrame {
                 stack: Arc::new(stack),
                 painted: None,
+                painted_mask: None,
                 offset: (0, 0),
                 transform: None,
                 settings: None,
@@ -1194,6 +1242,7 @@ mod tests {
             frame: LiveFrame {
                 stack,
                 painted: None,
+                painted_mask: None,
                 offset: (0, 0),
                 transform: None,
                 settings: Some(settings),

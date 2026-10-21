@@ -919,7 +919,7 @@ impl Editor {
         let before = self.snapshot(label);
         self.push_undo(before);
         self.stroke = Some((stroke, self.active));
-        if target == Target::Pixels {
+        if matches!(target, Target::Pixels | Target::Mask) {
             self.show_stroke_live();
         }
         true
@@ -2091,18 +2091,21 @@ impl Editor {
             }
             _ => None,
         };
-        // A stroke's pixels as they are now, at the level on screen.
+        // A stroke's layer as it is now, at the level on screen.
         let painted = match (&mut live.painting, layer, &live.stack) {
-            (Some(None), Some(layer), Some(s)) if s.level == 0 => Some(layer.pixels.clone()),
-            (Some(Some(own)), Some(layer), Some(s)) => own.layers(std::slice::from_ref(layer), s.level as u32).pop().map(|l| l.pixels),
+            (Some(None), Some(layer), Some(s)) if s.level == 0 => Some(layer.clone()),
+            (Some(Some(own)), Some(layer), Some(s)) => own.layers(std::slice::from_ref(layer), s.level as u32).pop(),
             _ => None,
         };
+        let painted_mask = painted.as_ref().and_then(|l| l.mask.as_ref()).filter(|m| m.enabled).map(|m| m.pixels.clone());
+        let painted = painted.map(|l| l.pixels);
         self.canvas.live = live.stack.as_ref().map(|s| LiveFrame {
             stack: Arc::clone(s),
             offset: live.offset,
             transform: live.transform,
             settings,
             painted,
+            painted_mask,
         });
     }
 
@@ -3651,6 +3654,19 @@ mod live_tests {
         assert!(e.painted_live.is_empty());
         e.end_stroke();
         assert_eq!(e.undo_label(), Some("Brush Stroke"));
+
+        // A mask is painted live too.
+        e.edit("Mask", |doc, active| {
+            doc.layer_mut(*active).unwrap().mask = Some(omapix_engine::layer::Mask::white(600, 400))
+        });
+        e.target = Target::Mask;
+        assert!(e.begin_stroke(brush, Paint::Mask(0), Sample::Current, Default::default()));
+        settle(&mut e, &ctx);
+        e.stroke_to(100.0, 200.0, 1.0);
+        e.update(&ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.painted_mask.expect("the mask as painted").get(100, 200), 0);
+        e.end_stroke();
     }
 
     #[test]
