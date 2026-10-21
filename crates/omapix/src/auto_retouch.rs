@@ -741,6 +741,110 @@ mod tests {
         assert!(thumb.iter().all(|p| p[0] == 50000));
     }
 
+    /// How close Auto Retouch comes to Michael's own retouches (PLAN.md,
+    /// step 21): for each layered file in `OMAPIX_RETOUCHES` (.ora or .psd,
+    /// the bottom layer the photo as it came from darktable), Auto Retouch
+    /// at `PRESET` (Standard, if unset) on that photo is compared with his
+    /// retouch, face by face and zone by zone: its skin, under its eyes, its
+    /// eyes and its teeth. In each zone, what each changed is split into
+    /// tone (blurred by a tenth of the distance between the eyes) and
+    /// texture (what's left), and the difference between the two changes
+    /// is averaged, in CIE L* (out of 100). Lower is closer; "his" is how
+    /// much he changed it, for scale. The last line is the score to beat:
+    /// the mean over every zone of every face. Needs the models.
+    #[test]
+    #[ignore]
+    fn auto_retouch_against_hand_retouches() {
+        use omapix_engine::tiled::Tiled;
+        let Ok(folder) = std::env::var("OMAPIX_RETOUCHES") else {
+            return;
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(&folder).unwrap().map(|e| e.unwrap().path()).collect();
+        paths.retain(|p| p.extension().is_some_and(|e| e == "ora" || e == "psd"));
+        paths.sort();
+        let preset = std::env::var("PRESET").map_or(Preset::Standard, |name| Preset::from_name(&name).unwrap());
+        // CIE L*, from linear sRGB.
+        let lightness = |p: Pixel| {
+            let y = (0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])) / 65535.0;
+            if y > 0.008856 { 116.0 * y.cbrt() - 16.0 } else { 903.3 * y }
+        };
+        let linear = ColorProfile::srgb().with_gamma(1.0).unwrap();
+        let mut all = Vec::new();
+        eprintln!("{:<28} {:>4} {:<10} {:>6} {:>8} {:>6}", "file", "face", "zone", "tone", "texture", "his");
+        for path in paths {
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let doc = omapix_engine::io::load(&path).unwrap();
+            let in_linear = |r: &Raster| {
+                omapix_engine::color::convert(&Tiled::from_raster(r), &doc.profile, &linear)
+                    .unwrap()
+                    .to_raster()
+            };
+            let his = in_linear(&doc.composite());
+            let mut photo = doc.clone();
+            photo.layers.truncate(1);
+            (photo.layers[0].visible, photo.layers[0].opacity, photo.layers[0].mask) = (true, 1.0, None);
+            let faces = match find(&photo.composite(), &photo.profile) {
+                Ok(faces) => faces,
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    continue;
+                }
+            };
+            let mut editor = Editor::new(photo).unwrap();
+            let dialog = AutoRetouch {
+                all: preset.settings(),
+                accept: false,
+                layer: editor.active,
+                finding: None,
+                faces,
+                selected: None,
+                circled: Vec::new(),
+            };
+            let before = in_linear(&editor.doc.composite());
+            apply(&mut editor, &dialog);
+            let ours = in_linear(&editor.doc.composite());
+            for (n, face) in dialog.faces.iter().enumerate() {
+                let found = &face.found;
+                let radius = found.iod / 10.0;
+                let blurred = |r: &Raster| omapix_engine::filters::gaussian_blur(&Tiled::from_raster(r), radius);
+                let [h, o] = [&his, &ours].map(blurred);
+                let under_eyes = found.under_eyes.0.combine(&found.under_eyes.1, omapix_engine::Combine::Add);
+                for (zone, selection) in [
+                    ("skin", &found.skin),
+                    ("under eyes", &under_eyes),
+                    ("eyes", &found.eyes),
+                    ("teeth", &found.teeth),
+                ] {
+                    let Some([x, y, w, hh]) = selection.bounds() else { continue };
+                    let (mut weight, mut tone, mut texture, mut his_change) = (0.0, 0.0, 0.0, 0.0);
+                    for (px, py) in (y..y + hh).flat_map(|py| (x..x + w).map(move |px| (px, py))) {
+                        let k = f32::from(selection.coverage.get(px, py)) / 65535.0;
+                        if k == 0.0 {
+                            continue;
+                        }
+                        let at = |r: &Raster| lightness(r.get(px, py));
+                        let smooth = |t: &Tiled<Pixel>| lightness(t.get(px, py));
+                        // The changes from `before` differ as the results do.
+                        let (th, to) = (smooth(&h), smooth(&o));
+                        weight += k;
+                        tone += k * (to - th).abs();
+                        texture += k * ((at(&ours) - to) - (at(&his) - th)).abs();
+                        his_change += k * (at(&his) - at(&before)).abs();
+                    }
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let (tone, texture, his_change) = (tone / weight, texture / weight, his_change / weight);
+                    eprintln!("{name:<28} {:>4} {zone:<10} {tone:>6.2} {texture:>8.2} {his_change:>6.2}", n + 1);
+                    all.push(tone + texture);
+                }
+            }
+        }
+        if !all.is_empty() {
+            eprintln!("score: {:.3} ({} zones)", all.iter().sum::<f32>() / all.len() as f32, all.len());
+        }
+    }
+
     /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder
     /// of them), Auto Retouch at `PRESET` (Standard, if unset), each face
     /// before and after side by side as `<photo>-face-<n>.png` in
