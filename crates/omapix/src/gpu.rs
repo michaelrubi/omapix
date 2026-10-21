@@ -938,6 +938,46 @@ mod tests {
         let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
         assert!(worst < 4e-3, "clipped, in a group that fades: off by {worst}");
 
+        // A group inside one, isolated or passing through, edited.
+        for mode in [BlendMode::Screen, BlendMode::PassThrough] {
+            let mut doc = document();
+            let ids = [doc.layers[1].id, above];
+            let outer = doc.group_layers(&ids).unwrap();
+            isolate(&mut doc, outer, BlendMode::Multiply);
+            let inner = doc.group_layer(2);
+            isolate(&mut doc, inner, mode);
+            let (w, h) = (doc.width, doc.height);
+            let stack = Arc::new(live::build(&doc, &doc.layers, inner, false, 0, (0, 0, w, h)).expect("shown live"));
+            doc.layer_mut(inner).unwrap().opacity = 0.4;
+            let draw = LiveDraw {
+                frame: LiveFrame {
+                    stack,
+                    painted: None,
+                    painted_mask: None,
+                    offset: (0, 0),
+                    transform: None,
+                    settings: Some(Settings {
+                        opacity: 0.4,
+                        mode,
+                        lut: None,
+                        blend_if: None,
+                    }),
+                },
+                display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            let gpu = composite_on_gpu(&device, &queue, draw);
+            let cpu = composite::composite(&doc.layers, w, h);
+            let worst = cpu
+                .pixels()
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+                .fold(0.0, f32::max);
+            assert!(worst < 4e-3, "a {mode:?} group inside one, edited: off by {worst}");
+        }
+
         // A group's own opacity and mode, edited.
         let mut doc = document();
         let group = doc.group_layers(&[doc.layers[1].id, above]).unwrap();

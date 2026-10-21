@@ -254,7 +254,6 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
         })
         .min();
     let from = match isolated {
-        Some(_) if subject.is_group => return None,
         Some(start) => start.min(from),
         None => from,
     };
@@ -305,8 +304,10 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
         if !plain(l) {
             return None;
         }
-        // A group being edited: its layers, composited, stand in for it.
-        if subject.is_group && (doc.span(index).start..index).contains(&i) {
+        // A group being edited that's composited on its own: its layers,
+        // composited, stand in for it.
+        let alone = !through(subject) || subject.clipped || doc.is_clip_base(subject.id);
+        if subject.is_group && alone && (doc.span(index).start..index).contains(&i) {
             continue;
         }
         if !shown(l) || clipped_away(l) {
@@ -440,7 +441,9 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
                     ..layer(i)
                 });
             }
-        } else if fades && let Some(first) = out.iter().position(|s| s.index >= start) {
+        } else if (fades || i == index)
+            && let Some(first) = out.iter().position(|s| s.index >= start)
+        {
             let slot = free(&kept, &clips, start);
             kept.push((start, slot));
             out[first].keep.push(slot);
@@ -774,8 +777,8 @@ mod tests {
         assert_eq!(ends(&live), [None, Some(1), None, Some(0), None]);
         assert!(live.layers[0].subject && live.layers[0].fresh);
         assert_eq!(live.below.data[0], [30000, 30000, 30000, 65535]);
-        // But not a group inside one.
-        assert!(!can_show(&doc, inner, false));
+        // And a group inside one, edited.
+        assert!(can_show(&doc, inner, false));
         // Editing the outer group, its layers stand in for it, and what's
         // below it is below them.
         let live = build(&doc, &doc.layers, outer, false, 0, all).unwrap();
