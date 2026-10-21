@@ -295,6 +295,7 @@ impl LiveGpu {
                 Source::Adjustment(table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
                 Source::Group(Before::Kept(slot)) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 4),
                 Source::Isolated(slot) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 5),
+                Source::Masked => (None, None, None, nothing, [0.0; 4], 6),
             };
             if let (true, Source::Pixels(plane), Some(view)) = (layer.subject, &layer.source, &pixels) {
                 painting.0 = Some((view.texture().clone(), (plane.x0, plane.y0, plane.w, plane.h), stack.subject_pixels.clone()));
@@ -1029,6 +1030,24 @@ mod tests {
             doc.layers.push(layer);
         }
         check(&doc, "clipped to an adjustment");
+        // Clipped to a group with a mask, Pass Through or not, with the patch
+        // moving below it and inside it.
+        for mode in [BlendMode::PassThrough, BlendMode::Multiply] {
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[2].id];
+            let group = doc.group_layers(&ids).unwrap();
+            doc.layers[4].clipped = true;
+            doc.layer_mut(group).unwrap().blend = mode;
+            fade(&mut doc, group, 0.7);
+            check(&doc, &format!("clipped to a group, {mode:?}"));
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[1].id, doc.layers[2].id];
+            let group = doc.group_layers(&ids).unwrap();
+            doc.layers[4].clipped = true;
+            doc.layer_mut(group).unwrap().blend = mode;
+            fade(&mut doc, group, 0.7);
+            check(&doc, &format!("inside a group clipped to, {mode:?}"));
+        }
 
         // The clipped Curves, edited.
         let mut doc = document(BlendMode::Normal, true);

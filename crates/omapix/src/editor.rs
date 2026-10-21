@@ -3904,13 +3904,8 @@ mod live_tests {
         let ctx = egui::Context::default();
         let mut e = editor();
         let patch = e.active;
-        // In a group with a layer clipped to it.
-        e.doc.group_layer(e.doc.index_of(patch).unwrap());
-        let id = e.doc.next_layer_id();
-        let mut clipped = Layer::empty(id, "Clipped", 600, 400);
-        clipped.clipped = true;
-        e.doc.layers.push(clipped);
-        e.active = patch;
+        // With a selection.
+        e.doc.selection = Some(Selection::all(600, 400));
         assert!(e.begin_move("Move", false, 0));
         e.move_to(10, 5);
         e.update(&ctx);

@@ -20,7 +20,8 @@ struct Layer {
     // 0: pixels, 1: an adjustment, 2: the first (nothing below it), 3: the
     // end of a group that fades, with what was below its layers in `pixels`,
     // 4: the same, with it in `kept`, 5: the end of an isolated group, its
-    // contents in `below` and what was below the group in `kept`.
+    // contents in `below` and what was below the group in `kept`, 6: the
+    // end of a group things are clipped to, its contents cut by its mask.
     kind: u32,
     has_mask: u32,
     lut_size: u32,
@@ -329,6 +330,10 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let cb = dst.rgb;
     let a_b = dst.a;
+
+    if p.kind == 6u {
+        return vec4<f32>(cb, a_b * coverage);
+    }
 
     // An isolated group's contents blend onto what was below the group
     // like a single layer (composite.rs `blend_one`).
