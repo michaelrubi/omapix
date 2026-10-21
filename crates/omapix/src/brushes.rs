@@ -217,6 +217,7 @@ impl Library {
             tip: self.tip(settings.tip),
             dual_tip: self.tip(settings.dynamics.dual.and_then(|d| d.tip)),
             pattern: self.pattern(settings),
+            ..Parts::default()
         }
     }
 

@@ -4083,7 +4083,12 @@ impl App {
                     paint = Paint::Color(background.unwrap_or([65535; 4]));
                 }
                 let (settings, sample) = (self.tools.settings(), self.tools.sample_from());
-                if editor.begin_stroke(settings, paint, sample, self.brushes.parts(&settings)) {
+                // Color Dynamics varies the colour towards the background.
+                let parts = omapix_engine::brush::Parts {
+                    background: editor.doc.profile.from_srgb8(self.tools.background).unwrap_or([65535; 4]),
+                    ..self.brushes.parts(&settings)
+                };
+                if editor.begin_stroke(settings, paint, sample, parts) {
                     editor.stroke_to(p.x, p.y, pressure);
                 }
             }
