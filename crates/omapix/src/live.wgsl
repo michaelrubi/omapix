@@ -342,6 +342,12 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         if a_s <= 0.0 {
             return back;
         }
+        if p.atop == 1u {
+            if back.a <= 0.0 {
+                return back;
+            }
+            return vec4<f32>(back.rgb + (blend(p.mode, back.rgb, cb) - back.rgb) * a_s, back.a);
+        }
         var blended = cb;
         if back.a > 0.0 {
             blended = blend(p.mode, back.rgb, cb);

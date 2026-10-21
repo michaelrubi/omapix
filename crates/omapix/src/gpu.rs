@@ -994,6 +994,32 @@ mod tests {
         clip(&mut doc, 1);
         clip(&mut doc, 2);
         check(&doc, "clipped itself");
+        // A group clipped to the patch, Pass Through or not, with the patch
+        // moving or inside it.
+        for mode in [BlendMode::PassThrough, BlendMode::Screen] {
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[2].id, doc.layers[3].id];
+            let group = doc.group_layers(&ids).unwrap();
+            let g = doc.layer_mut(group).unwrap();
+            (g.clipped, g.blend, g.opacity) = (true, mode, 0.7);
+            check(&doc, &format!("a clipped group, {mode:?}"));
+        }
+        let mut doc = document(BlendMode::Multiply, true);
+        let base = doc.layers[0].id;
+        let ids = [doc.layers[1].id, doc.layers[2].id];
+        let group = doc.group_layers(&ids).unwrap();
+        doc.layer_mut(group).unwrap().clipped = true;
+        doc.layer_mut(base).unwrap().opacity = 0.8;
+        check(&doc, "inside a clipped group");
+        // A clipping mask inside one.
+        let mut doc = document(BlendMode::Overlay, true);
+        doc.layers[2].clipped = true;
+        let ids = [doc.layers[1].id, doc.layers[2].id];
+        let group = doc.group_layers(&ids).unwrap();
+        let g = doc.layer_mut(group).unwrap();
+        (g.clipped, g.opacity) = (true, 0.6);
+        doc.layers[0].opacity = 0.9;
+        check(&doc, "a clipping mask in a clipped group");
 
         // The clipped Curves, edited.
         let mut doc = document(BlendMode::Normal, true);
