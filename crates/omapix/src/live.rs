@@ -11,12 +11,15 @@
 //! When the drag ends the exact CPU render replaces the live one.
 //!
 //! Only stacks the shader handles are shown live: the subject is a pixel
-//! layer (or for edits also an adjustment layer, or a Pass Through group),
-//! and the layers above it are pixel or adjustment layers. They can be in
-//! Pass Through groups, which blend as if their layers weren't grouped;
-//! one with an opacity or a mask then fades what its layers made back
-//! towards what was below them. Anything else (clipping, Blend If, other
-//! groups) stays on the CPU as before.
+//! layer (or for edits also an adjustment layer, or a group), and the
+//! layers above it are pixel or adjustment layers, in groups or not. A Pass
+//! Through group blends as if its layers weren't grouped; one with an
+//! opacity or a mask then fades what its layers made back towards what was
+//! below them. A group composited on its own (any other mode) has its
+//! layers blended onto nothing, then what they made blended onto what was
+//! below it, with the group's mode, opacity and mask. Anything else
+//! (clipping, Blend If, a subject inside a group composited on its own)
+//! stays on the CPU as before.
 
 use std::sync::Arc;
 
@@ -68,6 +71,10 @@ pub enum Source {
     /// they made of what was below them is faded back towards that by the
     /// group's opacity and mask.
     Group(Before),
+    /// The end of a group composited on its own: what its layers made (onto
+    /// nothing, from the first of them) is blended onto what was below
+    /// them, kept in this slot, with the group's mode, opacity and mask.
+    Isolated(usize),
 }
 
 /// What was below a group's layers.
@@ -89,6 +96,9 @@ pub struct LiveLayer {
     /// The slots to keep what's below this layer in, for the ends of the
     /// groups that start with it.
     pub keep: Vec<usize>,
+    /// It's the first in a group composited on its own, so it blends onto
+    /// nothing (after what's below is kept).
+    pub fresh: bool,
 }
 
 /// The subject's settings this frame, while they're being edited.
@@ -130,14 +140,23 @@ struct Step {
     index: usize,
     end: Option<End>,
     keep: Vec<usize>,
+    fresh: bool,
 }
 
-/// For a group's end, what was below its layers: everything below this
-/// place in the document, or what's kept in this slot.
+/// For a Pass Through group's end, what was below its layers: everything
+/// below this place in the document, or what's kept in this slot. For a
+/// group composited on its own: the slot what was below it is kept in, or
+/// for the subject itself, its layers from this place, composited.
+#[derive(Clone, Copy)]
 enum End {
     Below(usize),
     Kept(usize),
+    Isolated(usize),
+    Contents(usize),
 }
+
+/// The slot of a group that starts onto nothing: one never kept into.
+const NOTHING: usize = usize::MAX;
 
 /// The layers from `id` up that a live move (or edit) blends, bottom
 /// first, or `None` if it can't be shown live.
@@ -146,7 +165,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<Vec<Step>> {
     let subject = &doc.layers[index];
     let plain = |l: &Layer| !l.clipped && !doc.is_clip_base(l.id) && l.blend_if.is_none_or(|b| b.is_neutral());
     let through = |l: &Layer| l.is_group && l.blend == BlendMode::PassThrough;
-    let kind = subject.has_pixels() || !moving && (subject.adjustment.is_some() || through(subject));
+    let kind = subject.has_pixels() || !moving && (subject.adjustment.is_some() || subject.is_group);
     let groups_shown = |l: &Layer| std::iter::successors(l.parent, |&g| doc.layer(g)?.parent).all(|g| doc.layer(g).is_some_and(|g| g.visible));
     // What's below the subject is composited without the groups round it
     // (the loop below checks they're Pass Through). That's wrong if one is
@@ -165,6 +184,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<Vec<Step>> {
         index,
         end: None,
         keep: Vec::new(),
+        fresh: false,
     };
     let mut out: Vec<Step> = Vec::new();
     // The groups above the subject that fade: where each starts, and the
@@ -181,11 +201,49 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<Vec<Step>> {
             out.push(layer(i));
             continue;
         }
+        let start = doc.span(i).start;
         if !through(l) {
-            return None;
+            if i == index {
+                // The subject: its layers, composited, stand in for it.
+                out.push(Step {
+                    end: Some(End::Contents(start)),
+                    ..layer(i)
+                });
+            } else if start <= index {
+                // Round the subject: what's below it would be what's below
+                // it in the group, onto nothing.
+                return None;
+            } else if let Some(first) = out.iter().position(|s| s.index >= start) {
+                // Its layers start onto nothing, with what's below them
+                // kept, then what they made is blended onto that.
+                // Groups inside it that start with the same layer start
+                // onto nothing too, not onto what's below it.
+                let starts = |g: usize| out.iter().position(|s| s.index >= doc.span(g).start);
+                let same: Vec<usize> = (first + 1..out.len())
+                    .filter(|&j| out[j].end.is_some() && starts(out[j].index) == Some(first))
+                    .collect();
+                for j in same {
+                    out[j].end = match out[j].end {
+                        Some(End::Isolated(_)) => Some(End::Isolated(NOTHING)),
+                        Some(End::Kept(_)) => Some(End::Kept(NOTHING)),
+                        ref end => *end,
+                    };
+                }
+                out[first].keep.clear();
+                kept.retain(|&(s, _)| out.iter().position(|step| step.index >= s) != Some(first));
+                let inside = kept.iter().filter(|(s, _)| *s >= start);
+                let slot = inside.map(|(_, slot)| slot + 1).max().unwrap_or(0);
+                kept.push((start, slot));
+                out[first].keep.push(slot);
+                out[first].fresh = true;
+                out.push(Step {
+                    end: Some(End::Isolated(slot)),
+                    ..layer(i)
+                });
+            }
+            continue;
         }
         let fades = l.opacity < 1.0 || l.mask.as_ref().is_some_and(|m| m.enabled);
-        let start = doc.span(i).start;
         if start <= index {
             // The subject, or a group it's in: what's below the group
             // doesn't change.
@@ -219,7 +277,8 @@ pub fn can_show(doc: &Document, id: u64, moving: bool) -> bool {
 }
 
 /// Whether `after` differs from `before` only in layer `id`'s opacity,
-/// blend mode and adjustment settings: what a live edit can show.
+/// blend mode and adjustment settings: what a live edit can show. A group
+/// can't start or stop passing through.
 pub fn only_settings_changed(before: &[Layer], after: &[Layer], id: u64) -> bool {
     before.len() == after.len()
         && before.iter().zip(after).all(|(a, b)| {
@@ -231,7 +290,9 @@ pub fn only_settings_changed(before: &[Layer], after: &[Layer], id: u64) -> bool
                 };
             let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group, a.blend_if) == (b.id, b.parent, b.visible, b.clipped, b.is_group, b.blend_if);
             let same_settings = (a.opacity, a.blend, &a.adjustment) == (b.opacity, b.blend, &b.adjustment);
-            same_pixels && same_place && (same_settings || a.id == id)
+            // A group that starts or stops passing through is made of other passes.
+            let through = |l: &Layer| l.is_group && l.blend == BlendMode::PassThrough;
+            same_pixels && same_place && (same_settings || a.id == id && through(a) == through(b))
         })
 }
 
@@ -255,8 +316,28 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
         let all = Tiled::from_tiles(lw, lh, [0; 4], |col, row| by_tile.get(&(col, row)).cloned());
         Plane::crop(&all, region)
     };
+    // What the group at `group`, from place `start`, makes of its layers
+    // on its own, over `region`: the group alone, plainly.
+    let contents = |start: usize, group: usize| {
+        let mut alone = layers[start..=group].to_vec();
+        let g = alone.last_mut().expect("the group");
+        (g.parent, g.blend, g.opacity, g.mask, g.visible) = (None, BlendMode::Normal, 1.0, None, true);
+        let composited = composite::composite_tiles(&alone, &tiles, None);
+        let by_tile: HashMap<_, _> = tiles.iter().zip(composited).collect();
+        Plane::crop(&Tiled::from_tiles(lw, lh, [0; 4], |col, row| by_tile.get(&(col, row)).cloned()), region)
+    };
     let whole = (0, 0, lw, lh);
-    let slots = steps.iter().flat_map(|s| &s.keep).map(|slot| slot + 1).max().unwrap_or(0);
+    let mut slots = steps.iter().flat_map(|s| &s.keep).map(|slot| slot + 1).max().unwrap_or(0);
+    let nothing = slots;
+    if steps.iter().any(|s| matches!(s.end, Some(End::Isolated(NOTHING) | End::Kept(NOTHING)))) {
+        slots += 1;
+    }
+    let slot = |s: usize| if s == NOTHING { nothing } else { s };
+    // Below a group composited on its own is below its layers.
+    let base = match steps.first().and_then(|s| s.end) {
+        Some(End::Contents(start)) => start,
+        _ => index,
+    };
     let live = steps
         .into_iter()
         .map(|step| {
@@ -267,7 +348,9 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
             let area = if subject && moving { whole } else { region };
             let source = match (step.end, &layer.adjustment) {
                 (Some(End::Below(start)), _) => Source::Group(Before::Plane(below(start))),
-                (Some(End::Kept(slot)), _) => Source::Group(Before::Kept(slot)),
+                (Some(End::Kept(s)), _) => Source::Group(Before::Kept(slot(s))),
+                (Some(End::Isolated(s)), _) => Source::Isolated(slot(s)),
+                (Some(End::Contents(start)), _) => Source::Pixels(contents(start, step.index)),
                 (None, Some(a)) => Source::Adjustment(a.prepare().lut(LUT_SIZE)),
                 (None, None) => Source::Pixels(Plane::crop(&layer.pixels, area)),
             };
@@ -278,6 +361,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 opacity: layer.opacity,
                 subject,
                 keep: step.keep,
+                fresh: step.fresh,
             }
         })
         .collect();
@@ -285,7 +369,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
         id: NEXT.fetch_add(1, Ordering::Relaxed),
         level,
         region,
-        below: below(index),
+        below: below(base),
         layers: live,
         slots,
     })
@@ -335,15 +419,54 @@ mod tests {
         doc.layers[2].clipped = true;
         assert!(!can_show(&doc, patch, true), "clipped layer above");
         doc.layers[2].clipped = false;
-        // A Pass Through group above is fine; one composited on its own isn't,
-        // unless it's hidden.
+        // Groups above are fine, Pass Through or composited on their own.
         let group = doc.group_layer(2);
         assert!(can_show(&doc, patch, true));
         doc.layer_mut(group).unwrap().blend = BlendMode::Normal;
-        assert!(!can_show(&doc, patch, true));
-        assert!(!can_show(&doc, group, false), "nor edited itself");
-        doc.layer_mut(group).unwrap().visible = false;
         assert!(can_show(&doc, patch, true));
+        assert!(can_show(&doc, group, false), "and edited itself");
+    }
+
+    #[test]
+    fn isolated_groups_start_onto_nothing() {
+        let mut doc = doc();
+        let (patch, soft, curves) = (doc.layers[1].id, doc.layers[2].id, doc.layers[3].id);
+        // Background, [[Patch] inner, Soft Light] outer, Curves, both groups
+        // composited on their own.
+        let inner = doc.group_layer(1);
+        let outer = doc.group_layers(&[inner, soft]).unwrap();
+        for g in [inner, outer] {
+            doc.layer_mut(g).unwrap().blend = BlendMode::Multiply;
+        }
+        let all = (0, 0, 300, 200);
+        let ends = |live: &LiveStack| -> Vec<Option<usize>> {
+            live.layers
+                .iter()
+                .map(|l| match l.source {
+                    Source::Isolated(slot) => Some(slot),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // From the background, the patch starts onto nothing with what's
+        // below it kept for the outer group; the inner one, which starts
+        // there too, ends onto a slot nothing's kept in.
+        let live = build(&doc, &doc.layers, doc.layers[0].id, true, 0, all).unwrap();
+        assert_eq!(ends(&live), [None, None, Some(1), None, Some(0), None]);
+        assert!(live.layers[1].fresh && !live.layers[3].fresh);
+        assert_eq!(live.layers[1].keep, [0]);
+        assert_eq!(live.slots, 2);
+
+        // Inside one, a layer moves on the CPU.
+        assert!(!can_show(&doc, patch, true));
+        // Editing the outer group, its layers stand in for it, and what's
+        // below it is below them.
+        let live = build(&doc, &doc.layers, outer, false, 0, all).unwrap();
+        assert_eq!(live.layers.len(), 2);
+        assert!(live.layers[0].subject && matches!(live.layers[0].source, Source::Pixels(_)));
+        assert_eq!(live.below.data[0], [30000, 30000, 30000, 65535]);
+        assert!(can_show(&doc, curves, false));
     }
 
     #[test]

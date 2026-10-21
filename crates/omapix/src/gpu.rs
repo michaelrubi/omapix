@@ -101,6 +101,8 @@ struct Params {
     has_mask: bool,
     opacity: f32,
     mask_fill: f32,
+    /// The first in an isolated group, blended onto nothing.
+    fresh: bool,
 }
 
 impl Params {
@@ -114,7 +116,7 @@ impl Params {
         words.extend(self.pixel_fill.map(f32::to_bits));
         words.extend([self.mode, self.kind, self.has_mask.into(), LUT_SIZE as u32]);
         words.extend([self.opacity, self.mask_fill].map(f32::to_bits));
-        words.extend([inverse.is_some().into(), 0]);
+        words.extend([u32::from(inverse.is_some()), self.fresh.into()]);
         let [a, b, c, d, e, f] = inverse.unwrap_or_default();
         words.extend([a, b, c, d, e, f, 0.0, 0.0].map(|v| (v as f32).to_bits()));
         bytemuck::cast_slice(&words).to_vec()
@@ -254,6 +256,7 @@ impl LiveGpu {
             has_mask: false,
             opacity: 1.0,
             mask_fill: 1.0,
+            fresh: false,
         };
         let mut sources = vec![(below, Some(upload_pixels(device, queue, &stack.below)), None, None, None, &[][..], false)];
         let table_texture = |data: &[[f32; 3]]| {
@@ -274,6 +277,7 @@ impl LiveGpu {
                 ),
                 Source::Adjustment(table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
                 Source::Group(Before::Kept(slot)) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 4),
+                Source::Isolated(slot) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 5),
             };
             let mask = layer.mask.as_ref().map(|m| {
                 let texture = upload(device, queue, wgpu::TextureFormat::R16Uint, (m.w, m.h), &m.data);
@@ -289,6 +293,7 @@ impl LiveGpu {
                 has_mask: mask.is_some(),
                 opacity: layer.opacity,
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
+                fresh: layer.fresh,
             };
             sources.push((params, pixels, mask.map(|m| m.0), lut, before, &layer.keep[..], layer.subject));
         }
@@ -781,6 +786,65 @@ mod tests {
             .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
             .fold(0.0, f32::max);
         assert!(worst < 4e-3, "its own opacity: off by {worst}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_isolated_groups_match_the_cpu() {
+        let (device, queue) = device();
+        let document = || document(BlendMode::Multiply, true);
+        let ids = |doc: &Document| [2, 3].map(|i| doc.layers[i].id);
+        let isolate = |doc: &mut Document, id: u64, mode: BlendMode| doc.layer_mut(id).unwrap().blend = mode;
+
+        // Above the patch: one, one inside a Pass Through group that fades,
+        // and one inside another.
+        let mut doc = document();
+        let [above, curves] = ids(&doc);
+        let group = doc.group_layers(&[above, curves]).unwrap();
+        isolate(&mut doc, group, BlendMode::Screen);
+        fade(&mut doc, group, 0.7);
+        let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
+        assert!(worst < 4e-3, "above it: off by {worst}");
+        let outer = doc.group_layer(doc.index_of(group).unwrap());
+        fade(&mut doc, outer, 0.8);
+        let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
+        assert!(worst < 4e-3, "in a group that passes through: off by {worst}");
+        isolate(&mut doc, outer, BlendMode::Overlay);
+        let worst = worst_difference(&device, &queue, &doc, (-7, 4), None);
+        assert!(worst < 4e-3, "one in another: off by {worst}");
+
+        // A group's own opacity and mode, edited.
+        let mut doc = document();
+        let group = doc.group_layers(&[doc.layers[1].id, above]).unwrap();
+        isolate(&mut doc, group, BlendMode::Normal);
+        let (w, h) = (doc.width, doc.height);
+        let stack = Arc::new(live::build(&doc, &doc.layers, group, false, 0, (0, 0, w, h)).unwrap());
+        doc.layer_mut(group).unwrap().opacity = 0.45;
+        isolate(&mut doc, group, BlendMode::HardLight);
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack,
+                offset: (0, 0),
+                transform: None,
+                settings: Some(Settings {
+                    opacity: 0.45,
+                    mode: BlendMode::HardLight,
+                    lut: None,
+                }),
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(&device, &queue, draw);
+        let cpu = composite::composite(&doc.layers, w, h);
+        let worst = cpu
+            .pixels()
+            .iter()
+            .zip(&gpu)
+            .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+            .fold(0.0, f32::max);
+        assert!(worst < 4e-3, "its own opacity and mode: off by {worst}");
     }
 
     #[test]
