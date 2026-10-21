@@ -596,10 +596,10 @@ pub struct App {
     tablet: Option<Tablet>,
     /// Where the pen moved this frame (egui points), and its pressure at
     /// each place.
-    pen_moves: Vec<(egui::Pos2, f32)>,
+    pen_moves: Vec<(egui::Pos2, omapix_engine::dynamics::Pen)>,
     /// The pressure of the pen move being painted, while
     /// [`Self::canvas_input`] goes through a frame's moves.
-    pen: Option<f32>,
+    pen: Option<omapix_engine::dynamics::Pen>,
     /// The monitor Omapix is on, for showing images in its colours.
     monitor: Option<crate::monitor::Watch>,
     proof: ProofView,
@@ -3962,7 +3962,13 @@ impl App {
     /// The pen's pressure, 0–1, at the move being painted, or 1 with a
     /// mouse.
     fn pen_pressure(&self) -> f32 {
-        self.pen.unwrap_or_else(|| self.tablet.as_ref().map_or(1.0, Tablet::pressure))
+        self.pen_now().pressure
+    }
+
+    /// What the pen reports at the move being painted, or a mouse's full
+    /// pressure, upright.
+    fn pen_now(&self) -> omapix_engine::dynamics::Pen {
+        self.pen.unwrap_or_else(|| self.tablet.as_ref().map(Tablet::pen).unwrap_or_default())
     }
 
     /// `input` from the canvas. A pen reports many places a frame: dragging
@@ -3977,9 +3983,9 @@ impl App {
         if moves.is_empty() {
             return self.tool_input(input, modifiers);
         }
-        let points: Vec<_> = moves.iter().map(|&(at, pressure)| (editor.canvas.to_image(at), pressure)).collect();
-        for (p, pressure) in points {
-            self.pen = Some(pressure);
+        let points: Vec<_> = moves.iter().map(|&(at, pen)| (editor.canvas.to_image(at), pen)).collect();
+        for (p, pen) in points {
+            self.pen = Some(pen);
             self.tool_input(ToolInput::StrokeMove(p), modifiers);
         }
         self.pen = None;
@@ -4029,7 +4035,7 @@ impl App {
         {
             return;
         }
-        let pressure = self.pen_pressure();
+        let pen = self.pen_now();
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -4097,10 +4103,10 @@ impl App {
                     ..self.brushes.parts(&settings)
                 };
                 if editor.begin_stroke(settings, paint, sample, parts) {
-                    editor.stroke_to(p.x, p.y, pressure);
+                    editor.stroke_pen_to(p.x, p.y, pen);
                 }
             }
-            ToolInput::StrokeMove(p) => editor.stroke_to(p.x, p.y, pressure),
+            ToolInput::StrokeMove(p) => editor.stroke_pen_to(p.x, p.y, pen),
             ToolInput::StrokeEnd => editor.end_stroke(),
             // Handled before the tools.
             ToolInput::BrushDrag { .. } => {}
@@ -5887,10 +5893,17 @@ mod tests {
         let screen = |x: f32, y: f32| egui::pos2((x - origin.x) / scale, (y - origin.y) / scale);
 
         // In one frame the pen presses light, then hard, then light again.
-        app.pen = Some(0.2);
+        app.pen = Some(omapix_engine::dynamics::Pen {
+            pressure: 0.2,
+            ..Default::default()
+        });
         app.tool_input(ToolInput::StrokeBegin(egui::pos2(120.0, 200.0)), egui::Modifiers::NONE);
         app.pen = None;
-        app.pen_moves = [(200.0, 0.2), (240.0, 1.0), (280.0, 0.2)].map(|(x, p)| (screen(x, 200.0), p)).to_vec();
+        let pen = |pressure| omapix_engine::dynamics::Pen {
+            pressure,
+            ..Default::default()
+        };
+        app.pen_moves = [(200.0, 0.2), (240.0, 1.0), (280.0, 0.2)].map(|(x, p)| (screen(x, 200.0), pen(p))).to_vec();
         app.canvas_input(ToolInput::StrokeMove(egui::pos2(280.0, 200.0)), egui::Modifiers::NONE);
         app.tool_input(ToolInput::StrokeEnd, egui::Modifiers::NONE);
         assert!(app.pen_moves.is_empty() && app.pen.is_none());

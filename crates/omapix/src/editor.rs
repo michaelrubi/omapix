@@ -916,11 +916,25 @@ impl Editor {
 
     /// Continue the stroke to an image position, with a pen's `pressure`
     /// there (1 for a mouse).
+    #[cfg(test)]
     pub fn stroke_to(&mut self, x: f32, y: f32, pressure: f32) {
+        self.stroke_pen_to(
+            x,
+            y,
+            omapix_engine::dynamics::Pen {
+                pressure,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// [`Editor::stroke_to`] with all the pen reports there: its tilt and
+    /// rotation too.
+    pub fn stroke_pen_to(&mut self, x: f32, y: f32, pen: omapix_engine::dynamics::Pen) {
         let Some((stroke, _)) = &mut self.stroke else {
             return;
         };
-        let tiles = stroke.add_point(x, y, pressure);
+        let tiles = stroke.add_pen_point(x, y, pen);
         self.paint_tiles(&tiles, false);
     }
 

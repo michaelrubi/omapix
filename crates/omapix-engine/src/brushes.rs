@@ -36,7 +36,7 @@ use rayon::prelude::*;
 use crate::abr::{AbrFile, AbrSample, LegacyTip};
 use crate::brush::BrushSettings;
 use crate::descriptor::{Descriptor, Value};
-use crate::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT};
+use crate::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT, PenAngle, Pose};
 use crate::texture::{Mode, Pattern, Texture};
 use crate::tip::Tip;
 
@@ -163,7 +163,14 @@ fn preset(
         v.minimum_diameter = fraction(d, "minimumDiameter").unwrap_or(0.0).clamp(0.0, 1.0);
         let (angle, control) = varies(d, "angleDynamics");
         (v.angle_jitter, v.angle_follows) = (angle.min(1.0), control == 6);
-        other(control, &[6]);
+        // Pen Tilt, and Rotation (or Initial Rotation, which Omapix takes
+        // as it).
+        v.angle_pen = match control {
+            3 => PenAngle::Tilt,
+            7 | 8 => PenAngle::Rotation,
+            _ => PenAngle::Neither,
+        };
+        other(control, &[3, 6, 7, 8]);
         let (roundness, control) = varies(d, "roundnessDynamics");
         v.roundness_jitter = roundness.min(1.0);
         other(control, &[]);
@@ -271,7 +278,16 @@ fn preset(
             purity: fraction(d, "purity").unwrap_or(0.0).clamp(-1.0, 1.0),
         });
     }
-    let more = [(lost_pattern, "Texture (its pattern isn't in the file)"), (on(d, "useBrushPose"), "Brush Pose")];
+    // Brush Pose: Photoshop's tilt is ±100 %, Omapix's ±90°.
+    if on(d, "useBrushPose") {
+        let tilt = |key: &str| (number(d, key).unwrap_or(0.0) * 0.9).clamp(-90.0, 90.0);
+        out.dynamics.pose = Some(Pose {
+            tilt: (on(d, "overridePoseTiltX") || on(d, "overridePoseTiltY")).then(|| [tilt("brushPoseTiltX"), tilt("brushPoseTiltY")]),
+            rotation: on(d, "overridePoseAngle").then(|| number(d, "brushPoseAngle").unwrap_or(0.0).rem_euclid(360.0)),
+            pressure: on(d, "overridePosePressure").then(|| fraction(d, "brushPosePressure").unwrap_or(1.0).clamp(0.0, 1.0)),
+        });
+    }
+    let more = [(lost_pattern, "Texture (its pattern isn't in the file)")];
     let more = more.into_iter().chain([(others, "Fade, tilt and other controls")]);
     left_out.extend(more.filter(|(used, _)| *used).map(|(_, what)| what));
     Some(out)
@@ -372,6 +388,34 @@ mod tests {
 
     fn named(name: &str) -> Descriptor {
         Descriptor::new("brushPreset").with("Nm  ", Value::Text(UnicodeString::new_nul(name)))
+    }
+
+    #[test]
+    fn a_brushs_pen_controls_and_pose_come_from_the_file() {
+        use crate::dynamics::{PenAngle, Pose};
+        let brush = named("Calligraphy")
+            .with("Brsh", Value::Descriptor(Descriptor::new("computedBrush").with("Dmtr", Value::Double(30.0))))
+            .with("useTipDynamics", Value::Boolean(true))
+            .with("angleDynamics", vary(0.0, 8))
+            .with("useBrushPose", Value::Boolean(true))
+            .with("overridePoseTiltX", Value::Boolean(true))
+            .with("brushPoseTiltX", Value::Double(50.0))
+            .with("brushPoseTiltY", Value::Double(-100.0))
+            .with("overridePosePressure", Value::Boolean(true))
+            .with("brushPosePressure", percent(40.0));
+        let bytes = write_v6(2, &[], &[], &[brush], true).unwrap();
+        let (brushes, left_out) = presets(&parse(&bytes).unwrap());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let d = brushes[0].dynamics;
+        assert_eq!(d.angle_pen, PenAngle::Rotation);
+        assert_eq!(
+            d.pose,
+            Some(Pose {
+                tilt: Some([45.0, -90.0]),
+                rotation: None,
+                pressure: Some(0.4)
+            })
+        );
     }
 
     #[test]
