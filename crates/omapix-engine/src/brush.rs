@@ -121,6 +121,15 @@ impl Surface {
     }
 }
 
+/// What a brush's settings name by id, for a stroke to have: its sampled
+/// tip, Dual Brush's, and Texture's pattern.
+#[derive(Clone, Debug, Default)]
+pub struct Parts {
+    pub tip: Option<Arc<Tip>>,
+    pub dual_tip: Option<Arc<Tip>>,
+    pub pattern: Option<Arc<Pattern>>,
+}
+
 pub struct Stroke {
     settings: BrushSettings,
     paint: Paint,
@@ -135,6 +144,13 @@ pub struct Stroke {
     tip: Option<Arc<Tip>>,
     /// Texture's pattern, levelled as its settings say.
     pattern: Option<Levelled>,
+    /// Dual Brush: the picture its dabs stamp, if not round, its coverage
+    /// (as `coverage`), the distance since its last step, and its dabs so
+    /// far.
+    dual_tip: Option<Arc<Tip>>,
+    dual_coverage: HashMap<(u32, u32), Vec<f32>>,
+    dual_carried: f32,
+    dual_dabs: u64,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     /// The last point, and the pen's pressure there.
@@ -162,6 +178,10 @@ impl Stroke {
             keep_alpha: false,
             tip: None,
             pattern: None,
+            dual_tip: None,
+            dual_coverage: HashMap::new(),
+            dual_carried: 0.0,
+            dual_dabs: 0,
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -192,6 +212,18 @@ impl Stroke {
         self
     }
 
+    /// The pictures and pattern the brush's settings name.
+    pub fn with_parts(mut self, parts: &Parts) -> Self {
+        if let Some(tip) = &parts.tip {
+            self = self.with_tip(tip.clone());
+        }
+        if let Some(pattern) = &parts.pattern {
+            self = self.with_pattern(pattern);
+        }
+        self.dual_tip = parts.dual_tip.clone();
+        self
+    }
+
     /// Change only colour, keeping each pixel's alpha, as painting on a
     /// layer with Lock Transparent Pixels does. Erasing then does nothing.
     pub fn keeping_alpha(mut self) -> Self {
@@ -214,16 +246,21 @@ impl Stroke {
     /// covers `c` of it. With Wet Edges that's half where the stroke is
     /// solid and more towards its edge, where coverage runs out, so that
     /// paint gathers along the edge as watercolour does and a stroke
-    /// crossing itself gets no darker. A Texture into the stroke as a whole
-    /// is worked in after that.
+    /// crossing itself gets no darker. Then the paint is only where Dual
+    /// Brush's tip has been, as its mode says, and a Texture into the stroke
+    /// as a whole is worked in.
     #[inline]
     fn laid(&self, c: f32, col: u32, row: u32, i: usize) -> f32 {
-        let c = if self.settings.dynamics.wet_edges {
+        let mut c = if self.settings.dynamics.wet_edges {
             let t = ((c - 0.6) / 0.4).clamp(0.0, 1.0);
             c * (1.0 - 0.5 * t * t * (3.0 - 2.0 * t))
         } else {
             c
         };
+        if let Some(dual) = self.settings.dynamics.dual {
+            let t = self.dual_coverage.get(&(col, row)).map_or(0.0, |cov| cov[i]);
+            c = texture::dual(dual.mode, c, t);
+        }
         match (&self.pattern, self.settings.dynamics.texture) {
             (Some(pattern), Some(texture)) if !texture.each_tip => {
                 let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
@@ -290,6 +327,7 @@ impl Stroke {
                 self.waiting = self.settings.dynamics.follows_direction();
                 if !self.waiting {
                     self.step(x, y, pressure, 0.0, &mut touched);
+                    self.dual_step(x, y, 0.0, &mut touched);
                 }
             }
             Some((lx, ly, lp)) => {
@@ -300,6 +338,7 @@ impl Stroke {
                 if self.waiting && length > 0.0 {
                     self.waiting = false;
                     self.step(lx, ly, lp, direction, &mut touched);
+                    self.dual_step(lx, ly, direction, &mut touched);
                 }
                 let mut t = self.spacing(lp) - self.carried;
                 let mut spaced = self.spacing(lp);
@@ -311,6 +350,17 @@ impl Stroke {
                     t += spaced;
                 }
                 self.carried = length - (t - spaced);
+                // Dual Brush's tip along the same way, at its own spacing.
+                if let Some(dual) = self.settings.dynamics.dual.filter(|_| !self.waiting) {
+                    let spaced = dual.step(self.settings.size);
+                    let mut t = spaced - self.dual_carried;
+                    while t <= length {
+                        let f = t / length;
+                        self.dual_step(lx + dx * f, ly + dy * f, direction, &mut touched);
+                        t += spaced;
+                    }
+                    self.dual_carried = length - (t - spaced);
+                }
             }
         }
         self.last = Some((x, y, pressure));
@@ -334,11 +384,21 @@ impl Stroke {
         let dabs = self.settings.dynamics.dabs(self.seed, self.steps, &mut self.dabs, &at);
         self.steps += 1;
         for dab in &dabs {
-            self.dab(dab, touched);
+            self.dab(dab, false, touched);
         }
     }
 
-    fn dab(&mut self, dab: &Dab, touched: &mut Vec<(u32, u32)>) {
+    /// Lay Dual Brush's dabs of one of its steps, going in `direction`.
+    fn dual_step(&mut self, x: f32, y: f32, direction: f32, touched: &mut Vec<(u32, u32)>) {
+        let Some(dual) = self.settings.dynamics.dual else { return };
+        for dab in dual.dabs(self.seed, &mut self.dual_dabs, x, y, direction, self.settings.size) {
+            self.dab(&dab, true, touched);
+        }
+    }
+
+    /// Lay `dab`: one of the brush's, or with `dual` one of Dual Brush's,
+    /// into its coverage.
+    fn dab(&mut self, dab: &Dab, dual: bool, touched: &mut Vec<(u32, u32)>) {
         let (w, h) = self.original.size();
         let Dab {
             x: cx,
@@ -349,16 +409,21 @@ impl Stroke {
             flow,
             ..
         } = *dab;
-        let hardness = self.settings.hardness.clamp(0.0, 1.0);
+        let hardness = match self.settings.dynamics.dual.filter(|_| dual) {
+            Some(dual) => dual.hardness,
+            None => self.settings.hardness,
+        }
+        .clamp(0.0, 1.0);
         let (sin, cos) = dab.angle.sin_cos();
-        let noise = self.settings.dynamics.noise;
+        let noise = self.settings.dynamics.noise && !dual;
         // Texture Each Tip: the pattern worked into this dab at its depth.
-        let texture = self.settings.dynamics.texture.filter(|t| t.each_tip).zip(self.pattern.as_ref());
+        let texture = self.settings.dynamics.texture.filter(|t| t.each_tip && !dual).zip(self.pattern.as_ref());
         // A mirrored tip is read backwards.
         let (flip_x, flip_y) = (if dab.flip_x { -1.0 } else { 1.0 }, if dab.flip_y { -1.0 } else { 1.0 });
         // A sampled tip: which of its sizes to read, and how many of its
         // pixels one of the image's is.
-        let tip = self.tip.as_deref().map(|tip| {
+        let tip = if dual { &self.dual_tip } else { &self.tip };
+        let tip = tip.as_deref().map(|tip| {
             let (tw, th) = tip.size();
             let (tw, th, longer) = (tw as f32, th as f32, tw.max(th) as f32);
             (tip, tip.level_for(2.0 * r * roundness.max(0.25)), longer / (2.0 * r), tw, th)
@@ -422,26 +487,26 @@ impl Stroke {
             hit
         };
         let tiles = (y0 / TILE..=(y1 - 1) / TILE).flat_map(|row| (x0 / TILE..=(x1 - 1) / TILE).map(move |col| (col, row)));
+        // The coverage it goes into, taken out of the stroke for the while.
+        let mut coverage = std::mem::take(if dual { &mut self.dual_coverage } else { &mut self.coverage });
         if (x1 - x0) as usize * (y1 - y0) as usize >= PARALLEL {
-            // A big dab: each tile on its own core. Their coverage is
-            // taken out of the stroke for the while.
-            let mut taken: Vec<_> = tiles
-                .map(|at| (at, self.coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS])))
-                .collect();
+            // A big dab: each tile on its own core.
+            let mut taken: Vec<_> = tiles.map(|at| (at, coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS]))).collect();
             let hits: Vec<bool> = taken.par_iter_mut().map(|(at, cov)| lay(*at, cov)).collect();
             for ((at, cov), hit) in taken.into_iter().zip(hits) {
-                self.coverage.insert(at, cov);
+                coverage.insert(at, cov);
                 if hit {
                     touched.push(at);
                 }
             }
         } else {
             for at in tiles {
-                if lay(at, self.coverage.entry(at).or_insert_with(|| vec![0.0; TILE_PIXELS])) {
+                if lay(at, coverage.entry(at).or_insert_with(|| vec![0.0; TILE_PIXELS])) {
                     touched.push(at);
                 }
             }
         }
+        *(if dual { &mut self.dual_coverage } else { &mut self.coverage }) = coverage;
     }
 
     /// Write the stroke's current result for the given tiles into `surface`.
@@ -530,6 +595,7 @@ impl Stroke {
         if let (true, Some((x, y, pressure))) = (self.waiting, self.last) {
             self.waiting = false;
             self.step(x, y, pressure, 0.0, &mut waited);
+            self.dual_step(x, y, 0.0, &mut waited);
             waited.sort_unstable();
             waited.dedup();
             self.apply(surface, &waited);
@@ -1585,6 +1651,36 @@ mod tests {
             }),
             [false, false, true, false]
         );
+    }
+
+    #[test]
+    fn dual_brush_paints_only_where_its_tip_lays() {
+        use crate::dynamics::DualBrush;
+        use crate::texture::Mode;
+        // A 60 px brush, and a dual tip a fifth its size (12 px) laid every
+        // 36 px along the stroke.
+        let dual = DualBrush {
+            size: 0.2,
+            spacing: 3.0,
+            ..DualBrush::default()
+        };
+        let settings = |dual: Option<DualBrush>| BrushSettings {
+            dynamics: Dynamics { dual, ..Dynamics::default() },
+            ..hard(60.0, Dynamics::default())
+        };
+        let out = stroked(settings(Some(dual)), &[(50.0, 100.0), (250.0, 100.0)], true);
+        // On the stroke's line: painted at the dual dabs (50, 86, 122…),
+        // left alone halfway between them, where the dual tip didn't reach.
+        assert_eq!(out.get(86, 100)[0], 0);
+        assert_eq!(out.get(104, 100)[0], 65535);
+        // Without it, solid.
+        assert_eq!(stroked(settings(None), &[(50.0, 100.0), (250.0, 100.0)], true).get(104, 100)[0], 0);
+        // Darken keeps the lesser of the two: the same here, where both are
+        // solid or none.
+        let darken = stroked(settings(Some(DualBrush { mode: Mode::Darken, ..dual })), &[(50.0, 100.0), (250.0, 100.0)], true);
+        assert_eq!((darken.get(86, 100)[0], darken.get(104, 100)[0]), (0, 65535));
+        // The dual tip keeps its proportion at any size.
+        assert_eq!((dual.diameter(60.0), dual.diameter(1000.0)), (12.0, 200.0));
     }
 
     #[test]

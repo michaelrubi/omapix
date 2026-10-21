@@ -355,6 +355,46 @@ pub(crate) fn combine(mode: Mode, v: f32, t: f32, d: f32) -> f32 {
     if r.is_finite() { r.clamp(0.0, 1.0) } else { 0.0 }
 }
 
+/// The paint `v` (0–1) where a Dual Brush's tip lays `t`: PhotoCraft's
+/// `mask_combine` at full depth, which differs from Texture's in Subtract,
+/// Color Dodge and Burn and the Heights.
+pub(crate) fn dual(mode: Mode, v: f32, t: f32) -> f32 {
+    if v <= 0.0 {
+        return 0.0;
+    }
+    let r = match mode {
+        Mode::Multiply => v * t,
+        Mode::Subtract => v - (1.0 - t),
+        Mode::Darken => v.min(t),
+        Mode::Overlay => {
+            if v < 0.5 {
+                2.0 * v * t
+            } else {
+                1.0 - 2.0 * (1.0 - v) * (1.0 - t)
+            }
+        }
+        Mode::ColorDodge => v / (1.0 - t).max(1e-3),
+        Mode::ColorBurn => 1.0 - (1.0 - v) / t.max(1e-3),
+        Mode::LinearBurn => v + t - 1.0,
+        Mode::HardMix => {
+            if v + t > 1.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Mode::LinearHeight => v * ((t - (1.0 - v)) * 4.0 + 0.5).clamp(0.0, 1.0),
+        Mode::Height => {
+            if t >= 1.0 - v {
+                v
+            } else {
+                0.0
+            }
+        }
+    };
+    if r.is_finite() { r.clamp(0.0, 1.0) } else { 0.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +413,17 @@ mod tests {
         // Subtract: white takes the most away.
         assert!((combine(Mode::Subtract, 0.8, 0.5, 1.0) - 0.3).abs() < 1e-6);
         assert_eq!(combine(Mode::Subtract, 0.8, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_dual_tip_masks_the_paint_as_its_mode_says() {
+        for mode in Mode::ALL {
+            assert_eq!(dual(mode, 0.0, 1.0), 0.0, "{mode:?}");
+        }
+        assert_eq!((dual(Mode::Multiply, 0.8, 0.5), dual(Mode::Darken, 0.8, 0.5)), (0.4, 0.5));
+        // Subtract takes away what the dual tip doesn't cover.
+        assert!((dual(Mode::Subtract, 0.8, 0.5) - 0.3).abs() < 1e-6);
+        assert_eq!((dual(Mode::Height, 0.6, 0.5), dual(Mode::Height, 0.6, 0.3)), (0.6, 0.0));
     }
 
     #[test]

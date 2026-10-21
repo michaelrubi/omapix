@@ -3,7 +3,7 @@
 
 use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
-use omapix_engine::dynamics::{Dynamics, MAX_COUNT};
+use omapix_engine::dynamics::{DualBrush, Dynamics, MAX_COUNT};
 use omapix_engine::selection::Combine;
 use omapix_engine::texture::{Mode, Texture};
 use omapix_engine::toning::ToneRange;
@@ -1045,7 +1045,8 @@ impl Tools {
             self.use_brush(&brush);
         }
         brushes.preview(ui, theme, &self.settings_mut().clone());
-        let patterns = brushes.patterns();
+        let (patterns, tips) = (brushes.patterns(), brushes.tips());
+        let size = self.settings_mut().size;
         let d = &mut self.settings_mut().dynamics;
         let heading = |ui: &mut Ui, text: &str| {
             ui.label(RichText::new(text).color(theme.foreground).strong());
@@ -1210,6 +1211,77 @@ impl Tools {
                         percent(ui, "Minimum Depth", &mut t.minimum_depth, "The least Depth Jitter takes it to");
                         percent(ui, "Depth Jitter", &mut t.depth_jitter, "How much lower each dab's depth can be at random");
                     }
+                }
+
+                heading(ui, "Dual Brush");
+                let mut doubled = d.dual.is_some();
+                ui.label("");
+                ui.checkbox(&mut doubled, "Use a second tip")
+                    .on_hover_text("A second tip laid along the stroke, and the paint only where the two meet");
+                ui.end_row();
+                if doubled != d.dual.is_some() {
+                    d.dual = doubled.then(DualBrush::default);
+                }
+                if let Some(dual) = &mut d.dual {
+                    ui.label("Mode").on_hover_text("How the second tip meets the paint");
+                    ComboBox::from_id_salt("dual-mode").selected_text(dual.mode.label()).show_ui(ui, |ui| {
+                        for mode in Mode::ALL {
+                            ui.selectable_value(&mut dual.mode, mode, mode.label());
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Tip").on_hover_text("Round, or a tip from the brush files loaded");
+                    let name = dual.tip.map_or("Round", |id| {
+                        tips.iter().find(|(_, t)| t.id() == id).map_or("(not loaded)", |(name, _)| name.as_str())
+                    });
+                    ComboBox::from_id_salt("dual-tip").selected_text(name).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut dual.tip, None, "Round");
+                        for (name, tip) in &tips {
+                            ui.selectable_value(&mut dual.tip, Some(tip.id()), name);
+                        }
+                    });
+                    ui.end_row();
+                    // Kept as a share of the brush's size, shown in pixels.
+                    let hint = "The second tip's size; it keeps its proportion as the brush is made bigger or smaller";
+                    ui.label("Size").on_hover_text(hint);
+                    let mut px = dual.diameter(size);
+                    if ui
+                        .add(Slider::new(&mut px, 1.0..=5000.0).logarithmic(true).suffix(" px").fixed_decimals(0))
+                        .on_hover_text(hint)
+                        .changed()
+                    {
+                        dual.size = px / size.max(1.0);
+                    }
+                    ui.end_row();
+                    if dual.tip.is_none() {
+                        percent(ui, "Hardness", &mut dual.hardness, "How hard the round tip's edge is");
+                    }
+                    row(
+                        ui,
+                        "Spacing",
+                        &mut dual.spacing,
+                        1.0..=1000.0,
+                        100.0,
+                        "%",
+                        "The distance between its dabs, as a share of its size",
+                    );
+                    row(
+                        ui,
+                        "Scatter",
+                        &mut dual.scatter,
+                        0.0..=1000.0,
+                        100.0,
+                        "%",
+                        "How far its dabs stray, as a share of its radius",
+                    );
+                    let (both, flip) = (
+                        "Stray along the stroke as well as across it",
+                        "Each of its dabs mirrored left to right or not, at random",
+                    );
+                    pair(ui, (&mut dual.both_axes, "Both Axes", both), (&mut dual.flip, "Flip", flip));
+                    ui.label("Count").on_hover_text("Its dabs at each step");
+                    ui.add(Slider::new(&mut dual.count, 1..=MAX_COUNT)).on_hover_text("Its dabs at each step");
+                    ui.end_row();
                 }
 
                 heading(ui, "Other");
@@ -2401,7 +2473,7 @@ mod tests {
     }
 
     #[test]
-    fn texture_works_a_loaded_pattern_into_the_brush() {
+    fn texture_and_dual_brush_use_the_loaded_patterns_and_tips() {
         let ctx = egui::Context::default();
         let theme = Theme::default();
         let mut brushes = crate::brushes::Library::default();
@@ -2471,6 +2543,23 @@ mod tests {
         assert!(tools.brush.dynamics.texture.unwrap().each_tip);
         assert!(at(&frame(&mut tools, &mut brushes, vec![]), "Depth Jitter").is_some());
         assert_eq!(brushes.pattern(&tools.brush).map(|p| p.id()), Some(canvas));
+
+        // Dual Brush: a round second tip to start with, then one of the
+        // brushes' sampled tips, which a stroke is given.
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        for events in click(at(&drawn, "Use a second tip").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert_eq!(tools.brush.dynamics.dual, Some(omapix_engine::dynamics::DualBrush::default()));
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Round").is_some() && at(&drawn, "Hardness").is_some());
+        assert!(brushes.parts(&tools.brush).dual_tip.is_none());
+        let (name, leaf) = brushes.tips()[0].clone();
+        assert_eq!(name, "Leaf");
+        tools.brush.dynamics.dual.as_mut().unwrap().tip = Some(leaf.id());
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Leaf").is_some() && at(&drawn, "Hardness").is_none());
+        assert_eq!(brushes.parts(&tools.brush).dual_tip.map(|t| t.id()), Some(leaf.id()));
     }
 
     #[test]

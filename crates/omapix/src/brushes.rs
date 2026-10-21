@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 use egui::{RichText, Ui, vec2};
 use omapix_engine::abr::AbrFile;
-use omapix_engine::brush::{BrushSettings, Paint, Stroke, Surface};
+use omapix_engine::brush::{BrushSettings, Paint, Parts, Stroke, Surface};
 use omapix_engine::brushes::{Preset, presets};
 use omapix_engine::texture::Pattern;
 use omapix_engine::tiled::Tiled;
@@ -121,7 +121,7 @@ fn thumbnail(brush: &Preset) -> egui::ColorImage {
 /// A stroke with `brush` on a strip `width` by `height` pixels, as a pen
 /// pressing harder in the middle would draw it: white where it paints. A
 /// brush too big for the strip is drawn smaller.
-fn stroke_picture(brush: &BrushSettings, tip: Option<Arc<Tip>>, pattern: Option<Arc<Pattern>>, [width, height]: [u32; 2]) -> egui::ColorImage {
+fn stroke_picture(brush: &BrushSettings, parts: &Parts, [width, height]: [u32; 2]) -> egui::ColorImage {
     let (w, h) = (width as f32, height as f32);
     let settings = BrushSettings {
         size: brush.size.min(h / 2.0),
@@ -130,12 +130,7 @@ fn stroke_picture(brush: &BrushSettings, tip: Option<Arc<Tip>>, pattern: Option<
     };
     let mut out = Surface::Mask(Tiled::new(width, height, 0));
     let mut stroke = Stroke::new(settings, Paint::Mask(u16::MAX), out.clone());
-    if let Some(tip) = tip {
-        stroke = stroke.with_tip(tip);
-    }
-    if let Some(pattern) = pattern {
-        stroke = stroke.with_pattern(&pattern);
-    }
+    stroke = stroke.with_parts(parts);
     let margin = settings.size / 2.0 + 2.0;
     let mut tiles = Vec::new();
     for i in 0..=80 {
@@ -194,11 +189,35 @@ impl Library {
         said
     }
 
-    /// The sampled tip a brush's settings name, if it's among the brushes.
+    /// The sampled tip a brush's settings name, if it's among the brushes
+    /// (as a tip or a Dual Brush's).
     pub fn tip(&self, id: Option<u64>) -> Option<Arc<Tip>> {
         let id = id?;
-        let tips = self.files.iter().flat_map(|(_, brushes)| brushes).filter_map(|b| b.tip.as_ref());
+        let tips = self.files.iter().flat_map(|(_, brushes)| brushes).flat_map(|b| [&b.tip, &b.dual_tip]).flatten();
         tips.into_iter().find(|tip| tip.id() == id).cloned()
+    }
+
+    /// The brushes' sampled tips, each once, with the name of the first
+    /// brush that has it.
+    pub fn tips(&self) -> Vec<(String, Arc<Tip>)> {
+        let mut out: Vec<(String, Arc<Tip>)> = Vec::new();
+        for brush in self.files.iter().flat_map(|(_, brushes)| brushes) {
+            if let Some(tip) = &brush.tip
+                && !out.iter().any(|(_, t)| t.id() == tip.id())
+            {
+                out.push((brush.name.clone(), tip.clone()));
+            }
+        }
+        out
+    }
+
+    /// The tips and pattern a brush's settings name, for a stroke.
+    pub fn parts(&self, settings: &BrushSettings) -> Parts {
+        Parts {
+            tip: self.tip(settings.tip),
+            dual_tip: self.tip(settings.dynamics.dual.and_then(|d| d.tip)),
+            pattern: self.pattern(settings),
+        }
     }
 
     /// The Texture patterns the brushes have, each once.
@@ -228,7 +247,7 @@ impl Library {
             return;
         }
         if !self.preview.as_ref().is_some_and(|(of, at, _)| of == brush && *at == size) {
-            let image = stroke_picture(brush, self.tip(brush.tip), self.pattern(brush), size);
+            let image = stroke_picture(brush, &self.parts(brush), size);
             let texture = ui.ctx().load_texture("brush-preview", image, egui::TextureOptions::LINEAR);
             self.preview = Some((*brush, size, texture));
         }
@@ -383,7 +402,7 @@ pub(crate) mod tests {
             hardness: 1.0,
             ..Default::default()
         };
-        let image = stroke_picture(&soft, None, None, [240, 56]);
+        let image = stroke_picture(&soft, &Parts::default(), [240, 56]);
         // How much paint there is in a block of the strip.
         let paint = |image: &egui::ColorImage, xs: std::ops::Range<usize>, ys: std::ops::Range<usize>| -> u32 {
             xs.flat_map(|x| ys.clone().map(move |y| (x, y)))
@@ -406,8 +425,7 @@ pub(crate) mod tests {
                 opacity_pressure: false,
                 ..soft
             },
-            None,
-            None,
+            &Parts::default(),
             [240, 56],
         );
         assert!(alpha(&big, 120, 18) == 255 && alpha(&big, 120, 38) == 255 && alpha(&big, 120, 54) == 0);
