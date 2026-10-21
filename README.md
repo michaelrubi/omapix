@@ -19,7 +19,7 @@ for each face:
 
 <sub>Photo by [Zoran Borojevic](https://unsplash.com/photos/s55Di5cdiSM) on Unsplash.</sub>
 
-**Status:** pre-release (0.1.0, nothing tagged yet). It's used for real
+**Status:** 0.1.0, the first release ([changes](CHANGELOG.md)). It's used for real
 portrait work, but so far on one machine: Omarchy (Arch, Hyprland) with an
 NVIDIA GPU. Other Wayland desktops and other GPUs should work and haven't
 been tried. If you try one, [say how it went](CONTRIBUTING.md).
