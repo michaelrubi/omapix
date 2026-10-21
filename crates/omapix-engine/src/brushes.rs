@@ -36,7 +36,7 @@ use rayon::prelude::*;
 use crate::abr::{AbrFile, AbrSample, LegacyTip};
 use crate::brush::BrushSettings;
 use crate::descriptor::{Descriptor, Value};
-use crate::dynamics::{DualBrush, Dynamics, MAX_COUNT};
+use crate::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT};
 use crate::texture::{Mode, Pattern, Texture};
 use crate::tip::Tip;
 
@@ -258,11 +258,20 @@ fn preset(
         dual.count = number(db, "Cnt ").map_or(1, |n| n.clamp(1.0, MAX_COUNT as f32) as u32);
         out.dynamics.dual = Some(dual);
     }
-    let more = [
-        (lost_pattern, "Texture (its pattern isn't in the file)"),
-        (on(d, "useColorDynamics"), "Color Dynamics"),
-        (on(d, "useBrushPose"), "Brush Pose"),
-    ];
+    // Color Dynamics.
+    if on(d, "useColorDynamics") {
+        let (foreground_background, control) = varies(d, "clVr");
+        other(control, &[]);
+        out.dynamics.colour = Some(ColorDynamics {
+            per_tip: !matches!(d.get("colorDynamicsPerTip"), Some(Value::Boolean(false))),
+            foreground_background: foreground_background.min(1.0),
+            hue_jitter: fraction(d, "H   ").unwrap_or(0.0).clamp(0.0, 1.0),
+            saturation_jitter: fraction(d, "Strt").unwrap_or(0.0).clamp(0.0, 1.0),
+            brightness_jitter: fraction(d, "Brgh").unwrap_or(0.0).clamp(0.0, 1.0),
+            purity: fraction(d, "purity").unwrap_or(0.0).clamp(-1.0, 1.0),
+        });
+    }
+    let more = [(lost_pattern, "Texture (its pattern isn't in the file)"), (on(d, "useBrushPose"), "Brush Pose")];
     let more = more.into_iter().chain([(others, "Fade, tilt and other controls")]);
     left_out.extend(more.filter(|(used, _)| *used).map(|(_, what)| what));
     Some(out)
@@ -363,6 +372,29 @@ mod tests {
 
     fn named(name: &str) -> Descriptor {
         Descriptor::new("brushPreset").with("Nm  ", Value::Text(UnicodeString::new_nul(name)))
+    }
+
+    #[test]
+    fn a_brushs_color_dynamics_come_from_the_file() {
+        let brush = named("Leaves")
+            .with("Brsh", Value::Descriptor(Descriptor::new("computedBrush").with("Dmtr", Value::Double(50.0))))
+            .with("useColorDynamics", Value::Boolean(true))
+            .with("colorDynamicsPerTip", Value::Boolean(false))
+            .with("clVr", vary(60.0, 0))
+            .with("H   ", percent(10.0))
+            .with("Strt", percent(20.0))
+            .with("Brgh", percent(30.0))
+            .with("purity", percent(-40.0));
+        let bytes = write_v6(2, &[], &[], &[brush], true).unwrap();
+        let (brushes, left_out) = presets(&parse(&bytes).unwrap());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let c = brushes[0].dynamics.colour.unwrap();
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(!c.per_tip && close(c.foreground_background, 0.6), "{c:?}");
+        assert!(
+            close(c.hue_jitter, 0.1) && close(c.saturation_jitter, 0.2) && close(c.brightness_jitter, 0.3) && close(c.purity, -0.4),
+            "{c:?}"
+        );
     }
 
     #[test]

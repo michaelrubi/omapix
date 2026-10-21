@@ -3,7 +3,7 @@
 
 use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
-use omapix_engine::dynamics::{DualBrush, Dynamics, MAX_COUNT};
+use omapix_engine::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT};
 use omapix_engine::selection::Combine;
 use omapix_engine::texture::{Mode, Texture};
 use omapix_engine::toning::ToneRange;
@@ -1046,6 +1046,8 @@ impl Tools {
         }
         brushes.preview(ui, theme, &self.settings_mut().clone());
         let (patterns, tips) = (brushes.patterns(), brushes.tips());
+        // Color Dynamics is the Brush's: the other tools don't paint a colour.
+        let paints_colour = !self.tool.has_brush() || self.tool == Tool::Brush;
         let size = self.settings_mut().size;
         let d = &mut self.settings_mut().dynamics;
         let heading = |ui: &mut Ui, text: &str| {
@@ -1282,6 +1284,42 @@ impl Tools {
                     ui.label("Count").on_hover_text("Its dabs at each step");
                     ui.add(Slider::new(&mut dual.count, 1..=MAX_COUNT)).on_hover_text("Its dabs at each step");
                     ui.end_row();
+                }
+
+                if paints_colour {
+                    heading(ui, "Color Dynamics");
+                    let mut varied = d.colour.is_some();
+                    ui.label("");
+                    ui.checkbox(&mut varied, "Vary the colour")
+                        .on_hover_text("Each dab a colour between the foreground and background, its hue, saturation and brightness varied");
+                    ui.end_row();
+                    if varied != d.colour.is_some() {
+                        d.colour = varied.then(ColorDynamics::default);
+                    }
+                    if let Some(c) = &mut d.colour {
+                        ui.label("");
+                        ui.checkbox(&mut c.per_tip, "Apply Per Tip")
+                            .on_hover_text("Each dab its own colour; unticked, each stroke");
+                        ui.end_row();
+                        percent(
+                            ui,
+                            "Foreground/Background Jitter",
+                            &mut c.foreground_background,
+                            "How far towards the background colour it can go",
+                        );
+                        percent(ui, "Hue Jitter", &mut c.hue_jitter, "How far round the colour wheel it can turn");
+                        percent(ui, "Saturation Jitter", &mut c.saturation_jitter, "How much more or less saturated it can be");
+                        percent(ui, "Brightness Jitter", &mut c.brightness_jitter, "How much lighter or darker it can be");
+                        row(
+                            ui,
+                            "Purity",
+                            &mut c.purity,
+                            -100.0..=100.0,
+                            100.0,
+                            "%",
+                            "Makes every dab more saturated, or greyer",
+                        );
+                    }
                 }
 
                 heading(ui, "Other");
@@ -2447,6 +2485,8 @@ mod tests {
         ] {
             at(&drawn, text);
         }
+        // The Eraser doesn't paint a colour, so it has no Color Dynamics.
+        assert!(!drawn.iter().any(|(t, _)| t == "Color Dynamics"));
         let follow = at(&drawn, "Follow the stroke");
         frame(&mut tools, click(follow, true));
         frame(&mut tools, click(follow, false));
@@ -2601,6 +2641,15 @@ mod tests {
         let drawn = frame(&mut tools, &mut brushes, vec![]);
         assert!(at(&drawn, "Leaf").is_some() && at(&drawn, "Hardness").is_none());
         assert_eq!(brushes.parts(&tools.brush).dual_tip.map(|t| t.id()), Some(leaf.id()));
+
+        // Color Dynamics, for the Brush.
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        for events in click(at(&drawn, "Vary the colour").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert_eq!(tools.brush.dynamics.colour, Some(omapix_engine::dynamics::ColorDynamics::default()));
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Foreground/Background Jitter").is_some() && at(&drawn, "Purity").is_some());
     }
 
     #[test]

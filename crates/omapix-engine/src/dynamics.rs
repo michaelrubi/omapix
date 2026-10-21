@@ -1,6 +1,6 @@
 //! Photoshop's Brush Settings: the shape of a brush's tip, and how its dabs
 //! vary along a stroke (Shape Dynamics, Scattering, Transfer, Texture's
-//! depth, Dual Brush, Noise and Wet Edges).
+//! depth, Dual Brush, Color Dynamics, Noise and Wet Edges).
 //! [`crate::brush`] lays the dabs this works out.
 //!
 //! Whatever varies at random comes from the stroke's seed and the dab's
@@ -89,6 +89,87 @@ pub struct Dynamics {
     /// Dual Brush: a second tip along the same stroke, and the paint only
     /// where the two meet.
     pub dual: Option<DualBrush>,
+    /// Color Dynamics: each dab's colour varied from the foreground's.
+    pub colour: Option<ColorDynamics>,
+}
+
+/// Photoshop's Color Dynamics: each dab (or each stroke) a colour between
+/// the foreground and background, its hue, saturation and brightness
+/// varied at random. As PhotoCraft's `dynamic_color`.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ColorDynamics {
+    /// Each dab its own colour (Apply Per Tip), rather than each stroke.
+    pub per_tip: bool,
+    /// How far towards the background colour it can go at random (0–1).
+    pub foreground_background: f32,
+    /// How far round the hue wheel it can turn, as a fraction of half of it.
+    pub hue_jitter: f32,
+    pub saturation_jitter: f32,
+    pub brightness_jitter: f32,
+    /// -1 (grey) to 1 (fully saturated).
+    pub purity: f32,
+}
+
+impl Default for ColorDynamics {
+    fn default() -> Self {
+        Self {
+            per_tip: true,
+            foreground_background: 0.0,
+            hue_jitter: 0.0,
+            saturation_jitter: 0.0,
+            brightness_jitter: 0.0,
+            purity: 0.0,
+        }
+    }
+}
+
+impl ColorDynamics {
+    /// The colour (each channel 0–1) of dab `index` of the stroke `seed`
+    /// began, between `foreground` and `background`.
+    pub(crate) fn colour(&self, foreground: [f32; 3], background: [f32; 3], seed: u64, index: u64) -> [f32; 3] {
+        let index = if self.per_tip { index } else { 0 };
+        let r = |stream: u64| random(seed, index, stream);
+        let either_way = |stream: u64| r(stream) * 2.0 - 1.0;
+        let t = self.foreground_background.clamp(0.0, 1.0) * r(FOREGROUND_BACKGROUND);
+        let mixed = [0, 1, 2].map(|c| foreground[c] + (background[c] - foreground[c]) * t);
+        let [mut h, mut s, mut v] = rgb_to_hsv(mixed);
+        h += either_way(HUE) * self.hue_jitter.clamp(0.0, 1.0) * 0.5;
+        s = (s + either_way(SATURATION) * self.saturation_jitter.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let purity = self.purity.clamp(-1.0, 1.0);
+        s = if purity >= 0.0 { s + (1.0 - s) * purity } else { s * (1.0 + purity) };
+        v = (v + either_way(BRIGHTNESS) * self.brightness_jitter.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        hsv_to_rgb(h, s, v)
+    }
+}
+
+fn rgb_to_hsv(c: [f32; 3]) -> [f32; 3] {
+    let most = c[0].max(c[1]).max(c[2]);
+    let d = most - c[0].min(c[1]).min(c[2]);
+    let h = if d <= 0.0 {
+        0.0
+    } else if most == c[0] {
+        ((c[1] - c[2]) / d).rem_euclid(6.0)
+    } else if most == c[1] {
+        (c[2] - c[0]) / d + 2.0
+    } else {
+        (c[0] - c[1]) / d + 4.0
+    } / 6.0;
+    [h, if most > 0.0 { d / most } else { 0.0 }, most]
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let h6 = h.rem_euclid(1.0) * 6.0;
+    let f = h6 - h6.floor();
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    match h6.floor() as i32 {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
+    }
 }
 
 /// Photoshop's Dual Brush: a second tip laid along the stroke with its own
@@ -183,6 +264,7 @@ impl DualBrush {
                     most: 1.0,
                     flow: 1.0,
                     depth: 1.0,
+                    index: i,
                 }
             })
             .collect()
@@ -215,6 +297,7 @@ impl Default for Dynamics {
             wet_edges: false,
             texture: None,
             dual: None,
+            colour: None,
         }
     }
 }
@@ -247,6 +330,8 @@ pub(crate) struct Dab {
     pub most: f32,
     pub flow: f32,
     pub depth: f32,
+    /// Its number in the stroke.
+    pub index: u64,
 }
 
 impl Dynamics {
@@ -306,6 +391,7 @@ impl Dynamics {
                     most: at.most * (1.0 - unit(self.opacity_jitter) * r(OPACITY)),
                     flow: at.flow * (1.0 - unit(self.flow_jitter) * r(FLOW)),
                     depth: self.texture.map_or(1.0, |t| t.dab_depth(r(DEPTH))),
+                    index: i,
                 }
             })
             .collect()
@@ -325,6 +411,10 @@ const COUNT: u64 = 8;
 const OPACITY: u64 = 9;
 const FLOW: u64 = 10;
 const DEPTH: u64 = 11;
+const FOREGROUND_BACKGROUND: u64 = 12;
+const HUE: u64 = 13;
+const SATURATION: u64 = 14;
+const BRIGHTNESS: u64 = 15;
 
 /// SplitMix64's finaliser.
 pub(crate) fn mix(mut z: u64) -> u64 {
@@ -381,9 +471,10 @@ mod tests {
             most: 1.0,
             flow: 0.8,
             depth: 1.0,
+            index: 0,
         };
         assert_eq!(dabs.len(), 500);
-        assert!(dabs.iter().all(|d| *d == plain));
+        assert!(dabs.iter().enumerate().all(|(i, d)| *d == Dab { index: i as u64, ..plain }));
     }
 
     #[test]

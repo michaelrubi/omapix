@@ -133,13 +133,15 @@ impl Surface {
     }
 }
 
-/// What a brush's settings name by id, for a stroke to have: its sampled
-/// tip, Dual Brush's, and Texture's pattern.
+/// What a stroke is given beside its settings: the pictures and pattern
+/// they name by id (its sampled tip, Dual Brush's and Texture's), and the
+/// background colour Color Dynamics varies towards.
 #[derive(Clone, Debug, Default)]
 pub struct Parts {
     pub tip: Option<Arc<Tip>>,
     pub dual_tip: Option<Arc<Tip>>,
     pub pattern: Option<Arc<Pattern>>,
+    pub background: Pixel,
 }
 
 pub struct Stroke {
@@ -169,6 +171,11 @@ pub struct Stroke {
     brush: Option<(f32, f32, f32)>,
     pointer: Option<(f32, f32, f32)>,
     image_per_screen: f32,
+    /// Color Dynamics: the background colour, and the colour each pixel
+    /// has been painted, summed weighted by the coverage each dab added
+    /// (so over its coverage it's their mean).
+    background: Pixel,
+    colours: HashMap<(u32, u32), Vec<[f32; 3]>>,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     /// The last point, and the pen's pressure there.
@@ -203,6 +210,8 @@ impl Stroke {
             brush: None,
             pointer: None,
             image_per_screen: 1.0,
+            background: [0; 4],
+            colours: HashMap::new(),
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -249,6 +258,7 @@ impl Stroke {
             self = self.with_pattern(pattern);
         }
         self.dual_tip = parts.dual_tip.clone();
+        self.background = parts.background;
         self
     }
 
@@ -474,6 +484,14 @@ impl Stroke {
         let noise = self.settings.dynamics.noise && !dual;
         // Texture Each Tip: the pattern worked into this dab at its depth.
         let texture = self.settings.dynamics.texture.filter(|t| t.each_tip && !dual).zip(self.pattern.as_ref());
+        // Color Dynamics: this dab's colour, painting a colour.
+        let colour = match (self.settings.dynamics.colour.filter(|_| !dual), self.paint) {
+            (Some(dynamics), Paint::Color(fg)) => {
+                let unit = |p: Pixel| [0, 1, 2].map(|c| f32::from(p[c]) / MAX);
+                Some(dynamics.colour(unit(fg), unit(self.background), self.seed, dab.index))
+            }
+            _ => None,
+        };
         // A mirrored tip is read backwards.
         let (flip_x, flip_y) = (if dab.flip_x { -1.0 } else { 1.0 }, if dab.flip_y { -1.0 } else { 1.0 });
         // A sampled tip: which of its sizes to read, and how many of its
@@ -501,8 +519,9 @@ impl Stroke {
         if x0 >= x1 || y0 >= y1 {
             return;
         }
-        // Add the dab to one tile's coverage. Whether any of it fell there.
-        let lay = |(col, row): (u32, u32), cov: &mut [f32]| {
+        // Add the dab to one tile's coverage (and its colour to the tile's
+        // colours). Whether any of it fell there.
+        let lay = |(col, row): (u32, u32), cov: &mut [f32], mut colours: Option<&mut Vec<[f32; 3]>>| {
             let (tx, ty) = (col * TILE, row * TILE);
             let mut hit = false;
             for py in y0.max(ty)..y1.min(ty + TILE) {
@@ -535,34 +554,53 @@ impl Stroke {
                             continue;
                         }
                     }
-                    let c = &mut cov[((py - ty) * TILE + (px - tx)) as usize];
-                    *c += (most - *c).max(0.0) * flow * shape;
+                    let at = ((py - ty) * TILE + (px - tx)) as usize;
+                    let added = (most - cov[at]).max(0.0) * flow * shape;
+                    cov[at] += added;
+                    if let (Some(colours), Some(colour)) = (colours.as_deref_mut(), colour) {
+                        for c in 0..3 {
+                            colours[at][c] += colour[c] * added;
+                        }
+                    }
                     hit = true;
                 }
             }
             hit
         };
         let tiles = (y0 / TILE..=(y1 - 1) / TILE).flat_map(|row| (x0 / TILE..=(x1 - 1) / TILE).map(move |col| (col, row)));
-        // The coverage it goes into, taken out of the stroke for the while.
+        // The coverage (and colours) it goes into, taken out of the stroke
+        // for the while.
         let mut coverage = std::mem::take(if dual { &mut self.dual_coverage } else { &mut self.coverage });
+        let mut colours = std::mem::take(&mut self.colours);
+        let blank = || vec![[0.0; 3]; TILE_PIXELS];
         if (x1 - x0) as usize * (y1 - y0) as usize >= PARALLEL {
             // A big dab: each tile on its own core.
-            let mut taken: Vec<_> = tiles.map(|at| (at, coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS]))).collect();
-            let hits: Vec<bool> = taken.par_iter_mut().map(|(at, cov)| lay(*at, cov)).collect();
-            for ((at, cov), hit) in taken.into_iter().zip(hits) {
+            let mut taken: Vec<_> = tiles
+                .map(|at| {
+                    let cov = coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS]);
+                    (at, cov, colour.map(|_| colours.remove(&at).unwrap_or_else(blank)))
+                })
+                .collect();
+            let hits: Vec<bool> = taken.par_iter_mut().map(|(at, cov, col)| lay(*at, cov, col.as_mut())).collect();
+            for ((at, cov, col), hit) in taken.into_iter().zip(hits) {
                 coverage.insert(at, cov);
+                if let Some(col) = col {
+                    colours.insert(at, col);
+                }
                 if hit {
                     touched.push(at);
                 }
             }
         } else {
             for at in tiles {
-                if lay(at, coverage.entry(at).or_insert_with(|| vec![0.0; TILE_PIXELS])) {
+                let col = colour.map(|_| colours.entry(at).or_insert_with(blank));
+                if lay(at, coverage.entry(at).or_insert_with(|| vec![0.0; TILE_PIXELS]), col) {
                     touched.push(at);
                 }
             }
         }
         *(if dual { &mut self.dual_coverage } else { &mut self.coverage }) = coverage;
+        self.colours = colours;
     }
 
     /// Write the stroke's current result for the given tiles into `surface`.
@@ -589,6 +627,10 @@ impl Stroke {
                             } else {
                                 self.paint_onto(out[i], a, Paint::Color(self.copied(x, y)))
                             }
+                        } else if let Some(colours) = self.colours.get(&(col, row)).filter(|_| cov[i] > 0.0) {
+                            // Color Dynamics: the mean of the colours laid here.
+                            let mean = colours[i].map(|c| ((c / cov[i]).clamp(0.0, 1.0) * MAX).round() as u16);
+                            self.paint_onto(out[i], a, Paint::Color([mean[0], mean[1], mean[2], u16::MAX]))
                         } else {
                             self.paint_onto(out[i], a, self.paint)
                         };
@@ -1719,6 +1761,54 @@ mod tests {
             }),
             [false, false, true, false]
         );
+    }
+
+    #[test]
+    fn color_dynamics_vary_each_dabs_colour_between_the_foreground_and_background() {
+        use crate::dynamics::ColorDynamics;
+        let paint = |colour: Option<ColorDynamics>| {
+            let settings = BrushSettings {
+                dynamics: Dynamics {
+                    colour,
+                    spacing: 1.0,
+                    ..Dynamics::default()
+                },
+                ..hard(20.0, Dynamics::default())
+            };
+            let mut out = Surface::Pixels(white(300, 200));
+            let parts = Parts {
+                background: [0, 0, 65535, 65535],
+                ..Parts::default()
+            };
+            let mut s = Stroke::new(settings, Paint::Color([65535, 0, 0, 65535]), out.clone()).with_parts(&parts);
+            for x in [20.0, 280.0] {
+                let tiles = s.add_point(x, 100.0, 1.0);
+                s.apply(&mut out, &tiles);
+            }
+            let Surface::Pixels(out) = out else { unreachable!() };
+            // Each dab's centre, 20 px apart.
+            (1..13).map(|i| out.get(20 + i * 20, 100)).collect::<Vec<_>>()
+        };
+        // Without it, all red.
+        assert!(paint(None).iter().all(|p| *p == [65535, 0, 0, 65535]));
+        // With Foreground/Background Jitter, each dab somewhere from red to
+        // blue, and not all the same.
+        let jitter = ColorDynamics {
+            foreground_background: 1.0,
+            ..ColorDynamics::default()
+        };
+        let dabs = paint(Some(jitter));
+        assert!(dabs.iter().all(|p| p[1] == 0 && u32::from(p[0]) + u32::from(p[2]) >= 65000), "{dabs:?}");
+        assert!(dabs.iter().any(|p| p[2] > 30000) && dabs.iter().any(|p| p[0] > 30000), "{dabs:?}");
+        // Once a stroke, every dab the same colour.
+        let once = paint(Some(ColorDynamics { per_tip: false, ..jitter }));
+        assert!(once.iter().all(|p| *p == once[0]), "{once:?}");
+        // Purity -100 % greys it.
+        let grey = paint(Some(ColorDynamics {
+            purity: -1.0,
+            ..ColorDynamics::default()
+        }));
+        assert!(grey.iter().all(|p| p[0] == p[1] && p[1] == p[2]), "{grey:?}");
     }
 
     #[test]
