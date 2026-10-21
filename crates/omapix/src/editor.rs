@@ -2087,6 +2087,7 @@ impl Editor {
                     opacity: layer.opacity,
                     mode: layer.blend,
                     lut,
+                    blend_if: layer.blend_if.filter(|b| !b.is_neutral()),
                 })
             }
             _ => None,
@@ -3871,6 +3872,22 @@ mod live_tests {
         e.update(&ctx);
         let again = e.canvas.live.clone().unwrap().settings.unwrap().lut.unwrap();
         assert!(Arc::ptr_eq(&first, &again));
+    }
+
+    #[test]
+    fn blend_if_drags_show_live() {
+        let ctx = egui::Context::default();
+        let mut e = editor();
+        let patch = e.active;
+        let split = omapix_engine::layer::BlendIf {
+            this: [0.0, 0.3, 1.0, 1.0],
+            ..Default::default()
+        };
+        e.edit_live("Blend If", |doc| doc.layer_mut(patch).unwrap().blend_if = Some(split));
+        settle(&mut e, &ctx);
+        let frame = e.canvas.live.clone().expect("shown live");
+        assert_eq!(frame.settings.expect("an edit").blend_if, Some(split));
+        e.end_live();
     }
 
     #[test]

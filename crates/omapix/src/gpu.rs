@@ -431,8 +431,14 @@ impl CallbackTrait for LiveDraw {
             let (mut moved, mut through) = ([0, 0], None);
             if let Some((lut, uploaded_lut)) = &mut pass.subject {
                 (moved, through) = (offset, inverse);
-                if let Some(Settings { opacity, mode, lut: table }) = &self.frame.settings {
-                    (params.opacity, params.mode) = (*opacity, *mode as u32);
+                if let Some(Settings {
+                    opacity,
+                    mode,
+                    lut: table,
+                    blend_if,
+                }) = &self.frame.settings
+                {
+                    (params.opacity, params.mode, params.blend_if) = (*opacity, *mode as u32, *blend_if);
                     // An adjustment's new table, when it's changed.
                     if let Some(table) = table
                         && !uploaded_lut.as_ref().is_some_and(|u| Arc::ptr_eq(u, table))
@@ -852,6 +858,7 @@ mod tests {
                     opacity: 0.35,
                     mode: BlendMode::PassThrough,
                     lut: None,
+                    blend_if: None,
                 }),
             },
             display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
@@ -937,6 +944,7 @@ mod tests {
                     opacity: 0.45,
                     mode: BlendMode::HardLight,
                     lut: None,
+                    blend_if: None,
                 }),
             },
             display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
@@ -997,10 +1005,17 @@ mod tests {
         c.master.points.insert(1, (0.5, 0.3));
         layer.adjustment = Some(Adjustment::Curves(c));
         layer.opacity = 0.6;
+        // And its Blend If dragged.
+        let split = omapix_engine::layer::BlendIf {
+            underlying: [0.1, 0.4, 0.8, 0.9],
+            ..Default::default()
+        };
+        layer.blend_if = Some(split);
         let settings = Settings {
             opacity: 0.6,
             mode: BlendMode::Normal,
             lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+            blend_if: Some(split),
         };
         let draw = LiveDraw {
             frame: LiveFrame {
@@ -1237,6 +1252,7 @@ mod tests {
             opacity: 0.6,
             mode: BlendMode::Luminosity,
             lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+            blend_if: None,
         };
         let draw = LiveDraw {
             frame: LiveFrame {

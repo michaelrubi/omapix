@@ -113,6 +113,8 @@ pub struct Settings {
     pub opacity: f32,
     pub mode: BlendMode,
     pub lut: Option<Table>,
+    /// Blend If, unless it hides nothing.
+    pub blend_if: Option<BlendIf>,
 }
 
 /// What the canvas draws live this frame.
@@ -383,8 +385,8 @@ pub fn only_settings_changed(before: &[Layer], after: &[Layer], id: u64) -> bool
                     (Some(x), Some(y)) => x.enabled == y.enabled && x.pixels.same_tiles(&y.pixels),
                     _ => false,
                 };
-            let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group, a.blend_if) == (b.id, b.parent, b.visible, b.clipped, b.is_group, b.blend_if);
-            let same_settings = (a.opacity, a.blend, &a.adjustment) == (b.opacity, b.blend, &b.adjustment);
+            let same_place = (a.id, a.parent, a.visible, a.clipped, a.is_group) == (b.id, b.parent, b.visible, b.clipped, b.is_group);
+            let same_settings = (a.opacity, a.blend, &a.adjustment, a.blend_if) == (b.opacity, b.blend, &b.adjustment, b.blend_if);
             // A group that starts or stops passing through is made of other passes.
             let through = |l: &Layer| l.is_group && l.blend == BlendMode::PassThrough;
             same_pixels && same_place && (same_settings || a.id == id && through(a) == through(b))
