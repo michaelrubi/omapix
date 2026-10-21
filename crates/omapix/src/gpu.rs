@@ -1095,6 +1095,51 @@ mod tests {
             .fold(0.0, f32::max);
         assert!(worst < 4e-3, "a base, edited: off by {worst}");
 
+        // A clipped group's settings, and those of a group something's
+        // clipped to, edited.
+        for clipped_to in [false, true] {
+            let mut doc = document(BlendMode::Overlay, true);
+            let ids = [doc.layers[2].id];
+            let group = doc.group_layers(&ids).unwrap();
+            if clipped_to {
+                doc.layers[4].clipped = true;
+                fade(&mut doc, group, 1.0);
+            } else {
+                doc.layer_mut(group).unwrap().clipped = true;
+            }
+            let (w, h) = (doc.width, doc.height);
+            let stack = Arc::new(live::build(&doc, &doc.layers, group, false, 0, (0, 0, w, h)).unwrap());
+            let g = doc.layer_mut(group).unwrap();
+            (g.opacity, g.blend) = (0.55, BlendMode::Screen);
+            let draw = LiveDraw {
+                frame: LiveFrame {
+                    stack,
+                    painted: None,
+                    painted_mask: None,
+                    offset: (0, 0),
+                    transform: None,
+                    settings: Some(Settings {
+                        opacity: 0.55,
+                        mode: BlendMode::Screen,
+                        lut: None,
+                        blend_if: None,
+                    }),
+                },
+                display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            let gpu = composite_on_gpu(&device, &queue, draw);
+            let cpu = composite::composite(&doc.layers, w, h);
+            let worst = cpu
+                .pixels()
+                .iter()
+                .zip(&gpu)
+                .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
+                .fold(0.0, f32::max);
+            assert!(worst < 4e-3, "a group, clipped to: {clipped_to}, edited: off by {worst}");
+        }
+
         // The clipped Curves, edited.
         let mut doc = document(BlendMode::Normal, true);
         clip(&mut doc, 3);
