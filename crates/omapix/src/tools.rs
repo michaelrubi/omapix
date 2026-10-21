@@ -3,8 +3,9 @@
 
 use egui::{Button, ComboBox, Key, Modifiers, Pos2, RichText, Slider, Ui, Vec2};
 use omapix_engine::brush::{BrushSettings, Paint};
-use omapix_engine::dynamics::{Dynamics, MAX_COUNT};
+use omapix_engine::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT};
 use omapix_engine::selection::Combine;
+use omapix_engine::texture::{Mode, Texture};
 use omapix_engine::toning::ToneRange;
 use omapix_engine::warp::Brush as LiquifyBrush;
 use omapix_engine::{ColorProfile, DisplayTransform, Pixel};
@@ -1044,6 +1045,10 @@ impl Tools {
             self.use_brush(&brush);
         }
         brushes.preview(ui, theme, &self.settings_mut().clone());
+        let (patterns, tips) = (brushes.patterns(), brushes.tips());
+        // Color Dynamics is the Brush's: the other tools don't paint a colour.
+        let paints_colour = !self.tool.has_brush() || self.tool == Tool::Brush;
+        let size = self.settings_mut().size;
         let d = &mut self.settings_mut().dynamics;
         let heading = |ui: &mut Ui, text: &str| {
             ui.label(RichText::new(text).color(theme.foreground).strong());
@@ -1149,6 +1154,173 @@ impl Tools {
                 heading(ui, "Transfer");
                 percent(ui, "Opacity Jitter", &mut d.opacity_jitter, "How much lower a dab's opacity can be at random");
                 percent(ui, "Flow Jitter", &mut d.flow_jitter, "How much lower a dab's flow can be at random");
+
+                heading(ui, "Texture");
+                let mut textured = d.texture.is_some();
+                ui.label("");
+                let toggle = ui
+                    .add_enabled(textured || !patterns.is_empty(), egui::Checkbox::new(&mut textured, "Use a pattern"))
+                    .on_hover_text("A pattern worked into the paint")
+                    .on_disabled_hover_text("Load a brush file with patterns to have some to choose from");
+                if toggle.changed() {
+                    d.texture = textured.then(|| Texture {
+                        pattern: patterns[0].id(),
+                        ..Texture::default()
+                    });
+                }
+                ui.end_row();
+                if let Some(t) = &mut d.texture {
+                    ui.label("Pattern").on_hover_text("From the brush files loaded");
+                    let name = patterns.iter().find(|p| p.id() == t.pattern).map_or("(not loaded)", |p| p.name.as_str());
+                    ComboBox::from_id_salt("texture-pattern").selected_text(name).show_ui(ui, |ui| {
+                        for p in &patterns {
+                            ui.selectable_value(&mut t.pattern, p.id(), &p.name);
+                        }
+                    });
+                    ui.end_row();
+                    row(ui, "Scale", &mut t.scale, 1.0..=1000.0, 100.0, "%", "The pattern's size");
+                    row(
+                        ui,
+                        "Brightness",
+                        &mut t.brightness,
+                        -150.0..=150.0,
+                        150.0,
+                        "",
+                        "Lightens or darkens the pattern",
+                    );
+                    // Photoshop's -50 to 0 and 0 to 100, scaled apart.
+                    let hint = "Steepens the pattern's greys towards black and white, or flattens them";
+                    ui.label("Contrast").on_hover_text(hint);
+                    let mut shown = if t.contrast < 0.0 { t.contrast * 50.0 } else { t.contrast * 100.0 };
+                    if ui.add(Slider::new(&mut shown, -50.0..=100.0).fixed_decimals(0)).on_hover_text(hint).changed() {
+                        t.contrast = if shown < 0.0 { shown / 50.0 } else { shown / 100.0 };
+                    }
+                    ui.end_row();
+                    let (invert, each) = (
+                        "Swaps the pattern's light and dark",
+                        "Into each dab, so Depth can vary from dab to dab, rather than into the stroke as a whole",
+                    );
+                    pair(ui, (&mut t.invert, "Invert", invert), (&mut t.each_tip, "Texture Each Tip", each));
+                    ui.label("Mode").on_hover_text("How the pattern meets the paint");
+                    ComboBox::from_id_salt("texture-mode").selected_text(t.mode.label()).show_ui(ui, |ui| {
+                        for mode in Mode::ALL {
+                            ui.selectable_value(&mut t.mode, mode, mode.label());
+                        }
+                    });
+                    ui.end_row();
+                    percent(ui, "Depth", &mut t.depth, "How strongly the pattern shows");
+                    if t.each_tip {
+                        percent(ui, "Minimum Depth", &mut t.minimum_depth, "The least Depth Jitter takes it to");
+                        percent(ui, "Depth Jitter", &mut t.depth_jitter, "How much lower each dab's depth can be at random");
+                    }
+                }
+
+                heading(ui, "Dual Brush");
+                let mut doubled = d.dual.is_some();
+                ui.label("");
+                ui.checkbox(&mut doubled, "Use a second tip")
+                    .on_hover_text("A second tip laid along the stroke, and the paint only where the two meet");
+                ui.end_row();
+                if doubled != d.dual.is_some() {
+                    d.dual = doubled.then(DualBrush::default);
+                }
+                if let Some(dual) = &mut d.dual {
+                    ui.label("Mode").on_hover_text("How the second tip meets the paint");
+                    ComboBox::from_id_salt("dual-mode").selected_text(dual.mode.label()).show_ui(ui, |ui| {
+                        for mode in Mode::ALL {
+                            ui.selectable_value(&mut dual.mode, mode, mode.label());
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Tip").on_hover_text("Round, or a tip from the brush files loaded");
+                    let name = dual.tip.map_or("Round", |id| {
+                        tips.iter().find(|(_, t)| t.id() == id).map_or("(not loaded)", |(name, _)| name.as_str())
+                    });
+                    ComboBox::from_id_salt("dual-tip").selected_text(name).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut dual.tip, None, "Round");
+                        for (name, tip) in &tips {
+                            ui.selectable_value(&mut dual.tip, Some(tip.id()), name);
+                        }
+                    });
+                    ui.end_row();
+                    // Kept as a share of the brush's size, shown in pixels.
+                    let hint = "The second tip's size; it keeps its proportion as the brush is made bigger or smaller";
+                    ui.label("Size").on_hover_text(hint);
+                    let mut px = dual.diameter(size);
+                    if ui
+                        .add(Slider::new(&mut px, 1.0..=5000.0).logarithmic(true).suffix(" px").fixed_decimals(0))
+                        .on_hover_text(hint)
+                        .changed()
+                    {
+                        dual.size = px / size.max(1.0);
+                    }
+                    ui.end_row();
+                    if dual.tip.is_none() {
+                        percent(ui, "Hardness", &mut dual.hardness, "How hard the round tip's edge is");
+                    }
+                    row(
+                        ui,
+                        "Spacing",
+                        &mut dual.spacing,
+                        1.0..=1000.0,
+                        100.0,
+                        "%",
+                        "The distance between its dabs, as a share of its size",
+                    );
+                    row(
+                        ui,
+                        "Scatter",
+                        &mut dual.scatter,
+                        0.0..=1000.0,
+                        100.0,
+                        "%",
+                        "How far its dabs stray, as a share of its radius",
+                    );
+                    let (both, flip) = (
+                        "Stray along the stroke as well as across it",
+                        "Each of its dabs mirrored left to right or not, at random",
+                    );
+                    pair(ui, (&mut dual.both_axes, "Both Axes", both), (&mut dual.flip, "Flip", flip));
+                    ui.label("Count").on_hover_text("Its dabs at each step");
+                    ui.add(Slider::new(&mut dual.count, 1..=MAX_COUNT)).on_hover_text("Its dabs at each step");
+                    ui.end_row();
+                }
+
+                if paints_colour {
+                    heading(ui, "Color Dynamics");
+                    let mut varied = d.colour.is_some();
+                    ui.label("");
+                    ui.checkbox(&mut varied, "Vary the colour")
+                        .on_hover_text("Each dab a colour between the foreground and background, its hue, saturation and brightness varied");
+                    ui.end_row();
+                    if varied != d.colour.is_some() {
+                        d.colour = varied.then(ColorDynamics::default);
+                    }
+                    if let Some(c) = &mut d.colour {
+                        ui.label("");
+                        ui.checkbox(&mut c.per_tip, "Apply Per Tip")
+                            .on_hover_text("Each dab its own colour; unticked, each stroke");
+                        ui.end_row();
+                        percent(
+                            ui,
+                            "Foreground/Background Jitter",
+                            &mut c.foreground_background,
+                            "How far towards the background colour it can go",
+                        );
+                        percent(ui, "Hue Jitter", &mut c.hue_jitter, "How far round the colour wheel it can turn");
+                        percent(ui, "Saturation Jitter", &mut c.saturation_jitter, "How much more or less saturated it can be");
+                        percent(ui, "Brightness Jitter", &mut c.brightness_jitter, "How much lighter or darker it can be");
+                        row(
+                            ui,
+                            "Purity",
+                            &mut c.purity,
+                            -100.0..=100.0,
+                            100.0,
+                            "%",
+                            "Makes every dab more saturated, or greyer",
+                        );
+                    }
+                }
 
                 heading(ui, "Other");
                 let (noise, wet) = (
@@ -1376,6 +1548,9 @@ impl Tools {
             percent(ui, "Flow", &mut s.flow);
             ui.toggle_value(&mut s.flow_pressure, "✒").on_hover_text("A pen's pressure sets the flow");
             ui.toggle_value(&mut s.size_pressure, "⊙").on_hover_text("A pen's pressure sets the size");
+            percent(ui, "Smoothing", &mut s.smoothing);
+            ui.toggle_value(&mut s.pulled_string, "〰")
+                .on_hover_text("Pulled String Mode: the brush moves only when the pointer pulls the string taut (its length is the Smoothing)");
             ui.separator();
             if self.tool == Tool::SpotHealing {
                 self.sample_options(ui);
@@ -2310,6 +2485,8 @@ mod tests {
         ] {
             at(&drawn, text);
         }
+        // The Eraser doesn't paint a colour, so it has no Color Dynamics.
+        assert!(!drawn.iter().any(|(t, _)| t == "Color Dynamics"));
         let follow = at(&drawn, "Follow the stroke");
         frame(&mut tools, click(follow, true));
         frame(&mut tools, click(follow, false));
@@ -2336,6 +2513,143 @@ mod tests {
         // A tool with no brush shows the Brush tool's.
         tools.tool = Tool::Move;
         at(&frame(&mut tools, vec![]), "Brush");
+    }
+
+    #[test]
+    fn the_options_bar_has_smoothing_and_pulled_string_mode() {
+        let ctx = egui::Context::default();
+        let theme = Theme::default();
+        let mut tools = Tools::default();
+        let frame = |tools: &mut Tools, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1600.0, 40.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| tools.options_bar(ui, Target::Pixels, &theme));
+            out.textures_delta.clear();
+            fn texts(shape: &egui::Shape, found: &mut Vec<(String, Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => found.push((t.galley.text().to_owned(), t.visual_bounding_rect().center())),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, found)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| texts(&s.shape, &mut found));
+            found
+        };
+        let drawn = frame(&mut tools, vec![]);
+        assert!(drawn.iter().any(|(t, _)| t == "Smoothing"), "{drawn:?}");
+        let string = drawn.iter().find(|(t, _)| t == "〰").unwrap().1;
+        let button = |pressed| egui::Event::PointerButton {
+            pos: string,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&mut tools, vec![egui::Event::PointerMoved(string), button(true)]);
+        frame(&mut tools, vec![button(false)]);
+        assert!(tools.brush.pulled_string);
+    }
+
+    #[test]
+    fn texture_and_dual_brush_use_the_loaded_patterns_and_tips() {
+        let ctx = egui::Context::default();
+        let theme = Theme::default();
+        let mut brushes = crate::brushes::Library::default();
+        let mut tools = Tools::default();
+        let mut time = 0.0;
+        let mut frame = |tools: &mut Tools, brushes: &mut crate::brushes::Library, events: Vec<egui::Event>| -> Vec<(String, Pos2)> {
+            time += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 1400.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                tools.brush_settings(ui, &theme, brushes);
+            });
+            out.textures_delta.clear();
+            fn texts(shape: &egui::Shape, found: &mut Vec<(String, Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => found.push((t.galley.text().to_owned(), t.visual_bounding_rect().center())),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, found)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| texts(&s.shape, &mut found));
+            found
+        };
+        let click = |pos: Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            [vec![egui::Event::PointerMoved(pos), button(true)], vec![button(false)]]
+        };
+        let at = |drawn: &[(String, Pos2)], text: &str| drawn.iter().find(|(t, _)| t == text).map(|(_, p)| *p);
+
+        // With no patterns loaded there's nothing to use.
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        for events in click(at(&drawn, "Use a pattern").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert_eq!(tools.brush.dynamics.texture, None);
+
+        let dir = std::env::temp_dir().join(format!("omapix-brush-texture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Nature.abr"), crate::brushes::tests::brush_file()).unwrap();
+        brushes.load(dir.clone(), None, &ctx);
+        crate::brushes::tests::loaded(&mut brushes);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let canvas = brushes.patterns()[0].id();
+
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Pattern").is_none());
+        for events in click(at(&drawn, "Use a pattern").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        let texture = tools.brush.dynamics.texture.expect("a Texture");
+        assert_eq!((texture.pattern, texture.each_tip), (canvas, false));
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Canvas").is_some() && at(&drawn, "Depth").is_some() && at(&drawn, "Depth Jitter").is_none());
+        for events in click(at(&drawn, "Texture Each Tip").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert!(tools.brush.dynamics.texture.unwrap().each_tip);
+        assert!(at(&frame(&mut tools, &mut brushes, vec![]), "Depth Jitter").is_some());
+        assert_eq!(brushes.pattern(&tools.brush).map(|p| p.id()), Some(canvas));
+
+        // Dual Brush: a round second tip to start with, then one of the
+        // brushes' sampled tips, which a stroke is given.
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        for events in click(at(&drawn, "Use a second tip").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert_eq!(tools.brush.dynamics.dual, Some(omapix_engine::dynamics::DualBrush::default()));
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Round").is_some() && at(&drawn, "Hardness").is_some());
+        assert!(brushes.parts(&tools.brush).dual_tip.is_none());
+        let (name, leaf) = brushes.tips()[0].clone();
+        assert_eq!(name, "Leaf");
+        tools.brush.dynamics.dual.as_mut().unwrap().tip = Some(leaf.id());
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Leaf").is_some() && at(&drawn, "Hardness").is_none());
+        assert_eq!(brushes.parts(&tools.brush).dual_tip.map(|t| t.id()), Some(leaf.id()));
+
+        // Color Dynamics, for the Brush.
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        for events in click(at(&drawn, "Vary the colour").unwrap()) {
+            frame(&mut tools, &mut brushes, events);
+        }
+        assert_eq!(tools.brush.dynamics.colour, Some(omapix_engine::dynamics::ColorDynamics::default()));
+        let drawn = frame(&mut tools, &mut brushes, vec![]);
+        assert!(at(&drawn, "Foreground/Background Jitter").is_some() && at(&drawn, "Purity").is_some());
     }
 
     #[test]

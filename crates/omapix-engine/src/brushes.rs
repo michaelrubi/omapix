@@ -36,7 +36,8 @@ use rayon::prelude::*;
 use crate::abr::{AbrFile, AbrSample, LegacyTip};
 use crate::brush::BrushSettings;
 use crate::descriptor::{Descriptor, Value};
-use crate::dynamics::{Dynamics, MAX_COUNT};
+use crate::dynamics::{ColorDynamics, DualBrush, Dynamics, MAX_COUNT};
+use crate::texture::{Mode, Pattern, Texture};
 use crate::tip::Tip;
 
 /// The spacing of a brush that doesn't say, as in Photoshop.
@@ -54,6 +55,10 @@ pub struct Preset {
     pub size_pressure: bool,
     pub dynamics: Dynamics,
     pub tip: Option<Arc<Tip>>,
+    /// Texture's pattern, which `dynamics` names.
+    pub pattern: Option<Arc<Pattern>>,
+    /// Dual Brush's sampled tip, which `dynamics` names.
+    pub dual_tip: Option<Arc<Tip>>,
 }
 
 impl Preset {
@@ -103,8 +108,16 @@ fn longer(tip: &Tip) -> f32 {
 }
 
 /// The brush a `brushPreset` describes, with `tips` those of the file's
-/// samples. `None` if its tip isn't in the file.
-fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>], left_out: &mut BTreeSet<&'static str>) -> Option<Preset> {
+/// samples and `patterns` its patterns. `None` if its tip isn't in the
+/// file.
+fn preset(
+    d: &Descriptor,
+    name: String,
+    file: &AbrFile,
+    tips: &[Option<Arc<Tip>>],
+    patterns: &[Option<Arc<Pattern>>],
+    left_out: &mut BTreeSet<&'static str>,
+) -> Option<Preset> {
     let mut out = Preset {
         name,
         size: 30.0,
@@ -115,6 +128,8 @@ fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>
             ..Default::default()
         },
         tip: None,
+        pattern: None,
+        dual_tip: None,
     };
     let v = &mut out.dynamics;
     // Whether anything is set by a control Omapix doesn't have: one other
@@ -173,13 +188,90 @@ fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>
         other(b, &[2]);
     }
     (v.wet_edges, v.noise) = (on(d, "Wtdg"), on(d, "Nose"));
-    let dual = object(d, "dualBrush").is_some_and(|dual| on(dual, "useDualBrush"));
-    let more = [
-        (on(d, "useTexture"), "Texture"),
-        (dual, "Dual Brush"),
-        (on(d, "useColorDynamics"), "Color Dynamics"),
-        (on(d, "useBrushPose"), "Brush Pose"),
-    ];
+    // Texture, if its pattern is in the file: by its id, or else its name.
+    let (mut pattern, mut lost_pattern) = (None, false);
+    if on(d, "useTexture") {
+        let named = |key: &str| object(d, "Txtr").and_then(|t| t.get(key)).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let (id, name) = (named("Idnt"), named("Nm  "));
+        let at = file
+            .patterns
+            .iter()
+            .position(|p| Some(&p.id) == id.as_ref())
+            .or_else(|| file.patterns.iter().position(|p| Some(&p.name) == name.as_ref()));
+        match at.and_then(|at| patterns[at].clone()) {
+            Some(found) => {
+                let contrast = number(d, "textureContrast").unwrap_or(0.0);
+                let mode = match d.get("textureBlendMode") {
+                    Some(Value::Enumerated { value, .. }) => Mode::from_abr(&String::from_utf8_lossy(value.as_bytes())),
+                    _ => None,
+                };
+                let (depth_jitter, control) = varies(d, "textureDepthDynamics");
+                other(control, &[]);
+                v.texture = Some(Texture {
+                    pattern: found.id(),
+                    scale: fraction(d, "textureScale").unwrap_or(1.0).clamp(0.01, 10.0),
+                    brightness: (number(d, "textureBrightness").unwrap_or(0.0) / 150.0).clamp(-1.0, 1.0),
+                    contrast: (if contrast < 0.0 { contrast / 50.0 } else { contrast / 100.0 }).clamp(-1.0, 1.0),
+                    invert: on(d, "InvT"),
+                    each_tip: on(d, "TxtC"),
+                    mode: mode.unwrap_or_default(),
+                    depth: fraction(d, "textureDepth").unwrap_or(1.0).clamp(0.0, 1.0),
+                    minimum_depth: fraction(d, "minimumDepth").unwrap_or(0.0).clamp(0.0, 1.0),
+                    depth_jitter: depth_jitter.min(1.0),
+                });
+                pattern = Some(found);
+            }
+            None => lost_pattern = true,
+        }
+    }
+    out.pattern = pattern;
+    // Dual Brush: its tip, sized against the brush's, and how it's laid.
+    if let Some(db) = object(d, "dualBrush").filter(|db| on(db, "useDualBrush")) {
+        let mut dual = DualBrush::default();
+        if let Some(t) = object(db, "Brsh") {
+            let id = t.get("sampledData").and_then(Value::as_str);
+            // A sampled tip that isn't in the file: a round one stands in.
+            let found = id.and_then(|id| file.samples.iter().position(|s| s.id == id)).and_then(|at| tips[at].clone());
+            let own = found.as_deref().map(longer);
+            dual.size = (number(t, "Dmtr").or(own).unwrap_or(25.0).clamp(1.0, 5000.0) / out.size).clamp(0.0002, 5000.0);
+            dual.tip = found.as_ref().map(|tip| tip.id());
+            out.dual_tip = found;
+            dual.hardness = fraction(t, "Hrdn").unwrap_or(1.0).clamp(0.0, 1.0);
+            dual.roundness = fraction(t, "Rndn").unwrap_or(1.0).clamp(0.01, 1.0);
+            dual.angle = number(t, "Angl").unwrap_or(0.0);
+            dual.spacing = fraction(t, "Spcn").unwrap_or(dual.spacing).clamp(0.01, 10.0);
+        }
+        // The `Spcn` beside the tip reads 100 % whatever the panel says, so
+        // it only stands in for a tip without one (as PhotoCraft found).
+        if object(db, "Brsh").and_then(|t| fraction(t, "Spcn")).is_none()
+            && let Some(spacing) = fraction(db, "Spcn")
+        {
+            dual.spacing = spacing.clamp(0.01, 10.0);
+        }
+        dual.mode = match db.get("BlnM") {
+            Some(Value::Enumerated { value, .. }) => Mode::from_abr(&String::from_utf8_lossy(value.as_bytes())).unwrap_or_default(),
+            _ => Mode::Multiply,
+        };
+        dual.flip = on(db, "Flip");
+        dual.scatter = varies(db, "scatterDynamics").0.min(10.0);
+        dual.both_axes = on(db, "bothAxes");
+        dual.count = number(db, "Cnt ").map_or(1, |n| n.clamp(1.0, MAX_COUNT as f32) as u32);
+        out.dynamics.dual = Some(dual);
+    }
+    // Color Dynamics.
+    if on(d, "useColorDynamics") {
+        let (foreground_background, control) = varies(d, "clVr");
+        other(control, &[]);
+        out.dynamics.colour = Some(ColorDynamics {
+            per_tip: !matches!(d.get("colorDynamicsPerTip"), Some(Value::Boolean(false))),
+            foreground_background: foreground_background.min(1.0),
+            hue_jitter: fraction(d, "H   ").unwrap_or(0.0).clamp(0.0, 1.0),
+            saturation_jitter: fraction(d, "Strt").unwrap_or(0.0).clamp(0.0, 1.0),
+            brightness_jitter: fraction(d, "Brgh").unwrap_or(0.0).clamp(0.0, 1.0),
+            purity: fraction(d, "purity").unwrap_or(0.0).clamp(-1.0, 1.0),
+        });
+    }
+    let more = [(lost_pattern, "Texture (its pattern isn't in the file)"), (on(d, "useBrushPose"), "Brush Pose")];
     let more = more.into_iter().chain([(others, "Fade, tilt and other controls")]);
     left_out.extend(more.filter(|(used, _)| *used).map(|(_, what)| what));
     Some(out)
@@ -188,6 +280,7 @@ fn preset(d: &Descriptor, name: String, file: &AbrFile, tips: &[Option<Arc<Tip>>
 /// The brushes in `file`, and what some of them have that Omapix doesn't.
 pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
     let tips: Vec<Option<Arc<Tip>>> = file.samples.par_iter().map(tip).collect();
+    let patterns: Vec<Option<Arc<Pattern>>> = file.patterns.par_iter().map(|p| Pattern::from_psd(p).map(Arc::new)).collect();
     let plain = |name: String, size: f32, spacing: f32| Preset {
         name,
         size: size.clamp(1.0, 5000.0),
@@ -195,6 +288,8 @@ pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
         size_pressure: false,
         dynamics: Dynamics { spacing, ..Default::default() },
         tip: None,
+        pattern: None,
+        dual_tip: None,
     };
     let mut left_out = BTreeSet::new();
     let mut out = Vec::new();
@@ -228,7 +323,14 @@ pub fn presets(file: &AbrFile) -> (Vec<Preset>, Vec<&'static str>) {
     // The current one: tips, and the brushes that use them.
     for (i, d) in file.presets.iter().enumerate() {
         let name = d.name().map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
-        out.extend(preset(d, name.unwrap_or_else(|| format!("Brush {}", i + 1)), file, &tips, &mut left_out));
+        out.extend(preset(
+            d,
+            name.unwrap_or_else(|| format!("Brush {}", i + 1)),
+            file,
+            &tips,
+            &patterns,
+            &mut left_out,
+        ));
     }
     // Tips alone, as early files of the current layout have: a brush each.
     if file.legacy.is_empty() && file.presets.is_empty() {
@@ -270,6 +372,129 @@ mod tests {
 
     fn named(name: &str) -> Descriptor {
         Descriptor::new("brushPreset").with("Nm  ", Value::Text(UnicodeString::new_nul(name)))
+    }
+
+    #[test]
+    fn a_brushs_color_dynamics_come_from_the_file() {
+        let brush = named("Leaves")
+            .with("Brsh", Value::Descriptor(Descriptor::new("computedBrush").with("Dmtr", Value::Double(50.0))))
+            .with("useColorDynamics", Value::Boolean(true))
+            .with("colorDynamicsPerTip", Value::Boolean(false))
+            .with("clVr", vary(60.0, 0))
+            .with("H   ", percent(10.0))
+            .with("Strt", percent(20.0))
+            .with("Brgh", percent(30.0))
+            .with("purity", percent(-40.0));
+        let bytes = write_v6(2, &[], &[], &[brush], true).unwrap();
+        let (brushes, left_out) = presets(&parse(&bytes).unwrap());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let c = brushes[0].dynamics.colour.unwrap();
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(!c.per_tip && close(c.foreground_background, 0.6), "{c:?}");
+        assert!(
+            close(c.hue_jitter, 0.1) && close(c.saturation_jitter, 0.2) && close(c.brightness_jitter, 0.3) && close(c.purity, -0.4),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn a_brushs_dual_brush_comes_with_its_tip_and_keeps_its_proportion() {
+        use crate::descriptor::Id;
+        let tip = Descriptor::new("sampledBrush")
+            .with("sampledData", Value::Text(UnicodeString::new("grain")))
+            .with("Dmtr", Value::UnitFloat { unit: *b"#Pxl", value: 30.0 })
+            .with("Angl", Value::Double(45.0))
+            .with("Spcn", percent(150.0));
+        let dual = Descriptor::new("dualBrush")
+            .with("useDualBrush", Value::Boolean(true))
+            .with("Brsh", Value::Descriptor(tip))
+            .with(
+                "BlnM",
+                Value::Enumerated {
+                    type_id: Id::new("BlnM"),
+                    value: Id::new("Drkn"),
+                },
+            )
+            .with("Flip", Value::Boolean(true))
+            .with("scatterDynamics", vary(200.0, 0))
+            .with("bothAxes", Value::Boolean(true))
+            .with("Cnt ", Value::Double(2.0))
+            // Beside the tip: 100 % whatever the panel says, so not used.
+            .with("Spcn", percent(100.0));
+        let brush = named("Grainy")
+            .with(
+                "Brsh",
+                Value::Descriptor(Descriptor::new("computedBrush").with("Dmtr", Value::UnitFloat { unit: *b"#Pxl", value: 120.0 })),
+            )
+            .with("dualBrush", Value::Descriptor(dual));
+        let bytes = write_v6(2, &[sample("grain", 10, 6)], &[], &[brush], true).unwrap();
+        let (brushes, left_out) = presets(&parse(&bytes).unwrap());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let [grainy] = &brushes[..] else { panic!("{}", brushes.len()) };
+        let d = grainy.dynamics.dual.unwrap();
+        let tip = grainy.dual_tip.as_ref().unwrap();
+        assert_eq!((tip.size(), d.tip), ((10, 6), Some(tip.id())));
+        // A quarter of the brush's 120 px.
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(
+            close(d.size, 0.25) && close(d.angle, 45.0) && close(d.spacing, 1.5) && close(d.scatter, 2.0),
+            "{d:?}"
+        );
+        assert_eq!((d.mode, d.flip, d.both_axes, d.count), (Mode::Darken, true, true, 2));
+    }
+
+    #[test]
+    fn a_brushs_texture_comes_with_its_pattern_from_the_file() {
+        use crate::descriptor::Id;
+        use crate::patterns::PsdPattern;
+        // A grey 2 × 1 pattern: black, then white.
+        let canvas = PsdPattern {
+            mode: 1,
+            width: 2,
+            height: 1,
+            name: "Canvas".into(),
+            id: "f00d-1".into(),
+            palette: None,
+            depth: 8,
+            channels: vec![vec![0, 255]],
+            alpha: None,
+        };
+        let txtr = Descriptor::new("Ptrn")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Canvas")))
+            .with("Idnt", Value::Text(UnicodeString::new_nul("f00d-1")));
+        let brush = named("Rough")
+            .with(
+                "Brsh",
+                Value::Descriptor(Descriptor::new("computedBrush").with("Dmtr", Value::UnitFloat { unit: *b"#Pxl", value: 40.0 })),
+            )
+            .with("useTexture", Value::Boolean(true))
+            .with("Txtr", Value::Descriptor(txtr))
+            .with("TxtC", Value::Boolean(true))
+            .with("InvT", Value::Boolean(true))
+            .with("textureScale", percent(50.0))
+            .with("textureBrightness", Value::Integer(-75))
+            .with("textureContrast", Value::Integer(-25))
+            .with(
+                "textureBlendMode",
+                Value::Enumerated {
+                    type_id: Id::new("BlnM"),
+                    value: Id::new("Sbtr"),
+                },
+            )
+            .with("textureDepth", percent(60.0))
+            .with("minimumDepth", percent(20.0))
+            .with("textureDepthDynamics", vary(40.0, 0));
+        let bytes = write_v6(2, &[], &[canvas], &[brush], true).unwrap();
+        let (brushes, left_out) = presets(&parse(&bytes).unwrap());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let [rough] = &brushes[..] else { panic!("{}", brushes.len()) };
+        let pattern = rough.pattern.as_ref().unwrap();
+        assert_eq!((pattern.name.as_str(), pattern.size(), pattern.values()), ("Canvas", (2, 1), &[0.0, 1.0][..]));
+        let t = rough.dynamics.texture.unwrap();
+        assert_eq!((t.pattern, t.each_tip, t.invert, t.mode), (pattern.id(), true, true, Mode::Subtract));
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(close(t.scale, 0.5) && close(t.brightness, -0.5) && close(t.contrast, -0.5), "{t:?}");
+        assert!(close(t.depth, 0.6) && close(t.minimum_depth, 0.2) && close(t.depth_jitter, 0.4), "{t:?}");
     }
 
     #[test]
@@ -373,7 +598,7 @@ mod tests {
             ..Default::default()
         };
         let (brushes, left_out) = presets(&file);
-        assert_eq!(left_out, ["Dual Brush", "Fade, tilt and other controls", "Texture"]);
+        assert_eq!(left_out, ["Fade, tilt and other controls", "Texture (its pattern isn't in the file)"]);
         let [chalk] = &brushes[..] else { panic!("{}", brushes.len()) };
         assert_eq!(
             (chalk.name.as_str(), chalk.size, chalk.hardness, chalk.size_pressure),
@@ -386,6 +611,8 @@ mod tests {
                 spacing: SPACING,
                 flip_x: true,
                 wet_edges: true,
+                // A Dual Brush that says nothing more: as it starts.
+                dual: Some(DualBrush::default()),
                 ..Default::default()
             }
         );

@@ -846,7 +846,7 @@ impl Editor {
     /// heal strokes copy from the source image determined by `sample`. `tip`
     /// is the brush's sampled tip, if it isn't a round one.
     /// Returns false if there is nothing to paint on or a background job is running.
-    pub fn begin_stroke(&mut self, settings: BrushSettings, paint: Paint, sample: Sample, tip: Option<std::sync::Arc<omapix_engine::tip::Tip>>) -> bool {
+    pub fn begin_stroke(&mut self, settings: BrushSettings, paint: Paint, sample: Sample, parts: omapix_engine::brush::Parts) -> bool {
         if self.job.is_some() {
             return false;
         }
@@ -881,10 +881,8 @@ impl Editor {
             }
         };
         let locked = target == Target::Pixels && self.doc.layer(self.active).is_some_and(|l| l.lock_alpha());
-        let mut stroke = Stroke::new(settings, paint, surface);
-        if let Some(tip) = tip {
-            stroke = stroke.with_tip(tip);
-        }
+        let mut stroke = Stroke::new(settings, paint, surface).at_zoom(self.canvas.zoom());
+        stroke = stroke.with_parts(&parts);
         if locked {
             stroke = stroke.keeping_alpha();
         }
@@ -2553,7 +2551,7 @@ mod tests {
         e.edit("D&B", |doc, active| *active = ops::dodge_and_burn_layer(doc, 0));
         e.edit("Mask", |doc, active| doc.layer_mut(*active).unwrap().mask = Some(Mask::white(600, 400)));
         e.target = Target::Mask;
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, None));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, Default::default()));
         e.stroke_to(100.0, 100.0, 1.0);
         e.stroke_to(300.0, 100.0, 1.0);
         e.end_stroke();
@@ -2570,7 +2568,7 @@ mod tests {
     #[test]
     fn undo_mid_stroke_finishes_the_stroke_first() {
         let mut e = editor();
-        assert!(e.begin_stroke(hard(40.0), Paint::Color([0, 0, 0, 65535]), Sample::Current, None));
+        assert!(e.begin_stroke(hard(40.0), Paint::Color([0, 0, 0, 65535]), Sample::Current, Default::default()));
         e.stroke_to(100.0, 100.0, 1.0);
         e.undo();
         // Later moves of the abandoned stroke change nothing.
@@ -2700,7 +2698,7 @@ mod tests {
         let (render, _) = render_view(&e.doc, e.view, e.overlay_colour, None);
         e.canvas.set_render(Arc::new(render));
         e.rendered = (e.revision, e.view_generation);
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, None));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, Default::default()));
         e.stroke_to(300.0, 300.0, 1.0);
         e.stroke_to(500.0, 300.0, 1.0);
         e.end_stroke();
@@ -2726,7 +2724,7 @@ mod tests {
         let (render, _) = render_view(&e.doc, e.view, e.overlay_colour, None);
         e.canvas.set_render(Arc::new(render));
         e.rendered = (e.revision, e.view_generation);
-        assert!(e.begin_stroke(hard(40.0), Paint::Color([65535, 0, 0, 65535]), Sample::Current, None));
+        assert!(e.begin_stroke(hard(40.0), Paint::Color([65535, 0, 0, 65535]), Sample::Current, Default::default()));
         e.stroke_to(300.0, 200.0, 1.0);
         e.end_stroke();
         assert_eq!(e.canvas.sample(300, 200), Some([65535, 65535, 65535, 65535]));
@@ -2801,13 +2799,13 @@ mod tests {
         assert_eq!(render.sample_for_test(300, 300), [30000, 30000, 30000, 65535]);
 
         // White stroke outside adds to the selection (clearing red overlay).
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(u16::MAX), Sample::Current, None));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(u16::MAX), Sample::Current, Default::default()));
         e.stroke_to(100.0, 100.0, 1.0);
         e.end_stroke();
         assert_eq!(e.doc.selection.as_ref().unwrap().coverage.get(100, 100), u16::MAX);
 
         // Black stroke inside removes from the selection (adding red overlay).
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, None));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, Default::default()));
         e.stroke_to(300.0, 300.0, 1.0);
         e.end_stroke();
         assert_eq!(e.doc.selection.as_ref().unwrap().coverage.get(300, 300), 0);
@@ -2817,7 +2815,7 @@ mod tests {
         assert_eq!(e.doc.selection.as_ref().unwrap().coverage.get(300, 300), u16::MAX);
 
         // Re-paint black stroke inside to test leaving with combined selection.
-        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, None));
+        assert!(e.begin_stroke(hard(40.0), Paint::Mask(0), Sample::Current, Default::default()));
         e.stroke_to(300.0, 300.0, 1.0);
         e.end_stroke();
         assert_eq!(e.doc.selection.as_ref().unwrap().coverage.get(300, 300), 0);
@@ -3136,7 +3134,7 @@ mod tests {
         let render = Arc::new(Render::new(e.doc.composite()));
         e.canvas.set_render(Arc::clone(&render));
         e.rendered = (e.revision, e.view_generation);
-        assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535]), Sample::Current, None));
+        assert!(e.begin_stroke(hard(60.0), Paint::Color([0, 0, 65535, 65535]), Sample::Current, Default::default()));
         e.stroke_to(250.0, 250.0, 1.0);
         e.stroke_to(290.0, 270.0, 1.0);
         e.end_stroke();
@@ -3247,7 +3245,7 @@ mod tests {
         let layer = e.active;
         e.edit("Group Layers", |doc, active| *active = doc.group_layer(0));
         let group = e.active;
-        assert!(!e.begin_stroke(hard(40.0), Paint::Color(RED), Sample::Current, None));
+        assert!(!e.begin_stroke(hard(40.0), Paint::Color(RED), Sample::Current, Default::default()));
 
         assert!(e.begin_move("Move", false, 0));
         e.move_to(200, 100);

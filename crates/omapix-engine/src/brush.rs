@@ -22,6 +22,7 @@ use rayon::prelude::*;
 
 use crate::Pixel;
 use crate::dynamics::{Dab, Dynamics, Step, grain, mix};
+use crate::texture::{self, Levelled, Pattern};
 use crate::tiled::{TILE, TILE_PIXELS, Tiled};
 use crate::tip::Tip;
 use crate::toning::{self, ToneRange};
@@ -59,6 +60,13 @@ pub struct BrushSettings {
     /// The sampled tip it stamps ([`Tip::id`]), or none for a round one.
     /// The stroke is given the tip itself ([`Stroke::with_tip`]).
     pub tip: Option<u64>,
+    /// Photoshop's Smoothing, 0–1: the brush follows the pointer at a lag,
+    /// so a shaky hand paints a smooth line. It catches up when the stroke
+    /// ends.
+    pub smoothing: f32,
+    /// Pulled String Mode: the brush moves only when the pointer pulls a
+    /// string of up to 100 screen pixels taut, then along it.
+    pub pulled_string: bool,
 }
 
 impl Default for BrushSettings {
@@ -73,9 +81,14 @@ impl Default for BrushSettings {
             flow_pressure: false,
             dynamics: Dynamics::default(),
             tip: None,
+            smoothing: 0.0,
+            pulled_string: false,
         }
     }
 }
+
+/// The string Pulled String Mode pulls at full Smoothing, in screen pixels.
+const STRING: f32 = 100.0;
 
 /// What a stroke does to the surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -120,6 +133,17 @@ impl Surface {
     }
 }
 
+/// What a stroke is given beside its settings: the pictures and pattern
+/// they name by id (its sampled tip, Dual Brush's and Texture's), and the
+/// background colour Color Dynamics varies towards.
+#[derive(Clone, Debug, Default)]
+pub struct Parts {
+    pub tip: Option<Arc<Tip>>,
+    pub dual_tip: Option<Arc<Tip>>,
+    pub pattern: Option<Arc<Pattern>>,
+    pub background: Pixel,
+}
+
 pub struct Stroke {
     settings: BrushSettings,
     paint: Paint,
@@ -132,6 +156,26 @@ pub struct Stroke {
     keep_alpha: bool,
     /// The picture each dab stamps, in place of a round one.
     tip: Option<Arc<Tip>>,
+    /// Texture's pattern, levelled as its settings say.
+    pattern: Option<Levelled>,
+    /// Dual Brush: the picture its dabs stamp, if not round, its coverage
+    /// (as `coverage`), the distance since its last step, and its dabs so
+    /// far.
+    dual_tip: Option<Arc<Tip>>,
+    dual_coverage: HashMap<(u32, u32), Vec<f32>>,
+    dual_carried: f32,
+    dual_dabs: u64,
+    /// Smoothing: where the brush is (and the pen's pressure it has
+    /// there), where the pointer is, and how many image pixels a screen
+    /// pixel is (for Pulled String Mode).
+    brush: Option<(f32, f32, f32)>,
+    pointer: Option<(f32, f32, f32)>,
+    image_per_screen: f32,
+    /// Color Dynamics: the background colour, and the colour each pixel
+    /// has been painted, summed weighted by the coverage each dab added
+    /// (so over its coverage it's their mean).
+    background: Pixel,
+    colours: HashMap<(u32, u32), Vec<[f32; 3]>>,
     /// Coverage of touched tiles, 0–1 per pixel.
     coverage: HashMap<(u32, u32), Vec<f32>>,
     /// The last point, and the pen's pressure there.
@@ -158,6 +202,16 @@ impl Stroke {
             limit: None,
             keep_alpha: false,
             tip: None,
+            pattern: None,
+            dual_tip: None,
+            dual_coverage: HashMap::new(),
+            dual_carried: 0.0,
+            dual_dabs: 0,
+            brush: None,
+            pointer: None,
+            image_per_screen: 1.0,
+            background: [0; 4],
+            colours: HashMap::new(),
             coverage: HashMap::new(),
             last: None,
             carried: 0.0,
@@ -181,6 +235,33 @@ impl Stroke {
         self
     }
 
+    /// Work `pattern` into the paint, as the brush's Texture says. Without
+    /// a Texture it's left out.
+    pub fn with_pattern(mut self, pattern: &Pattern) -> Self {
+        self.pattern = self.settings.dynamics.texture.map(|texture| pattern.levelled(&texture));
+        self
+    }
+
+    /// Pulled String Mode's string is in screen pixels: how many image
+    /// pixels one of them is, at the zoom the stroke is painted at.
+    pub fn at_zoom(mut self, zoom: f32) -> Self {
+        self.image_per_screen = 1.0 / zoom.max(0.01);
+        self
+    }
+
+    /// The pictures and pattern the brush's settings name.
+    pub fn with_parts(mut self, parts: &Parts) -> Self {
+        if let Some(tip) = &parts.tip {
+            self = self.with_tip(tip.clone());
+        }
+        if let Some(pattern) = &parts.pattern {
+            self = self.with_pattern(pattern);
+        }
+        self.dual_tip = parts.dual_tip.clone();
+        self.background = parts.background;
+        self
+    }
+
     /// Change only colour, keeping each pixel's alpha, as painting on a
     /// layer with Lock Transparent Pixels does. Erasing then does nothing.
     pub fn keeping_alpha(mut self) -> Self {
@@ -199,17 +280,32 @@ impl Stroke {
         out
     }
 
-    /// How much paint a pixel gets where the stroke covers `c` of it. With
-    /// Wet Edges that's half where the stroke is solid and more towards its
-    /// edge, where coverage runs out, so that paint gathers along the edge
-    /// as watercolour does and a stroke crossing itself gets no darker.
+    /// How much paint pixel `i` of tile (col, row) gets where the stroke
+    /// covers `c` of it. With Wet Edges that's half where the stroke is
+    /// solid and more towards its edge, where coverage runs out, so that
+    /// paint gathers along the edge as watercolour does and a stroke
+    /// crossing itself gets no darker. Then the paint is only where Dual
+    /// Brush's tip has been, as its mode says, and a Texture into the stroke
+    /// as a whole is worked in.
     #[inline]
-    fn laid(&self, c: f32) -> f32 {
-        if !self.settings.dynamics.wet_edges {
-            return c;
+    fn laid(&self, c: f32, col: u32, row: u32, i: usize) -> f32 {
+        let mut c = if self.settings.dynamics.wet_edges {
+            let t = ((c - 0.6) / 0.4).clamp(0.0, 1.0);
+            c * (1.0 - 0.5 * t * t * (3.0 - 2.0 * t))
+        } else {
+            c
+        };
+        if let Some(dual) = self.settings.dynamics.dual {
+            let t = self.dual_coverage.get(&(col, row)).map_or(0.0, |cov| cov[i]);
+            c = texture::dual(dual.mode, c, t);
         }
-        let t = ((c - 0.6) / 0.4).clamp(0.0, 1.0);
-        c * (1.0 - 0.5 * t * t * (3.0 - 2.0 * t))
+        match (&self.pattern, self.settings.dynamics.texture) {
+            (Some(pattern), Some(texture)) if !texture.each_tip => {
+                let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
+                texture::combine(texture.mode, c, pattern.at(x, y), texture.depth.clamp(0.0, 1.0))
+            }
+            _ => c,
+        }
     }
 
     /// Selection coverage (0–1) of pixel `i` in tile (col, row).
@@ -259,8 +355,36 @@ impl Stroke {
 
     /// Continue the stroke to (x, y) in image pixels, with a pen's
     /// `pressure` there (0–1; 1 for a mouse), laying evenly spaced dabs
-    /// along the way. Returns the tiles whose coverage changed.
+    /// along the way. With Smoothing, the brush goes only part of the way
+    /// to the pointer. Returns the tiles whose coverage changed.
     pub fn add_point(&mut self, x: f32, y: f32, pressure: f32) -> Vec<(u32, u32)> {
+        let amount = self.settings.smoothing.clamp(0.0, 1.0);
+        self.pointer = Some((x, y, pressure));
+        let Some((bx, by, bp)) = self.brush.filter(|_| amount > 0.0) else {
+            self.brush = Some((x, y, pressure));
+            return self.lay_to(x, y, pressure);
+        };
+        // How far towards the pointer the brush goes this time. Its pen
+        // pressure goes with it, so a brush trailing behind a quick stroke
+        // doesn't take the lift's light pressure early (PhotoCraft's
+        // b768970d).
+        let f = if self.settings.pulled_string {
+            let string = amount * STRING * self.image_per_screen;
+            let far = (x - bx).hypot(y - by);
+            if far <= string {
+                return Vec::new();
+            }
+            (far - string) / far
+        } else {
+            1.0 - amount.min(0.95)
+        };
+        let to = (bx + (x - bx) * f, by + (y - by) * f, bp + (pressure - bp) * f);
+        self.brush = Some(to);
+        self.lay_to(to.0, to.1, to.2)
+    }
+
+    /// Lay the stroke on to (x, y), at `pressure` there.
+    fn lay_to(&mut self, x: f32, y: f32, pressure: f32) -> Vec<(u32, u32)> {
         let mut touched = Vec::new();
         let pressure = pressure.clamp(0.0, 1.0);
         match self.last {
@@ -269,6 +393,7 @@ impl Stroke {
                 self.waiting = self.settings.dynamics.follows_direction();
                 if !self.waiting {
                     self.step(x, y, pressure, 0.0, &mut touched);
+                    self.dual_step(x, y, 0.0, &mut touched);
                 }
             }
             Some((lx, ly, lp)) => {
@@ -279,6 +404,7 @@ impl Stroke {
                 if self.waiting && length > 0.0 {
                     self.waiting = false;
                     self.step(lx, ly, lp, direction, &mut touched);
+                    self.dual_step(lx, ly, direction, &mut touched);
                 }
                 let mut t = self.spacing(lp) - self.carried;
                 let mut spaced = self.spacing(lp);
@@ -290,6 +416,17 @@ impl Stroke {
                     t += spaced;
                 }
                 self.carried = length - (t - spaced);
+                // Dual Brush's tip along the same way, at its own spacing.
+                if let Some(dual) = self.settings.dynamics.dual.filter(|_| !self.waiting) {
+                    let spaced = dual.step(self.settings.size);
+                    let mut t = spaced - self.dual_carried;
+                    while t <= length {
+                        let f = t / length;
+                        self.dual_step(lx + dx * f, ly + dy * f, direction, &mut touched);
+                        t += spaced;
+                    }
+                    self.dual_carried = length - (t - spaced);
+                }
             }
         }
         self.last = Some((x, y, pressure));
@@ -313,11 +450,21 @@ impl Stroke {
         let dabs = self.settings.dynamics.dabs(self.seed, self.steps, &mut self.dabs, &at);
         self.steps += 1;
         for dab in &dabs {
-            self.dab(dab, touched);
+            self.dab(dab, false, touched);
         }
     }
 
-    fn dab(&mut self, dab: &Dab, touched: &mut Vec<(u32, u32)>) {
+    /// Lay Dual Brush's dabs of one of its steps, going in `direction`.
+    fn dual_step(&mut self, x: f32, y: f32, direction: f32, touched: &mut Vec<(u32, u32)>) {
+        let Some(dual) = self.settings.dynamics.dual else { return };
+        for dab in dual.dabs(self.seed, &mut self.dual_dabs, x, y, direction, self.settings.size) {
+            self.dab(&dab, true, touched);
+        }
+    }
+
+    /// Lay `dab`: one of the brush's, or with `dual` one of Dual Brush's,
+    /// into its coverage.
+    fn dab(&mut self, dab: &Dab, dual: bool, touched: &mut Vec<(u32, u32)>) {
         let (w, h) = self.original.size();
         let Dab {
             x: cx,
@@ -328,14 +475,29 @@ impl Stroke {
             flow,
             ..
         } = *dab;
-        let hardness = self.settings.hardness.clamp(0.0, 1.0);
+        let hardness = match self.settings.dynamics.dual.filter(|_| dual) {
+            Some(dual) => dual.hardness,
+            None => self.settings.hardness,
+        }
+        .clamp(0.0, 1.0);
         let (sin, cos) = dab.angle.sin_cos();
-        let noise = self.settings.dynamics.noise;
+        let noise = self.settings.dynamics.noise && !dual;
+        // Texture Each Tip: the pattern worked into this dab at its depth.
+        let texture = self.settings.dynamics.texture.filter(|t| t.each_tip && !dual).zip(self.pattern.as_ref());
+        // Color Dynamics: this dab's colour, painting a colour.
+        let colour = match (self.settings.dynamics.colour.filter(|_| !dual), self.paint) {
+            (Some(dynamics), Paint::Color(fg)) => {
+                let unit = |p: Pixel| [0, 1, 2].map(|c| f32::from(p[c]) / MAX);
+                Some(dynamics.colour(unit(fg), unit(self.background), self.seed, dab.index))
+            }
+            _ => None,
+        };
         // A mirrored tip is read backwards.
         let (flip_x, flip_y) = (if dab.flip_x { -1.0 } else { 1.0 }, if dab.flip_y { -1.0 } else { 1.0 });
         // A sampled tip: which of its sizes to read, and how many of its
         // pixels one of the image's is.
-        let tip = self.tip.as_deref().map(|tip| {
+        let tip = if dual { &self.dual_tip } else { &self.tip };
+        let tip = tip.as_deref().map(|tip| {
             let (tw, th) = tip.size();
             let (tw, th, longer) = (tw as f32, th as f32, tw.max(th) as f32);
             (tip, tip.level_for(2.0 * r * roundness.max(0.25)), longer / (2.0 * r), tw, th)
@@ -357,8 +519,9 @@ impl Stroke {
         if x0 >= x1 || y0 >= y1 {
             return;
         }
-        // Add the dab to one tile's coverage. Whether any of it fell there.
-        let lay = |(col, row): (u32, u32), cov: &mut [f32]| {
+        // Add the dab to one tile's coverage (and its colour to the tile's
+        // colours). Whether any of it fell there.
+        let lay = |(col, row): (u32, u32), cov: &mut [f32], mut colours: Option<&mut Vec<[f32; 3]>>| {
             let (tx, ty) = (col * TILE, row * TILE);
             let mut hit = false;
             for py in y0.max(ty)..y1.min(ty + TILE) {
@@ -385,34 +548,59 @@ impl Stroke {
                         let all = if grain(px, py) < shape { 1.0 } else { 0.0 };
                         shape += (all - shape) * 0.7;
                     }
-                    let c = &mut cov[((py - ty) * TILE + (px - tx)) as usize];
-                    *c += (most - *c).max(0.0) * flow * shape;
+                    if let Some((t, pattern)) = texture {
+                        shape = texture::combine(t.mode, shape, pattern.at(px, py), dab.depth);
+                        if shape <= 0.0 {
+                            continue;
+                        }
+                    }
+                    let at = ((py - ty) * TILE + (px - tx)) as usize;
+                    let added = (most - cov[at]).max(0.0) * flow * shape;
+                    cov[at] += added;
+                    if let (Some(colours), Some(colour)) = (colours.as_deref_mut(), colour) {
+                        for c in 0..3 {
+                            colours[at][c] += colour[c] * added;
+                        }
+                    }
                     hit = true;
                 }
             }
             hit
         };
         let tiles = (y0 / TILE..=(y1 - 1) / TILE).flat_map(|row| (x0 / TILE..=(x1 - 1) / TILE).map(move |col| (col, row)));
+        // The coverage (and colours) it goes into, taken out of the stroke
+        // for the while.
+        let mut coverage = std::mem::take(if dual { &mut self.dual_coverage } else { &mut self.coverage });
+        let mut colours = std::mem::take(&mut self.colours);
+        let blank = || vec![[0.0; 3]; TILE_PIXELS];
         if (x1 - x0) as usize * (y1 - y0) as usize >= PARALLEL {
-            // A big dab: each tile on its own core. Their coverage is
-            // taken out of the stroke for the while.
+            // A big dab: each tile on its own core.
             let mut taken: Vec<_> = tiles
-                .map(|at| (at, self.coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS])))
+                .map(|at| {
+                    let cov = coverage.remove(&at).unwrap_or_else(|| vec![0.0; TILE_PIXELS]);
+                    (at, cov, colour.map(|_| colours.remove(&at).unwrap_or_else(blank)))
+                })
                 .collect();
-            let hits: Vec<bool> = taken.par_iter_mut().map(|(at, cov)| lay(*at, cov)).collect();
-            for ((at, cov), hit) in taken.into_iter().zip(hits) {
-                self.coverage.insert(at, cov);
+            let hits: Vec<bool> = taken.par_iter_mut().map(|(at, cov, col)| lay(*at, cov, col.as_mut())).collect();
+            for ((at, cov, col), hit) in taken.into_iter().zip(hits) {
+                coverage.insert(at, cov);
+                if let Some(col) = col {
+                    colours.insert(at, col);
+                }
                 if hit {
                     touched.push(at);
                 }
             }
         } else {
             for at in tiles {
-                if lay(at, self.coverage.entry(at).or_insert_with(|| vec![0.0; TILE_PIXELS])) {
+                let col = colour.map(|_| colours.entry(at).or_insert_with(blank));
+                if lay(at, coverage.entry(at).or_insert_with(|| vec![0.0; TILE_PIXELS]), col) {
                     touched.push(at);
                 }
             }
         }
+        *(if dual { &mut self.dual_coverage } else { &mut self.coverage }) = coverage;
+        self.colours = colours;
     }
 
     /// Write the stroke's current result for the given tiles into `surface`.
@@ -428,7 +616,7 @@ impl Stroke {
                     let mut out: Vec<Pixel> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
                     let (tx, ty) = (col * TILE, row * TILE);
                     for i in 0..TILE_PIXELS {
-                        let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
+                        let a = self.laid(cov[i], col, row, i) * opacity * self.limit_at(col, row, i);
                         out[i] = if self.paint == Paint::SpotHeal {
                             // Show where the stroke is until it heals on release.
                             self.paint_onto(out[i], a * 0.35, Paint::Color([0, 0, 0, u16::MAX]))
@@ -439,6 +627,10 @@ impl Stroke {
                             } else {
                                 self.paint_onto(out[i], a, Paint::Color(self.copied(x, y)))
                             }
+                        } else if let Some(colours) = self.colours.get(&(col, row)).filter(|_| cov[i] > 0.0) {
+                            // Color Dynamics: the mean of the colours laid here.
+                            let mean = colours[i].map(|c| ((c / cov[i]).clamp(0.0, 1.0) * MAX).round() as u16);
+                            self.paint_onto(out[i], a, Paint::Color([mean[0], mean[1], mean[2], u16::MAX]))
                         } else {
                             self.paint_onto(out[i], a, self.paint)
                         };
@@ -462,7 +654,7 @@ impl Stroke {
                     let cov = self.coverage.get(&(col, row))?;
                     let mut out: Vec<u16> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[u16]>::to_vec);
                     for i in 0..TILE_PIXELS {
-                        let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
+                        let a = self.laid(cov[i], col, row, i) * opacity * self.limit_at(col, row, i);
                         let v = f32::from(out[i]);
                         out[i] = match self.paint {
                             Paint::Tone { range, burn, .. } => (toning::tone_curve(v / MAX, a, range, burn) * MAX).round() as u16,
@@ -495,15 +687,28 @@ impl Stroke {
     /// left out of it, so a selection drawn along an edge keeps that edge's
     /// colour from bleeding in.
     pub fn finish(&mut self, surface: &mut Surface) -> Vec<(u32, u32)> {
+        // A smoothed brush catches up with the pointer, its pressure going
+        // to the pen's last on the way.
+        let mut waited = match (self.brush, self.pointer) {
+            (Some(brush), Some((x, y, pressure))) if brush != (x, y, pressure) => {
+                self.brush = self.pointer;
+                let caught = self.lay_to(x, y, pressure);
+                self.apply(surface, &caught);
+                caught
+            }
+            _ => Vec::new(),
+        };
         // A click that never moved: the dab that was waiting to know which
         // way the stroke went.
-        let mut waited = Vec::new();
         if let (true, Some((x, y, pressure))) = (self.waiting, self.last) {
             self.waiting = false;
-            self.step(x, y, pressure, 0.0, &mut waited);
-            waited.sort_unstable();
-            waited.dedup();
-            self.apply(surface, &waited);
+            let mut more = Vec::new();
+            self.step(x, y, pressure, 0.0, &mut more);
+            self.dual_step(x, y, 0.0, &mut more);
+            more.sort_unstable();
+            more.dedup();
+            self.apply(surface, &more);
+            waited.extend(more);
         }
         if self.paint == Paint::SpotHeal {
             let Some((dx, dy)) = self.find_source() else {
@@ -567,7 +772,7 @@ impl Stroke {
             let base: Vec<Pixel> = orig.tile(col, row).map_or_else(|| vec![orig.fill(); TILE_PIXELS], <[Pixel]>::to_vec);
             let out = dst.tile_mut(col, row);
             for i in 0..TILE_PIXELS {
-                let a = self.laid(cov[i]) * opacity * self.limit_at(col, row, i);
+                let a = self.laid(cov[i], col, row, i) * opacity * self.limit_at(col, row, i);
                 let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
                 if a <= 0.0 || x >= w || y >= h {
                     out[i] = base[i];
@@ -1556,6 +1761,175 @@ mod tests {
             }),
             [false, false, true, false]
         );
+    }
+
+    #[test]
+    fn color_dynamics_vary_each_dabs_colour_between_the_foreground_and_background() {
+        use crate::dynamics::ColorDynamics;
+        let paint = |colour: Option<ColorDynamics>| {
+            let settings = BrushSettings {
+                dynamics: Dynamics {
+                    colour,
+                    spacing: 1.0,
+                    ..Dynamics::default()
+                },
+                ..hard(20.0, Dynamics::default())
+            };
+            let mut out = Surface::Pixels(white(300, 200));
+            let parts = Parts {
+                background: [0, 0, 65535, 65535],
+                ..Parts::default()
+            };
+            let mut s = Stroke::new(settings, Paint::Color([65535, 0, 0, 65535]), out.clone()).with_parts(&parts);
+            for x in [20.0, 280.0] {
+                let tiles = s.add_point(x, 100.0, 1.0);
+                s.apply(&mut out, &tiles);
+            }
+            let Surface::Pixels(out) = out else { unreachable!() };
+            // Each dab's centre, 20 px apart.
+            (1..13).map(|i| out.get(20 + i * 20, 100)).collect::<Vec<_>>()
+        };
+        // Without it, all red.
+        assert!(paint(None).iter().all(|p| *p == [65535, 0, 0, 65535]));
+        // With Foreground/Background Jitter, each dab somewhere from red to
+        // blue, and not all the same.
+        let jitter = ColorDynamics {
+            foreground_background: 1.0,
+            ..ColorDynamics::default()
+        };
+        let dabs = paint(Some(jitter));
+        assert!(dabs.iter().all(|p| p[1] == 0 && u32::from(p[0]) + u32::from(p[2]) >= 65000), "{dabs:?}");
+        assert!(dabs.iter().any(|p| p[2] > 30000) && dabs.iter().any(|p| p[0] > 30000), "{dabs:?}");
+        // Once a stroke, every dab the same colour.
+        let once = paint(Some(ColorDynamics { per_tip: false, ..jitter }));
+        assert!(once.iter().all(|p| *p == once[0]), "{once:?}");
+        // Purity -100 % greys it.
+        let grey = paint(Some(ColorDynamics {
+            purity: -1.0,
+            ..ColorDynamics::default()
+        }));
+        assert!(grey.iter().all(|p| p[0] == p[1] && p[1] == p[2]), "{grey:?}");
+    }
+
+    #[test]
+    fn smoothing_lags_the_brush_and_catches_up_at_the_end() {
+        let settings = |smoothing: f32, pulled_string: bool| BrushSettings {
+            smoothing,
+            pulled_string,
+            ..hard(10.0, Dynamics::default())
+        };
+        // A shaky line: along y = 100, jumping 30 px up and down each point.
+        let shaky: Vec<(f32, f32)> = (0..=20).map(|i| (50.0 + i as f32 * 10.0, if i % 2 == 0 { 70.0 } else { 130.0 })).collect();
+        // Away from its ends (where it starts and catches up).
+        let painted_rows = |out: &Tiled<Pixel>| (0..200).filter(|&y| (90..210).any(|x| out.get(x, y)[0] == 0)).count();
+        let (raw, smooth) = (stroked(settings(0.0, false), &shaky, true), stroked(settings(0.8, false), &shaky, true));
+        // Unsmoothed it reaches both 70 and 130; smoothed it stays near the middle.
+        assert!(
+            painted_rows(&raw) > 60 && painted_rows(&smooth) < 40,
+            "{} {}",
+            painted_rows(&raw),
+            painted_rows(&smooth)
+        );
+        // It finishes where the pointer stopped.
+        assert_eq!(smooth.get(250, 70)[0], 0);
+
+        // Pulled String Mode: moving less than the string does nothing,
+        // further pulls the brush along behind the pointer.
+        let pulled = settings(0.3, true);
+        let mut out = Surface::Pixels(white(300, 200));
+        let mut s = Stroke::new(pulled, Paint::Color([0, 0, 0, 65535]), out.clone()).at_zoom(2.0);
+        s.add_point(50.0, 100.0, 1.0);
+        // The string is 30 screen pixels, 15 image pixels at 200 %.
+        assert!(s.add_point(60.0, 100.0, 1.0).is_empty());
+        assert!(!s.add_point(100.0, 100.0, 1.0).is_empty());
+        assert_eq!(s.brush.map(|b| b.0.round()), Some(85.0));
+        s.finish(&mut out);
+        assert_eq!(s.brush.map(|b| b.0), Some(100.0));
+
+        // The lagging brush keeps the pressure where it is: lifting the pen
+        // far ahead of it doesn't thin it at once.
+        let mut s = Stroke::new(settings(0.9, false), Paint::Color([0, 0, 0, 65535]), Surface::Pixels(white(300, 200)));
+        s.add_point(10.0, 100.0, 1.0);
+        s.add_point(290.0, 100.0, 0.0);
+        assert!(s.brush.unwrap().2 > 0.8, "{:?}", s.brush);
+    }
+
+    #[test]
+    fn dual_brush_paints_only_where_its_tip_lays() {
+        use crate::dynamics::DualBrush;
+        use crate::texture::Mode;
+        // A 60 px brush, and a dual tip a fifth its size (12 px) laid every
+        // 36 px along the stroke.
+        let dual = DualBrush {
+            size: 0.2,
+            spacing: 3.0,
+            ..DualBrush::default()
+        };
+        let settings = |dual: Option<DualBrush>| BrushSettings {
+            dynamics: Dynamics { dual, ..Dynamics::default() },
+            ..hard(60.0, Dynamics::default())
+        };
+        let out = stroked(settings(Some(dual)), &[(50.0, 100.0), (250.0, 100.0)], true);
+        // On the stroke's line: painted at the dual dabs (50, 86, 122…),
+        // left alone halfway between them, where the dual tip didn't reach.
+        assert_eq!(out.get(86, 100)[0], 0);
+        assert_eq!(out.get(104, 100)[0], 65535);
+        // Without it, solid.
+        assert_eq!(stroked(settings(None), &[(50.0, 100.0), (250.0, 100.0)], true).get(104, 100)[0], 0);
+        // Darken keeps the lesser of the two: the same here, where both are
+        // solid or none.
+        let darken = stroked(settings(Some(DualBrush { mode: Mode::Darken, ..dual })), &[(50.0, 100.0), (250.0, 100.0)], true);
+        assert_eq!((darken.get(86, 100)[0], darken.get(104, 100)[0]), (0, 65535));
+        // The dual tip keeps its proportion at any size.
+        assert_eq!((dual.diameter(60.0), dual.diameter(1000.0)), (12.0, 200.0));
+    }
+
+    #[test]
+    fn texture_works_a_pattern_into_each_dab_or_the_whole_stroke() {
+        use crate::texture::{Mode, Pattern, Texture};
+        // Stripes four pixels wide: black, then white.
+        let stripes = Pattern::new("stripes".into(), 8, 1, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]).unwrap();
+        let paint = |texture: Option<Texture>| {
+            let settings = BrushSettings {
+                dynamics: Dynamics {
+                    texture,
+                    ..Dynamics::default()
+                },
+                ..hard(60.0, Dynamics::default())
+            };
+            let mut out = Surface::Pixels(white(300, 200));
+            let mut s = Stroke::new(settings, Paint::Color([0, 0, 0, 65535]), out.clone()).with_pattern(&stripes);
+            for x in [100.0, 200.0] {
+                let tiles = s.add_point(x, 100.0, 1.0);
+                s.apply(&mut out, &tiles);
+            }
+            let Surface::Pixels(out) = out else { unreachable!() };
+            out
+        };
+        let texture = Texture {
+            pattern: stripes.id(),
+            ..Texture::default()
+        };
+        let (plain, whole, each) = (paint(None), paint(Some(texture)), paint(Some(Texture { each_tip: true, ..texture })));
+        // Black paint on white. Without a Texture it's solid; with one, it
+        // all goes where the pattern is white (x = 150, 6 in its 8) and
+        // none where it's black (154, 2 in 8).
+        assert_eq!((plain.get(150, 100)[0], plain.get(154, 100)[0]), (0, 0));
+        for out in [&whole, &each] {
+            assert_eq!((out.get(150, 100)[0], out.get(154, 100)[0]), (0, 65535));
+        }
+        // Half depth lays half the paint on the black stripes.
+        let half = paint(Some(Texture { depth: 0.5, ..texture }));
+        assert!((30000..36000).contains(&half.get(154, 100)[0]), "{:?}", half.get(154, 100));
+        // Height at low depth paints only the pattern's hollows (black),
+        // there 61 % (12 × 5 % into the pattern).
+        let height = paint(Some(Texture {
+            mode: Mode::Height,
+            depth: 0.05,
+            ..texture
+        }));
+        assert_eq!(height.get(150, 100)[0], 65535);
+        assert!((24000..27000).contains(&height.get(154, 100)[0]), "{:?}", height.get(154, 100));
     }
 
     #[test]

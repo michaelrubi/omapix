@@ -1,6 +1,6 @@
 //! Photoshop's Brush Settings: the shape of a brush's tip, and how its dabs
-//! vary along a stroke (Shape Dynamics, Scattering, Transfer, Noise and
-//! Wet Edges).
+//! vary along a stroke (Shape Dynamics, Scattering, Transfer, Texture's
+//! depth, Dual Brush, Color Dynamics, Noise and Wet Edges).
 //! [`crate::brush`] lays the dabs this works out.
 //!
 //! Whatever varies at random comes from the stroke's seed and the dab's
@@ -29,6 +29,8 @@
 //! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
+
+use crate::texture::{Mode, Texture};
 
 /// The most dabs Scattering lays at one step.
 pub const MAX_COUNT: u32 = 16;
@@ -82,6 +84,191 @@ pub struct Dynamics {
     /// Wet Edges: paint gathers along the edge of the stroke, as
     /// watercolour's does.
     pub wet_edges: bool,
+    /// Texture: a pattern worked into the paint.
+    pub texture: Option<Texture>,
+    /// Dual Brush: a second tip along the same stroke, and the paint only
+    /// where the two meet.
+    pub dual: Option<DualBrush>,
+    /// Color Dynamics: each dab's colour varied from the foreground's.
+    pub colour: Option<ColorDynamics>,
+}
+
+/// Photoshop's Color Dynamics: each dab (or each stroke) a colour between
+/// the foreground and background, its hue, saturation and brightness
+/// varied at random. As PhotoCraft's `dynamic_color`.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ColorDynamics {
+    /// Each dab its own colour (Apply Per Tip), rather than each stroke.
+    pub per_tip: bool,
+    /// How far towards the background colour it can go at random (0–1).
+    pub foreground_background: f32,
+    /// How far round the hue wheel it can turn, as a fraction of half of it.
+    pub hue_jitter: f32,
+    pub saturation_jitter: f32,
+    pub brightness_jitter: f32,
+    /// -1 (grey) to 1 (fully saturated).
+    pub purity: f32,
+}
+
+impl Default for ColorDynamics {
+    fn default() -> Self {
+        Self {
+            per_tip: true,
+            foreground_background: 0.0,
+            hue_jitter: 0.0,
+            saturation_jitter: 0.0,
+            brightness_jitter: 0.0,
+            purity: 0.0,
+        }
+    }
+}
+
+impl ColorDynamics {
+    /// The colour (each channel 0–1) of dab `index` of the stroke `seed`
+    /// began, between `foreground` and `background`.
+    pub(crate) fn colour(&self, foreground: [f32; 3], background: [f32; 3], seed: u64, index: u64) -> [f32; 3] {
+        let index = if self.per_tip { index } else { 0 };
+        let r = |stream: u64| random(seed, index, stream);
+        let either_way = |stream: u64| r(stream) * 2.0 - 1.0;
+        let t = self.foreground_background.clamp(0.0, 1.0) * r(FOREGROUND_BACKGROUND);
+        let mixed = [0, 1, 2].map(|c| foreground[c] + (background[c] - foreground[c]) * t);
+        let [mut h, mut s, mut v] = rgb_to_hsv(mixed);
+        h += either_way(HUE) * self.hue_jitter.clamp(0.0, 1.0) * 0.5;
+        s = (s + either_way(SATURATION) * self.saturation_jitter.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let purity = self.purity.clamp(-1.0, 1.0);
+        s = if purity >= 0.0 { s + (1.0 - s) * purity } else { s * (1.0 + purity) };
+        v = (v + either_way(BRIGHTNESS) * self.brightness_jitter.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        hsv_to_rgb(h, s, v)
+    }
+}
+
+fn rgb_to_hsv(c: [f32; 3]) -> [f32; 3] {
+    let most = c[0].max(c[1]).max(c[2]);
+    let d = most - c[0].min(c[1]).min(c[2]);
+    let h = if d <= 0.0 {
+        0.0
+    } else if most == c[0] {
+        ((c[1] - c[2]) / d).rem_euclid(6.0)
+    } else if most == c[1] {
+        (c[2] - c[0]) / d + 2.0
+    } else {
+        (c[0] - c[1]) / d + 4.0
+    } / 6.0;
+    [h, if most > 0.0 { d / most } else { 0.0 }, most]
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let h6 = h.rem_euclid(1.0) * 6.0;
+    let f = h6 - h6.floor();
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    match h6.floor() as i32 {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
+    }
+}
+
+/// Photoshop's Dual Brush: a second tip laid along the stroke with its own
+/// size, spacing and scatter. The stroke's paint is combined with where it
+/// lays, in [`Mode`].
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DualBrush {
+    pub mode: Mode,
+    /// The sampled tip it stamps ([`crate::tip::Tip::id`]), or none for a
+    /// round one; the stroke is given the tip itself.
+    pub tip: Option<u64>,
+    /// Its diameter as a fraction of the brush's, so it keeps its
+    /// proportion as the brush is made bigger or smaller (as Photoshop's,
+    /// PhotoCraft's `0ce7e00f`).
+    pub size: f32,
+    /// A round tip's hardness.
+    pub hardness: f32,
+    pub roundness: f32,
+    /// Degrees, anticlockwise.
+    pub angle: f32,
+    /// The distance between its dabs, as a fraction of its diameter.
+    pub spacing: f32,
+    /// How far its dabs stray, in its radii.
+    pub scatter: f32,
+    pub both_axes: bool,
+    /// Its dabs at each step, up to [`MAX_COUNT`].
+    pub count: u32,
+    /// Each of its dabs mirrored left to right or not, at random.
+    pub flip: bool,
+}
+
+impl Default for DualBrush {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Multiply,
+            tip: None,
+            size: 0.25,
+            hardness: 1.0,
+            roundness: 1.0,
+            angle: 0.0,
+            spacing: 0.25,
+            scatter: 0.0,
+            both_axes: false,
+            count: 1,
+            flip: false,
+        }
+    }
+}
+
+impl DualBrush {
+    /// The distance between its steps, with the brush `size` across.
+    pub(crate) fn step(&self, size: f32) -> f32 {
+        (self.diameter(size) * self.spacing.max(0.01)).max(0.5)
+    }
+
+    /// Its diameter in pixels, with the brush `size` across.
+    pub fn diameter(&self, size: f32) -> f32 {
+        (size * self.size).clamp(1.0, 5000.0)
+    }
+
+    /// Its dabs at (x, y), going in `direction`, with the brush `size`
+    /// across. `next` numbers them, apart from the brush's own.
+    pub(crate) fn dabs(&self, seed: u64, next: &mut u64, x: f32, y: f32, direction: f32, size: f32) -> Vec<Dab> {
+        let seed = seed ^ 0xD0A1;
+        let radius = (self.diameter(size) / 2.0).max(0.5);
+        (0..self.count.clamp(1, MAX_COUNT))
+            .map(|_| {
+                let i = *next;
+                *next += 1;
+                let either_way = |stream: u64| random(seed, i, stream) * 2.0 - 1.0;
+                let (mut x, mut y) = (x, y);
+                if self.scatter > 0.0 {
+                    let far = self.scatter * radius;
+                    let (across, along) = (either_way(SCATTER_X) * far, either_way(SCATTER_Y) * far);
+                    if self.both_axes {
+                        x += across;
+                        y += along;
+                    } else {
+                        x += direction.sin() * across;
+                        y += direction.cos() * across;
+                    }
+                }
+                Dab {
+                    x,
+                    y,
+                    radius,
+                    angle: self.angle.to_radians(),
+                    roundness: self.roundness.clamp(0.01, 1.0),
+                    flip_x: self.flip && random(seed, i, FLIP_X) < 0.5,
+                    flip_y: false,
+                    most: 1.0,
+                    flow: 1.0,
+                    depth: 1.0,
+                    index: i,
+                }
+            })
+            .collect()
+    }
 }
 
 impl Default for Dynamics {
@@ -108,6 +295,9 @@ impl Default for Dynamics {
             flow_jitter: 0.0,
             noise: false,
             wet_edges: false,
+            texture: None,
+            dual: None,
+            colour: None,
         }
     }
 }
@@ -127,7 +317,7 @@ pub(crate) struct Step {
 
 /// One dab: its centre, radius, angle (radians, anticlockwise) and
 /// roundness, whether its tip is mirrored, how far coverage can build up
-/// under it, and its flow.
+/// under it, its flow, and its Texture's depth.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Dab {
     pub x: f32,
@@ -139,12 +329,15 @@ pub(crate) struct Dab {
     pub flip_y: bool,
     pub most: f32,
     pub flow: f32,
+    pub depth: f32,
+    /// Its number in the stroke.
+    pub index: u64,
 }
 
 impl Dynamics {
     /// Whether dabs depend on the way the stroke is going.
     pub(crate) fn follows_direction(&self) -> bool {
-        self.angle_follows || self.scatter > 0.0 && !self.both_axes
+        self.angle_follows || self.scatter > 0.0 && !self.both_axes || self.dual.is_some_and(|d| d.scatter > 0.0 && !d.both_axes)
     }
 
     /// The distance between steps of a brush `diameter` across.
@@ -197,6 +390,8 @@ impl Dynamics {
                     flip_y: self.flip_y != (self.flip_y_jitter && r(FLIP_Y) < 0.5),
                     most: at.most * (1.0 - unit(self.opacity_jitter) * r(OPACITY)),
                     flow: at.flow * (1.0 - unit(self.flow_jitter) * r(FLOW)),
+                    depth: self.texture.map_or(1.0, |t| t.dab_depth(r(DEPTH))),
+                    index: i,
                 }
             })
             .collect()
@@ -215,6 +410,11 @@ const SCATTER_Y: u64 = 7;
 const COUNT: u64 = 8;
 const OPACITY: u64 = 9;
 const FLOW: u64 = 10;
+const DEPTH: u64 = 11;
+const FOREGROUND_BACKGROUND: u64 = 12;
+const HUE: u64 = 13;
+const SATURATION: u64 = 14;
+const BRIGHTNESS: u64 = 15;
 
 /// SplitMix64's finaliser.
 pub(crate) fn mix(mut z: u64) -> u64 {
@@ -270,9 +470,11 @@ mod tests {
             flip_y: false,
             most: 1.0,
             flow: 0.8,
+            depth: 1.0,
+            index: 0,
         };
         assert_eq!(dabs.len(), 500);
-        assert!(dabs.iter().all(|d| *d == plain));
+        assert!(dabs.iter().enumerate().all(|(i, d)| *d == Dab { index: i as u64, ..plain }));
     }
 
     #[test]

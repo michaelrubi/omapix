@@ -42,6 +42,7 @@ pub mod retouch;
 pub mod selection;
 pub mod shine;
 pub mod skin;
+pub mod texture;
 pub mod tiled;
 pub mod tiles;
 pub mod tip;
