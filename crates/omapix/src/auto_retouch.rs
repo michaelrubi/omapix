@@ -74,12 +74,13 @@ impl Preset {
         Self::ALL.into_iter().find(|p| p.name() == name)
     }
 
-    /// Every step on: Standard is each step's own default.
+    /// Every step on. Even Tone is far below its own command's default:
+    /// a hand retouch took Natural's from 40 down to 5.
     pub fn settings(self) -> Retouch {
         let [blemishes, smooth_skin, even_tone, lighten] = match self {
-            Preset::Natural => [60.0, 40.0, 40.0, 30.0],
-            Preset::Standard => [75.0, 70.0, 60.0, 50.0],
-            Preset::Strong => [90.0, 90.0, 80.0, 70.0],
+            Preset::Natural => [60.0, 40.0, 5.0, 30.0],
+            Preset::Standard => [75.0, 70.0, 10.0, 50.0],
+            Preset::Strong => [90.0, 90.0, 20.0, 70.0],
         }
         .map(|amount| Step { on: true, amount });
         Retouch {
@@ -513,11 +514,11 @@ mod tests {
     }
 
     #[test]
-    fn standard_is_each_steps_own_default_and_presets_have_names() {
+    fn standard_is_the_default_and_presets_have_names() {
         let standard = Preset::Standard.settings();
         assert_eq!(standard, Retouch::default());
         assert_eq!(standard.smooth_skin.amount, Smoothing::default().amount);
-        assert_eq!(standard.even_tone.amount, Evening::default().amount);
+        assert!(standard.even_tone.amount < Evening::default().amount);
         for step in [standard.shine, standard.under_eyes, standard.whiten_eyes, standard.whiten_teeth] {
             assert_eq!(step.amount, crate::whiten::AMOUNT);
         }
@@ -525,6 +526,7 @@ mod tests {
         assert_eq!(Preset::from_name("Gentle"), None);
         let (natural, strong) = (Preset::Natural.settings(), Preset::Strong.settings());
         assert!(natural.smooth_skin.amount < standard.smooth_skin.amount && standard.smooth_skin.amount < strong.smooth_skin.amount);
+        assert!(natural.even_tone.amount < standard.even_tone.amount && standard.even_tone.amount < strong.even_tone.amount);
     }
 
     #[test]

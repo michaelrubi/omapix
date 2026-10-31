@@ -1150,17 +1150,17 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   eyes (`retouch::share`), not yet by SAM as designed. One face has it
   all. In the three-person shots tried, necks and shoulders went to the
   right people; an arm across someone else would go to them.
-- **Order.** For each face: Blemishes, then Reduce Shine (milestone 13)
-  and Smooth Skin from the image with them healed, each from what the last
-  shows, then Dodge & Burn from the image smoothed, each from
+- **Order.** For each face: Reduce Shine (milestone 13), then Smooth Skin
+  masked to patches round the spots found, each from what the last shows,
+  then Dodge & Burn from the image smoothed, each from
   Current & Below of the face's group so far. They're the commands' own
   functions, with Smoothness, Detail and Size at 50. Then Under Eyes
   (milestone 13), from the image evened, so it lifts what Even Tone left.
   Whiten Eyes and Whiten Teeth go on top: their masks are found with the
   faces, and the steps under them don't touch eyes or teeth.
 - **Presets.** Sensitivity, Smooth Skin's amount, Even Tone's, and the
-  shine's, under-eyes' and whitening's: Natural 35, 40, 40 and 30; Standard 50, 70,
-  60 and 50 (each command's own default); Strong 65, 90, 80 and 70. The settings last OK'd
+  shine's, under-eyes' and whitening's: Natural 60, 40, 5 and 30; Standard 75, 70,
+  10 and 50; Strong 90, 90, 20 and 70. The settings last OK'd
   for All Faces are kept between runs.
 - **The strip.** With more than one face: All Faces, then a thumbnail of
   each. A face follows All Faces until its own settings are changed. It
