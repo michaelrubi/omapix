@@ -16,6 +16,7 @@
 
 use rayon::prelude::*;
 
+use crate::blemish::Spot;
 use crate::document::Document;
 use crate::filters::blur_buffer;
 use crate::layer::{Layer, Mask};
@@ -97,12 +98,52 @@ pub fn smooth(image: &Raster, skin: &Selection, [x, y, w, h]: [u32; 4], [fine, c
         .collect()
 }
 
+/// How far a patch reaches from a spot, at least, as a fraction of the
+/// distance between the eyes.
+const PATCH: f32 = 0.12;
+
+/// Soft patches of `skin` round `spots`, for eyes `iod` apart: all of it on
+/// a spot, fading out with distance. This is how a retoucher works on the
+/// mid band, a patch at a time, rather than over all the skin.
+pub fn patches(skin: &Selection, spots: &[Spot], iod: f32) -> Selection {
+    let c = &skin.coverage;
+    let reach = |s: &Spot| (s.heal_size() / 2.0).max(PATCH * iod);
+    Selection::from_coverage(Tiled::from_tiles(c.width(), c.height(), 0, |col, row| {
+        let (tx, ty) = ((col * TILE) as f32, (row * TILE) as f32);
+        let side = TILE as f32;
+        let near: Vec<_> = (spots.iter())
+            .filter(|s| {
+                let (dx, dy) = ((tx - s.x).max(s.x - tx - side).max(0.0), (ty - s.y).max(s.y - ty - side).max(0.0));
+                dx.hypot(dy) < 2.0 * reach(s)
+            })
+            .collect();
+        let skin_tile = c.tile(col, row);
+        if near.is_empty() || (skin_tile.is_none() && c.fill() == 0) {
+            return None;
+        }
+        let tile = (0..(TILE * TILE) as usize)
+            .map(|i| {
+                let (x, y) = (tx + (i as u32 % TILE) as f32, ty + (i as u32 / TILE) as f32);
+                let strength = (near.iter())
+                    .map(|s| {
+                        let d = (x - s.x).hypot(y - s.y) / reach(s);
+                        if d < 2.0 { (-d * d).exp() } else { 0.0 }
+                    })
+                    .fold(0.0, f32::max);
+                let covered = skin_tile.map_or(c.fill(), |t| t[i]);
+                (f32::from(covered) * strength) as u16
+            })
+            .collect();
+        Some(tile)
+    }))
+}
+
 /// A "Smooth Skin" layer above the layer at `above`, made from `image`
-/// (what that layer and those below it show) with the mid band taken out,
-/// masked by `skin`, at `smoothing`'s amount for eyes `iod` apart. Returns
-/// the new layer's id, or `None` if there's no skin.
-pub fn add_layer(doc: &mut Document, above: usize, image: &Raster, skin: &Selection, iod: f32, smoothing: &Smoothing) -> Option<u64> {
-    let bounds @ [x, y, w, h] = skin.bounds()?;
+/// (what that layer and those below it show) with the mid band of `skin`
+/// taken out, masked by `mask`, at `smoothing`'s amount for eyes `iod`
+/// apart. Returns the new layer's id, or `None` if the mask is empty.
+pub fn add_layer(doc: &mut Document, above: usize, image: &Raster, skin: &Selection, mask: &Selection, iod: f32, smoothing: &Smoothing) -> Option<u64> {
+    let bounds @ [x, y, w, h] = mask.bounds()?;
     let smoothed = smooth(image, skin, bounds, smoothing.radii(iod));
     let pixels = Tiled::from_tiles(image.width(), image.height(), [0; 4], |col, row| {
         let (tx, ty) = (col * TILE, row * TILE);
@@ -120,7 +161,7 @@ pub fn add_layer(doc: &mut Document, above: usize, image: &Raster, skin: &Select
     let id = doc.next_layer_id();
     let mut layer = Layer::from_pixels(id, "Smooth Skin", pixels);
     layer.mask = Some(Mask {
-        pixels: skin.coverage.clone(),
+        pixels: mask.coverage.clone(),
         enabled: true,
     });
     layer.opacity = smoothing.amount / 100.0;
@@ -223,11 +264,45 @@ mod tests {
     }
 
     #[test]
+    fn patches_are_strongest_on_a_spot_fade_out_and_stay_on_the_skin() {
+        let skin = Selection::rectangle(300, 300, (0.0, 0.0), (150.0, 300.0));
+        let spot = |x: f32| Spot {
+            x,
+            y: 100.0,
+            radius: 4.0,
+            score: 20.0,
+        };
+        let patches = patches(&skin, &[spot(100.0), spot(148.0)], 100.0);
+        assert!(patches.at(100, 100) > 0.99);
+        let (near, far) = (patches.at(110, 100), patches.at(100, 118));
+        assert!(near < 0.99 && far < near && far > 0.0, "{near} {far}");
+        assert_eq!(patches.at(100, 130), 0.0);
+        assert_eq!(patches.at(151, 100), 0.0);
+        assert_eq!(super::patches(&skin, &[], 100.0).bounds(), None);
+    }
+
+    #[test]
+    fn a_layer_masked_to_patches_stops_at_them_and_keeps_the_pores() {
+        let (mut doc, image, skin) = (Document::from_image("t.tif".into(), &image(), ColorProfile::srgb(), 16), image(), skin());
+        let spot = Spot {
+            x: 150.0,
+            y: 150.0,
+            radius: 4.0,
+            score: 20.0,
+        };
+        let patch = patches(&skin, &[spot], IOD);
+        add_layer(&mut doc, 0, &image, &skin, &patch, IOD, &Smoothing::default()).unwrap();
+        let after = doc.composite();
+        assert_ne!(after.get(150, 150), image.get(150, 150));
+        assert_eq!(after.get(60, 60), image.get(60, 60));
+    }
+
+    #[test]
     fn the_layer_is_masked_by_the_skin_at_the_amount_and_hides_to_the_before() {
         let image = image();
         let mut doc = Document::from_image("t.tif".into(), &image, ColorProfile::srgb(), 16);
         let skin = Selection::rectangle(W, H, (100.0, 100.0), (200.0, 200.0));
-        let id = add_layer(&mut doc, 0, &image, &skin, IOD, &Smoothing::default()).unwrap();
+        let id = add_layer(&mut doc, 0, &image, &skin, &skin, IOD, &Smoothing::default()).unwrap();
         let layer = doc.layer(id).unwrap();
         assert_eq!((layer.name.as_str(), layer.opacity), ("Smooth Skin", 0.7));
         assert_eq!(doc.index_of(id), Some(1));
@@ -240,6 +315,6 @@ mod tests {
         assert_eq!(composite.get(50, 250), image.get(50, 250));
         // No skin, no layer.
         let none = Selection::from_coverage(Tiled::new(W, H, 0));
-        assert_eq!(add_layer(&mut doc, 0, &image, &none, IOD, &Smoothing::default()), None);
+        assert_eq!(add_layer(&mut doc, 0, &image, &none, &none, IOD, &Smoothing::default()), None);
     }
 }

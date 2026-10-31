@@ -183,7 +183,7 @@ impl SmoothSkin {
         editor.edit_in_background(
             "Smooth Skin",
             move |doc, active| {
-                if let Some(id) = skin::add_layer(doc, index, &found.image, &found.skin, found.iod, &smoothing) {
+                if let Some(id) = skin::add_layer(doc, index, &found.image, &found.skin, &found.skin, found.iod, &smoothing) {
                     *active = id;
                 }
             },
@@ -357,7 +357,7 @@ mod tests {
             let found_in = t.elapsed();
             let t = std::time::Instant::now();
             let top = doc.layers.len() - 1;
-            skin::add_layer(&mut doc, top, &found.image, &found.skin, found.iod, &smoothing);
+            skin::add_layer(&mut doc, top, &found.image, &found.skin, &found.skin, found.iod, &smoothing);
             let after = doc.composite();
             eprintln!(
                 "{name}: iod {:.0}, radii {:?}, found in {found_in:?}, smoothed in {:?}",
