@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use ort::environment::Environment;
 use ort::ep;
 use ort::session::Session;
 use rayon::prelude::*;
@@ -12,8 +13,8 @@ use rayon::prelude::*;
 use crate::Result;
 
 /// Open ONNX Runtime, once.
-fn init() -> Result<()> {
-    static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+fn init() -> Result<Environment> {
+    static INIT: OnceLock<std::result::Result<Environment, String>> = OnceLock::new();
     INIT.get_or_init(|| {
         let library = std::env::var("OMAPIX_ORT_LIBRARY").unwrap_or_else(|_| library());
         // Arch's CUDA provider isn't linked against cuDNN, so it has to be
@@ -28,8 +29,10 @@ fn init() -> Result<()> {
             }
         }
         let builder = ort::init_from(&library).map_err(|e| format!("Couldn't open ONNX Runtime ({library}): {e}"))?;
-        builder.with_name("omapix").commit();
-        Ok(())
+        builder
+            .with_name("omapix")
+            .build()
+            .map_err(|e| format!("Couldn't start ONNX Runtime ({library}): {e}"))
     })
     .clone()
 }
@@ -47,8 +50,7 @@ fn library() -> String {
 /// A session for the model in `path`: on the GPU with CUDA if it works,
 /// otherwise on the CPU.
 pub(crate) fn session(path: &Path) -> Result<Session> {
-    init()?;
-    match open(path, Some(cuda()), true) {
+    match open(&init()?, path, Some(cuda()), true) {
         Ok(session) => Ok(loaded(path, session, true)),
         Err(e) => {
             log::info!("{}: not on the GPU ({e})", path.display());
@@ -61,8 +63,7 @@ pub(crate) fn session(path: &Path) -> Result<Session> {
 /// that would take minutes on the CPU. These nearly fill the card, so a
 /// run's memory isn't planned as one block from the run before.
 pub(crate) fn gpu_session(path: &Path) -> Result<Session> {
-    init()?;
-    let session = open(path, Some(cuda()), false).map_err(|e| format!("Couldn't load {} on the GPU: {e}", path.display()))?;
+    let session = open(&init()?, path, Some(cuda()), false).map_err(|e| format!("Couldn't load {} on the GPU: {e}", path.display()))?;
     Ok(loaded(path, session, true))
 }
 
@@ -78,16 +79,15 @@ fn cuda() -> ep::CUDA {
 
 /// A session for the model in `path` on the CPU.
 pub(crate) fn cpu_session(path: &Path) -> Result<Session> {
-    init()?;
-    let session = open(path, None, true).map_err(|e| format!("Couldn't load {}: {e}", path.display()))?;
+    let session = open(&init()?, path, None, true).map_err(|e| format!("Couldn't load {}: {e}", path.display()))?;
     Ok(loaded(path, session, false))
 }
 
 /// With `cuda`, on the GPU or not at all. `planned`: each run's memory
 /// is laid out as one block from the run before, which is quicker and
 /// takes more.
-fn open(path: &Path, cuda: Option<ep::CUDA>, planned: bool) -> ort::Result<Session> {
-    let builder = Session::builder()?.with_memory_pattern(planned)?;
+fn open(environment: &Environment, path: &Path, cuda: Option<ep::CUDA>, planned: bool) -> ort::Result<Session> {
+    let builder = Session::builder(environment)?.with_memory_pattern(planned)?;
     let mut builder = match cuda {
         Some(cuda) => builder.with_execution_providers([cuda.build().error_on_failure()])?,
         None => builder,
