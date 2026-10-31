@@ -1,7 +1,8 @@
-//! Auto Retouch (docs/AI.md, feature 6): Heal Blemishes, Reduce Shine,
-//! Smooth Skin and Even Tone done for each face in turn, then the shadows under its eyes
-//! lifted, each step made from what the last one shows, and its teeth and
-//! eyes whitened, as a "Retouch" group holding a group for each face:
+//! Auto Retouch (docs/AI.md, feature 6): Reduce Shine, Smooth Skin at the
+//! blemishes found and Even Tone done for each face in turn, then the
+//! shadows under its eyes lifted, each step made from what the last one
+//! shows, and its teeth and eyes whitened, as a "Retouch" group holding a
+//! group for each face:
 //!
 //! ```text
 //! Retouch
@@ -11,8 +12,7 @@
 //!   │    ├─ Under Eyes
 //!   │    ├─ Dodge & Burn
 //!   │    ├─ Smooth Skin
-//!   │    ├─ Reduce Shine
-//!   │    └─ Blemishes
+//!   │    └─ Reduce Shine
 //!   └─ Face 2
 //! ```
 //!
@@ -20,7 +20,7 @@
 //! between its own eyes, so a small face at the back of a group is smoothed
 //! as finely as it needs.
 
-use crate::blemish::{self, Spot};
+use crate::blemish::Spot;
 use crate::body::{Joint, Joints};
 use crate::document::Document;
 use crate::layer::Layer;
@@ -39,12 +39,14 @@ pub struct Face<'a> {
     /// This person's skin, and the distance between their eyes.
     pub skin: &'a Selection,
     pub iod: f32,
-    /// The spots to heal: with none, there's no Blemishes layer.
+    /// The spots whose mid band is softened: with none, there's no Smooth
+    /// Skin layer.
     pub spots: &'a [Spot],
     /// How much of the shine on its skin goes (0–100): without, or with
     /// none, there's no Reduce Shine layer.
     pub shine: Option<f32>,
-    /// Without these, there's no Smooth Skin layer or Dodge & Burn group.
+    /// Without these, there's no Smooth Skin layer or Dodge & Burn group:
+    /// `smoothing`'s amount is how much of the mid band goes on a spot.
     pub smoothing: Option<Smoothing>,
     pub evening: Option<Evening>,
     /// The skin under its eyes, the cheek below it, and how much of the
@@ -180,10 +182,10 @@ pub fn share(skin: &Selection, people: &[Person], which: usize) -> Selection {
 }
 
 /// A "Retouch" group above the layer at `above`, with a group for each of
-/// `faces` (the first on top), each holding that face's steps: a Blemishes
-/// layer ([`blemish::heal`]), a Reduce Shine layer ([`shine::add_layer`]) made
-/// from the image with the blemishes healed, a Smooth Skin layer
-/// ([`skin::add_layer`]) made from that, a Dodge & Burn group
+/// `faces` (the first on top), each holding that face's steps: a Reduce
+/// Shine layer ([`shine::add_layer`]), a Smooth Skin layer
+/// ([`skin::add_layer`]) made from that and masked to patches round its
+/// spots ([`skin::patches`]), a Dodge & Burn group
 /// ([`tone::add_layers`]) made from the image smoothed, an Under Eyes layer
 /// ([`under_eyes::add_layer`]) made from the image evened, and Whiten Eyes
 /// and Whiten Teeth layers ([`whiten::add_layer`]). Returns the Retouch group's
@@ -199,9 +201,6 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
     // The last first: each goes in at the top.
     for face in faces.iter().rev() {
         let id = group(doc, index(doc, retouch), format!("Face {}", face.number));
-        if !face.spots.is_empty() {
-            blemish::heal(doc, index(doc, id), face.spots);
-        }
         if let Some(amount) = face.shine {
             let at = index(doc, id);
             let image = doc.composite_current_and_below(at);
@@ -212,7 +211,8 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
         if let Some(smoothing) = &face.smoothing {
             let at = index(doc, id);
             let image = doc.composite_current_and_below(at);
-            skin::add_layer(doc, at, &image, face.skin, face.iod, smoothing);
+            let patches = skin::patches(face.skin, face.spots, face.iod);
+            skin::add_layer(doc, at, &image, face.skin, &patches, face.iod, smoothing);
         }
         if let Some(evening) = &face.evening {
             let at = index(doc, id);
@@ -318,14 +318,14 @@ mod tests {
         let retouch = add_layers(&mut doc, 0, &[face(1, &left, &spots[0]), face(2, &right, &spots[1])]).unwrap();
 
         let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
-        let steps = ["Blemishes", "Smooth Skin", "Burn", "Dodge", "Dodge & Burn"];
-        assert_eq!(names[1..6], steps);
-        assert_eq!(names[6], "Face 2");
-        assert_eq!(names[7..12], steps);
-        assert_eq!(names[12..], ["Face 1", "Retouch"]);
+        let steps = ["Smooth Skin", "Burn", "Dodge", "Dodge & Burn"];
+        assert_eq!(names[1..5], steps);
+        assert_eq!(names[5], "Face 2");
+        assert_eq!(names[6..10], steps);
+        assert_eq!(names[10..], ["Face 1", "Retouch"]);
         // Groups in groups, all Pass Through, so the curves see the image.
         let layer = |name: &str| doc.layers.iter().rfind(|l| l.name == name).unwrap();
-        assert_eq!(doc.layers[13].id, retouch);
+        assert_eq!(doc.layers[11].id, retouch);
         for group in ["Face 1", "Face 2"] {
             let group = layer(group);
             assert_eq!((group.parent, group.is_group, group.blend), (Some(retouch), true, BlendMode::PassThrough));
@@ -336,12 +336,12 @@ mod tests {
         // Each step's strength is its own layer's.
         assert_eq!((layer("Smooth Skin").opacity, layer("Dodge & Burn").opacity), (0.7, 0.6));
 
-        // Both faces: the spot's healed, and the patch is nearer the skin
+        // Both faces: the spot's softer, and the patch is nearer the skin
         // round it.
         let after = doc.composite();
         let red = |image: &Raster, x: u32, y: u32| f32::from(image.get(x, y)[0]);
         for x in [150, 450] {
-            assert!(red(&after, x, 100) > 40000.0, "{}", red(&after, x, 100));
+            assert!(red(&after, x, 100) > red(&before, x, 100) + 1000.0, "{}", red(&after, x, 100));
             let off = |image: &Raster| red(image, x, 260) - red(image, x, 200);
             assert!(off(&before) > 2900.0 && off(&after) < 0.7 * off(&before), "{} {}", off(&before), off(&after));
         }
@@ -355,10 +355,10 @@ mod tests {
         let mut doc = document();
         let ([left, _], spots) = (skins(), spot(150.0));
         add_layers(&mut doc, 0, &[face(1, &left, &spots)]);
-        // The Smooth Skin layer was made from the image with the spot
-        // healed.
+        // The Smooth Skin layer stops at its patch, and Dodge & Burn sees it.
         let smooth = doc.layers.iter().find(|l| l.name == "Smooth Skin").unwrap();
-        assert!(smooth.pixels.get(150, 100)[0] > 40000, "{:?}", smooth.pixels.get(150, 100));
+        assert_eq!(smooth.pixels.get(150, 200), [0; 4]);
+        assert!(smooth.pixels.get(150, 100)[0] > image().get(150, 100)[0]);
         // Only this face's skin is touched.
         assert_eq!(doc.composite().get(450, 200), image().get(450, 200));
     }
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn shine_is_taken_down_after_the_blemishes_and_before_the_smoothing() {
+    fn shine_is_taken_down_before_the_smoothing() {
         // A hot spot on the first face's skin.
         let mut pixels = image().pixels().to_vec();
         for (i, p) in pixels.iter_mut().enumerate() {
@@ -488,16 +488,11 @@ mod tests {
         };
         add_layers(&mut doc, 0, &[shiny(1, &left, &spots), shiny(2, &right, &[])]).unwrap();
         let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
-        // The second face has no shine, so no layer for it.
-        assert_eq!(
-            names[1..],
-            ["Smooth Skin", "Face 2", "Blemishes", "Reduce Shine", "Smooth Skin", "Face 1", "Retouch"]
-        );
+        // The second face has no shine or spots, so no layers for it.
+        assert_eq!(names[1..], ["Reduce Shine", "Smooth Skin", "Face 1", "Retouch"]);
         let shine = doc.layers.iter().find(|l| l.name == "Reduce Shine").unwrap();
         assert_eq!(shine.opacity, 0.5);
-        // Made from the image with the spot healed, and the hot spot's
-        // lower for it.
-        assert!(shine.pixels.get(150, 100)[0] > 40000, "{:?}", shine.pixels.get(150, 100));
+        // The hot spot's lower for it.
         assert!(doc.composite().get(80, 60)[0] < image.get(80, 60)[0] - 2000);
     }
 

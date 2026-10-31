@@ -415,9 +415,8 @@ Retouch
   │    ├─ Whiten Eyes        (Hue/Saturation, masked to the whites)
   │    ├─ Under Eyes         (Curves, masked to the shadows under the eyes)
   │    ├─ Dodge & Burn       (group: Brighten, Darken curves, with masks)
-  │    ├─ Smooth Skin        (pixel layer, this face's skin mask)
-  │    ├─ Reduce Shine       (pixel layer, masked to this face's hot spots)
-  │    └─ Blemishes          (heal patches on an empty layer)
+  │    ├─ Smooth Skin        (pixel layer, masked to patches round this face's spots)
+  │    └─ Reduce Shine       (pixel layer, masked to this face's hot spots)
   └─ Face 2
        └─ …
 ```

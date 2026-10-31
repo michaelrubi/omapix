@@ -77,9 +77,9 @@ impl Preset {
     /// Every step on: Standard is each step's own default.
     pub fn settings(self) -> Retouch {
         let [blemishes, smooth_skin, even_tone, lighten] = match self {
-            Preset::Natural => [35.0, 40.0, 40.0, 30.0],
-            Preset::Standard => [50.0, 70.0, 60.0, 50.0],
-            Preset::Strong => [65.0, 90.0, 80.0, 70.0],
+            Preset::Natural => [60.0, 40.0, 40.0, 30.0],
+            Preset::Standard => [75.0, 70.0, 60.0, 50.0],
+            Preset::Strong => [90.0, 90.0, 80.0, 70.0],
         }
         .map(|amount| Step { on: true, amount });
         Retouch {
@@ -282,9 +282,17 @@ impl AutoRetouch {
             ui.add_space(4.0);
             egui::Grid::new("auto-retouch-steps").num_columns(2).show(ui, |ui| {
                 for (label, hint, step) in [
-                    ("Heal Blemishes", "Sensitivity: how many of the spots found are healed", &mut settings.blemishes),
+                    (
+                        "Find Blemishes",
+                        "Sensitivity: how many of the spots found get a Smooth Skin patch",
+                        &mut settings.blemishes,
+                    ),
                     ("Reduce Shine", "Amount: the Reduce Shine layer's opacity", &mut settings.shine),
-                    ("Smooth Skin", "Amount: the Smooth Skin layer's opacity", &mut settings.smooth_skin),
+                    (
+                        "Smooth Skin",
+                        "Amount: how much of the blotchiness goes in each patch, the Smooth Skin layer's opacity",
+                        &mut settings.smooth_skin,
+                    ),
                     ("Even Tone", "Amount: the Dodge & Burn group's opacity", &mut settings.even_tone),
                     ("Lighten Under Eyes", "Amount: the Under Eyes layer's opacity", &mut settings.under_eyes),
                     ("Whiten Eyes", "Amount: the Whiten Eyes layer's opacity", &mut settings.whiten_eyes),
@@ -339,7 +347,7 @@ impl AutoRetouch {
                 )
             })
             .filter(|(_, _, healed, shine, smoothing, evening, lighten)| {
-                *healed > 0 || shine.is_some() || smoothing.is_some() || evening.is_some() || lighten.iter().any(Option::is_some)
+                (*healed > 0 && smoothing.is_some()) || shine.is_some() || evening.is_some() || lighten.iter().any(Option::is_some)
             })
             .collect();
         if faces.is_empty() {
@@ -510,7 +518,6 @@ mod tests {
         assert_eq!(standard, Retouch::default());
         assert_eq!(standard.smooth_skin.amount, Smoothing::default().amount);
         assert_eq!(standard.even_tone.amount, Evening::default().amount);
-        assert_eq!(standard.blemishes.amount, crate::settings::FilterSettings::default().blemish_sensitivity);
         for step in [standard.shine, standard.under_eyes, standard.whiten_eyes, standard.whiten_teeth] {
             assert_eq!(step.amount, crate::whiten::AMOUNT);
         }
@@ -524,10 +531,10 @@ mod tests {
     fn ok_adds_a_retouch_group_with_a_group_for_each_face_in_one_undo_step() {
         let (mut editor, mut dialog) = dialog();
         let ctx = egui::Context::default();
-        // At 50 % each face's clear spot is circled, and its thumbnail
+        // At Standard each face's spots are circled, and its thumbnail
         // made.
         assert_eq!(frame(&ctx, &editor, &mut dialog, vec![]), Ok(None));
-        assert_eq!(dialog.spots().len(), 2);
+        assert_eq!(dialog.spots().len(), 4);
         assert!(dialog.faces.iter().all(|f| f.texture.is_some()));
         let enter = egui::Event::Key {
             key: egui::Key::Enter,
@@ -538,16 +545,17 @@ mod tests {
         };
         assert_eq!(frame(&ctx, &editor, &mut dialog, vec![enter]), Ok(Some(true)));
 
+        let before = editor.doc.composite();
         let names = apply(&mut editor, &dialog);
-        let steps = ["Blemishes", "Smooth Skin", "Burn", "Dodge", "Dodge & Burn", "Whiten Eyes", "Whiten Teeth"];
-        assert_eq!(names[1..8], steps);
-        assert_eq!(names[8], "Face 2");
-        assert_eq!(names[9..16], steps);
-        assert_eq!(names[16..], ["Face 1", "Retouch"]);
-        // The group's selected, and both spots are healed.
+        let steps = ["Smooth Skin", "Burn", "Dodge", "Dodge & Burn", "Whiten Eyes", "Whiten Teeth"];
+        assert_eq!(names[1..7], steps);
+        assert_eq!(names[7], "Face 2");
+        assert_eq!(names[8..14], steps);
+        assert_eq!(names[14..], ["Face 1", "Retouch"]);
+        // The group's selected, and both spots are softened.
         assert_eq!(editor.doc.layer(editor.active).unwrap().name, "Retouch");
         let after = editor.doc.composite();
-        assert!(after.get(150, 400)[0] > 40000 && after.get(850, 400)[0] > 40000);
+        assert!(after.get(150, 400)[0] > before.get(150, 400)[0] && after.get(850, 400)[0] > before.get(850, 400)[0]);
         assert_eq!(editor.undo_label(), Some("Auto Retouch"));
         editor.undo();
         assert_eq!(editor.doc.layers.len(), 1);
@@ -563,7 +571,7 @@ mod tests {
         assert_eq!(dialog.spots().len(), 4);
         // The second face on its own: only blemishes, and fewer.
         let mut own = Preset::Natural.settings();
-        (own.shine.on, own.smooth_skin.on, own.even_tone.on) = (false, false, false);
+        (own.shine.on, own.even_tone.on) = (false, false);
         (own.under_eyes.on, own.whiten_eyes.on, own.whiten_teeth.on) = (false, false, false);
         dialog.faces[1].own = Some(own);
         frame(&ctx, &editor, &mut dialog, vec![]).unwrap();
@@ -574,10 +582,12 @@ mod tests {
         frame(&ctx, &editor, &mut dialog, vec![]).unwrap();
         assert_eq!(dialog.spots(), &dialog.faces[1].found.spots[..1]);
 
+        let before = editor.doc.composite();
         let names = apply(&mut editor, &dialog);
-        assert_eq!(names[1..], ["Blemishes", "Face 2", "Retouch"]);
+        assert_eq!(names[1..], ["Smooth Skin", "Face 2", "Retouch"]);
         let after = editor.doc.composite();
-        assert!(after.get(850, 400)[0] > 40000 && after.get(150, 400)[0] < 25000);
+        assert!(after.get(850, 400)[0] > before.get(850, 400)[0]);
+        assert_eq!(after.get(150, 400), before.get(150, 400));
 
         // With every step off, there's nothing to do.
         editor.undo();
@@ -671,10 +681,10 @@ mod tests {
         dialog.all = only;
         let before = editor.doc.composite();
 
-        // Above the blemishes; the second face has no shine.
+        // The second face has no shine.
         let names = apply(&mut editor, &dialog);
-        assert_eq!(names[1..], ["Blemishes", "Face 2", "Blemishes", "Reduce Shine", "Face 1", "Retouch"]);
-        assert_eq!(editor.doc.layers[4].opacity, 0.7);
+        assert_eq!(names[1..], ["Reduce Shine", "Face 1", "Retouch"]);
+        assert_eq!(editor.doc.layers[1].opacity, 0.7);
         assert!(editor.doc.composite().get(300, 200)[0] < before.get(300, 200)[0] - 3000);
     }
 
