@@ -7,14 +7,14 @@ license.workspace = true
 [dependencies]
 omapix-engine = { path = "../omapix-engine" }
 # Opened at run time from the system's ONNX Runtime (see docs/AI.md).
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "cuda", "api-27"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "cuda", "api-27"] }
 libloading = "0.9"
 log = "0.4"
 rayon = "1.12.0"
 # For the FLUX.2 text encoder's tokenizer.json.
 regex = "1"
 serde_json = "1.0.151"
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png"] }
