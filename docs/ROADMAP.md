@@ -49,7 +49,8 @@ Ctrl+T (Edit › Free Transform) puts a box with eight handles round the active 
 - ~~Shown live on the GPU~~ (done): transforming a whole layer (no selection) is drawn live, as Move tool drags are: the layer and its mask are sampled through the transform in the shader (`live.wgsl`), and the document changes only when Enter applies it, resampled bicubic on the CPU, with the live view up until that's on screen. Zooming or scrolling meanwhile builds the live view again. A GPU test checks it against the CPU's bilinear preview in every blend mode.
   - Transforming a selection's pixels is live too (see 6, "Selections being moved"); a mask's selected values still preview on the CPU.
   - Applying a whole 24 MP layer takes about half a second (the bicubic resampling); later, doing that in the background.
-- Later: several layers or a group at once, typed values in an options bar, moving the reference point, Skew/Distort/Perspective/Warp (Ctrl+drag a corner), Flip and Rotate 90°, and double-click to apply.
+- ~~Flip, Rotate 90° and 180°, and double-click to apply~~ (done): in Edit › Transform, at once, or on the right-click menu of Free Transform's box, which they turn or flip until it's applied. A double-click inside the box applies it.
+- Later: several layers or a group at once, typed values in an options bar, moving the reference point, and Skew/Distort/Perspective/Warp (Ctrl+drag a corner).
 
 ### ~~Cut, Copy and Paste~~ (done)
 
@@ -169,7 +170,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] PSD export: a retouch with frequency separation, a masked layer, a clipped layer, a group and a Curves layer, exported and opened in Photoshop or Photopea (does it open without a warning, do the layers look as they do in Omapix, are names, masks, groups, blend modes and opacity right, is Blend If where it was), and in Lightroom or a file manager for the flattened image; the same as a .psb; a .psd and a .psb from Photoshop opened in Omapix; how long a big one takes and how big it is beside the .ora
 - [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
 - [ ] Free Transform live on the GPU: dragging handles on a whole 24 MP layer at fit and at 100 %, zooming mid-transform, Enter with no flash, and Esc
-- [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, and how smooth it is on a 24 MP layer
+- [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, how smooth it is on a 24 MP layer, Edit › Transform's flips and turns with and without the box up, the box's right-click menu, and double-clicking inside it
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates; then the same with three images at once (a tab each, saving each, all imported and grouped on quit)
 - [ ] Paste Special: Paste in Place (Ctrl+Shift+V), and Paste Into (Ctrl+Alt+Shift+V) a copy from elsewhere in the image and from another app
 - [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit

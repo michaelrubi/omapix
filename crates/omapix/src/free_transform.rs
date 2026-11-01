@@ -153,6 +153,17 @@ impl Drag {
     }
 }
 
+/// `t` turned by `angle` radians about the box's centre.
+pub fn turned(bounds: [f64; 4], t: &Affine, angle: f64) -> Affine {
+    t.then(&Affine::rotate_about(angle, t.apply(local(bounds, 0.0, 0.0))))
+}
+
+/// `t` flipped across the box's own axes: -1 in `sx` for horizontally, in
+/// `sy` for vertically.
+pub fn flipped(bounds: [f64; 4], t: &Affine, sx: f64, sy: f64) -> Affine {
+    Affine::scale_about(sx, sy, local(bounds, 0.0, 0.0)).then(t)
+}
+
 /// The status bar's readout: width and height in percent, and the angle.
 pub fn readout(t: &Affine) -> String {
     let (sx, sy, angle) = t.decompose();
@@ -215,6 +226,19 @@ mod tests {
         let t = drag.to(BOX, pos2(200.0, 350.0), false, false);
         let (sx, sy, _) = t.decompose();
         assert!((sx - 1.5).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6, "{sx} {sy}");
+    }
+
+    #[test]
+    fn flips_and_quarter_turns_keep_the_box_where_it_is() {
+        let c = corners(BOX, &flipped(BOX, &Affine::IDENTITY, -1.0, 1.0));
+        assert!(close(c[0], pos2(300.0, 100.0)) && close(c[2], pos2(100.0, 200.0)));
+        let c = corners(BOX, &turned(BOX, &Affine::IDENTITY, std::f64::consts::FRAC_PI_2));
+        assert!(close(c[0], pos2(250.0, 50.0)) && close(c[2], pos2(150.0, 250.0)));
+        // A turned box flips across its own axes, not the image's.
+        let t = Affine::rotate_about(0.5, (200.0, 150.0));
+        let c = corners(BOX, &flipped(BOX, &t, -1.0, 1.0));
+        let was = corners(BOX, &t);
+        assert!(close(c[0], was[1]) && close(c[1], was[0]) && close(c[2], was[3]));
     }
 
     #[test]

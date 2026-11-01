@@ -1511,6 +1511,11 @@ impl App {
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
             Command::FreeTransform => layer.is_some() && editor.transform().is_none(),
+            Command::TransformRotate180
+            | Command::TransformRotate90Cw
+            | Command::TransformRotate90Ccw
+            | Command::TransformFlipHorizontal
+            | Command::TransformFlipVertical => layer.is_some(),
             Command::AutoAlignLayers => {
                 let pixels = |id: &u64| doc.layer(*id).is_some_and(|l| l.has_pixels());
                 editor.selected().iter().filter(|id| pixels(id)).count() > 1
@@ -1985,6 +1990,34 @@ impl App {
                     self.message(why, true);
                 }
             }
+            // With Free Transform's box up it turns or flips the box, and
+            // otherwise it's done at once, as in Photoshop.
+            Command::TransformRotate180
+            | Command::TransformRotate90Cw
+            | Command::TransformRotate90Ccw
+            | Command::TransformFlipHorizontal
+            | Command::TransformFlipVertical => {
+                use crate::free_transform::{flipped, turned};
+                use std::f64::consts::{FRAC_PI_2, PI};
+                let background = crate::tools::grey(self.tools.background);
+                if let Some(editor) = &mut self.editor {
+                    let box_up = editor.transform().is_some();
+                    if !box_up && let Err(why) = editor.begin_transform(background) {
+                        self.message(why, true);
+                    } else if let Some((bounds, t)) = editor.transform() {
+                        editor.transform_to(match cmd {
+                            Command::TransformRotate180 => turned(bounds, &t, PI),
+                            Command::TransformRotate90Cw => turned(bounds, &t, FRAC_PI_2),
+                            Command::TransformRotate90Ccw => turned(bounds, &t, -FRAC_PI_2),
+                            Command::TransformFlipHorizontal => flipped(bounds, &t, -1.0, 1.0),
+                            _ => flipped(bounds, &t, 1.0, -1.0),
+                        });
+                        if !box_up {
+                            editor.commit_transform();
+                        }
+                    }
+                }
+            }
             Command::AutoAlignLayers => {
                 if let Some(editor) = &mut self.editor {
                     let selected = editor.selected();
@@ -2281,6 +2314,10 @@ impl App {
     /// Right-clicking the image, as in Photoshop: what's handy for the
     /// selection, or with none, for the layer.
     fn canvas_menu(&mut self, ui: &mut Ui) {
+        if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) {
+            self.transform_items(ui);
+            return;
+        }
         // With a tool that has a brush: its panel, as Photoshop's
         // right-click brings up the brushes.
         if self.tools.tool.has_brush() {
@@ -2309,6 +2346,16 @@ impl App {
             self.menu_item(ui, Command::Paste, None);
         }
         self.menu_item(ui, Command::FreeTransform, None);
+    }
+
+    /// Edit › Transform, and the menu on Free Transform's box.
+    fn transform_items(&mut self, ui: &mut Ui) {
+        self.menu_item(ui, Command::TransformRotate180, None);
+        self.menu_item(ui, Command::TransformRotate90Cw, None);
+        self.menu_item(ui, Command::TransformRotate90Ccw, None);
+        ui.separator();
+        self.menu_item(ui, Command::TransformFlipHorizontal, None);
+        self.menu_item(ui, Command::TransformFlipVertical, None);
     }
 
     /// Image › Adjustments › Presets: add a saved preset's layers.
@@ -2464,6 +2511,7 @@ impl App {
                 });
                 ui.separator();
                 self.menu_item(ui, Command::FreeTransform, None);
+                ui.menu_button("Transform", |ui| self.transform_items(ui));
                 self.menu_item(ui, Command::AutoAlignLayers, None);
                 ui.separator();
                 self.menu_item(ui, Command::FillForeground, None);
@@ -3771,6 +3819,20 @@ impl App {
             return;
         }
         self.transform_drag = None;
+    }
+
+    /// A double-click inside Free Transform's box applies it.
+    fn transform_double_click(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let Some(((bounds, t), p)) = editor.transform().zip(editor.canvas.pointer) else {
+            return;
+        };
+        if crate::free_transform::hit(bounds, &t, p, 0.0) == crate::free_transform::Handle::Move {
+            editor.commit_transform();
+            self.transform_drag = None;
+        }
     }
 
     /// Dragging Free Transform's box: its handles scale, inside moves, and
@@ -5563,7 +5625,8 @@ impl eframe::App for App {
                 // An armed Curves or Levels eyedropper, or Free Transform, takes the
                 // pointer from the tools.
                 let liquify_brush = editor.liquifying().then(|| crate::canvas::BrushOutline::round(self.tools.liquify.size));
-                let tools_off = self.properties.eyedropper.is_some() || editor.transform().is_some() || liquify_brush.is_some();
+                let transforming = editor.transform().is_some();
+                let tools_off = self.properties.eyedropper.is_some() || transforming || liquify_brush.is_some();
                 let tip = self.brushes.tip(brush.tip);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
@@ -5610,7 +5673,7 @@ impl eframe::App for App {
                 let (tool_input, response) = editor.canvas.show(ui, pasteboard, overlay);
                 input = tool_input;
                 // Alt+right-drag resizes the brush instead.
-                menu_on = (!tools_off && !modifiers.alt).then_some(response);
+                menu_on = ((!tools_off || transforming) && !modifiers.alt).then_some(response);
             } else {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, pasteboard);
                 self.empty_state(ui);
@@ -5621,6 +5684,9 @@ impl eframe::App for App {
             self.canvas_input(input, modifiers);
         }
         if let Some(response) = menu_on {
+            if response.double_clicked() {
+                self.transform_double_click();
+            }
             response.context_menu(|ui| self.canvas_menu(ui));
         }
         let ctx = ui.ctx().clone();
@@ -10024,6 +10090,40 @@ mod tests {
         assert_eq!((editor.doc.width, editor.doc.height), (h, w));
         assert_eq!((editor.canvas.width(), editor.canvas.height()), (h, w));
         assert_eq!(editor.canvas.levels()[0], (h, w));
+    }
+
+    #[test]
+    fn transform_flips_at_once_or_turn_the_box_until_applied() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let mark = [60000, 0, 0, 65535];
+        let editor = app.editor.as_mut().unwrap();
+        editor.edit("Mark", |doc, _| doc.layers[0].pixels.tile_mut(0, 0)[150 * 256 + 110] = mark);
+        let at = |app: &App, x, y| app.editor.as_ref().unwrap().doc.layers[0].pixels.get(x, y);
+
+        // With no box up, the selection flips at once as one step.
+        app.run(Command::TransformFlipHorizontal, &ctx);
+        assert!(app.editor.as_ref().unwrap().transform().is_none());
+        assert_eq!(at(&app, 189, 150), mark);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Free Transform"));
+        app.run(Command::Undo, &ctx);
+        assert_eq!(at(&app, 110, 150), mark);
+
+        // With the box up, it stays up, and turns add up.
+        app.run(Command::FreeTransform, &ctx);
+        app.run(Command::TransformRotate90Cw, &ctx);
+        app.run(Command::TransformRotate90Cw, &ctx);
+        let (_, _, angle) = app.editor.as_ref().unwrap().transform().unwrap().1.decompose();
+        assert!((angle.abs() - std::f64::consts::PI).abs() < 1e-9, "{angle}");
+
+        // A double-click outside the box does nothing, and inside applies it.
+        app.editor.as_mut().unwrap().canvas.pointer = Some(egui::pos2(300.0, 150.0));
+        app.transform_double_click();
+        assert!(app.editor.as_ref().unwrap().transform().is_some());
+        app.editor.as_mut().unwrap().canvas.pointer = Some(egui::pos2(150.0, 150.0));
+        app.transform_double_click();
+        assert!(app.editor.as_ref().unwrap().transform().is_none());
+        assert_eq!(at(&app, 189, 149), mark);
     }
 
     #[test]
