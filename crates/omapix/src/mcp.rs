@@ -258,7 +258,7 @@ fn tools() -> Value {
         },
         {
             "name": "apply_auto_retouch",
-            "description": "Find the faces and build Auto Retouch's layers for each (healed blemishes, smoothed skin, even tone, dodge and burn), as Retouch › Auto Retouch does, and write the result. Needs the AI models (scripts/fetch-models.sh).",
+            "description": "Find the faces and build Auto Retouch's layers for each (smoothed skin, softened lines and eye bags, even tone, dodge and burn), as Retouch › Auto Retouch does, and write the result. Needs the AI models (scripts/fetch-models.sh).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -1,8 +1,9 @@
-//! Auto Retouch (docs/AI.md, feature 6): Reduce Shine, Smooth Skin at the
-//! blemishes found and Even Tone done for each face in turn, then the
-//! shadows under its eyes lifted, each step made from what the last one
-//! shows, and its teeth and eyes whitened, as a "Retouch" group holding a
-//! group for each face:
+//! Auto Retouch (docs/AI.md, feature 6): Reduce Shine, then the skin
+//! retouched as by hand on frequency separation, by parts of the face (see
+//! [`Regions`]), and Even Tone done for each face in turn, then the shadows
+//! under its eyes lifted, each step made from what the last one shows, and
+//! its teeth and eyes whitened, as a "Retouch" group holding a group for
+//! each face:
 //!
 //! ```text
 //! Retouch
@@ -11,6 +12,8 @@
 //!   │    ├─ Whiten Eyes
 //!   │    ├─ Under Eyes
 //!   │    ├─ Dodge & Burn
+//!   │    ├─ Eye Bags
+//!   │    ├─ Lines
 //!   │    ├─ Smooth Skin
 //!   │    └─ Reduce Shine
 //!   └─ Face 2
@@ -24,13 +27,31 @@ use crate::blemish::Spot;
 use crate::body::{Joint, Joints};
 use crate::document::Document;
 use crate::layer::Layer;
-use crate::selection::Selection;
+use crate::selection::{Combine, Selection};
 use crate::shine::{self, Matte};
 use crate::skin::{self, Smoothing};
 use crate::tiled::{TILE, Tiled};
 use crate::tone::{self, Evening, Tone};
 use crate::under_eyes;
 use crate::whiten::{self, Whiten};
+
+/// The parts of a face retouched as hand retouches do them, each on its
+/// skin: over the lower cheeks and jaw the mid band goes down, and on lines
+/// and eye bags, the fine texture too.
+pub struct Regions {
+    /// The lower cheeks and jaw.
+    pub lower: Selection,
+    /// The forehead and round the outer corners of the eyes, where lines
+    /// are looked for.
+    pub lines: Selection,
+    pub bags: Selection,
+    /// Bare skin, to tell a beard by.
+    pub bare: Selection,
+}
+
+/// How far from the skin's edge lines are looked for, in distances between
+/// the eyes: hair and brows there look like grooves.
+const LINE_MARGIN: f32 = 0.03;
 
 /// A face to retouch, and how.
 pub struct Face<'a> {
@@ -42,6 +63,11 @@ pub struct Face<'a> {
     /// The spots whose mid band is softened: with none, there's no Smooth
     /// Skin layer.
     pub spots: &'a [Spot],
+    /// Where its skin is retouched: without, only at its spots.
+    pub regions: Option<&'a Regions>,
+    /// How much of the fine texture goes on lines and eye bags (0–100):
+    /// without, there's no Lines or Eye Bags layer.
+    pub lines: Option<f32>,
     /// How much of the shine on its skin goes (0–100): without, or with
     /// none, there's no Reduce Shine layer.
     pub shine: Option<f32>,
@@ -183,9 +209,10 @@ pub fn share(skin: &Selection, people: &[Person], which: usize) -> Selection {
 
 /// A "Retouch" group above the layer at `above`, with a group for each of
 /// `faces` (the first on top), each holding that face's steps: a Reduce
-/// Shine layer ([`shine::add_layer`]), a Smooth Skin layer
-/// ([`skin::add_layer`]) made from that and masked to patches round its
-/// spots ([`skin::patches`]), a Dodge & Burn group
+/// Shine layer ([`shine::add_layer`]), a Smooth Skin layer made from that
+/// ([`skin::add_band_layer`]), masked to its lower cheeks and jaw less any
+/// beard, and patches round its spots ([`skin::patches`]), Lines and Eye
+/// Bags layers ([`skin::lines`]), a Dodge & Burn group
 /// ([`tone::add_layers`]) made from the image smoothed, an Under Eyes layer
 /// ([`under_eyes::add_layer`]) made from the image evened, and Whiten Eyes
 /// and Whiten Teeth layers ([`whiten::add_layer`]). Returns the Retouch group's
@@ -211,8 +238,22 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
         if let Some(smoothing) = &face.smoothing {
             let at = index(doc, id);
             let image = doc.composite_current_and_below(at);
-            let patches = skin::patches(face.skin, face.spots, face.iod);
-            skin::add_layer(doc, at, &image, face.skin, &patches, face.iod, smoothing);
+            let mut mask = skin::patches(face.skin, face.spots, face.iod);
+            if let Some(regions) = face.regions {
+                let bare = skin::without_stubble(&image, &regions.lower, &regions.bare, face.iod);
+                mask = mask.combine(&bare.combine(face.skin, Combine::Intersect), Combine::Add);
+            }
+            skin::add_band_layer(doc, at, "Smooth Skin", &image, face.skin, &mask, skin::hand_radii(face.iod), smoothing.amount);
+        }
+        if let (Some(regions), Some(amount)) = (face.regions, face.lines) {
+            let [_, coarse] = skin::hand_radii(face.iod);
+            let at = index(doc, id);
+            let image = doc.composite_current_and_below(at);
+            let area = regions.lines.combine(face.skin, Combine::Intersect).contract(LINE_MARGIN * face.iod);
+            let lines = skin::lines(&image, &area, face.iod);
+            skin::add_band_layer(doc, at, "Lines", &image, face.skin, &lines, [0.0, coarse], amount);
+            let bags = regions.bags.combine(face.skin, Combine::Intersect);
+            skin::add_band_layer(doc, index(doc, id), "Eye Bags", &image, face.skin, &bags, [0.0, coarse], amount);
         }
         if let Some(evening) = &face.evening {
             let at = index(doc, id);
@@ -297,6 +338,8 @@ mod tests {
             skin,
             iod: 80.0,
             spots,
+            regions: None,
+            lines: None,
             shine: None,
             smoothing: Some(Smoothing::default()),
             evening: Some(Evening::default()),

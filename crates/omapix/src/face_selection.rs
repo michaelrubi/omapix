@@ -438,11 +438,72 @@ fn people(faces: &[&Detection], srgb: &[[u8; 4]], image: &Raster) -> Vec<retouch
         .collect()
 }
 
+/// Where the lower face starts, in distances between the eyes below them;
+/// how far it's feathered; how far the area round an eye's outer corner
+/// goes across and down, its middle that far out of the corner by
+/// [`CROW_OUT`].
+const LOWER: f32 = 0.45;
+const REGION_FEATHER: f32 = 0.04;
+const CROW: [f32; 2] = [0.3, 0.25];
+const CROW_OUT: f32 = 0.2;
+/// The top of each brow.
+const BROW_TOPS: [usize; 2] = [105, 334];
+
+/// The parts of a face its skin is retouched by, on its skin `skin`.
+fn regions(points: &[[f32; 3]], skin: &Selection, under_eyes: &(Selection, Selection)) -> retouch::Regions {
+    let (width, height) = (skin.width(), skin.height());
+    let (scale, seen) = sight(points);
+    let at = |i: usize| [points[i][0], points[i][1]];
+    let [top, chin] = FACE_HEIGHT.map(at);
+    let length = (chin[0] - top[0]).hypot(chin[1] - top[1]).max(1.0);
+    let down = [(chin[0] - top[0]) / length, (chin[1] - top[1]) / length];
+    let across = [-down[1], down[0]];
+    let middle = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let eyes = middle(at(EACH_EYE[0].corners[0]), at(EACH_EYE[1].corners[1]));
+    // The whole width of the face, from `from`, `by` down it.
+    let band = |from: [f32; 2], by: f32| {
+        let far = 4.0 * scale;
+        let corner = |a: f32, d: f32| (from[0] + across[0] * a + down[0] * d, from[1] + across[1] * a + down[1] * d);
+        let ring = [corner(-far, 0.0), corner(far, 0.0), corner(far, by), corner(-far, by)];
+        place(&Vec::from_iter(drawn(&ring, REGION_FEATHER * scale, width, height)), width, height)
+    };
+    let outline = draw(&[points], &OUTLINE, width, height);
+    let lower_from = [eyes[0] + down[0] * LOWER * scale, eyes[1] + down[1] * LOWER * scale];
+    let lower = band(lower_from, 4.0 * scale)
+        .combine(&outline, Combine::Intersect)
+        .combine(&draw(&[points], &NOSE, width, height), Combine::Subtract)
+        .combine(skin, Combine::Intersect);
+    let brows = middle(at(BROW_TOPS[0]), at(BROW_TOPS[1]));
+    let mut lines = band(brows, -4.0 * scale).combine(&outline, Combine::Intersect);
+    for (n, eye) in EACH_EYE.iter().enumerate().filter(|(n, _)| seen[*n]) {
+        let corner = at(eye.corners[n]);
+        let (dx, dy) = (corner[0] - eyes[0], corner[1] - eyes[1]);
+        let out = dx.hypot(dy).max(1.0);
+        let (cx, cy) = (corner[0] + dx / out * CROW_OUT * scale, corner[1] + dy / out * CROW_OUT * scale);
+        let ring: Vec<_> = (0..24)
+            .map(|i| {
+                let angle = i as f32 / 24.0 * std::f32::consts::TAU;
+                (cx + angle.cos() * CROW[0] * scale, cy + angle.sin() * CROW[1] * scale)
+            })
+            .collect();
+        let crow = place(&Vec::from_iter(drawn(&ring, REGION_FEATHER * scale, width, height)), width, height);
+        lines = lines.combine(&crow, Combine::Add);
+    }
+    retouch::Regions {
+        lower,
+        lines: lines
+            .combine(skin, Combine::Intersect)
+            .combine(&draw(&[points], &LASHES, width, height), Combine::Subtract),
+        bags: under_eyes.0.clone(),
+        bare: under_eyes.1.clone(),
+    }
+}
+
 /// What Auto Retouch works from, for one face: its box (left, top, right,
 /// bottom), the distance between its eyes, that person's share of the skin,
 /// face and body, the spots on the face, most prominent first, its teeth
-/// and the whites of its eyes, and the skin under its eyes with the cheek
-/// below it.
+/// and the whites of its eyes, the skin under its eyes with the cheek below
+/// it, and the parts of it retouched, if the landmarker saw it.
 pub struct FoundFace {
     pub bounds: [f32; 4],
     pub iod: f32,
@@ -451,6 +512,7 @@ pub struct FoundFace {
     pub teeth: Selection,
     pub eyes: Selection,
     pub under_eyes: (Selection, Selection),
+    pub regions: Option<retouch::Regions>,
 }
 
 /// The faces in `image`, from left to right, each measured on its own. A
@@ -474,7 +536,9 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
         let iod = people[n].iod;
         let none = || Selection::from_coverage(Tiled::new(image.width(), image.height(), 0));
         let whites = |what| points.as_deref().map_or_else(none, |p| whites(&srgb, p, what, &on_faces));
+        let under_eyes = points.as_deref().map_or_else(|| (none(), none()), |p| under_eyes(p, &face_skin));
         FoundFace {
+            regions: points.as_deref().map(|p| regions(p, &face_skin, &under_eyes)),
             bounds: face.bounds,
             iod,
             skin: retouch::share(&all_skin, &people, n),
@@ -483,7 +547,7 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
                 .map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),
             teeth: whites(Whiten::Teeth),
             eyes: whites(Whiten::Eyes),
-            under_eyes: points.as_deref().map_or_else(|| (none(), none()), |p| under_eyes(p, &face_skin)),
+            under_eyes,
         }
     });
     let found: Vec<_> = found.filter(|f| !f.skin.is_empty() || !f.spots.is_empty()).collect();

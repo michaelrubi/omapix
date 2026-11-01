@@ -1,5 +1,5 @@
-//! Retouch › Auto Retouch… (docs/AI.md, feature 6): Heal Blemishes, Reduce
-//! Shine, Smooth Skin, Even Tone, Lighten Under Eyes and Whiten Eyes and
+//! Retouch › Auto Retouch… (docs/AI.md, feature 6): Reduce Shine, Smooth
+//! Skin over the lower face and the blemishes found, Smooth Lines, Even Tone, Lighten Under Eyes and Whiten Eyes and
 //! Teeth in one go, for each face found
 //! in what the active layer and those below it show, as a Retouch group
 //! above with a group for each face (`omapix_engine::retouch`). The dialog has a switch and a
@@ -39,6 +39,7 @@ pub struct Retouch {
     pub blemishes: Step,
     pub shine: Step,
     pub smooth_skin: Step,
+    pub lines: Step,
     pub even_tone: Step,
     pub under_eyes: Step,
     pub whiten_eyes: Step,
@@ -75,18 +76,21 @@ impl Preset {
     }
 
     /// Every step on. Even Tone is far below its own command's default:
-    /// a hand retouch took Natural's from 40 down to 5.
+    /// a hand retouch took Natural's from 40 down to 5. Natural's Smooth
+    /// Skin and Lines are what hand retouches took out: about 55–65 % of
+    /// the mid band on scars, and 40–45 % of the fine texture on lines.
     pub fn settings(self) -> Retouch {
-        let [blemishes, smooth_skin, even_tone, lighten] = match self {
-            Preset::Natural => [60.0, 40.0, 5.0, 30.0],
-            Preset::Standard => [75.0, 70.0, 10.0, 50.0],
-            Preset::Strong => [90.0, 90.0, 20.0, 70.0],
+        let [blemishes, smooth_skin, lines, even_tone, lighten] = match self {
+            Preset::Natural => [60.0, 55.0, 45.0, 5.0, 30.0],
+            Preset::Standard => [75.0, 70.0, 55.0, 10.0, 50.0],
+            Preset::Strong => [90.0, 90.0, 70.0, 20.0, 70.0],
         }
         .map(|amount| Step { on: true, amount });
         Retouch {
             blemishes,
             shine: lighten,
             smooth_skin,
+            lines,
             even_tone,
             under_eyes: lighten,
             whiten_eyes: lighten,
@@ -291,8 +295,13 @@ impl AutoRetouch {
                     ("Reduce Shine", "Amount: the Reduce Shine layer's opacity", &mut settings.shine),
                     (
                         "Smooth Skin",
-                        "Amount: how much of the blotchiness goes in each patch, the Smooth Skin layer's opacity",
+                        "Amount: how much of the blotchiness goes on the lower face and each patch, the Smooth Skin layer's opacity",
                         &mut settings.smooth_skin,
+                    ),
+                    (
+                        "Smooth Lines",
+                        "Amount: how much of the lines, crow's feet and eye bags goes, the Lines and Eye Bags layers' opacity",
+                        &mut settings.lines,
                     ),
                     ("Even Tone", "Amount: the Dodge & Burn group's opacity", &mut settings.even_tone),
                     ("Lighten Under Eyes", "Amount: the Under Eyes layer's opacity", &mut settings.under_eyes),
@@ -331,6 +340,7 @@ impl AutoRetouch {
                 let amount = |step: Step| step.on.then_some(step.amount);
                 let smoothing = amount(settings.smooth_skin).map(|amount| Smoothing { amount, ..Default::default() });
                 let evening = amount(settings.even_tone).map(|amount| Evening { amount, ..Default::default() });
+                let lines = amount(settings.lines).filter(|_| found.regions.is_some());
                 let lighten = |step: Step, part: &Selection| amount(step).filter(|_| !part.is_empty());
                 let lighten = [
                     lighten(settings.under_eyes, &found.under_eyes.0),
@@ -343,12 +353,17 @@ impl AutoRetouch {
                     self.healed(n).len(),
                     amount(settings.shine),
                     smoothing,
+                    lines,
                     evening,
                     lighten,
                 )
             })
-            .filter(|(_, _, healed, shine, smoothing, evening, lighten)| {
-                (*healed > 0 && smoothing.is_some()) || shine.is_some() || evening.is_some() || lighten.iter().any(Option::is_some)
+            .filter(|(_, found, healed, shine, smoothing, lines, evening, lighten)| {
+                ((*healed > 0 || found.regions.is_some()) && smoothing.is_some())
+                    || lines.is_some()
+                    || shine.is_some()
+                    || evening.is_some()
+                    || lighten.iter().any(Option::is_some)
             })
             .collect();
         if faces.is_empty() {
@@ -359,18 +374,22 @@ impl AutoRetouch {
             "Auto Retouch",
             move |doc, active| {
                 let faces: Vec<_> = (faces.iter())
-                    .map(|(number, found, healed, shine, smoothing, evening, [under, eyes, teeth])| retouch::Face {
-                        number: *number,
-                        skin: &found.skin,
-                        iod: found.iod,
-                        spots: &found.spots[..*healed],
-                        shine: *shine,
-                        smoothing: *smoothing,
-                        evening: *evening,
-                        under_eyes: under.map(|amount| (&found.under_eyes.0, &found.under_eyes.1, amount)),
-                        eyes: eyes.map(|amount| (&found.eyes, amount)),
-                        teeth: teeth.map(|amount| (&found.teeth, amount)),
-                    })
+                    .map(
+                        |(number, found, healed, shine, smoothing, lines, evening, [under, eyes, teeth])| retouch::Face {
+                            number: *number,
+                            skin: &found.skin,
+                            iod: found.iod,
+                            spots: &found.spots[..*healed],
+                            regions: found.regions.as_ref(),
+                            lines: *lines,
+                            shine: *shine,
+                            smoothing: *smoothing,
+                            evening: *evening,
+                            under_eyes: under.map(|amount| (&found.under_eyes.0, &found.under_eyes.1, amount)),
+                            eyes: eyes.map(|amount| (&found.eyes, amount)),
+                            teeth: teeth.map(|amount| (&found.teeth, amount)),
+                        },
+                    )
                     .collect();
                 if let Some(id) = retouch::add_layers(doc, index, &faces) {
                     *active = id;
@@ -468,6 +487,7 @@ mod tests {
                         Selection::rectangle(W, H, (x - 60.0, 355.0), (x - 20.0, 375.0)),
                         Selection::rectangle(W, H, (x - 60.0, 380.0), (x - 20.0, 395.0)),
                     ),
+                    regions: None,
                 }),
                 texture: None,
                 own: None,
