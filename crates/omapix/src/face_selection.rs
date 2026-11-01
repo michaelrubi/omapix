@@ -448,6 +448,11 @@ const CROW: [f32; 2] = [0.3, 0.25];
 const CROW_OUT: f32 = 0.2;
 /// The top of each brow.
 const BROW_TOPS: [usize; 2] = [105, 334];
+/// The side of the nose and the corner of the mouth below each eye; how far
+/// the area for smile lines goes out from them, and on past the corner.
+const SMILE: [[usize; 2]; 2] = [[98, 61], [327, 291]];
+const SMILE_OUT: f32 = 0.25;
+const SMILE_PAST: f32 = 0.1;
 
 /// The parts of a face its skin is retouched by, on its skin `skin`.
 fn regions(points: &[[f32; 3]], skin: &Selection, under_eyes: &(Selection, Selection)) -> retouch::Regions {
@@ -474,26 +479,42 @@ fn regions(points: &[[f32; 3]], skin: &Selection, under_eyes: &(Selection, Selec
         .combine(&draw(&[points], &NOSE, width, height), Combine::Subtract)
         .combine(skin, Combine::Intersect);
     let brows = middle(at(BROW_TOPS[0]), at(BROW_TOPS[1]));
-    let mut lines = band(brows, -4.0 * scale).combine(&outline, Combine::Intersect);
-    for (n, eye) in EACH_EYE.iter().enumerate().filter(|(n, _)| seen[*n]) {
-        let corner = at(eye.corners[n]);
-        let (dx, dy) = (corner[0] - eyes[0], corner[1] - eyes[1]);
-        let out = dx.hypot(dy).max(1.0);
-        let (cx, cy) = (corner[0] + dx / out * CROW_OUT * scale, corner[1] + dy / out * CROW_OUT * scale);
-        let ring: Vec<_> = (0..24)
-            .map(|i| {
-                let angle = i as f32 / 24.0 * std::f32::consts::TAU;
-                (cx + angle.cos() * CROW[0] * scale, cy + angle.sin() * CROW[1] * scale)
-            })
-            .collect();
-        let crow = place(&Vec::from_iter(drawn(&ring, REGION_FEATHER * scale, width, height)), width, height);
-        lines = lines.combine(&crow, Combine::Add);
-    }
+    let forehead = band(brows, -4.0 * scale).combine(&outline, Combine::Intersect);
+    let drawn = |ring: &[(f32, f32)]| drawn(ring, REGION_FEATHER * scale, width, height);
+    let crows: Vec<_> = (EACH_EYE.iter().enumerate().filter(|(n, _)| seen[*n]))
+        .filter_map(|(n, eye)| {
+            let corner = at(eye.corners[n]);
+            let (dx, dy) = (corner[0] - eyes[0], corner[1] - eyes[1]);
+            let out = dx.hypot(dy).max(1.0);
+            let (cx, cy) = (corner[0] + dx / out * CROW_OUT * scale, corner[1] + dy / out * CROW_OUT * scale);
+            let ring: Vec<_> = (0..24)
+                .map(|i| {
+                    let angle = i as f32 / 24.0 * std::f32::consts::TAU;
+                    (cx + angle.cos() * CROW[0] * scale, cy + angle.sin() * CROW[1] * scale)
+                })
+                .collect();
+            drawn(&ring)
+        })
+        .collect();
+    let mouth = middle(at(SMILE[0][1]), at(SMILE[1][1]));
+    let smiles: Vec<_> = (SMILE.iter().enumerate().filter(|(n, _)| seen[*n]))
+        .filter_map(|(_, &[nose, corner])| {
+            let (nose, corner) = (at(nose), at(corner));
+            let side = ((corner[0] - mouth[0]) * across[0] + (corner[1] - mouth[1]) * across[1]).signum();
+            let out = SMILE_OUT * scale * side;
+            let past = SMILE_PAST * scale;
+            let end = [corner[0] + down[0] * past, corner[1] + down[1] * past];
+            let beside = |p: [f32; 2]| (p[0] + across[0] * out, p[1] + across[1] * out);
+            drawn(&[(nose[0], nose[1]), beside(nose), beside(end), (end[0], end[1])])
+        })
+        .collect();
+    let lashes = draw(&[points], &LASHES, width, height);
+    let lines = |area: Selection| area.combine(skin, Combine::Intersect).combine(&lashes, Combine::Subtract);
     retouch::Regions {
         lower,
-        lines: lines
-            .combine(skin, Combine::Intersect)
-            .combine(&draw(&[points], &LASHES, width, height), Combine::Subtract),
+        forehead: lines(forehead),
+        crows_feet: lines(place(&crows, width, height)),
+        smile_lines: lines(place(&smiles, width, height)),
         bags: under_eyes.0.clone(),
         bare: under_eyes.1.clone(),
     }
@@ -884,6 +905,30 @@ mod tests {
         points[outline::LEFT_IRIS[0]] = [250.0, 280.0, 0.0];
         points[outline::RIGHT_IRIS[0]] = [350.0, 280.0, 0.0];
         points
+    }
+
+    #[test]
+    fn smile_lines_run_from_the_nose_past_the_corners_of_the_mouth_on_the_sides_seen() {
+        let mut face = face();
+        // Eyes 100 apart, over a nose and a mouth, in a face 300 tall.
+        outline_box(&mut face, &outline::RIGHT_EYE, [330.0, 270.0, 370.0, 290.0]);
+        for (i, point) in [(10, [300.0, 150.0]), (152, [300.0, 450.0]), (98, [280.0, 340.0]), (327, [320.0, 340.0])] {
+            face[i] = [point[0], point[1], 0.0];
+        }
+        face[61] = [250.0, 400.0, 0.0];
+        face[291] = [350.0, 400.0, 0.0];
+        let skin = Selection::all(600, 600);
+        let none = || Selection::from_coverage(Tiled::new(600, 600, 0));
+
+        let found = regions(&face, &skin, &(none(), none())).smile_lines;
+        assert!(found.at(252, 375) > 0.9 && found.at(348, 375) > 0.9);
+        assert!(found.at(300, 375) < 0.01, "not between them");
+        assert!(found.at(252, 300) < 0.01 && found.at(252, 470) < 0.01, "not above the nose or by the chin");
+
+        // With that eye turned away, that side's left out.
+        face[EACH_EYE[1].corners[1]] = face[EACH_EYE[1].corners[0]];
+        let found = regions(&face, &skin, &(none(), none())).smile_lines;
+        assert!(found.at(252, 375) > 0.9 && found.at(348, 375) < 0.01);
     }
 
     #[test]

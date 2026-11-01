@@ -1152,19 +1152,22 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   right people; an arm across someone else would go to them.
 - **Order.** For each face: Reduce Shine (milestone 13), then Smooth Skin
   masked to the lower cheeks and jaw less any beard and patches round the
-  spots found, then Lines and Eye Bags, each from what the last shows,
+  spots found, then the lines and Eye Bags, each from what the last shows,
   then Dodge & Burn from the image smoothed, each from
   Current & Below of the face's group so far. Smooth Skin takes down the
-  mid band, and Lines and Eye Bags the fine texture too, with blurs of a
+  mid band, and the lines and Eye Bags the fine texture too, with blurs of a
   fifth of 0.57 √IOD and 0.57 √IOD, measured on four hand retouches of
   Aspen portraits, where the band going down evenly came closer to his
   heals (correlation 0.74–0.83) than a blur or a limit on outliers. Lines
-  are the grooves found on the forehead and round the eyes' outer corners.
+  are the grooves found on the forehead, round the eyes' outer corners and
+  from the nose to the corners of the mouth, each on a layer of its own
+  (Forehead Lines, Crow's Feet, Smile Lines).
   Dodge & Burn is the command's own function, with Size at 50. Then Under Eyes
   (milestone 13), from the image evened, so it lifts what Even Tone left.
   Whiten Eyes and Whiten Teeth go on top: their masks are found with the
   faces, and the steps under them don't touch eyes or teeth.
-- **Presets.** Sensitivity, Smooth Skin's amount, Smooth Lines', Even
+- **Presets.** Sensitivity, Smooth Skin's amount, that of each kind of line
+  and of Eye Bags (one figure, each has its own slider), Even
   Tone's, and the shine's, under-eyes' and whitening's: Natural 60, 55, 45, 5
   and 30; Standard 75, 70, 55, 10 and 50; Strong 90, 90, 70, 20 and 70. The settings last OK'd
   for All Faces are kept between runs.

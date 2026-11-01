@@ -1,5 +1,5 @@
 //! Retouch › Auto Retouch… (docs/AI.md, feature 6): Reduce Shine, Smooth
-//! Skin over the lower face and the blemishes found, Smooth Lines, Even Tone, Lighten Under Eyes and Whiten Eyes and
+//! Skin over the lower face and the blemishes found, lines and eye bags, Even Tone, Lighten Under Eyes and Whiten Eyes and
 //! Teeth in one go, for each face found
 //! in what the active layer and those below it show, as a Retouch group
 //! above with a group for each face (`omapix_engine::retouch`). The dialog has a switch and a
@@ -39,7 +39,10 @@ pub struct Retouch {
     pub blemishes: Step,
     pub shine: Step,
     pub smooth_skin: Step,
-    pub lines: Step,
+    pub forehead: Step,
+    pub crows_feet: Step,
+    pub smile_lines: Step,
+    pub eye_bags: Step,
     pub even_tone: Step,
     pub under_eyes: Step,
     pub whiten_eyes: Step,
@@ -90,7 +93,10 @@ impl Preset {
             blemishes,
             shine: lighten,
             smooth_skin,
-            lines,
+            forehead: lines,
+            crows_feet: lines,
+            smile_lines: lines,
+            eye_bags: lines,
             even_tone,
             under_eyes: lighten,
             whiten_eyes: lighten,
@@ -299,9 +305,24 @@ impl AutoRetouch {
                         &mut settings.smooth_skin,
                     ),
                     (
-                        "Smooth Lines",
-                        "Amount: how much of the lines, crow's feet and eye bags goes, the Lines and Eye Bags layers' opacity",
-                        &mut settings.lines,
+                        "Forehead Lines",
+                        "Amount: how much of the lines above the brows goes, the Forehead Lines layer's opacity",
+                        &mut settings.forehead,
+                    ),
+                    (
+                        "Crow's Feet",
+                        "Amount: how much of the lines round the outer corners of the eyes goes, the Crow's Feet layer's opacity",
+                        &mut settings.crows_feet,
+                    ),
+                    (
+                        "Smile Lines",
+                        "Amount: how much of the lines from the nose to the corners of the mouth goes, the Smile Lines layer's opacity",
+                        &mut settings.smile_lines,
+                    ),
+                    (
+                        "Eye Bags",
+                        "Amount: how much of the fine texture under the eyes goes, the Eye Bags layer's opacity",
+                        &mut settings.eye_bags,
                     ),
                     ("Even Tone", "Amount: the Dodge & Burn group's opacity", &mut settings.even_tone),
                     ("Lighten Under Eyes", "Amount: the Under Eyes layer's opacity", &mut settings.under_eyes),
@@ -340,7 +361,16 @@ impl AutoRetouch {
                 let amount = |step: Step| step.on.then_some(step.amount);
                 let smoothing = amount(settings.smooth_skin).map(|amount| Smoothing { amount, ..Default::default() });
                 let evening = amount(settings.even_tone).map(|amount| Evening { amount, ..Default::default() });
-                let lines = amount(settings.lines).filter(|_| found.regions.is_some());
+                let lines = if found.regions.is_some() {
+                    retouch::Lines {
+                        forehead: amount(settings.forehead),
+                        crows_feet: amount(settings.crows_feet),
+                        smile_lines: amount(settings.smile_lines),
+                        bags: amount(settings.eye_bags),
+                    }
+                } else {
+                    retouch::Lines::default()
+                };
                 let lighten = |step: Step, part: &Selection| amount(step).filter(|_| !part.is_empty());
                 let lighten = [
                     lighten(settings.under_eyes, &found.under_eyes.0),
@@ -360,7 +390,7 @@ impl AutoRetouch {
             })
             .filter(|(_, found, healed, shine, smoothing, lines, evening, lighten)| {
                 ((*healed > 0 || found.regions.is_some()) && smoothing.is_some())
-                    || lines.is_some()
+                    || lines.any()
                     || shine.is_some()
                     || evening.is_some()
                     || lighten.iter().any(Option::is_some)

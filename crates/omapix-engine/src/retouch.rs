@@ -13,7 +13,9 @@
 //!   │    ├─ Under Eyes
 //!   │    ├─ Dodge & Burn
 //!   │    ├─ Eye Bags
-//!   │    ├─ Lines
+//!   │    ├─ Crow's Feet
+//!   │    ├─ Smile Lines
+//!   │    ├─ Forehead Lines
 //!   │    ├─ Smooth Skin
 //!   │    └─ Reduce Shine
 //!   └─ Face 2
@@ -41,9 +43,11 @@ use crate::whiten::{self, Whiten};
 pub struct Regions {
     /// The lower cheeks and jaw.
     pub lower: Selection,
-    /// The forehead and round the outer corners of the eyes, where lines
-    /// are looked for.
-    pub lines: Selection,
+    /// Where lines are looked for: above the brows, round the outer corners
+    /// of the eyes, and from the nose to the corners of the mouth.
+    pub forehead: Selection,
+    pub crows_feet: Selection,
+    pub smile_lines: Selection,
     pub bags: Selection,
     /// Bare skin, to tell a beard by.
     pub bare: Selection,
@@ -52,6 +56,22 @@ pub struct Regions {
 /// How far from the skin's edge lines are looked for, in distances between
 /// the eyes: hair and brows there look like grooves.
 const LINE_MARGIN: f32 = 0.03;
+
+/// How much of the fine texture goes on each part of a face (0–100):
+/// without, there's no layer for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Lines {
+    pub forehead: Option<f32>,
+    pub crows_feet: Option<f32>,
+    pub smile_lines: Option<f32>,
+    pub bags: Option<f32>,
+}
+
+impl Lines {
+    pub fn any(&self) -> bool {
+        [self.forehead, self.crows_feet, self.smile_lines, self.bags].iter().any(Option::is_some)
+    }
+}
 
 /// A face to retouch, and how.
 pub struct Face<'a> {
@@ -65,9 +85,7 @@ pub struct Face<'a> {
     pub spots: &'a [Spot],
     /// Where its skin is retouched: without, only at its spots.
     pub regions: Option<&'a Regions>,
-    /// How much of the fine texture goes on lines and eye bags (0–100):
-    /// without, there's no Lines or Eye Bags layer.
-    pub lines: Option<f32>,
+    pub lines: Lines,
     /// How much of the shine on its skin goes (0–100): without, or with
     /// none, there's no Reduce Shine layer.
     pub shine: Option<f32>,
@@ -211,8 +229,8 @@ pub fn share(skin: &Selection, people: &[Person], which: usize) -> Selection {
 /// `faces` (the first on top), each holding that face's steps: a Reduce
 /// Shine layer ([`shine::add_layer`]), a Smooth Skin layer made from that
 /// ([`skin::add_band_layer`]), masked to its lower cheeks and jaw less any
-/// beard, and patches round its spots ([`skin::patches`]), Lines and Eye
-/// Bags layers ([`skin::lines`]), a Dodge & Burn group
+/// beard, and patches round its spots ([`skin::patches`]), a layer for
+/// each part of its [`Lines`] ([`skin::lines`]), a Dodge & Burn group
 /// ([`tone::add_layers`]) made from the image smoothed, an Under Eyes layer
 /// ([`under_eyes::add_layer`]) made from the image evened, and Whiten Eyes
 /// and Whiten Teeth layers ([`whiten::add_layer`]). Returns the Retouch group's
@@ -245,15 +263,24 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
             }
             skin::add_band_layer(doc, at, "Smooth Skin", &image, face.skin, &mask, skin::hand_radii(face.iod), smoothing.amount);
         }
-        if let (Some(regions), Some(amount)) = (face.regions, face.lines) {
+        if let Some(regions) = face.regions.filter(|_| face.lines.any()) {
             let [_, coarse] = skin::hand_radii(face.iod);
-            let at = index(doc, id);
-            let image = doc.composite_current_and_below(at);
-            let area = regions.lines.combine(face.skin, Combine::Intersect).contract(LINE_MARGIN * face.iod);
-            let lines = skin::lines(&image, &area, face.iod);
-            skin::add_band_layer(doc, at, "Lines", &image, face.skin, &lines, [0.0, coarse], amount);
-            let bags = regions.bags.combine(face.skin, Combine::Intersect);
-            skin::add_band_layer(doc, index(doc, id), "Eye Bags", &image, face.skin, &bags, [0.0, coarse], amount);
+            let image = doc.composite_current_and_below(index(doc, id));
+            for (name, area, amount) in [
+                ("Forehead Lines", &regions.forehead, face.lines.forehead),
+                ("Smile Lines", &regions.smile_lines, face.lines.smile_lines),
+                ("Crow's Feet", &regions.crows_feet, face.lines.crows_feet),
+            ] {
+                if let Some(amount) = amount {
+                    let area = area.combine(face.skin, Combine::Intersect).contract(LINE_MARGIN * face.iod);
+                    let lines = skin::lines(&image, &area, face.iod);
+                    skin::add_band_layer(doc, index(doc, id), name, &image, face.skin, &lines, [0.0, coarse], amount);
+                }
+            }
+            if let Some(amount) = face.lines.bags {
+                let bags = regions.bags.combine(face.skin, Combine::Intersect);
+                skin::add_band_layer(doc, index(doc, id), "Eye Bags", &image, face.skin, &bags, [0.0, coarse], amount);
+            }
         }
         if let Some(evening) = &face.evening {
             let at = index(doc, id);
@@ -339,7 +366,7 @@ mod tests {
             iod: 80.0,
             spots,
             regions: None,
-            lines: None,
+            lines: Lines::default(),
             shine: None,
             smoothing: Some(Smoothing::default()),
             evening: Some(Evening::default()),
@@ -351,6 +378,55 @@ mod tests {
 
     fn document() -> Document {
         Document::from_image("t.tif".into(), &image(), ColorProfile::srgb(), 16)
+    }
+
+    #[test]
+    fn each_part_of_a_face_has_its_own_layer_and_amount_and_can_be_left_out() {
+        // A dark groove across the middle of each of three bands.
+        let pixels = (0..W * H)
+            .map(|i| {
+                let v = if (i / W) % 100 == 50 { 30000 } else { 45000 };
+                [v, v - 8000, v - 12000, u16::MAX]
+            })
+            .collect();
+        let mut doc = Document::from_image("t.tif".into(), &Raster::new(W, H, pixels), ColorProfile::srgb(), 16);
+        let band = |y: f32| Selection::rectangle(W, H, (20.0, y), (280.0, y + 80.0));
+        let regions = Regions {
+            lower: band(210.0),
+            forehead: band(10.0),
+            crows_feet: band(110.0),
+            smile_lines: band(210.0),
+            bags: band(210.0),
+            bare: band(210.0),
+        };
+        let [skin, _] = skins();
+        let lines = Lines {
+            forehead: Some(40.0),
+            crows_feet: Some(60.0),
+            smile_lines: None,
+            bags: Some(30.0),
+        };
+        let face = Face {
+            regions: Some(&regions),
+            lines,
+            smoothing: None,
+            evening: None,
+            ..face(1, &skin, &[])
+        };
+        add_layers(&mut doc, 0, &[face]).unwrap();
+
+        let opacity = |name: &str| doc.layers.iter().find(|l| l.name == name).map(|l| l.opacity);
+        assert_eq!(opacity("Forehead Lines"), Some(0.4));
+        assert_eq!(opacity("Crow's Feet"), Some(0.6));
+        assert_eq!(opacity("Eye Bags"), Some(0.3));
+        assert_eq!(opacity("Smile Lines"), None);
+        // Each layer's mask is on its own groove only.
+        let mask = |name: &str, y: u32| {
+            let layer = doc.layers.iter().find(|l| l.name == name).unwrap();
+            layer.mask.as_ref().unwrap().pixels.get(150, y)
+        };
+        assert!(mask("Forehead Lines", 50) > 30000 && mask("Forehead Lines", 150) == 0);
+        assert!(mask("Crow's Feet", 150) > 30000 && mask("Crow's Feet", 50) == 0);
     }
 
     #[test]
