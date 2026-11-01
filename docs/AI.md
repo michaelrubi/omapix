@@ -1168,6 +1168,13 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   Tone's, and the shine's, under-eyes' and whitening's: Natural 60, 55, 45, 5
   and 30; Standard 75, 70, 55, 10 and 50; Strong 90, 90, 70, 20 and 70. The settings last OK'd
   for All Faces are kept between runs.
+- **Small faces.** The segmenter sees the whole image in 256 squares and the
+  detector in 640, so a face under a sixth of the image's longest side is
+  looked at again in a square three times its box: found again, then
+  segmented on its own (`Analysis::close_ups`). On four group shots of
+  faces about 60 px between the eyes, the faces the landmarker had missed
+  got their points, and Auto Retouch's masks reached 66–91 % of a hand
+  retouch's work, from 0–63 %. Portraits measured the same as before.
 - **The strip.** With more than one face: All Faces, then a thumbnail of
   each. A face follows All Faces until its own settings are changed. It
   can be switched off, and clicking it on the canvas selects it. Faces

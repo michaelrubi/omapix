@@ -748,10 +748,22 @@ pub fn skin(analysis: &Analysis, image: &Raster, classes: &[usize]) -> Selection
     segmented(analysis, image, classes).combine(&features(analysis, image), Combine::Subtract)
 }
 
-/// What `image`'s segmentation takes for `classes`, its edges the image's.
+/// What `image`'s segmentation takes for `classes`, its edges the image's,
+/// and round each small face what its own closer segmentation does.
 fn segmented(analysis: &Analysis, image: &Raster, classes: &[usize]) -> Selection {
     let (logits, lw, lh) = analysis.logits(classes);
-    Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image))
+    let mut found = Selection::from_coverage(refine::mask_coverage(&logits, lw, lh, 0.0, image));
+    let (width, height) = (image.width(), image.height());
+    for close in analysis.close_ups(classes) {
+        let [l, t, r, b] = close.bounds;
+        let (w, h) = (r - l, b - t);
+        let part: Vec<_> = (0..w * h).map(|i| image.get(l + i % w, t + i / w)).collect();
+        let part = Raster::new(w, h, part);
+        let seen = Selection::from_coverage(refine::mask_coverage(&close.logits, close.width, close.height, 0.0, &part));
+        let there = place(&[(close.bounds, Selection::all(w, h))], width, height);
+        found = (found.combine(&there, Combine::Subtract)).combine(&place(&[(close.bounds, seen)], width, height), Combine::Add);
+    }
+    found
 }
 
 /// Each face's eyes, brows and lips.
