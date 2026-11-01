@@ -44,6 +44,9 @@ use crate::whiten::{self, Whiten};
 pub struct Regions {
     /// The lower cheeks and jaw.
     pub lower: Selection,
+    /// The same, on or off the skin, without the mouth: where a beard
+    /// is, which the skin leaves out.
+    pub jaw: Selection,
     /// Where lines are looked for: above the brows, round the outer corners
     /// of the eyes, and from the nose to the corners of the mouth.
     pub forehead: Selection,
@@ -398,6 +401,7 @@ mod tests {
         let band = |y: f32| Selection::rectangle(W, H, (20.0, y), (280.0, y + 80.0));
         let regions = Regions {
             lower: band(210.0),
+            jaw: band(210.0),
             forehead: band(10.0),
             crows_feet: band(110.0),
             smile_lines: band(210.0),

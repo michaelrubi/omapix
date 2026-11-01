@@ -474,10 +474,10 @@ fn regions(points: &[[f32; 3]], skin: &Selection, under_eyes: &(Selection, Selec
     };
     let outline = draw(&[points], &OUTLINE, width, height);
     let lower_from = [eyes[0] + down[0] * LOWER * scale, eyes[1] + down[1] * LOWER * scale];
-    let lower = band(lower_from, 4.0 * scale)
+    let jaw = band(lower_from, 4.0 * scale)
         .combine(&outline, Combine::Intersect)
-        .combine(&draw(&[points], &NOSE, width, height), Combine::Subtract)
-        .combine(skin, Combine::Intersect);
+        .combine(&draw(&[points], &NOSE, width, height), Combine::Subtract);
+    let lower = jaw.combine(skin, Combine::Intersect);
     let brows = middle(at(BROW_TOPS[0]), at(BROW_TOPS[1]));
     let forehead = band(brows, -4.0 * scale).combine(&outline, Combine::Intersect);
     let drawn = |ring: &[(f32, f32)]| drawn(ring, REGION_FEATHER * scale, width, height);
@@ -512,6 +512,7 @@ fn regions(points: &[[f32; 3]], skin: &Selection, under_eyes: &(Selection, Selec
     let lines = |area: Selection| area.combine(skin, Combine::Intersect).combine(&lashes, Combine::Subtract);
     retouch::Regions {
         lower,
+        jaw: jaw.combine(&draw(&[points], &FEATURES, width, height), Combine::Subtract),
         forehead: lines(forehead),
         crows_feet: lines(place(&crows, width, height)),
         smile_lines: lines(place(&smiles, width, height)),
@@ -576,6 +577,24 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
         return Err("Found no skin on the faces".into());
     }
     Ok(found)
+}
+
+/// The beards in `image`: what's rough and dark on the jaw of each face,
+/// next to its bare skin, for filling gaps from.
+pub fn find_beard(image: &Raster, profile: &ColorProfile) -> Result<Selection, String> {
+    let (width, height) = (image.width(), image.height());
+    let mut beards = Selection::from_coverage(Tiled::new(width, height, 0));
+    for face in find_faces(image, profile)? {
+        if let Some(regions) = face.regions {
+            let bare = omapix_engine::skin::without_stubble(image, &regions.jaw, &regions.bare, face.iod);
+            beards = beards.combine(&regions.jaw.combine(&bare, Combine::Subtract), Combine::Add);
+        }
+    }
+    let beards = Selection::from_coverage(beards.coverage.map(|v| if v > u16::MAX / 2 { u16::MAX } else { 0 }));
+    if beards.is_empty() {
+        return Err("Found no beard to copy from".into());
+    }
+    Ok(beards)
 }
 
 /// The teeth, or the whites of the eyes, of every face in `image` the

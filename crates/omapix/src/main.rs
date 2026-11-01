@@ -15,6 +15,7 @@ mod editor;
 mod even_tone;
 mod face_liquify;
 mod face_selection;
+mod fill_beard;
 mod free_transform;
 mod generative_fill;
 mod gpu;
