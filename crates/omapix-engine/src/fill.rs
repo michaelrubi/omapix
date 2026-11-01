@@ -210,15 +210,53 @@ const SURROUNDINGS: u32 = 256;
 /// image's own values at its own size, so the fill is as sharp as what's
 /// round it. `None` with nothing selected.
 pub fn copied(id: u64, name: &str, image: &Raster, selection: &Selection) -> Option<Layer> {
+    copied_from(id, name, image, selection, None)
+}
+
+/// How far round the selection pixels are kept with a sampling area, for
+/// the fill's edge to meet what's really there.
+const EDGE: usize = 8;
+
+/// Whether each pixel is within [`EDGE`] of `hole` (`w` × `h`).
+fn near(w: usize, h: usize, hole: &[bool]) -> Vec<bool> {
+    // How many of the hole's pixels are above and left of each pixel.
+    let mut sum = vec![0u32; (w + 1) * (h + 1)];
+    for y in 0..h {
+        for x in 0..w {
+            sum[(y + 1) * (w + 1) + x + 1] = u32::from(hole[y * w + x]) + sum[y * (w + 1) + x + 1] + sum[(y + 1) * (w + 1) + x] - sum[y * (w + 1) + x];
+        }
+    }
+    (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            let (x0, x1, y0, y1) = (x.saturating_sub(EDGE), (x + EDGE + 1).min(w), y.saturating_sub(EDGE), (y + EDGE + 1).min(h));
+            sum[y1 * (w + 1) + x1] + sum[y0 * (w + 1) + x0] > sum[y0 * (w + 1) + x1] + sum[y1 * (w + 1) + x0]
+        })
+        .collect()
+}
+
+/// [`copied`], looking only in `area` if there is one, wherever it is.
+pub fn copied_from(id: u64, name: &str, image: &Raster, selection: &Selection, area: Option<&Selection>) -> Option<Layer> {
     let [bx, by, bw, bh] = selection.bounds()?;
     let (w, h) = (image.width(), image.height());
     let pad = bw.max(bh).max(SURROUNDINGS);
-    let (x, y) = (bx.saturating_sub(pad), by.saturating_sub(pad));
-    let (cw, ch) = ((bx + bw + pad).min(w) - x, (by + bh + pad).min(h) - y);
+    let (mut x, mut y) = (bx.saturating_sub(pad), by.saturating_sub(pad));
+    let (mut x1, mut y1) = ((bx + bw + pad).min(w), (by + bh + pad).min(h));
+    if let Some([ax, ay, aw, ah]) = area.and_then(Selection::bounds) {
+        (x, y, x1, y1) = (x.min(ax), y.min(ay), x1.max(ax + aw), y1.max(ay + ah));
+    }
+    let (cw, ch) = (x1 - x, y1 - y);
     let window = move || (0..ch).flat_map(move |py| (0..cw).map(move |px| (x + px, y + py)));
     let pixels: Vec<Pixel> = window().map(|(px, py)| image.get(px, py)).collect();
     let hole: Vec<bool> = window().map(|(px, py)| selection.at(px, py) > 0.0).collect();
-    let empty: Vec<bool> = pixels.iter().map(|p| p[3] < u16::MAX).collect();
+    let mut empty: Vec<bool> = pixels.iter().map(|p| p[3] < u16::MAX).collect();
+    // What's outside the area counts as empty, so nothing's copied from it.
+    if let Some(area) = area {
+        let near = near(cw as usize, ch as usize, &hole);
+        for (i, (px, py)) in window().enumerate() {
+            empty[i] |= !near[i] && area.at(px, py) == 0.0;
+        }
+    }
     let rgb: Vec<[f32; 3]> = pixels.iter().map(|p| [0, 1, 2].map(|c| f32::from(p[c]) / 65535.0)).collect();
     let filled = inpaint::fill(cw as usize, ch as usize, &rgb, &hole, &empty);
 
@@ -268,6 +306,34 @@ fn resample(plane: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sampling_area_is_copied_from_however_far_away_it_is() {
+        // Flat grey, with a checked patch further off than the fill looks.
+        let (w, h) = (1400, 300);
+        let checked = |x: u32, y: u32| x >= 1200 && (x / 3 + y / 3).is_multiple_of(2);
+        let pixels = (0..h).flat_map(|y| {
+            (0..w).map(move |x| {
+                if checked(x, y) {
+                    [50000, 50000, 50000, 65535]
+                } else {
+                    [20000, 20000, 20000, 65535]
+                }
+            })
+        });
+        let image = Raster::new(w, h, pixels.collect());
+        let selection = Selection::rectangle(w, h, (100.0, 100.0), (160.0, 160.0));
+        let spread = |layer: &Layer| {
+            let values: Vec<u16> = (105..155)
+                .flat_map(|y| (105..155).map(move |x| (x, y)))
+                .map(|(x, y)| layer.pixels.get(x, y)[0])
+                .collect();
+            values.iter().max().unwrap() - values.iter().min().unwrap()
+        };
+        assert!(spread(&copied(0, "x", &image, &selection).unwrap()) < 1000, "only flat grey in reach");
+        let area = Selection::rectangle(w, h, (1200.0, 0.0), (1400.0, 300.0));
+        assert!(spread(&copied_from(0, "x", &image, &selection, Some(&area)).unwrap()) > 10000);
+    }
 
     /// A grey image with a red square where the selection is.
     fn scene(w: u32, h: u32, square: [u32; 4]) -> (Raster, Selection) {

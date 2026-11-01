@@ -205,6 +205,10 @@ impl RightTab {
 }
 
 enum Dialog {
+    /// Which saved alpha channel Texture Fill copies from, if any.
+    TextureFill {
+        from: Option<u64>,
+    },
     /// Ask for a radius, then run a filter. For frequency separation,
     /// `preview` shows the texture layer, mid layer, colour/tone layer
     /// or the image (`None`) while adjusting.
@@ -1511,6 +1515,11 @@ impl App {
             Command::DeleteChannel => matches!(editor.view(), View::Alpha(_)),
             Command::Undo => editor.undo_label().is_some() || editor.transform().is_some(),
             Command::FreeTransform => layer.is_some() && editor.transform().is_none(),
+            Command::TransformRotate180
+            | Command::TransformRotate90Cw
+            | Command::TransformRotate90Ccw
+            | Command::TransformFlipHorizontal
+            | Command::TransformFlipVertical => layer.is_some(),
             Command::AutoAlignLayers => {
                 let pixels = |id: &u64| doc.layer(*id).is_some_and(|l| l.has_pixels());
                 editor.selected().iter().filter(|id| pixels(id)).count() > 1
@@ -1559,9 +1568,13 @@ impl App {
             Command::PasteInto => editor.doc.selection.is_some() && self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay | Command::MaskDensity => has_mask,
             Command::GaussianBlur | Command::SmartBlur | Command::HighPass | Command::UnsharpMask | Command::SmartSharpen | Command::ReduceNoise => {
-                if editor.target == Target::Mask { has_mask } else { !no_pixels }
+                match editor.target {
+                    Target::Mask => has_mask,
+                    Target::QuickMask => true,
+                    Target::Pixels => !no_pixels,
+                }
             }
-            Command::AddNoise => editor.target == Target::Pixels || has_mask,
+            Command::AddNoise => editor.target != Target::Mask || has_mask,
             Command::Invert => editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels,
             _ => true,
         }
@@ -1677,9 +1690,9 @@ impl App {
                 self.dialog = Some(Dialog::AiModels(found));
             }
             Command::Finish => self.finish(),
-            // On a mask, noise goes straight into it; on pixels, onto a
-            // Grain layer.
-            Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target == Target::Mask) => {
+            // On a mask or Quick Mask, noise goes straight into it; on
+            // pixels, onto a Grain layer.
+            Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target != Target::Pixels) => {
                 self.dialog = Some(Dialog::Filter {
                     filter: LayerFilter::AddNoise(self.filters.noise),
                     preview: true,
@@ -1779,13 +1792,11 @@ impl App {
             Command::SaveAdjustmentPreset => {
                 self.dialog = Some(Dialog::SavePreset { name: self.preset_name() });
             }
-            Command::ContentAwareFill | Command::TextureFill => {
-                if let Some(editor) = &self.editor
-                    && let Err(e) = self.content_fill.start(ctx, editor, cmd == Command::TextureFill)
-                {
-                    self.message(e, true);
-                }
+            // With alpha channels saved, one can be where to copy from.
+            Command::TextureFill if self.editor.as_ref().is_some_and(|e| !e.doc.channels.is_empty()) => {
+                self.dialog = Some(Dialog::TextureFill { from: None });
             }
+            Command::ContentAwareFill | Command::TextureFill => self.start_fill(cmd == Command::TextureFill, None, ctx),
             Command::GenerativeFill => {
                 let Some(editor) = &mut self.editor else { return };
                 match crate::generative_fill::GenerativeFill::open(ctx, editor) {
@@ -1985,6 +1996,34 @@ impl App {
                     self.message(why, true);
                 }
             }
+            // With Free Transform's box up it turns or flips the box, and
+            // otherwise it's done at once, as in Photoshop.
+            Command::TransformRotate180
+            | Command::TransformRotate90Cw
+            | Command::TransformRotate90Ccw
+            | Command::TransformFlipHorizontal
+            | Command::TransformFlipVertical => {
+                use crate::free_transform::{flipped, turned};
+                use std::f64::consts::{FRAC_PI_2, PI};
+                let background = crate::tools::grey(self.tools.background);
+                if let Some(editor) = &mut self.editor {
+                    let box_up = editor.transform().is_some();
+                    if !box_up && let Err(why) = editor.begin_transform(background) {
+                        self.message(why, true);
+                    } else if let Some((bounds, t)) = editor.transform() {
+                        editor.transform_to(match cmd {
+                            Command::TransformRotate180 => turned(bounds, &t, PI),
+                            Command::TransformRotate90Cw => turned(bounds, &t, FRAC_PI_2),
+                            Command::TransformRotate90Ccw => turned(bounds, &t, -FRAC_PI_2),
+                            Command::TransformFlipHorizontal => flipped(bounds, &t, -1.0, 1.0),
+                            _ => flipped(bounds, &t, 1.0, -1.0),
+                        });
+                        if !box_up {
+                            editor.commit_transform();
+                        }
+                    }
+                }
+            }
             Command::AutoAlignLayers => {
                 if let Some(editor) = &mut self.editor {
                     let selected = editor.selected();
@@ -2141,11 +2180,28 @@ impl App {
 
     /// Apply a Filter menu filter to the active layer (within the
     /// selection), remembering its settings for next time.
+    /// Fill the selection, with texture if `texture`, from alpha channel
+    /// `from` if there is one.
+    fn start_fill(&mut self, texture: bool, from: Option<u64>, ctx: &egui::Context) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let area = from.and_then(|id| editor.doc.channel(id)).map(|c| Selection::from_coverage(c.pixels.clone()));
+        if let Err(e) = self.content_fill.start(ctx, editor, texture, area) {
+            self.message(e, true);
+        }
+    }
+
     fn apply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
         self.filters.remember(&filter);
         let Some(editor) = &mut self.editor else {
             return;
         };
+        if editor.target == Target::QuickMask {
+            let edit = move |doc: &mut Document, _: &mut u64| doc.selection = Some(Selection::from_coverage(ops::filtered_selection(doc, &filter)));
+            editor.edit_in_background(filter.name(), edit, ctx);
+            return;
+        }
         let (id, mask) = (editor.active, editor.target == Target::Mask);
         if !mask && editor.doc.layer(id).is_some_and(|l| !l.can_paint_pixels()) {
             self.message("Could not use the filter because the layer is locked", true);
@@ -2281,6 +2337,10 @@ impl App {
     /// Right-clicking the image, as in Photoshop: what's handy for the
     /// selection, or with none, for the layer.
     fn canvas_menu(&mut self, ui: &mut Ui) {
+        if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) {
+            self.transform_items(ui);
+            return;
+        }
         // With a tool that has a brush: its panel, as Photoshop's
         // right-click brings up the brushes.
         if self.tools.tool.has_brush() {
@@ -2309,6 +2369,16 @@ impl App {
             self.menu_item(ui, Command::Paste, None);
         }
         self.menu_item(ui, Command::FreeTransform, None);
+    }
+
+    /// Edit › Transform, and the menu on Free Transform's box.
+    fn transform_items(&mut self, ui: &mut Ui) {
+        self.menu_item(ui, Command::TransformRotate180, None);
+        self.menu_item(ui, Command::TransformRotate90Cw, None);
+        self.menu_item(ui, Command::TransformRotate90Ccw, None);
+        ui.separator();
+        self.menu_item(ui, Command::TransformFlipHorizontal, None);
+        self.menu_item(ui, Command::TransformFlipVertical, None);
     }
 
     /// Image › Adjustments › Presets: add a saved preset's layers.
@@ -2464,6 +2534,7 @@ impl App {
                 });
                 ui.separator();
                 self.menu_item(ui, Command::FreeTransform, None);
+                ui.menu_button("Transform", |ui| self.transform_items(ui));
                 self.menu_item(ui, Command::AutoAlignLayers, None);
                 ui.separator();
                 self.menu_item(ui, Command::FillForeground, None);
@@ -3177,6 +3248,30 @@ impl App {
                         }
                     });
                 }
+                Dialog::TextureFill { from } => {
+                    ui.heading("Texture Fill");
+                    ui.add_space(8.0);
+                    let channels: Vec<(u64, String)> = self.editor.iter().flat_map(|e| &e.doc.channels).map(|c| (c.id, c.name.clone())).collect();
+                    let name = channels.iter().find(|c| Some(c.0) == *from).map_or("Around the selection", |c| &c.1);
+                    egui::ComboBox::from_label("Copy from").selected_text(name).show_ui(ui, |ui| {
+                        ui.selectable_value(from, None, "Around the selection");
+                        for (id, name) in &channels {
+                            ui.selectable_value(from, Some(*id), name);
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let from = *from;
+                            action = Some(Box::new(move |app, ctx| app.start_fill(true, from, ctx)));
+                            close = true;
+                        }
+                    });
+                }
                 Dialog::SavePreset { name } => {
                     ui.heading("Save Adjustment Preset");
                     ui.add_space(8.0);
@@ -3556,14 +3651,15 @@ impl App {
                     editor.set_view(view);
                 }
                 Some(Dialog::Filter { filter, preview }) => {
-                    let view = if *preview {
-                        View::Filter {
+                    let view = match (*preview, editor.target) {
+                        (true, Target::QuickMask) => View::QuickMaskFilter { filter: *filter },
+                        (false, Target::QuickMask) => View::QuickMask,
+                        (true, target) => View::Filter {
                             layer: editor.active,
                             filter: *filter,
-                            mask: editor.target == Target::Mask,
-                        }
-                    } else {
-                        View::Image
+                            mask: target == Target::Mask,
+                        },
+                        (false, _) => View::Image,
                     };
                     editor.set_view(view);
                 }
@@ -3578,6 +3674,7 @@ impl App {
                     };
                     editor.set_view(view);
                 }
+                _ if matches!(editor.view(), View::QuickMaskFilter { .. }) => editor.set_view(View::QuickMask),
                 _ if matches!(editor.view(), View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }) => editor.set_view(View::Image),
                 _ => {}
             }
@@ -3771,6 +3868,20 @@ impl App {
             return;
         }
         self.transform_drag = None;
+    }
+
+    /// A double-click inside Free Transform's box applies it.
+    fn transform_double_click(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let Some(((bounds, t), p)) = editor.transform().zip(editor.canvas.pointer) else {
+            return;
+        };
+        if crate::free_transform::hit(bounds, &t, p, 0.0) == crate::free_transform::Handle::Move {
+            editor.commit_transform();
+            self.transform_drag = None;
+        }
     }
 
     /// Dragging Free Transform's box: its handles scale, inside moves, and
@@ -5418,6 +5529,10 @@ impl eframe::App for App {
                     if restore != editor.liquify_restore() {
                         editor.set_liquify_restore(restore);
                     }
+                } else if let Some((bounds, t)) = editor.transform() {
+                    if let Some(typed) = crate::free_transform::options_bar(ui, bounds, &t) {
+                        editor.transform_to(typed);
+                    }
                 } else {
                     self.tools.options_bar(ui, target, &self.theme);
                 }
@@ -5563,7 +5678,8 @@ impl eframe::App for App {
                 // An armed Curves or Levels eyedropper, or Free Transform, takes the
                 // pointer from the tools.
                 let liquify_brush = editor.liquifying().then(|| crate::canvas::BrushOutline::round(self.tools.liquify.size));
-                let tools_off = self.properties.eyedropper.is_some() || editor.transform().is_some() || liquify_brush.is_some();
+                let transforming = editor.transform().is_some();
+                let tools_off = self.properties.eyedropper.is_some() || transforming || liquify_brush.is_some();
                 let tip = self.brushes.tip(brush.tip);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
@@ -5610,7 +5726,7 @@ impl eframe::App for App {
                 let (tool_input, response) = editor.canvas.show(ui, pasteboard, overlay);
                 input = tool_input;
                 // Alt+right-drag resizes the brush instead.
-                menu_on = (!tools_off && !modifiers.alt).then_some(response);
+                menu_on = ((!tools_off || transforming) && !modifiers.alt).then_some(response);
             } else {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, pasteboard);
                 self.empty_state(ui);
@@ -5621,6 +5737,9 @@ impl eframe::App for App {
             self.canvas_input(input, modifiers);
         }
         if let Some(response) = menu_on {
+            if response.double_clicked() {
+                self.transform_double_click();
+            }
             response.context_menu(|ui| self.canvas_menu(ui));
         }
         let ctx = ui.ctx().clone();
@@ -10024,6 +10143,83 @@ mod tests {
         assert_eq!((editor.doc.width, editor.doc.height), (h, w));
         assert_eq!((editor.canvas.width(), editor.canvas.height()), (h, w));
         assert_eq!(editor.canvas.levels()[0], (h, w));
+    }
+
+    #[test]
+    fn filters_on_quick_mask_change_the_selection_and_stay_in_it() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().enter_quick_mask();
+        let pixels = app.editor.as_ref().unwrap().doc.layers[0].pixels.clone();
+        app.run(Command::GaussianBlur, &ctx);
+        let Some(Dialog::Filter { filter, .. }) = app.dialog else {
+            panic!("no filter dialog");
+        };
+        app.editor.as_mut().unwrap().set_view(View::QuickMaskFilter { filter });
+        let at_edge = app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap().at(100, 150);
+        app.dialog = None;
+        app.apply_filter(LayerFilter::GaussianBlur { radius: 10.0 }, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.target, Target::QuickMask);
+        let sel = editor.doc.selection.as_ref().unwrap();
+        assert!(sel.at(100, 150) < at_edge && sel.at(90, 150) > 0.0 && sel.at(150, 150) > 0.9);
+        assert!(editor.doc.layers[0].pixels.same_tiles(&pixels), "the layer's left alone");
+        assert_eq!(editor.undo_label(), Some("Gaussian Blur"));
+    }
+
+    #[test]
+    fn texture_fill_asks_where_to_copy_from_once_a_channel_is_saved() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::TextureFill, &ctx);
+        assert!(app.dialog.is_none());
+        while app.content_fill.busy() {
+            let editor = app.editor.as_mut().unwrap();
+            if let Some(why) = app.content_fill.poll(editor) {
+                panic!("{why}");
+            }
+        }
+        app.editor.as_mut().unwrap().doc.save_selection();
+        app.run(Command::TextureFill, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::TextureFill { from: None })));
+    }
+
+    #[test]
+    fn transform_flips_at_once_or_turn_the_box_until_applied() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let mark = [60000, 0, 0, 65535];
+        let editor = app.editor.as_mut().unwrap();
+        editor.edit("Mark", |doc, _| doc.layers[0].pixels.tile_mut(0, 0)[150 * 256 + 110] = mark);
+        let at = |app: &App, x, y| app.editor.as_ref().unwrap().doc.layers[0].pixels.get(x, y);
+
+        // With no box up, the selection flips at once as one step.
+        app.run(Command::TransformFlipHorizontal, &ctx);
+        assert!(app.editor.as_ref().unwrap().transform().is_none());
+        assert_eq!(at(&app, 189, 150), mark);
+        assert_eq!(app.editor.as_ref().unwrap().undo_label(), Some("Free Transform"));
+        app.run(Command::Undo, &ctx);
+        assert_eq!(at(&app, 110, 150), mark);
+
+        // With the box up, it stays up, and turns add up.
+        app.run(Command::FreeTransform, &ctx);
+        app.run(Command::TransformRotate90Cw, &ctx);
+        app.run(Command::TransformRotate90Cw, &ctx);
+        let (_, _, angle) = app.editor.as_ref().unwrap().transform().unwrap().1.decompose();
+        assert!((angle.abs() - std::f64::consts::PI).abs() < 1e-9, "{angle}");
+
+        // A double-click outside the box does nothing, and inside applies it.
+        app.editor.as_mut().unwrap().canvas.pointer = Some(egui::pos2(300.0, 150.0));
+        app.transform_double_click();
+        assert!(app.editor.as_ref().unwrap().transform().is_some());
+        app.editor.as_mut().unwrap().canvas.pointer = Some(egui::pos2(150.0, 150.0));
+        app.transform_double_click();
+        assert!(app.editor.as_ref().unwrap().transform().is_none());
+        assert_eq!(at(&app, 189, 149), mark);
     }
 
     #[test]

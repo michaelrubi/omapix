@@ -73,6 +73,8 @@ pub enum View {
         filter: omapix_engine::filters::LayerFilter,
         mask: bool,
     },
+    /// Quick Mask, with what a Filter menu filter would do to the selection.
+    QuickMaskFilter { filter: omapix_engine::filters::LayerFilter },
     /// What adding noise with `options` above `layer` would produce.
     AddNoise { layer: u64, options: NoiseOptions },
     /// One channel of the finished image, in grey (the Channels panel).
@@ -87,13 +89,16 @@ pub enum View {
 impl View {
     /// Whether it shows the selection itself, so its outline isn't drawn.
     pub fn shows_selection(self) -> bool {
-        matches!(self, View::QuickMask | View::Refined(_))
+        matches!(self, View::QuickMask | View::QuickMaskFilter { .. } | View::Refined(_))
     }
 
     /// Whether it's rendered whole by [`render_view`], rather than tile by
     /// tile, in place, by [`draw_tiles`].
     fn whole(self) -> bool {
-        matches!(self, View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. } | View::Alpha(_))
+        matches!(
+            self,
+            View::Separation { .. } | View::Filter { .. } | View::QuickMaskFilter { .. } | View::AddNoise { .. } | View::Alpha(_)
+        )
     }
 }
 
@@ -2448,6 +2453,14 @@ pub(crate) fn render_view(doc: &Document, view: View, colour: Pixel, base: Optio
             let image = composite::composite(&layers, doc.width, doc.height);
             (Render::new(image), None)
         }
+        View::QuickMaskFilter { filter } => {
+            let mut preview = doc.clone();
+            preview.selection = Some(Selection {
+                coverage: ops::filtered_selection(doc, &filter),
+                outlines: Vec::new(),
+            });
+            render_view(&preview, View::QuickMask, colour, base)
+        }
         View::AddNoise { layer, options } => {
             let mut preview_doc = doc.clone();
             let base_tiled = match base {
@@ -2551,7 +2564,7 @@ fn draw_tiles(
             out
         }
         // The rest are drawn whole by `render_view`.
-        View::Image | View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. } | View::Alpha(_) => {
+        View::Image | View::Separation { .. } | View::Filter { .. } | View::QuickMaskFilter { .. } | View::AddNoise { .. } | View::Alpha(_) => {
             composite::composite_tiles(layers, tiles, groups)
         }
     }

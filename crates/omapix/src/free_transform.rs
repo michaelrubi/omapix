@@ -153,6 +153,91 @@ impl Drag {
     }
 }
 
+/// `t` turned by `angle` radians about the box's centre.
+pub fn turned(bounds: [f64; 4], t: &Affine, angle: f64) -> Affine {
+    t.then(&Affine::rotate_about(angle, t.apply(local(bounds, 0.0, 0.0))))
+}
+
+/// `t` flipped across the box's own axes: -1 in `sx` for horizontally, in
+/// `sy` for vertically.
+pub fn flipped(bounds: [f64; 4], t: &Affine, sx: f64, sy: f64) -> Affine {
+    Affine::scale_about(sx, sy, local(bounds, 0.0, 0.0)).then(t)
+}
+
+/// The box as typed values: where its centre is, its size in percent, and
+/// its angle in degrees. A flip keeps its sign in `flip`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Typed {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    angle: f64,
+    flip: f64,
+}
+
+impl Typed {
+    fn of(bounds: [f64; 4], t: &Affine) -> Self {
+        let (x, y) = t.apply(local(bounds, 0.0, 0.0));
+        let (sx, sy, angle) = t.decompose();
+        Self {
+            x,
+            y,
+            width: sx * 100.0,
+            height: sy.abs() * 100.0,
+            angle: angle.to_degrees(),
+            flip: sy.signum(),
+        }
+    }
+
+    fn transform(&self, bounds: [f64; 4]) -> Affine {
+        let c = local(bounds, 0.0, 0.0);
+        Affine::scale_about(self.width / 100.0, self.flip * self.height / 100.0, c)
+            .then(&Affine::rotate_about(self.angle.to_radians(), c))
+            .then(&Affine::translate(self.x - c.0, self.y - c.1))
+    }
+}
+
+/// Free Transform's X, Y, W, H and angle, with the transform to change to
+/// if one's been changed.
+pub fn options_bar(ui: &mut egui::Ui, bounds: [f64; 4], t: &Affine) -> Option<Affine> {
+    let mut typed = Typed::of(bounds, t);
+    let was = typed;
+    ui.horizontal(|ui| {
+        ui.label("X:");
+        ui.add(egui::DragValue::new(&mut typed.x).suffix(" px").fixed_decimals(1));
+        ui.label("Y:");
+        ui.add(egui::DragValue::new(&mut typed.y).suffix(" px").fixed_decimals(1));
+        ui.separator();
+        ui.label("W:");
+        ui.add(
+            egui::DragValue::new(&mut typed.width)
+                .range(0.1..=10000.0)
+                .speed(0.2)
+                .suffix(" %")
+                .fixed_decimals(1),
+        );
+        ui.label("H:");
+        ui.add(
+            egui::DragValue::new(&mut typed.height)
+                .range(0.1..=10000.0)
+                .speed(0.2)
+                .suffix(" %")
+                .fixed_decimals(1),
+        );
+        ui.separator();
+        ui.label("Angle:");
+        ui.add(
+            egui::DragValue::new(&mut typed.angle)
+                .range(-180.0..=180.0)
+                .speed(0.2)
+                .suffix("°")
+                .fixed_decimals(1),
+        );
+    });
+    (typed != was).then(|| typed.transform(bounds))
+}
+
 /// The status bar's readout: width and height in percent, and the angle.
 pub fn readout(t: &Affine) -> String {
     let (sx, sy, angle) = t.decompose();
@@ -215,6 +300,36 @@ mod tests {
         let t = drag.to(BOX, pos2(200.0, 350.0), false, false);
         let (sx, sy, _) = t.decompose();
         assert!((sx - 1.5).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6, "{sx} {sy}");
+    }
+
+    #[test]
+    fn typed_values_rebuild_the_transform_they_came_from() {
+        let t = Affine::scale_about(1.5, 0.5, (120.0, 130.0)).then(&Affine::rotate_about(0.4, (200.0, 150.0)));
+        for t in [t, flipped(BOX, &t, -1.0, 1.0), flipped(BOX, &t, 1.0, -1.0), Affine::IDENTITY] {
+            let rebuilt = Typed::of(BOX, &t).transform(BOX);
+            let (a, b) = (corners(BOX, &t), corners(BOX, &rebuilt));
+            assert!(a.iter().zip(&b).all(|(a, b)| close(*a, *b)), "{a:?} {b:?}");
+        }
+        // Typing a width stretches about the centre, along the box.
+        let typed = Typed {
+            width: 200.0,
+            ..Typed::of(BOX, &Affine::IDENTITY)
+        };
+        let c = corners(BOX, &typed.transform(BOX));
+        assert!(close(c[0], pos2(0.0, 100.0)) && close(c[2], pos2(400.0, 200.0)));
+    }
+
+    #[test]
+    fn flips_and_quarter_turns_keep_the_box_where_it_is() {
+        let c = corners(BOX, &flipped(BOX, &Affine::IDENTITY, -1.0, 1.0));
+        assert!(close(c[0], pos2(300.0, 100.0)) && close(c[2], pos2(100.0, 200.0)));
+        let c = corners(BOX, &turned(BOX, &Affine::IDENTITY, std::f64::consts::FRAC_PI_2));
+        assert!(close(c[0], pos2(250.0, 50.0)) && close(c[2], pos2(150.0, 250.0)));
+        // A turned box flips across its own axes, not the image's.
+        let t = Affine::rotate_about(0.5, (200.0, 150.0));
+        let c = corners(BOX, &flipped(BOX, &t, -1.0, 1.0));
+        let was = corners(BOX, &t);
+        assert!(close(c[0], was[1]) && close(c[1], was[0]) && close(c[2], was[3]));
     }
 
     #[test]

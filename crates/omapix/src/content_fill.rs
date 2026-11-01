@@ -34,8 +34,9 @@ pub struct ContentFill {
 impl ContentFill {
     /// Fill the selection in what `editor` shows: with texture copied from
     /// round it if that's what's asked for (`texture`), or if the model
-    /// isn't there, and by the model otherwise.
-    pub fn start(&mut self, ctx: &egui::Context, editor: &Editor, texture: bool) -> Result<(), String> {
+    /// isn't there, and by the model otherwise. Texture is copied from
+    /// `area` if there is one.
+    pub fn start(&mut self, ctx: &egui::Context, editor: &Editor, texture: bool, area: Option<Selection>) -> Result<(), String> {
         let name = if texture { "Texture Fill" } else { "Content-Aware Fill" };
         let texture = texture || omapix_ai::find_model(omapix_ai::lama::MODEL).is_none();
         let (Some(image), Some(selection)) = (editor.canvas.render(), &editor.doc.selection) else {
@@ -46,7 +47,7 @@ impl ContentFill {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let layer = if texture {
-                copied(name, &image, &selection)
+                copied(name, &image, &selection, area.as_ref())
             } else {
                 layer(&image, &selection, &profile)
             };
@@ -103,10 +104,10 @@ fn layer(image: &Render, selection: &Selection, profile: &ColorProfile) -> Resul
     fill::layer(0, "Content-Aware Fill", &patch, &filled, profile, selection).map_err(|e| e.to_string())
 }
 
-/// The selection filled with texture copied from round it.
-fn copied(name: &str, image: &Render, selection: &Selection) -> Result<Layer, String> {
+/// The selection filled with texture copied from `area`, or from round it.
+fn copied(name: &str, image: &Render, selection: &Selection, area: Option<&Selection>) -> Result<Layer, String> {
     image
-        .with_image(|image| fill::copied(0, name, image, selection))
+        .with_image(|image| fill::copied_from(0, name, image, selection, area))
         .ok_or("The image isn't ready yet")?
         .ok_or("Select what to fill first".into())
 }
@@ -160,10 +161,10 @@ mod tests {
         let mut editor = Editor::new(doc).unwrap();
         let mut content = ContentFill::default();
         let ctx = egui::Context::default();
-        assert_eq!(content.start(&ctx, &editor, true), Err("Select what to fill first".into()));
+        assert_eq!(content.start(&ctx, &editor, true, None), Err("Select what to fill first".into()));
         editor.doc.selection = Some(Selection::rectangle(600, 400, (250.0, 150.0), (300.0, 200.0)));
         editor.canvas.set_render(Arc::new(Render::new(image)));
-        content.start(&ctx, &editor, true).unwrap();
+        content.start(&ctx, &editor, true, None).unwrap();
         while content.busy() {
             std::thread::sleep(std::time::Duration::from_millis(5));
             assert_eq!(content.poll(&mut editor), None);
