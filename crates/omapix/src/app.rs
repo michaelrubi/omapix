@@ -234,6 +234,7 @@ enum Dialog {
     SelectAndMask(crate::select_and_mask::SelectAndMask),
     AutoRetouch(crate::auto_retouch::AutoRetouch),
     HealBlemishes(crate::heal_blemishes::HealBlemishes),
+    SoftenScars(crate::soften_scars::SoftenScars),
     SmoothSkin(crate::smooth_skin::SmoothSkin),
     EvenTone(crate::even_tone::EvenTone),
     Denoise(crate::denoise::Denoise),
@@ -304,6 +305,7 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::SelectTeeth
         | Command::AutoRetouch
         | Command::HealBlemishes
+        | Command::SoftenScars
         | Command::SmoothSkin
         | Command::EvenTone
         | Command::ReduceShine
@@ -1920,6 +1922,13 @@ impl App {
                     Err(e) => self.message(e, true),
                 }
             }
+            Command::SoftenScars => {
+                let Some(editor) = &self.editor else { return };
+                match crate::soften_scars::SoftenScars::open(ctx, editor) {
+                    Ok(dialog) => self.dialog = Some(Dialog::SoftenScars(dialog)),
+                    Err(e) => self.message(e, true),
+                }
+            }
             Command::SmoothSkin => {
                 let Some(editor) = &self.editor else { return };
                 match crate::smooth_skin::SmoothSkin::open(ctx, editor, self.filters.smooth_skin) {
@@ -2676,6 +2685,7 @@ impl App {
                 self.menu_item(ui, Command::AutoRetouch, None);
                 ui.separator();
                 self.menu_item(ui, Command::HealBlemishes, None);
+                self.menu_item(ui, Command::SoftenScars, None);
                 self.menu_item(ui, Command::SmoothSkin, None);
                 self.menu_item(ui, Command::EvenTone, None);
                 self.menu_item(ui, Command::ReduceShine, None);
@@ -2979,6 +2989,20 @@ impl App {
             self.dialog = None;
             return;
         }
+        if let (Some(Dialog::SoftenScars(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
+            match dialog.show(ctx, editor, &self.theme) {
+                // White on the mask shows the softening.
+                Ok(Some(true)) => {
+                    self.tools.tool = crate::tools::Tool::Brush;
+                    self.tools.foreground = [255; 3];
+                }
+                Ok(Some(false)) => {}
+                Ok(None) => return,
+                Err(e) => self.message(e, true),
+            }
+            self.dialog = None;
+            return;
+        }
         if let (Some(Dialog::SmoothSkin(dialog)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
             match dialog.show(ctx, editor, &self.theme) {
                 Ok(Some(true)) => {
@@ -3218,6 +3242,7 @@ impl App {
                 | Dialog::SelectAndMask(_)
                 | Dialog::AutoRetouch(_)
                 | Dialog::HealBlemishes(_)
+                | Dialog::SoftenScars(_)
                 | Dialog::SmoothSkin(_)
                 | Dialog::EvenTone(_)
                 | Dialog::Denoise(_)

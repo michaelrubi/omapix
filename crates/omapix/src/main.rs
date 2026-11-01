@@ -36,6 +36,7 @@ mod select_and_mask;
 mod select_subject;
 mod settings;
 mod smooth_skin;
+mod soften_scars;
 mod tablet;
 mod theme;
 mod tools;
