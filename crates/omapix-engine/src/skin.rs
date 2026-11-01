@@ -403,6 +403,7 @@ mod tests {
             y: 100.0,
             radius: 4.0,
             score: 20.0,
+            mole: false,
         };
         let patches = patches(&skin, &[spot(100.0), spot(148.0)], 100.0);
         assert!(patches.at(100, 100) > 0.99);
@@ -421,6 +422,7 @@ mod tests {
             y: 150.0,
             radius: 4.0,
             score: 20.0,
+            mole: false,
         };
         let patch = patches(&skin, &[spot], IOD);
         add_layer(&mut doc, 0, &image, &skin, &patch, IOD, &Smoothing::default()).unwrap();

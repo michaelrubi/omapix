@@ -16,6 +16,7 @@
 //!   │    ├─ Crow's Feet
 //!   │    ├─ Smile Lines
 //!   │    ├─ Forehead Lines
+//!   │    ├─ Blemishes
 //!   │    ├─ Smooth Skin
 //!   │    └─ Reduce Shine
 //!   └─ Face 2
@@ -25,7 +26,7 @@
 //! between its own eyes, so a small face at the back of a group is smoothed
 //! as finely as it needs.
 
-use crate::blemish::Spot;
+use crate::blemish::{self, Spot};
 use crate::body::{Joint, Joints};
 use crate::document::Document;
 use crate::layer::Layer;
@@ -80,8 +81,8 @@ pub struct Face<'a> {
     /// This person's skin, and the distance between their eyes.
     pub skin: &'a Selection,
     pub iod: f32,
-    /// The spots whose mid band is softened: with none, there's no Smooth
-    /// Skin layer.
+    /// The spots whose mid band is softened and which are then healed:
+    /// with none, there's no Blemishes layer.
     pub spots: &'a [Spot],
     /// Where its skin is retouched: without, only at its spots.
     pub regions: Option<&'a Regions>,
@@ -263,6 +264,9 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
             }
             skin::add_band_layer(doc, at, "Smooth Skin", &image, face.skin, &mask, skin::hand_radii(face.iod), smoothing.amount);
         }
+        if !face.spots.is_empty() {
+            blemish::heal(doc, index(doc, id), face.spots);
+        }
         if let Some(regions) = face.regions.filter(|_| face.lines.any()) {
             let [_, coarse] = skin::hand_radii(face.iod);
             let image = doc.composite_current_and_below(index(doc, id));
@@ -350,6 +354,7 @@ mod tests {
             y: 100.0,
             radius: 4.0,
             score: 20.0,
+            mole: false,
         }]
     }
 
@@ -437,14 +442,14 @@ mod tests {
         let retouch = add_layers(&mut doc, 0, &[face(1, &left, &spots[0]), face(2, &right, &spots[1])]).unwrap();
 
         let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
-        let steps = ["Smooth Skin", "Burn", "Dodge", "Dodge & Burn"];
-        assert_eq!(names[1..5], steps);
-        assert_eq!(names[5], "Face 2");
-        assert_eq!(names[6..10], steps);
-        assert_eq!(names[10..], ["Face 1", "Retouch"]);
+        let steps = ["Smooth Skin", "Blemishes", "Burn", "Dodge", "Dodge & Burn"];
+        assert_eq!(names[1..6], steps);
+        assert_eq!(names[6], "Face 2");
+        assert_eq!(names[7..12], steps);
+        assert_eq!(names[12..], ["Face 1", "Retouch"]);
         // Groups in groups, all Pass Through, so the curves see the image.
         let layer = |name: &str| doc.layers.iter().rfind(|l| l.name == name).unwrap();
-        assert_eq!(doc.layers[11].id, retouch);
+        assert_eq!(doc.layers[13].id, retouch);
         for group in ["Face 1", "Face 2"] {
             let group = layer(group);
             assert_eq!((group.parent, group.is_group, group.blend), (Some(retouch), true, BlendMode::PassThrough));
@@ -608,7 +613,7 @@ mod tests {
         add_layers(&mut doc, 0, &[shiny(1, &left, &spots), shiny(2, &right, &[])]).unwrap();
         let names: Vec<_> = doc.layers.iter().map(|l| l.name.as_str()).collect();
         // The second face has no shine or spots, so no layers for it.
-        assert_eq!(names[1..], ["Reduce Shine", "Smooth Skin", "Face 1", "Retouch"]);
+        assert_eq!(names[1..], ["Reduce Shine", "Smooth Skin", "Blemishes", "Face 1", "Retouch"]);
         let shine = doc.layers.iter().find(|l| l.name == "Reduce Shine").unwrap();
         assert_eq!(shine.opacity, 0.5);
         // The hot spot's lower for it.

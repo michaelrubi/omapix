@@ -24,10 +24,10 @@ pub struct HealBlemishes {
 }
 
 /// The least score a spot needs at `sensitivity`: at 100 %, every spot
-/// found; at 50 %, about 9 (clear pimples and marks, few shadows or
-/// pores, on the test portraits); at 0 %, 20 (only obvious pimples).
+/// found, faint acne scars among them; at 50 %, about 7; at 0 %, 20 (only
+/// obvious pimples).
 fn least_score(sensitivity: f32) -> f32 {
-    LEAST_SCORE * 5f32.powf((100.0 - sensitivity) / 100.0)
+    LEAST_SCORE * 8f32.powf((100.0 - sensitivity) / 100.0)
 }
 
 /// Those of `found` (most prominent first) healed at `sensitivity`.
@@ -148,6 +148,7 @@ mod tests {
             y: 0.0,
             radius: 2.0,
             score,
+            mole: false,
         };
         let mut dialog = HealBlemishes {
             sensitivity: 100.0,
@@ -180,6 +181,7 @@ mod tests {
             y: 100.0,
             radius: 4.0,
             score: 20.0,
+            mole: false,
         };
         let mut dialog = HealBlemishes {
             sensitivity: 0.0,

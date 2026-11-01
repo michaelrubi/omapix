@@ -1152,7 +1152,8 @@ OMAPIX_FACE_PHOTO=photos OMAPIX_FACE_OUT=out \
   right people; an arm across someone else would go to them.
 - **Order.** For each face: Reduce Shine (milestone 13), then Smooth Skin
   masked to the lower cheeks and jaw less any beard and patches round the
-  spots found, then the lines and Eye Bags, each from what the last shows,
+  spots found, then a Spot Healing dab on each spot (the Blemishes layer),
+  then the lines and Eye Bags, each from what the last shows,
   then Dodge & Burn from the image smoothed, each from
   Current & Below of the face's group so far. Smooth Skin takes down the
   mid band, and the lines and Eye Bags the fine texture too, with blurs of a

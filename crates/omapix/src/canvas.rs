@@ -1439,6 +1439,7 @@ mod tests {
             y: 300.0,
             radius: 10.0,
             score: 20.0,
+            mole: false,
         };
         let input = egui::RawInput {
             screen_rect: Some(view),

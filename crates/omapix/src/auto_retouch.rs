@@ -37,6 +37,8 @@ pub struct Step {
 #[serde(default)]
 pub struct Retouch {
     pub blemishes: Step,
+    /// Moles and beauty marks are left out of the blemishes.
+    pub keep_beauty_marks: bool,
     pub shine: Step,
     pub smooth_skin: Step,
     pub forehead: Step,
@@ -91,6 +93,7 @@ impl Preset {
         .map(|amount| Step { on: true, amount });
         Retouch {
             blemishes,
+            keep_beauty_marks: false,
             shine: lighten,
             smooth_skin,
             forehead: lines,
@@ -170,13 +173,13 @@ impl AutoRetouch {
     }
 
     /// The spots face `n` has healed: none if it or the step is off.
-    fn healed(&self, n: usize) -> &[Spot] {
-        let (face, blemishes) = (&self.faces[n], self.settings(Some(n)).blemishes);
-        if face.on && blemishes.on {
-            at_sensitivity(&face.found.spots, blemishes.amount)
-        } else {
-            &[]
+    fn healed(&self, n: usize) -> Vec<Spot> {
+        let (face, settings) = (&self.faces[n], self.settings(Some(n)));
+        if !face.on || !settings.blemishes.on {
+            return Vec::new();
         }
+        let spots = at_sensitivity(&face.found.spots, settings.blemishes.amount).iter().copied();
+        spots.filter(|s| !(s.mole && settings.keep_beauty_marks)).collect()
     }
 
     /// Select the face at `at` (image pixels), if there's one there.
@@ -204,7 +207,7 @@ impl AutoRetouch {
             }
         }
         let ready = self.finding.is_none();
-        self.circled = (0..self.faces.len()).flat_map(|n| self.healed(n).to_vec()).collect();
+        self.circled = (0..self.faces.len()).flat_map(|n| self.healed(n)).collect();
         let mut result = (ready && self.accept).then_some(true);
         let area = egui::Modal::default_area(egui::Id::new("auto-retouch")).anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
         let modal = egui::Modal::new(egui::Id::new("auto-retouch"))
@@ -295,7 +298,7 @@ impl AutoRetouch {
                 for (label, hint, step) in [
                     (
                         "Find Blemishes",
-                        "Sensitivity: how many of the spots found get a Smooth Skin patch",
+                        "Sensitivity: how many of the spots found get a Smooth Skin patch and a heal on the Blemishes layer",
                         &mut settings.blemishes,
                     ),
                     ("Reduce Shine", "Amount: the Reduce Shine layer's opacity", &mut settings.shine),
@@ -335,6 +338,8 @@ impl AutoRetouch {
                     ui.end_row();
                 }
             });
+            ui.add_enabled(settings.blemishes.on, egui::Checkbox::new(&mut settings.keep_beauty_marks, "Keep Beauty Marks"))
+                .on_hover_text("Leave out spots that are dark without being red, as moles are. Some old acne marks look the same");
         });
         if settings != before {
             match self.selected {
@@ -380,7 +385,7 @@ impl AutoRetouch {
                 (
                     n + 1,
                     Arc::clone(found),
-                    self.healed(n).len(),
+                    self.healed(n),
                     amount(settings.shine),
                     smoothing,
                     lines,
@@ -389,7 +394,8 @@ impl AutoRetouch {
                 )
             })
             .filter(|(_, found, healed, shine, smoothing, lines, evening, lighten)| {
-                ((*healed > 0 || found.regions.is_some()) && smoothing.is_some())
+                !healed.is_empty()
+                    || (found.regions.is_some() && smoothing.is_some())
                     || lines.any()
                     || shine.is_some()
                     || evening.is_some()
@@ -409,7 +415,7 @@ impl AutoRetouch {
                             number: *number,
                             skin: &found.skin,
                             iod: found.iod,
-                            spots: &found.spots[..*healed],
+                            spots: healed,
                             regions: found.regions.as_ref(),
                             lines: *lines,
                             shine: *shine,
@@ -503,14 +509,20 @@ mod tests {
         editor.canvas.lay_out_for_test(Rect::from_min_size(Pos2::ZERO, vec2(W as f32, H as f32)), 1.0);
         let faces = [150.0, 850.0].map(|x: f32| {
             let half = if x < 500.0 { 0.0 } else { 500.0 };
-            let spot = |y, score| Spot { x, y, radius: 4.0, score };
+            let spot = |y, score| Spot {
+                x,
+                y,
+                radius: 4.0,
+                score,
+                mole: y > 500.0,
+            };
             Face {
                 thumbnail: thumbnail(&image, [x - 100.0, 300.0, x + 100.0, 500.0]),
                 found: Arc::new(FoundFace {
                     bounds: [x - 100.0, 300.0, x + 100.0, 500.0],
                     iod: 80.0,
                     skin: Selection::rectangle(W, H, (half, 0.0), (half + 500.0, H as f32)),
-                    spots: vec![spot(400.0, 25.0), spot(600.0, 6.0)],
+                    spots: vec![spot(400.0, 25.0), spot(600.0, 4.5)],
                     teeth: Selection::rectangle(W, H, (x - 30.0, 450.0), (x + 30.0, 470.0)),
                     eyes: Selection::rectangle(W, H, (x - 50.0, 340.0), (x - 30.0, 350.0)),
                     under_eyes: (
@@ -599,11 +611,11 @@ mod tests {
 
         let before = editor.doc.composite();
         let names = apply(&mut editor, &dialog);
-        let steps = ["Smooth Skin", "Burn", "Dodge", "Dodge & Burn", "Whiten Eyes", "Whiten Teeth"];
-        assert_eq!(names[1..7], steps);
-        assert_eq!(names[7], "Face 2");
-        assert_eq!(names[8..14], steps);
-        assert_eq!(names[14..], ["Face 1", "Retouch"]);
+        let steps = ["Smooth Skin", "Blemishes", "Burn", "Dodge", "Dodge & Burn", "Whiten Eyes", "Whiten Teeth"];
+        assert_eq!(names[1..8], steps);
+        assert_eq!(names[8], "Face 2");
+        assert_eq!(names[9..16], steps);
+        assert_eq!(names[16..], ["Face 1", "Retouch"]);
         // The group's selected, and both spots are softened.
         assert_eq!(editor.doc.layer(editor.active).unwrap().name, "Retouch");
         let after = editor.doc.composite();
@@ -633,10 +645,17 @@ mod tests {
         dialog.faces[0].on = false;
         frame(&ctx, &editor, &mut dialog, vec![]).unwrap();
         assert_eq!(dialog.spots(), &dialog.faces[1].found.spots[..1]);
+        // Keeping beauty marks leaves out the first face's second spot.
+        dialog.faces[0].on = true;
+        dialog.all.keep_beauty_marks = true;
+        frame(&ctx, &editor, &mut dialog, vec![]).unwrap();
+        assert_eq!(dialog.spots().len(), 2);
+        dialog.all.keep_beauty_marks = false;
+        dialog.faces[0].on = false;
 
         let before = editor.doc.composite();
         let names = apply(&mut editor, &dialog);
-        assert_eq!(names[1..], ["Smooth Skin", "Face 2", "Retouch"]);
+        assert_eq!(names[1..], ["Smooth Skin", "Blemishes", "Face 2", "Retouch"]);
         let after = editor.doc.composite();
         assert!(after.get(850, 400)[0] > before.get(850, 400)[0]);
         assert_eq!(after.get(150, 400), before.get(150, 400));
@@ -729,7 +748,7 @@ mod tests {
         let (mut editor, mut dialog) = dialog_on(Raster::new(W, H, pixels));
         let mut only = Preset::Strong.settings();
         (only.smooth_skin.on, only.even_tone.on, only.under_eyes.on) = (false, false, false);
-        (only.whiten_eyes.on, only.whiten_teeth.on) = (false, false);
+        (only.whiten_eyes.on, only.whiten_teeth.on, only.blemishes.on) = (false, false, false);
         dialog.all = only;
         let before = editor.doc.composite();
 
