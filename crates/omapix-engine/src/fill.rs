@@ -237,6 +237,17 @@ fn near(w: usize, h: usize, hole: &[bool]) -> Vec<bool> {
 
 /// [`copied`], looking only in `area` if there is one, wherever it is.
 pub fn copied_from(id: u64, name: &str, image: &Raster, selection: &Selection, area: Option<&Selection>) -> Option<Layer> {
+    fill_from(id, name, image, selection, area, true)
+}
+
+/// [`copied`], looking in `area` and nowhere else, not even at what's
+/// round the selection: hair for a gap in bare skin.
+pub fn copied_only_from(id: u64, name: &str, image: &Raster, selection: &Selection, area: &Selection) -> Option<Layer> {
+    fill_from(id, name, image, selection, Some(area), false)
+}
+
+/// The fill, its `area` widened by [`EDGE`] round the selection if `edge`.
+fn fill_from(id: u64, name: &str, image: &Raster, selection: &Selection, area: Option<&Selection>, edge: bool) -> Option<Layer> {
     let [bx, by, bw, bh] = selection.bounds()?;
     let (w, h) = (image.width(), image.height());
     let pad = bw.max(bh).max(SURROUNDINGS);
@@ -254,7 +265,7 @@ pub fn copied_from(id: u64, name: &str, image: &Raster, selection: &Selection, a
     if let Some(area) = area {
         let near = near(cw as usize, ch as usize, &hole);
         for (i, (px, py)) in window().enumerate() {
-            empty[i] |= !near[i] && area.at(px, py) == 0.0;
+            empty[i] |= !(edge && near[i]) && area.at(px, py) == 0.0;
         }
     }
     let rgb: Vec<[f32; 3]> = pixels.iter().map(|p| [0, 1, 2].map(|c| f32::from(p[c]) / 65535.0)).collect();

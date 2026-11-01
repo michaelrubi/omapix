@@ -39,6 +39,33 @@ impl ContentFill {
     pub fn start(&mut self, ctx: &egui::Context, editor: &Editor, texture: bool, area: Option<Selection>) -> Result<(), String> {
         let name = if texture { "Texture Fill" } else { "Content-Aware Fill" };
         let texture = texture || omapix_ai::find_model(omapix_ai::lama::MODEL).is_none();
+        self.run(ctx, editor, name, move |image, selection, profile| {
+            if texture {
+                copied(name, image, selection, area.as_ref())
+            } else {
+                layer(image, selection, profile)
+            }
+        })
+    }
+
+    /// Fill the selection in what `editor` shows with texture copied from
+    /// `area` alone, as a layer called `name`.
+    pub fn copy(&mut self, ctx: &egui::Context, editor: &Editor, name: &'static str, area: Selection) -> Result<(), String> {
+        self.run(ctx, editor, name, move |image, selection, _| {
+            image
+                .with_image(|image| fill::copied_only_from(0, name, image, selection, &area))
+                .ok_or("The image isn't ready yet")?
+                .ok_or("Select what to fill first".into())
+        })
+    }
+
+    fn run(
+        &mut self,
+        ctx: &egui::Context,
+        editor: &Editor,
+        name: &'static str,
+        make: impl FnOnce(&Render, &Selection, &ColorProfile) -> Result<Layer, String> + Send + 'static,
+    ) -> Result<(), String> {
         let (Some(image), Some(selection)) = (editor.canvas.render(), &editor.doc.selection) else {
             return Err("Select what to fill first".into());
         };
@@ -46,12 +73,7 @@ impl ContentFill {
         let (tx, rx) = channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let layer = if texture {
-                copied(name, &image, &selection, area.as_ref())
-            } else {
-                layer(&image, &selection, &profile)
-            };
-            let _ = tx.send(layer);
+            let _ = tx.send(make(&image, &selection, &profile));
             ctx.request_repaint();
         });
         self.running = Some((rx, name));

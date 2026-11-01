@@ -29,6 +29,8 @@ pub struct Spot {
     /// How much it stands out from the skin round it, in multiples of how
     /// much the skin varies at its size.
     pub score: f32,
+    /// Dark without being red, as a mole or beauty mark is.
+    pub mole: bool,
 }
 
 impl Spot {
@@ -57,7 +59,7 @@ const RADIUS: f32 = 1.9;
 /// How much wider the ring of skin a blob is compared with is.
 const SURROUND: f32 = 2.5;
 /// The least score a spot can have.
-pub const LEAST_SCORE: f32 = 4.0;
+pub const LEAST_SCORE: f32 = 2.5;
 /// How far from round a spot can be: the ratio of its curvatures across
 /// and along (SIFT uses 10; creases are longer).
 const LONGEST: f32 = 6.0;
@@ -140,6 +142,7 @@ pub fn find(srgb: &[[u8; 4]], skin: &Selection, iod: f32) -> Vec<Spot> {
                         y: y as f32,
                         radius: SIZES[widest] * iod * RADIUS,
                         score: v,
+                        mole: false,
                     });
                 }
             }
@@ -164,8 +167,42 @@ pub fn find(srgb: &[[u8; 4]], skin: &Selection, iod: f32) -> Vec<Spot> {
             y: by as f32 + (s.y + 0.5) * k,
             radius: s.radius * k,
             score: s.score,
+            mole: mole(&weighted, gw, gh, &s),
         })
         .collect()
+}
+
+/// How much darker than the skin round it a mole is, in L*, at least; and
+/// how much redder it can be, as a fraction of that.
+const MOLE_DARK: f32 = 6.0;
+const MOLE_RED: f32 = 0.25;
+
+/// Whether `spot` (working pixels) is a mole: its middle against the ring
+/// of skin round it, in `weighted`'s Lab.
+fn mole(weighted: &[[f32; 4]], gw: usize, gh: usize, spot: &Spot) -> bool {
+    let (inner, outer) = ((spot.radius * 0.6).max(1.0), (spot.radius * SURROUND).max(3.0));
+    let (mut middle, mut ring) = ([0.0f32; 3], [0.0f32; 3]);
+    let (x0, x1) = ((spot.x - outer).max(0.0) as usize, ((spot.x + outer) as usize + 1).min(gw));
+    let (y0, y1) = ((spot.y - outer).max(0.0) as usize, ((spot.y + outer) as usize + 1).min(gh));
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let d = (x as f32 - spot.x).hypot(y as f32 - spot.y);
+            let sum = match d {
+                d if d <= inner => &mut middle,
+                d if d >= spot.radius && d <= outer => &mut ring,
+                _ => continue,
+            };
+            for c in 0..3 {
+                sum[c] += weighted[y * gw + x][c];
+            }
+        }
+    }
+    if middle[2] < 1e-3 || ring[2] < 1e-3 {
+        return false;
+    }
+    let dark = ring[0] / ring[2] - middle[0] / middle[2];
+    let red = middle[1] / middle[2] - ring[1] / ring[2];
+    dark >= MOLE_DARK && red <= dark * MOLE_RED
 }
 
 /// How much each point stands out as a blob of Gaussian `sigma`: how much
@@ -351,6 +388,14 @@ mod tests {
         for s in &spots {
             assert!((2.0..10.0).contains(&s.radius), "{s:?}");
         }
+    }
+
+    #[test]
+    fn a_dark_spot_is_a_mole_and_a_red_one_is_not() {
+        let spots = find(&photo(), &all_skin(), 150.0);
+        let at = |x: f32| spots.iter().find(|s| (s.x - x).abs() < 3.0).unwrap();
+        assert!(at(150.0).mole, "{spots:?}");
+        assert!(!at(400.0).mole, "{spots:?}");
     }
 
     #[test]

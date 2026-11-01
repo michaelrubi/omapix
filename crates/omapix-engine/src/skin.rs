@@ -275,7 +275,51 @@ pub fn add_band_layer(
     radii: [f32; 2],
     amount: f32,
 ) -> Option<u64> {
-    let bounds @ [x, y, w, h] = mask.bounds()?;
+    let bounds = mask.bounds()?;
+    Some(band_layer(doc, above, name, image, skin, mask, bounds, radii, amount))
+}
+
+/// How much of the mid band goes where scars are painted, as in hand
+/// retouches: about 55–65 %.
+const SCARS: f32 = 60.0;
+
+/// A "Scars" layer above the layer at `above`, made from `image` with the
+/// mid band of `skin` taken out for eyes `iod` apart, as on a hand retouch,
+/// its mask hiding it all: painting the mask softens a scar there, however
+/// long. Returns the new layer's id, or `None` if there's no skin.
+pub fn add_scars_layer(doc: &mut Document, above: usize, image: &Raster, skin: &Selection, iod: f32) -> Option<u64> {
+    let bounds = skin.bounds()?;
+    let hidden = Selection::from_coverage(Tiled::new(image.width(), image.height(), 0));
+    let id = band_layer(doc, above, "Scars", image, skin, &hidden, bounds, hand_radii(iod), SCARS);
+    // Only on skin, so a stroke past a scar leaves lips and brows alone.
+    let layer = doc.layer_mut(id)?;
+    let pixels = &layer.pixels;
+    layer.pixels = Tiled::from_tiles(pixels.width(), pixels.height(), [0; 4], |col, row| {
+        let mut tile = pixels.tile(col, row)?.to_vec();
+        for (i, p) in tile.iter_mut().enumerate() {
+            let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
+            if x < pixels.width() && y < pixels.height() {
+                p[3] = (f32::from(p[3]) * skin.at(x, y)) as u16;
+            }
+        }
+        Some(tile)
+    });
+    Some(id)
+}
+
+/// [`add_band_layer`], with `bounds` of pixels whatever `mask` shows.
+#[allow(clippy::too_many_arguments)]
+fn band_layer(
+    doc: &mut Document,
+    above: usize,
+    name: &str,
+    image: &Raster,
+    skin: &Selection,
+    mask: &Selection,
+    bounds @ [x, y, w, h]: [u32; 4],
+    radii: [f32; 2],
+    amount: f32,
+) -> u64 {
     let smoothed = smooth(image, skin, bounds, radii);
     let pixels = Tiled::from_tiles(image.width(), image.height(), [0; 4], |col, row| {
         let (tx, ty) = (col * TILE, row * TILE);
@@ -298,7 +342,7 @@ pub fn add_band_layer(
     });
     layer.opacity = amount / 100.0;
     doc.insert_above(above, layer);
-    Some(id)
+    id
 }
 
 #[cfg(test)]
@@ -403,6 +447,7 @@ mod tests {
             y: 100.0,
             radius: 4.0,
             score: 20.0,
+            mole: false,
         };
         let patches = patches(&skin, &[spot(100.0), spot(148.0)], 100.0);
         assert!(patches.at(100, 100) > 0.99);
@@ -414,6 +459,29 @@ mod tests {
     }
 
     #[test]
+    fn the_scars_layer_changes_nothing_until_its_mask_is_painted() {
+        let (mut doc, image, skin) = (Document::from_image("t.tif".into(), &image(), ColorProfile::srgb(), 16), image(), skin());
+        let before = doc.composite();
+        let id = add_scars_layer(&mut doc, 0, &image, &skin, IOD).unwrap();
+        assert_eq!(doc.composite().get(150, 150), before.get(150, 150));
+
+        // Painted over the blotch, it's softened there and nowhere else.
+        let layer = doc.layer_mut(id).unwrap();
+        assert_eq!((layer.name.as_str(), layer.opacity), ("Scars", 0.6));
+        layer.mask.as_mut().unwrap().pixels = Selection::rectangle(W, H, (120.0, 120.0), (180.0, 180.0)).coverage;
+        let after = doc.composite();
+        assert_ne!(after.get(150, 150), before.get(150, 150));
+        assert_eq!(after.get(300, 150), before.get(300, 150));
+        // Painted over the "brow", which isn't skin, nothing changes.
+        let layer = doc.layer_mut(id).unwrap();
+        layer.mask.as_mut().unwrap().pixels = Selection::all(W, H).coverage;
+        assert_eq!(doc.composite().get(150, 50), before.get(150, 50));
+        // No skin, no layer.
+        let none = Selection::from_coverage(Tiled::new(W, H, 0));
+        assert_eq!(add_scars_layer(&mut doc, 0, &image, &none, IOD), None);
+    }
+
+    #[test]
     fn a_layer_masked_to_patches_stops_at_them_and_keeps_the_pores() {
         let (mut doc, image, skin) = (Document::from_image("t.tif".into(), &image(), ColorProfile::srgb(), 16), image(), skin());
         let spot = Spot {
@@ -421,6 +489,7 @@ mod tests {
             y: 150.0,
             radius: 4.0,
             score: 20.0,
+            mole: false,
         };
         let patch = patches(&skin, &[spot], IOD);
         add_layer(&mut doc, 0, &image, &skin, &patch, IOD, &Smoothing::default()).unwrap();
