@@ -138,13 +138,145 @@ pub fn patches(skin: &Selection, spots: &[Spot], iod: f32) -> Selection {
     }))
 }
 
+/// The fine and coarse blurs' standard deviations for eyes `iod` apart, as
+/// in hand retouches: 1.6 and 8 px with the eyes about 200 px apart, the
+/// coarse one about 13 px at 500, so they grow more slowly than the face.
+pub fn hand_radii(iod: f32) -> [f32; 2] {
+    let coarse = 0.57 * iod.sqrt();
+    [coarse / 5.0, coarse]
+}
+
+/// `image`'s lightness in `area`'s box and `pad` pixels round it: the box
+/// (left, top, width, height) and, to blur, [L; 4] for each pixel.
+fn lightness(image: &Raster, [x, y, w, h]: [u32; 4], pad: u32) -> ([u32; 4], Vec<[f32; 4]>) {
+    let (x0, y0) = (x.saturating_sub(pad), y.saturating_sub(pad));
+    let (x1, y1) = ((x + w + pad).min(image.width()), (y + h + pad).min(image.height()));
+    let (pw, ph) = (x1 - x0, y1 - y0);
+    let light = (0..pw * ph)
+        .into_par_iter()
+        .map(|i| {
+            let p = image.get(x0 + i % pw, y0 + i / pw);
+            let l = 0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2]);
+            [l; 4]
+        })
+        .collect();
+    ([x0, y0, pw, ph], light)
+}
+
+/// `values`' median, or `None` with none.
+fn median(mut values: Vec<f32>) -> Option<f32> {
+    let mid = values.len() / 2;
+    (!values.is_empty()).then(|| *values.select_nth_unstable_by(mid, f32::total_cmp).1)
+}
+
+/// 0 at or below `low`, 1 at or above `high`, smoothly between.
+fn step(low: f32, high: f32, v: f32) -> f32 {
+    let t = ((v - low) / (high - low)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// How far a line's mask is softened, as a fraction of the distance between
+/// the eyes.
+const LINE_SOFTEN: f32 = 0.012;
+
+/// The lines in `area`: grooves darker than the skin round them by more
+/// than most of it varies, softened as strokes along them are. Pores and
+/// skin between lines are left, for eyes `iod` apart.
+pub fn lines(image: &Raster, area: &Selection, iod: f32) -> Selection {
+    let (w, h) = (area.width(), area.height());
+    let Some(bounds) = area.bounds() else {
+        return Selection::from_coverage(Tiled::new(w, h, 0));
+    };
+    let [fine, coarse] = hand_radii(iod);
+    let ([x0, y0, pw, ph], light) = lightness(image, bounds, (coarse * 3.0).ceil() as u32);
+    let (pw, ph) = (pw as usize, ph as usize);
+    let (f, c) = (blur_buffer(light.clone(), pw, ph, fine), blur_buffer(light, pw, ph, coarse));
+    let mid: Vec<f32> = f.iter().zip(&c).map(|(f, c)| f[0] - c[0]).collect();
+    let on_area = |i: usize| area.at(x0 + (i % pw) as u32, y0 + (i / pw) as u32) > 0.5;
+    let spread = median((0..mid.len()).filter(|&i| on_area(i)).map(|i| mid[i].abs()).collect())
+        .unwrap_or(1.0)
+        .max(1.0);
+    let grooves = mid.iter().map(|m| [step(spread, 2.0 * spread, -m); 4]).collect();
+    let grooves = blur_buffer(grooves, pw, ph, LINE_SOFTEN * iod);
+    let mut coverage = vec![0u16; (w * h) as usize];
+    for (i, g) in grooves.iter().enumerate() {
+        let (x, y) = (x0 + (i % pw) as u32, y0 + (i / pw) as u32);
+        coverage[(y * w + x) as usize] = ((g[0] * 2.0).min(1.0) * area.at(x, y) * MAX) as u16;
+    }
+    Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage))
+}
+
+/// How far fine texture and lightness are averaged, as a fraction of the
+/// distance between the eyes; how many times `reference`'s roughness it
+/// takes to be stubble, from starting to being it; and what fraction of its
+/// lightness, from being stubble to not: scars are as rough as stubble, but
+/// not as dark.
+const STUBBLE_REACH: f32 = 0.1;
+const ROUGH: [f32; 2] = [1.3, 1.8];
+const DARK: [f32; 2] = [0.8, 0.92];
+
+/// `area` less what's rougher and darker than `reference`, bare skin on the
+/// same face: a beard or stubble, which has to stay as it is.
+pub fn without_stubble(image: &Raster, area: &Selection, reference: &Selection, iod: f32) -> Selection {
+    let (w, h) = (area.width(), area.height());
+    let (Some(a), Some(r)) = (area.bounds(), reference.bounds()) else {
+        return area.clone();
+    };
+    let (l, t) = (a[0].min(r[0]), a[1].min(r[1]));
+    let (right, bottom) = ((a[0] + a[2]).max(r[0] + r[2]), (a[1] + a[3]).max(r[1] + r[3]));
+    let [fine, _] = hand_radii(iod);
+    let ([x0, y0, pw, ph], light) = lightness(image, [l, t, right - l, bottom - t], 0);
+    let (pw, ph) = (pw as usize, ph as usize);
+    let blurred = blur_buffer(light.clone(), pw, ph, fine);
+    // Roughness and lightness, averaged.
+    let both = light.iter().zip(&blurred).map(|(l, b)| [(l[0] - b[0]).abs(), l[0], 0.0, 0.0]).collect();
+    let both = blur_buffer(both, pw, ph, STUBBLE_REACH * iod);
+    let at = |i: usize| (x0 + (i % pw) as u32, y0 + (i / pw) as u32);
+    let bare = |c: usize| {
+        let on_reference = (0..both.len()).filter(|&i| {
+            let (x, y) = at(i);
+            reference.at(x, y) > 0.5
+        });
+        median(on_reference.map(|i| both[i][c]).collect()).filter(|&m| m > 0.0)
+    };
+    let (Some(smooth), Some(lit)) = (bare(0), bare(1)) else {
+        return area.clone();
+    };
+    let mut coverage = vec![0u16; (w * h) as usize];
+    for (i, v) in both.iter().enumerate() {
+        let (x, y) = at(i);
+        let rough = step(ROUGH[0] * smooth, ROUGH[1] * smooth, v[0]);
+        let dark = 1.0 - step(DARK[0] * lit, DARK[1] * lit, v[1]);
+        coverage[(y * w + x) as usize] = ((1.0 - rough * dark) * area.at(x, y) * MAX) as u16;
+    }
+    Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage))
+}
+
 /// A "Smooth Skin" layer above the layer at `above`, made from `image`
 /// (what that layer and those below it show) with the mid band of `skin`
 /// taken out, masked by `mask`, at `smoothing`'s amount for eyes `iod`
 /// apart. Returns the new layer's id, or `None` if the mask is empty.
 pub fn add_layer(doc: &mut Document, above: usize, image: &Raster, skin: &Selection, mask: &Selection, iod: f32, smoothing: &Smoothing) -> Option<u64> {
+    add_band_layer(doc, above, "Smooth Skin", image, skin, mask, smoothing.radii(iod), smoothing.amount)
+}
+
+/// A layer called `name` above the layer at `above`, made from `image`
+/// with what's between the blurs `radii` of `skin` taken out, masked by
+/// `mask`, at `amount` % opacity. A fine blur of 0 takes out the fine
+/// texture too. Returns the new layer's id, or `None` if the mask is empty.
+#[allow(clippy::too_many_arguments)]
+pub fn add_band_layer(
+    doc: &mut Document,
+    above: usize,
+    name: &str,
+    image: &Raster,
+    skin: &Selection,
+    mask: &Selection,
+    radii: [f32; 2],
+    amount: f32,
+) -> Option<u64> {
     let bounds @ [x, y, w, h] = mask.bounds()?;
-    let smoothed = smooth(image, skin, bounds, smoothing.radii(iod));
+    let smoothed = smooth(image, skin, bounds, radii);
     let pixels = Tiled::from_tiles(image.width(), image.height(), [0; 4], |col, row| {
         let (tx, ty) = (col * TILE, row * TILE);
         if tx >= x + w || ty >= y + h || tx + TILE <= x || ty + TILE <= y {
@@ -159,12 +291,12 @@ pub fn add_layer(doc: &mut Document, above: usize, image: &Raster, skin: &Select
         Some(tile)
     });
     let id = doc.next_layer_id();
-    let mut layer = Layer::from_pixels(id, "Smooth Skin", pixels);
+    let mut layer = Layer::from_pixels(id, name, pixels);
     layer.mask = Some(Mask {
         pixels: mask.coverage.clone(),
         enabled: true,
     });
-    layer.opacity = smoothing.amount / 100.0;
+    layer.opacity = amount / 100.0;
     doc.insert_above(above, layer);
     Some(id)
 }
@@ -295,6 +427,57 @@ mod tests {
         let after = doc.composite();
         assert_ne!(after.get(150, 150), image.get(150, 150));
         assert_eq!(after.get(60, 60), image.get(60, 60));
+    }
+
+    #[test]
+    fn hand_radii_grow_more_slowly_than_the_face() {
+        let [fine, coarse] = hand_radii(200.0);
+        assert!((fine - 1.6).abs() < 0.1 && (coarse - 8.0).abs() < 0.2, "{fine} {coarse}");
+        assert!((hand_radii(516.0)[1] - 12.9).abs() < 0.3);
+    }
+
+    #[test]
+    fn lines_finds_a_groove_and_leaves_the_skin_round_it() {
+        let (w, h) = (300, 200);
+        let image = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let grain = ((x * 7 + y * 13) % 5) * 60;
+                    let v = if (y as i32 - 100).abs() < 2 { 30000 } else { 40000 };
+                    [(v + grain) as u16, (v + grain) as u16, (v + grain) as u16, u16::MAX]
+                })
+                .collect(),
+        );
+        let found = lines(&image, &Selection::all(w, h), 200.0);
+        assert!(found.at(150, 100) > 0.8, "{}", found.at(150, 100));
+        assert!(found.at(150, 40) < 0.1, "{}", found.at(150, 40));
+    }
+
+    #[test]
+    fn without_stubble_keeps_bare_skin_and_drops_what_is_rough() {
+        let (w, h) = (300, 200);
+        let image = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let rough = if y >= 100 {
+                        ((x * 31 + y * 17) % 9 * 900) as i32 - 9000
+                    } else {
+                        ((x * 7 + y * 13) % 5 * 40) as i32
+                    };
+                    [(30000 + rough) as u16, (30000 + rough) as u16, (30000 + rough) as u16, u16::MAX]
+                })
+                .collect(),
+        );
+        let bare = Selection::rectangle(w, h, (0.0, 0.0), (300.0, 50.0));
+        let kept = without_stubble(&image, &Selection::all(w, h), &bare, 200.0);
+        assert!(kept.at(150, 60) > 0.9, "{}", kept.at(150, 60));
+        assert!(kept.at(150, 170) < 0.1, "{}", kept.at(150, 170));
     }
 
     #[test]
