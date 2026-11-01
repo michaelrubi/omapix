@@ -205,6 +205,10 @@ impl RightTab {
 }
 
 enum Dialog {
+    /// Which saved alpha channel Texture Fill copies from, if any.
+    TextureFill {
+        from: Option<u64>,
+    },
     /// Ask for a radius, then run a filter. For frequency separation,
     /// `preview` shows the texture layer, mid layer, colour/tone layer
     /// or the image (`None`) while adjusting.
@@ -1564,9 +1568,13 @@ impl App {
             Command::PasteInto => editor.doc.selection.is_some() && self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay | Command::MaskDensity => has_mask,
             Command::GaussianBlur | Command::SmartBlur | Command::HighPass | Command::UnsharpMask | Command::SmartSharpen | Command::ReduceNoise => {
-                if editor.target == Target::Mask { has_mask } else { !no_pixels }
+                match editor.target {
+                    Target::Mask => has_mask,
+                    Target::QuickMask => true,
+                    Target::Pixels => !no_pixels,
+                }
             }
-            Command::AddNoise => editor.target == Target::Pixels || has_mask,
+            Command::AddNoise => editor.target != Target::Mask || has_mask,
             Command::Invert => editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels,
             _ => true,
         }
@@ -1682,9 +1690,9 @@ impl App {
                 self.dialog = Some(Dialog::AiModels(found));
             }
             Command::Finish => self.finish(),
-            // On a mask, noise goes straight into it; on pixels, onto a
-            // Grain layer.
-            Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target == Target::Mask) => {
+            // On a mask or Quick Mask, noise goes straight into it; on
+            // pixels, onto a Grain layer.
+            Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target != Target::Pixels) => {
                 self.dialog = Some(Dialog::Filter {
                     filter: LayerFilter::AddNoise(self.filters.noise),
                     preview: true,
@@ -1784,13 +1792,11 @@ impl App {
             Command::SaveAdjustmentPreset => {
                 self.dialog = Some(Dialog::SavePreset { name: self.preset_name() });
             }
-            Command::ContentAwareFill | Command::TextureFill => {
-                if let Some(editor) = &self.editor
-                    && let Err(e) = self.content_fill.start(ctx, editor, cmd == Command::TextureFill)
-                {
-                    self.message(e, true);
-                }
+            // With alpha channels saved, one can be where to copy from.
+            Command::TextureFill if self.editor.as_ref().is_some_and(|e| !e.doc.channels.is_empty()) => {
+                self.dialog = Some(Dialog::TextureFill { from: None });
             }
+            Command::ContentAwareFill | Command::TextureFill => self.start_fill(cmd == Command::TextureFill, None, ctx),
             Command::GenerativeFill => {
                 let Some(editor) = &mut self.editor else { return };
                 match crate::generative_fill::GenerativeFill::open(ctx, editor) {
@@ -2174,11 +2180,28 @@ impl App {
 
     /// Apply a Filter menu filter to the active layer (within the
     /// selection), remembering its settings for next time.
+    /// Fill the selection, with texture if `texture`, from alpha channel
+    /// `from` if there is one.
+    fn start_fill(&mut self, texture: bool, from: Option<u64>, ctx: &egui::Context) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let area = from.and_then(|id| editor.doc.channel(id)).map(|c| Selection::from_coverage(c.pixels.clone()));
+        if let Err(e) = self.content_fill.start(ctx, editor, texture, area) {
+            self.message(e, true);
+        }
+    }
+
     fn apply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
         self.filters.remember(&filter);
         let Some(editor) = &mut self.editor else {
             return;
         };
+        if editor.target == Target::QuickMask {
+            let edit = move |doc: &mut Document, _: &mut u64| doc.selection = Some(Selection::from_coverage(ops::filtered_selection(doc, &filter)));
+            editor.edit_in_background(filter.name(), edit, ctx);
+            return;
+        }
         let (id, mask) = (editor.active, editor.target == Target::Mask);
         if !mask && editor.doc.layer(id).is_some_and(|l| !l.can_paint_pixels()) {
             self.message("Could not use the filter because the layer is locked", true);
@@ -3225,6 +3248,30 @@ impl App {
                         }
                     });
                 }
+                Dialog::TextureFill { from } => {
+                    ui.heading("Texture Fill");
+                    ui.add_space(8.0);
+                    let channels: Vec<(u64, String)> = self.editor.iter().flat_map(|e| &e.doc.channels).map(|c| (c.id, c.name.clone())).collect();
+                    let name = channels.iter().find(|c| Some(c.0) == *from).map_or("Around the selection", |c| &c.1);
+                    egui::ComboBox::from_label("Copy from").selected_text(name).show_ui(ui, |ui| {
+                        ui.selectable_value(from, None, "Around the selection");
+                        for (id, name) in &channels {
+                            ui.selectable_value(from, Some(*id), name);
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let from = *from;
+                            action = Some(Box::new(move |app, ctx| app.start_fill(true, from, ctx)));
+                            close = true;
+                        }
+                    });
+                }
                 Dialog::SavePreset { name } => {
                     ui.heading("Save Adjustment Preset");
                     ui.add_space(8.0);
@@ -3604,14 +3651,15 @@ impl App {
                     editor.set_view(view);
                 }
                 Some(Dialog::Filter { filter, preview }) => {
-                    let view = if *preview {
-                        View::Filter {
+                    let view = match (*preview, editor.target) {
+                        (true, Target::QuickMask) => View::QuickMaskFilter { filter: *filter },
+                        (false, Target::QuickMask) => View::QuickMask,
+                        (true, target) => View::Filter {
                             layer: editor.active,
                             filter: *filter,
-                            mask: editor.target == Target::Mask,
-                        }
-                    } else {
-                        View::Image
+                            mask: target == Target::Mask,
+                        },
+                        (false, _) => View::Image,
                     };
                     editor.set_view(view);
                 }
@@ -3626,6 +3674,7 @@ impl App {
                     };
                     editor.set_view(view);
                 }
+                _ if matches!(editor.view(), View::QuickMaskFilter { .. }) => editor.set_view(View::QuickMask),
                 _ if matches!(editor.view(), View::Separation { .. } | View::Filter { .. } | View::AddNoise { .. }) => editor.set_view(View::Image),
                 _ => {}
             }
@@ -5479,6 +5528,10 @@ impl eframe::App for App {
                     self.tools.liquify.options_bar(ui, &self.theme, &mut restore, [&missing[0], &missing[1]]);
                     if restore != editor.liquify_restore() {
                         editor.set_liquify_restore(restore);
+                    }
+                } else if let Some((bounds, t)) = editor.transform() {
+                    if let Some(typed) = crate::free_transform::options_bar(ui, bounds, &t) {
+                        editor.transform_to(typed);
                     }
                 } else {
                     self.tools.options_bar(ui, target, &self.theme);
@@ -10090,6 +10143,49 @@ mod tests {
         assert_eq!((editor.doc.width, editor.doc.height), (h, w));
         assert_eq!((editor.canvas.width(), editor.canvas.height()), (h, w));
         assert_eq!(editor.canvas.levels()[0], (h, w));
+    }
+
+    #[test]
+    fn filters_on_quick_mask_change_the_selection_and_stay_in_it() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.editor.as_mut().unwrap().enter_quick_mask();
+        let pixels = app.editor.as_ref().unwrap().doc.layers[0].pixels.clone();
+        app.run(Command::GaussianBlur, &ctx);
+        let Some(Dialog::Filter { filter, .. }) = app.dialog else {
+            panic!("no filter dialog");
+        };
+        app.editor.as_mut().unwrap().set_view(View::QuickMaskFilter { filter });
+        let at_edge = app.editor.as_ref().unwrap().doc.selection.as_ref().unwrap().at(100, 150);
+        app.dialog = None;
+        app.apply_filter(LayerFilter::GaussianBlur { radius: 10.0 }, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.target, Target::QuickMask);
+        let sel = editor.doc.selection.as_ref().unwrap();
+        assert!(sel.at(100, 150) < at_edge && sel.at(90, 150) > 0.0 && sel.at(150, 150) > 0.9);
+        assert!(editor.doc.layers[0].pixels.same_tiles(&pixels), "the layer's left alone");
+        assert_eq!(editor.undo_label(), Some("Gaussian Blur"));
+    }
+
+    #[test]
+    fn texture_fill_asks_where_to_copy_from_once_a_channel_is_saved() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::TextureFill, &ctx);
+        assert!(app.dialog.is_none());
+        while app.content_fill.busy() {
+            let editor = app.editor.as_mut().unwrap();
+            if let Some(why) = app.content_fill.poll(editor) {
+                panic!("{why}");
+            }
+        }
+        app.editor.as_mut().unwrap().doc.save_selection();
+        app.run(Command::TextureFill, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::TextureFill { from: None })));
     }
 
     #[test]

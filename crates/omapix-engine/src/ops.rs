@@ -402,6 +402,14 @@ pub fn filtered_mask(doc: &Document, id: u64, filter: &crate::filters::LayerFilt
     Some(out.map(|p| p[0]))
 }
 
+/// The selection after `filter`, which sees it as a grey image, as Quick
+/// Mask's filters do. No selection is everything selected.
+pub fn filtered_selection(doc: &Document, filter: &crate::filters::LayerFilter) -> Tiled<u16> {
+    let all = Tiled::new(doc.width, doc.height, u16::MAX);
+    let grey = doc.selection.as_ref().map_or(&all, |s| &s.coverage).map(|v| [v, v, v, u16::MAX]);
+    filter.apply(&grey).map(|p| p[0])
+}
+
 /// One-step High Pass sharpening: a "High Pass Sharpening" layer in
 /// Overlay mode above layer index `above`, holding the High Pass of the
 /// visible image's luminance, so it sharpens tone without colour fringes.
