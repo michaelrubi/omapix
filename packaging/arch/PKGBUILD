@@ -4,7 +4,7 @@
 #   makepkg -si
 
 pkgname=omapix-git
-pkgver=0.1.0.r304.g9ea1e06
+pkgver=0.1.0.r477.gcb62238
 pkgrel=1
 pkgdesc="Keyboard-first raster photo editor for portrait retouching, with Photoshop's shortcuts"
 arch=('x86_64')

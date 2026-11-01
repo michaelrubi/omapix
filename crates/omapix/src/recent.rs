@@ -17,8 +17,9 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
     Some(dir.join("omapix"))
 }
 
+/// None under `cargo test`, which mustn't touch the real recent files.
 fn default_config_path() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("recent.toml"))
+    config_dir().filter(|_| !cfg!(test)).map(|d| d.join("recent.toml"))
 }
 
 impl RecentStore {
