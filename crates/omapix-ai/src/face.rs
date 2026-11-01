@@ -19,6 +19,12 @@ pub const SEGMENTER: &str = "mask-selfie-multiclass";
 const DETECT_SIZE: usize = 640;
 /// The landmarker's crop, and the segmenter's, are this many pixels across.
 const LANDMARK_SIZE: usize = 256;
+/// A face taking up less than this share of the image's longest side is
+/// looked at again, close up: the segmenter sees the whole image in 256
+/// squares, so a face in a group shot is a few squares across.
+const SMALL: f32 = 1.0 / 6.0;
+/// How big that closer look is, in multiples of the face's box.
+const CLOSE_UP: f32 = 3.0;
 pub const SEGMENT_SIZE: usize = 256;
 /// The segmenter's classes, in the order of its output.
 pub const CLASSES: [&str; 6] = ["background", "hair", "body skin", "face skin", "clothes", "others"];
@@ -189,13 +195,19 @@ impl Faces {
             side,
             angle: 0.0,
         };
-        let pixels = image.sample(&crop, DETECT_SIZE);
+        self.detect_in(image, &crop)
+    }
+
+    /// The faces in `crop`, which isn't turned, most confident first.
+    fn detect_in(&mut self, image: &Image, crop: &Crop) -> Result<Vec<Detection>> {
+        let pixels = image.sample(crop, DETECT_SIZE);
         // Blue, green, red planes, 0–255.
         let planar: Vec<f32> = [2, 1, 0].iter().flat_map(|&c| pixels.iter().map(move |p| p[c] * 255.0)).collect();
         let n = DETECT_SIZE as i64;
         let input = Tensor::from_array((vec![1, 3, n, n], planar)).map_err(error)?;
         let outputs = self.detector.run(ort::inputs!["input" => input]).map_err(error)?;
-        let to_image = side / DETECT_SIZE as f32;
+        let to_image = crop.side / DETECT_SIZE as f32;
+        let [left, top] = crop.to_image(0.0, 0.0);
         let mut found = Vec::new();
         for stride in [8usize, 16, 32] {
             let get = |name: &str| -> Result<Vec<f32>> {
@@ -217,8 +229,13 @@ impl Faces {
                 let k = &kps[i * 10..i * 10 + 10];
                 found.push(Detection {
                     score,
-                    bounds: [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0].map(|v| v * to_image),
-                    points: [0, 1, 2, 3, 4].map(|p| [(k[2 * p] + col) * s * to_image, (k[2 * p + 1] + row) * s * to_image]),
+                    bounds: [
+                        left + (cx - w / 2.0) * to_image,
+                        top + (cy - h / 2.0) * to_image,
+                        left + (cx + w / 2.0) * to_image,
+                        top + (cy + h / 2.0) * to_image,
+                    ],
+                    points: [0, 1, 2, 3, 4].map(|p| [left + (k[2 * p] + col) * s * to_image, top + (k[2 * p + 1] + row) * s * to_image]),
                 });
             }
         }
@@ -299,14 +316,27 @@ pub struct Analysis {
     height: usize,
     /// The whole image's segmentation, over the square round it.
     segmentation: Vec<[f32; 6]>,
+    /// A segmentation close up of each small face, and where it was taken.
+    close_ups: Vec<(Crop, Vec<[f32; 6]>)>,
 }
 
 impl Faces {
     /// Find the faces in `image`, their points, and its segmentation.
     pub fn analyse(&mut self, image: &Image) -> Result<Analysis> {
-        let mut faces = Vec::new();
+        let (mut faces, mut close_ups) = (Vec::new(), Vec::new());
+        let longest = image.width.max(image.height) as f32;
         for face in self.detect(image)? {
+            let crop = close_up(&face);
+            let small = is_small(&face, longest);
+            // Where it is, again, from a closer look: a tighter box and
+            // eyes, which the landmarker needs.
+            let face = if small { self.closer(image, face, &crop)? } else { face };
             let points = self.landmarks(image, &face)?.map(|(_, points)| points);
+            log::info!("face at {:?}: small {small}, points {}", face.bounds, points.is_some());
+            if small {
+                let crop = close_up(&face);
+                close_ups.push((crop, self.segment(image, &crop)?));
+            }
             faces.push((face, points));
         }
         let (w, h) = (image.width as f32, image.height as f32);
@@ -321,8 +351,86 @@ impl Faces {
             width: image.width,
             height: image.height,
             segmentation,
+            close_ups,
         })
     }
+
+    /// `face` as the detector finds it in `crop`, or as it is if it isn't
+    /// found there.
+    fn closer(&mut self, image: &Image, face: Detection, crop: &Crop) -> Result<Detection> {
+        let found = self.detect_in(image, crop)?;
+        let overlap = |d: &&Detection| iou(&d.bounds, &face.bounds) >= 0.3;
+        let best = found
+            .iter()
+            .filter(overlap)
+            .max_by(|a, b| iou(&a.bounds, &face.bounds).total_cmp(&iou(&b.bounds, &face.bounds)));
+        Ok(best.cloned().unwrap_or(face))
+    }
+}
+
+/// Whether `face` is too small for what's seen of the whole image.
+fn is_small(face: &Detection, longest: f32) -> bool {
+    let [l, t, r, b] = face.bounds;
+    (r - l).max(b - t) < SMALL * longest
+}
+
+/// The square round `face` it's looked at again in.
+fn close_up(face: &Detection) -> Crop {
+    let [l, t, r, b] = face.bounds;
+    Crop {
+        centre: [(l + r) / 2.0, (t + b) / 2.0],
+        side: (r - l).max(b - t) * CLOSE_UP,
+        angle: 0.0,
+    }
+}
+
+/// A part of the image segmented on its own: its box (left, top, right,
+/// bottom), and logits as [`Analysis::logits`] gives them, over that box.
+pub struct CloseUp {
+    pub bounds: [u32; 4],
+    pub logits: Vec<f32>,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// The logit of `classes` in `p`.
+fn logit(p: &[f32; 6], classes: &[usize]) -> f32 {
+    let p: f32 = classes.iter().map(|&c| p[c]).sum::<f32>().clamp(1e-4, 1.0 - 1e-4);
+    (p / (1.0 - p)).ln()
+}
+
+/// `segmentation` of `crop` as a [`CloseUp`] of the part of it in an image
+/// `width` × `height`, or `None` if there's none.
+fn close_up_logits(crop: &Crop, segmentation: &[[f32; 6]], classes: &[usize], width: usize, height: usize) -> Option<CloseUp> {
+    let half = crop.side / 2.0;
+    let (l, t) = ((crop.centre[0] - half).max(0.0).floor(), (crop.centre[1] - half).max(0.0).floor());
+    let (r, b) = (
+        (crop.centre[0] + half).min(width as f32).ceil(),
+        (crop.centre[1] + half).min(height as f32).ceil(),
+    );
+    if r <= l || b <= t {
+        return None;
+    }
+    // One logit to a square of the crop.
+    let per = SEGMENT_SIZE as f32 / crop.side;
+    let (lw, lh) = (
+        (((r - l) * per) as usize).clamp(1, SEGMENT_SIZE),
+        (((b - t) * per) as usize).clamp(1, SEGMENT_SIZE),
+    );
+    let logits = (0..lw * lh)
+        .map(|i| {
+            let x = l + ((i % lw) as f32 + 0.5) / lw as f32 * (r - l);
+            let y = t + ((i / lw) as f32 + 0.5) / lh as f32 * (b - t);
+            let at = |v: f32, c: usize| (((v - crop.centre[c] + half) * per) as usize).min(SEGMENT_SIZE - 1);
+            logit(&segmentation[at(y, 1) * SEGMENT_SIZE + at(x, 0)], classes)
+        })
+        .collect();
+    Some(CloseUp {
+        bounds: [l as u32, t as u32, r as u32, b as u32],
+        logits,
+        width: lw,
+        height: lh,
+    })
 }
 
 impl Analysis {
@@ -335,13 +443,16 @@ impl Analysis {
         let (lw, lh) = ((SEGMENT_SIZE * self.width / longest).max(1), (SEGMENT_SIZE * self.height / longest).max(1));
         let (ox, oy) = ((SEGMENT_SIZE - lw) / 2, (SEGMENT_SIZE - lh) / 2);
         let logits = (0..lw * lh)
-            .map(|i| {
-                let p = &self.segmentation[(oy + i / lw) * SEGMENT_SIZE + ox + i % lw];
-                let p: f32 = classes.iter().map(|&c| p[c]).sum::<f32>().clamp(1e-4, 1.0 - 1e-4);
-                (p / (1.0 - p)).ln()
-            })
+            .map(|i| logit(&self.segmentation[(oy + i / lw) * SEGMENT_SIZE + ox + i % lw], classes))
             .collect();
         (logits, lw, lh)
+    }
+
+    /// The same for each small face, close up.
+    pub fn close_ups(&self, classes: &[usize]) -> Vec<CloseUp> {
+        (self.close_ups.iter())
+            .filter_map(|(crop, seg)| close_up_logits(crop, seg, classes, self.width, self.height))
+            .collect()
     }
 }
 
@@ -394,6 +505,34 @@ mod tests {
         let (logits, w, h) = analysis.logits(&[BODY_SKIN, FACE_SKIN]);
         assert_eq!((w, h), (256, 170));
         assert!(logits.iter().all(|&l| l < 0.0));
+    }
+
+    #[test]
+    fn a_small_face_is_looked_at_close_up_within_the_image() {
+        let face = Detection {
+            score: 1.0,
+            bounds: [20.0, 40.0, 120.0, 140.0],
+            points: [[0.0; 2]; 5],
+        };
+        assert!(is_small(&face, 6000.0));
+        assert!(!is_small(&face, 500.0));
+        let crop = close_up(&face);
+        assert_eq!((crop.centre, crop.side), ([70.0, 90.0], 300.0));
+
+        // Face skin on the crop's right half only.
+        let seg: Vec<[f32; 6]> = (0..SEGMENT_SIZE * SEGMENT_SIZE)
+            .map(|i| {
+                let on = i % SEGMENT_SIZE >= SEGMENT_SIZE / 2;
+                [f32::from(!on), 0.0, 0.0, f32::from(on), 0.0, 0.0]
+            })
+            .collect();
+        let close = close_up_logits(&crop, &seg, &[FACE_SKIN], 6000, 4000).unwrap();
+        // Cut off at the image's top left: the crop starts at (-80, -60).
+        assert_eq!(close.bounds, [0, 0, 220, 240]);
+        let at = |x: usize, y: usize| close.logits[y * close.width + x];
+        // The crop's middle is at x = 70.
+        let middle = 70 * close.width / 220;
+        assert!(at(middle + 4, 10) > 0.0 && at(middle - 4, 10) < 0.0);
     }
 
     #[test]
