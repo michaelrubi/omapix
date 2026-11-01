@@ -10,12 +10,13 @@
 
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use egui::{CursorIcon, PointerButton, pos2};
 use omapix_engine::dynamics::Pen as Sample;
 use wayland_client::backend::Backend;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::{wl_registry, wl_seat};
+use wayland_client::protocol::{wl_callback, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, event_created_child};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{self, Shape};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1;
@@ -59,6 +60,8 @@ pub struct Tablet {
     /// Never dropped: winit closes the display as Omapix quits, and
     /// destroying these after that crashes it.
     wayland: ManuallyDrop<Wayland>,
+    /// The tablet thread, until `stop` ends it.
+    thread: Option<JoinHandle<()>>,
     /// Where the pen was last, in egui points.
     last: egui::Pos2,
 }
@@ -92,21 +95,35 @@ impl Tablet {
             shared: Arc::clone(&shared),
             ctx: cc.egui_ctx.clone(),
             frame: Vec::new(),
+            stopping: false,
         };
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("tablet".into())
             .spawn(move || {
-                while queue.blocking_dispatch(&mut state).is_ok() {}
-                // The display's closed (Omapix is quitting): destroying the
-                // queue and the objects on it now would crash.
+                while !state.stopping && queue.blocking_dispatch(&mut state).is_ok() {}
+                // winit's about to close the display: destroying the queue
+                // and the objects on it after that would crash.
                 std::mem::forget((queue, state));
             })
             .ok()?;
         Some(Self {
             shared,
             wayland: ManuallyDrop::new(Wayland { connection, shapes, queue: qh }),
+            thread: Some(thread),
             last: egui::Pos2::ZERO,
         })
+    }
+
+    /// Ends the tablet thread, which has to happen before winit closes the
+    /// display, or the thread's left reading from a connection that's gone.
+    /// The compositor's answer to `sync` is what wakes it.
+    pub fn stop(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        self.wayland.connection.display().sync(&self.wayland.queue, ());
+        let _ = self.wayland.connection.flush();
+        let _ = thread.join();
     }
 
     /// Hands what the pen did since the last frame to egui, with the keys
@@ -203,6 +220,14 @@ struct State {
     ctx: egui::Context,
     /// What the pen's done since its last `frame` event.
     frame: Vec<Pen>,
+    /// `Tablet::stop` has been called.
+    stopping: bool,
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for State {
+    fn event(state: &mut Self, _: &wl_callback::WlCallback, _: wl_callback::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        state.stopping = true;
+    }
 }
 
 impl Dispatch<ZwpTabletToolV2, ()> for State {

@@ -5498,6 +5498,12 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        if let Some(tablet) = &mut self.tablet {
+            tablet.stop();
+        }
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::drop::take(raw_input);
         if let Some(tablet) = &mut self.tablet {
