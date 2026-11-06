@@ -1169,6 +1169,8 @@ impl App {
     fn save(&mut self, ctx: &egui::Context) {
         let saved = self.editor.as_ref().and_then(|e| e.doc.saved_path.clone());
         match saved {
+            // Nothing changed since it was saved there: nothing to write.
+            Some(_) if !self.modified() => self.message("Already saved", false),
             Some(path) => self.write(Purpose::SaveAs, path, ctx),
             None => self.pick(Purpose::SaveAs, ctx),
         }
@@ -9131,6 +9133,32 @@ mod tests {
         let flat = omapix_engine::io::load(&tiff).unwrap();
         assert_eq!((flat.width, flat.height, flat.layers.len()), (600, 400, 1));
         assert_eq!(app.status.as_ref().unwrap().0, "Saved IMG.ora, and IMG.tif for darktable");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saving_with_nothing_changed_writes_nothing_and_says_so() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = std::env::temp_dir().join(format!("omapix-app-already-saved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ora = dir.join("IMG.ora");
+        let editor = app.editor.as_mut().unwrap();
+        editor.doc.saved_path = Some(ora.clone());
+        editor.modified = false;
+
+        app.run(Command::Save, &ctx);
+        assert!(app.file_job.is_none() && !ora.exists());
+        assert_eq!(app.status.as_ref().map(|s| (s.0.as_str(), s.1)), Some(("Already saved", false)));
+
+        // After a change, it's written.
+        app.editor.as_mut().unwrap().modified = true;
+        app.run(Command::Save, &ctx);
+        while app.file_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        assert!(ora.exists() && !app.modified());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
