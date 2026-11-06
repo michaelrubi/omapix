@@ -257,6 +257,9 @@ pub struct Overlay<'a> {
     pub alt_samples: bool,
     /// The Eyedropper tool samples on primary click or drag.
     pub samples: bool,
+    /// Clone Stamp or Healing Brush: while Alt is held, Photoshop's target
+    /// shows where the source will be set, in place of the brush.
+    pub sets_source: bool,
     /// Brush outline at the pointer, in image pixels.
     pub brush: Option<BrushOutline>,
     /// Show the Move tool's cursor rather than a crosshair (without a brush).
@@ -629,6 +632,7 @@ impl Canvas {
             tool,
             alt_samples,
             samples,
+            sets_source,
             brush,
             moves,
             source,
@@ -677,7 +681,10 @@ impl Canvas {
             && !navigating
             && tool
         {
+            // Not while Alt+right-dragging to resize the brush.
+            let targets = sets_source && ui.input(|i| i.modifiers.alt && !i.pointer.secondary_down()) && self.resizing.is_none();
             match brush {
+                _ if targets => self.target_cursor(ui, pointer),
                 Some(outline) => self.brush_cursor(ui, self.resizing.unwrap_or(pointer), outline),
                 None => self.drawn_cursor(ui, pointer, moves),
             }
@@ -899,6 +906,22 @@ impl Canvas {
             }
         }
         outlined_lines(&ui.painter_at(self.rect), &lines);
+        ui.ctx().set_cursor_icon(CursorIcon::None);
+    }
+
+    /// Photoshop's clone source target: a small ring with a crosshair
+    /// through it, centred on the point Alt+click will take.
+    fn target_cursor(&self, ui: &Ui, pointer: Pos2) {
+        let c = pointer;
+        let painter = ui.painter_at(self.rect);
+        for (width, colour) in [(3.0, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)] {
+            painter.circle_stroke(c, TARGET_RING, Stroke::new(width, colour));
+        }
+        let lines: Vec<_> = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
+            .into_iter()
+            .map(|(dx, dy)| [c + vec2(dx, dy) * 2.0, c + vec2(dx, dy) * (TARGET_RING + 4.0)])
+            .collect();
+        outlined_lines(&painter, &lines);
         ui.ctx().set_cursor_icon(CursorIcon::None);
     }
 
@@ -1244,6 +1267,9 @@ fn dashed_path(path: &[Pos2], stroke: Stroke, dash: f32, gap: f32, offset: f32, 
 }
 
 /// White lines with a dark outline, visible on any image.
+/// The clone source target's ring radius, in points.
+const TARGET_RING: f32 = 7.0;
+
 fn outlined_lines(painter: &egui::Painter, segments: &[[Pos2; 2]]) {
     for (width, colour) in [(3.0, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)] {
         let stroke = Stroke::new(width, colour);
@@ -1304,6 +1330,50 @@ mod tests {
         frame(&mut canvas, button(true));
         let drag = frame(&mut canvas, egui::Event::PointerMoved(pos2(430.0, 300.0)));
         assert!(matches!(drag, Some(ToolInput::BrushDrag { size, .. }) if size > 0.0), "{drag:?}");
+    }
+
+    #[test]
+    fn holding_alt_with_a_clone_or_heal_brush_shows_the_source_target() {
+        let ctx = egui::Context::default();
+        let transform = DisplayTransform::to_srgb(&omapix_engine::ColorProfile::srgb()).unwrap();
+        let mut canvas = Canvas::new(800, 600, transform);
+        let view = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        canvas.lay_out_for_test(view, 1.0);
+        let mut time = 0.0;
+        // The radii of the rings drawn at the pointer.
+        let mut rings = |modifiers| {
+            time += 0.1;
+            let input = egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(view),
+                events: vec![egui::Event::ModifiersChanged(modifiers), egui::Event::PointerMoved(pos2(400.0, 300.0))],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let overlay = Overlay {
+                    tool: true,
+                    sets_source: true,
+                    brush: Some(BrushOutline::round(100.0)),
+                    ..Default::default()
+                };
+                canvas.show(ui, Color32::BLACK, overlay);
+            });
+            out.textures_delta.clear();
+            let mut radii: Vec<f32> = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Circle(c) => Some(c.radius),
+                    _ => None,
+                })
+                .collect();
+            radii.dedup();
+            radii
+        };
+        rings(egui::Modifiers::NONE);
+        assert_eq!(rings(egui::Modifiers::NONE), [50.0]);
+        assert_eq!(rings(egui::Modifiers::ALT), [TARGET_RING]);
+        assert_eq!(rings(egui::Modifiers::NONE), [50.0]);
     }
 
     fn closed_line_spans(shapes: &[egui::epaint::ClippedShape]) -> (f32, f32) {
