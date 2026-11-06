@@ -134,6 +134,9 @@ pub struct LayersPanel {
     /// The layer above the line between rows the pointer is on with Alt
     /// held, where a click clips it to the layer below or releases it.
     clip_line: Option<u64>,
+    /// The layer Alt+click on its eye showed alone, and every layer's
+    /// visibility before, for a second Alt+click to put back.
+    solo: Option<(u64, Vec<(u64, bool)>)>,
 }
 
 impl LayersPanel {
@@ -423,6 +426,35 @@ impl LayersPanel {
         }
     }
 
+    /// Alt+click on a layer's eye, as in Photoshop: show only that layer
+    /// (and the groups it's in, and what's in it if it's a group); Alt+click
+    /// it again to put back what was shown before.
+    fn solo(&mut self, editor: &mut Editor, id: u64) {
+        if let Some((_, before)) = self.solo.take_if(|(layer, _)| *layer == id) {
+            editor.edit("Show/Hide Layers", |doc, _| {
+                for (layer, visible) in before {
+                    if let Some(l) = doc.layer_mut(layer) {
+                        l.visible = visible;
+                    }
+                }
+            });
+            return;
+        }
+        let doc = &editor.doc;
+        let before = doc.layers.iter().map(|l| (l.id, l.visible)).collect();
+        let path: HashSet<u64> = ancestors(doc, id).chain([id]).collect();
+        let inside = |l: u64| ancestors(doc, l).any(|g| g == id);
+        let changes: Vec<(u64, bool)> = doc.layers.iter().filter(|l| !inside(l.id)).map(|l| (l.id, path.contains(&l.id))).collect();
+        editor.edit("Show/Hide Layers", |doc, _| {
+            for (layer, visible) in changes {
+                if let Some(l) = doc.layer_mut(layer) {
+                    l.visible = visible;
+                }
+            }
+        });
+        self.solo = Some((id, before));
+    }
+
     /// Draw one layer row; returns its rectangle.
     fn row(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme, id: u64) -> egui::Rect {
         let Some(layer) = editor.doc.layer(id) else {
@@ -467,8 +499,11 @@ impl LayersPanel {
                         let eye_colour = if shown { theme.foreground } else { theme.dark_foreground };
                         let eye_button = ui
                             .add_sized([EYE_WIDTH, 18.0], Button::new(RichText::new(eye).color(eye_colour)).frame(false))
-                            .on_hover_text("Show/hide");
-                        if eye_button.clicked() {
+                            .on_hover_text("Show/hide (Alt+click: show only this layer)");
+                        if eye_button.clicked() && ui.input(|i| i.modifiers.alt) {
+                            self.solo(editor, id);
+                        } else if eye_button.clicked() {
+                            self.solo = None;
                             editor.edit(if visible { "Hide Layer" } else { "Show Layer" }, |doc, _| {
                                 if let Some(l) = doc.layer_mut(id) {
                                     l.visible = !l.visible;
@@ -1501,6 +1536,47 @@ mod tests {
         drag(&mut h, from, pos2(to.x, top + 2.0));
         assert_eq!(h.editor.doc.layer(CURVES).unwrap().parent, None);
         assert_eq!(h.top_first()[0], CURVES);
+    }
+
+    #[test]
+    fn alt_clicking_an_eye_shows_only_that_layer_and_again_puts_back_what_was_shown() {
+        let mut h = Harness::new();
+        let background = h.background();
+        h.editor.edit("Group Layers", |doc, active| {
+            *active = doc.group_layer(1);
+        });
+        let group = h.editor.active;
+        h.editor.doc.layer_mut(CURVES).unwrap().visible = false;
+        h.editor.active = MULTIPLY;
+        // The panel opens the group to show the active layer.
+        assert!(h.shown(MULTIPLY));
+        let eye = |h: &Harness, layer| {
+            let rect = h.ctx.read_response(row_id(layer)).unwrap().rect;
+            pos2(rect.left() + 4.0 + EYE_WIDTH / 2.0, rect.center().y)
+        };
+        let visible = |h: &Harness| [CURVES, group, MULTIPLY, background].map(|l| h.editor.doc.layer(l).unwrap().visible);
+        let before = visible(&h);
+        assert_eq!(before, [false, true, true, true]);
+
+        // The layer, and the group it's in.
+        h.modifiers = egui::Modifiers::ALT;
+        h.click(eye(&h, MULTIPLY));
+        assert_eq!(visible(&h), [false, true, true, false]);
+        h.click(eye(&h, MULTIPLY));
+        assert_eq!(visible(&h), before);
+
+        // A group keeps what's in it.
+        h.click(eye(&h, group));
+        assert_eq!(visible(&h), [false, true, true, false]);
+        // A plain click on another eye forgets what to put back.
+        h.modifiers = egui::Modifiers::NONE;
+        h.click(eye(&h, background));
+        h.modifiers = egui::Modifiers::ALT;
+        h.click(eye(&h, group));
+        assert_eq!(visible(&h), [false, true, true, false]);
+        // Each is one undo step.
+        h.editor.undo();
+        assert_eq!(visible(&h), [false, true, true, true]);
     }
 
     #[test]
