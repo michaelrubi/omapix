@@ -909,47 +909,89 @@ mod tests {
     }
 
     /// How close Auto Retouch comes to Michael's own retouches (PLAN.md,
-    /// step 21): for each layered file in `OMAPIX_RETOUCHES` (.ora or .psd,
-    /// the bottom layer the photo as it came from darktable), Auto Retouch
-    /// at `PRESET` (Standard, if unset) on that photo is compared with his
-    /// retouch, face by face and zone by zone: its skin, under its eyes, its
-    /// eyes and its teeth. In each zone, what each changed is split into
-    /// tone (blurred by a tenth of the distance between the eyes) and
-    /// texture (what's left), and the difference between the two changes
-    /// is averaged, in CIE L* (out of 100). Lower is closer; "his" is how
-    /// much he changed it, for scale. The last line is the score to beat:
-    /// the mean over every zone of every face. Needs the models.
+    /// step 21). For each layered file in `OMAPIX_RETOUCHES` (.ora or .psd)
+    /// with a "Retouch" or "Frequency Separation…" group at the top level:
+    ///
+    /// - the photo is what the top-level layers below the lowest of those
+    ///   show (the Background, and Denoise if there is one);
+    /// - his retouch is what the layers up to the highest of them show,
+    ///   without the grading and Liquify above;
+    /// - Auto Retouch at `PRESET` (Natural, if unset) runs on the photo.
+    ///
+    /// The two are compared face by face and zone by zone. In each zone,
+    /// what each changed is split into tone (blurred by a tenth of the
+    /// distance between the eyes) and texture (what's left), and the
+    /// difference between the two changes is averaged, in CIE L* (out of
+    /// 100). Lower is closer; "his" and "ours" are how much each changed
+    /// it, to tell too little from too much.
+    /// A `<name>-og` file beside it (an earlier edit he redid) is cut the
+    /// same way and scored against the redo as "og": the bar to beat. The
+    /// last lines are the means over every zone of every face. Needs the
+    /// models; run with `cargo test --release -p omapix -- --ignored
+    /// auto_retouch_against_hand_retouches --nocapture`.
     #[test]
     #[ignore]
     fn auto_retouch_against_hand_retouches() {
+        use omapix_engine::document::Document;
         use omapix_engine::tiled::Tiled;
         let Ok(folder) = std::env::var("OMAPIX_RETOUCHES") else {
             return;
         };
         let mut paths: Vec<_> = std::fs::read_dir(&folder).unwrap().map(|e| e.unwrap().path()).collect();
-        paths.retain(|p| p.extension().is_some_and(|e| e == "ora" || e == "psd"));
+        paths.retain(|p| p.extension().is_some_and(|e| e == "ora" || e == "psd") && !p.file_stem().unwrap().to_string_lossy().ends_with("-og"));
         paths.sort();
-        let preset = std::env::var("PRESET").map_or(Preset::Standard, |name| Preset::from_name(&name).unwrap());
+        let preset = std::env::var("PRESET").map_or(Preset::Natural, |name| Preset::from_name(&name).unwrap());
         // CIE L*, from linear sRGB.
         let lightness = |p: Pixel| {
             let y = (0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])) / 65535.0;
             if y > 0.008856 { 116.0 * y.cbrt() - 16.0 } else { 903.3 * y }
         };
         let linear = ColorProfile::srgb().with_gamma(1.0).unwrap();
-        let mut all = Vec::new();
-        eprintln!("{:<28} {:>4} {:<10} {:>6} {:>8} {:>6}", "file", "face", "zone", "tone", "texture", "his");
+        // The top-level layers, bottom first, and where the retouching
+        // ones start and end among them.
+        let cut = |doc: &Document| {
+            let top: Vec<u64> = doc.layers.iter().filter(|l| l.parent.is_none()).map(|l| l.id).collect();
+            let retouching = |id: &u64| {
+                doc.layer(*id)
+                    .is_some_and(|l| l.name == "Retouch" || l.name.starts_with("Frequency Separation"))
+            };
+            let first = top.iter().position(retouching)?;
+            let last = top.iter().rposition(retouching)?;
+            Some((top, first, last))
+        };
+        // `doc` with only the top-level layers in `keep` shown.
+        let showing = |doc: &Document, top: &[u64], keep: std::ops::Range<usize>| {
+            let mut doc = doc.clone();
+            for (i, id) in top.iter().enumerate() {
+                if !keep.contains(&i) {
+                    doc.layer_mut(*id).unwrap().visible = false;
+                }
+            }
+            doc
+        };
+        let (mut all, mut all_og) = (Vec::new(), Vec::new());
+        eprintln!(
+            "{:<12} {:>4} {:<11} {:>6} {:>8} {:>6} {:>6} {:>8} {:>8}",
+            "file", "face", "zone", "tone", "texture", "his", "ours", "og tone", "og text"
+        );
         for path in paths {
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
             let doc = omapix_engine::io::load(&path).unwrap();
-            let in_linear = |r: &Raster| {
-                omapix_engine::color::convert(&Tiled::from_raster(r), &doc.profile, &linear)
-                    .unwrap()
-                    .to_raster()
+            let Some((top, first, last)) = cut(&doc) else {
+                eprintln!("{name}: no Retouch or Frequency Separation group");
+                continue;
             };
-            let his = in_linear(&doc.composite());
-            let mut photo = doc.clone();
-            photo.layers.truncate(1);
-            (photo.layers[0].visible, photo.layers[0].opacity, photo.layers[0].mask) = (true, 1.0, None);
+            let profile = doc.profile.clone();
+            let in_linear = |r: &Raster| omapix_engine::color::convert(&Tiled::from_raster(r), &profile, &linear).unwrap().to_raster();
+            let his = in_linear(&showing(&doc, &top, 0..last + 1).composite());
+            let og = path.with_file_name(format!("{name}-og.{}", path.extension().unwrap().to_string_lossy()));
+            let og = og.exists().then(|| {
+                let doc = omapix_engine::io::load(&og).unwrap();
+                let (top, _, last) = cut(&doc).unwrap();
+                in_linear(&showing(&doc, &top, 0..last + 1).composite())
+            });
+            let photo = showing(&doc, &top, 0..first);
+            drop(doc);
             let faces = match find(&photo.composite(), &photo.profile) {
                 Ok(faces) => faces,
                 Err(e) => {
@@ -957,11 +999,13 @@ mod tests {
                     continue;
                 }
             };
+            let below = top[first - 1];
             let mut editor = Editor::new(photo).unwrap();
+            editor.active = below;
             let dialog = AutoRetouch {
                 all: preset.settings(),
                 accept: false,
-                layer: editor.active,
+                layer: below,
                 finding: None,
                 faces,
                 selected: None,
@@ -972,20 +1016,33 @@ mod tests {
             let before = in_linear(&editor.doc.composite());
             apply(&mut editor, &dialog);
             let ours = in_linear(&editor.doc.composite());
+            drop(editor);
             for (n, face) in dialog.faces.iter().enumerate() {
                 let found = &face.found;
                 let radius = found.iod / 10.0;
                 let blurred = |r: &Raster| omapix_engine::filters::gaussian_blur(&Tiled::from_raster(r), radius);
-                let [h, o] = [&his, &ours].map(blurred);
+                let h = blurred(&his);
+                let o = blurred(&ours);
+                let g = og.as_ref().map(blurred);
                 let under_eyes = found.under_eyes.0.combine(&found.under_eyes.1, omapix_engine::Combine::Add);
-                for (zone, selection) in [
+                let mut zones = vec![
                     ("skin", &found.skin),
                     ("under eyes", &under_eyes),
                     ("eyes", &found.eyes),
                     ("teeth", &found.teeth),
-                ] {
+                ];
+                if let Some(regions) = &found.regions {
+                    zones.extend([
+                        ("forehead", &regions.forehead),
+                        ("crow's feet", &regions.crows_feet),
+                        ("smile lines", &regions.smile_lines),
+                    ]);
+                }
+                for (zone, selection) in zones {
                     let Some([x, y, w, hh]) = selection.bounds() else { continue };
-                    let (mut weight, mut tone, mut texture, mut his_change) = (0.0, 0.0, 0.0, 0.0);
+                    let (mut weight, mut his_change, mut our_change) = (0.0, 0.0, 0.0);
+                    // Tone and texture differences from his, for ours and the og.
+                    let (mut ours_diff, mut og_diff) = ([0.0; 2], [0.0; 2]);
                     for (px, py) in (y..y + hh).flat_map(|py| (x..x + w).map(move |px| (px, py))) {
                         let k = f32::from(selection.coverage.get(px, py)) / 65535.0;
                         if k == 0.0 {
@@ -993,24 +1050,54 @@ mod tests {
                         }
                         let at = |r: &Raster| lightness(r.get(px, py));
                         let smooth = |t: &Tiled<Pixel>| lightness(t.get(px, py));
+                        let th = smooth(&h);
                         // The changes from `before` differ as the results do.
-                        let (th, to) = (smooth(&h), smooth(&o));
+                        let diff = |sum: &mut [f32; 2], result: &Raster, blurred: &Tiled<Pixel>| {
+                            let t = smooth(blurred);
+                            sum[0] += k * (t - th).abs();
+                            sum[1] += k * ((at(result) - t) - (at(&his) - th)).abs();
+                        };
+                        diff(&mut ours_diff, &ours, &o);
+                        if let (Some(og), Some(g)) = (&og, &g) {
+                            diff(&mut og_diff, og, g);
+                        }
                         weight += k;
-                        tone += k * (to - th).abs();
-                        texture += k * ((at(&ours) - to) - (at(&his) - th)).abs();
                         his_change += k * (at(&his) - at(&before)).abs();
+                        our_change += k * (at(&ours) - at(&before)).abs();
                     }
                     if weight == 0.0 {
                         continue;
                     }
-                    let (tone, texture, his_change) = (tone / weight, texture / weight, his_change / weight);
-                    eprintln!("{name:<28} {:>4} {zone:<10} {tone:>6.2} {texture:>8.2} {his_change:>6.2}", n + 1);
+                    let [tone, texture] = ours_diff.map(|d| d / weight);
+                    let [og_tone, og_texture] = og_diff.map(|d| d / weight);
+                    let og_columns = match og {
+                        Some(_) => format!("{og_tone:>8.2} {og_texture:>8.2}"),
+                        None => String::new(),
+                    };
+                    eprintln!(
+                        "{name:<12} {:>4} {zone:<11} {tone:>6.2} {texture:>8.2} {:>6.2} {:>6.2} {og_columns}",
+                        n + 1,
+                        his_change / weight,
+                        our_change / weight
+                    );
                     all.push(tone + texture);
+                    if og.is_some() {
+                        all_og.push((tone + texture, og_tone + og_texture));
+                    }
                 }
             }
         }
+        let mean = |v: &mut dyn Iterator<Item = f32>, n: usize| v.sum::<f32>() / n as f32;
         if !all.is_empty() {
-            eprintln!("score: {:.3} ({} zones)", all.iter().sum::<f32>() / all.len() as f32, all.len());
+            eprintln!("score: {:.3} ({} zones)", mean(&mut all.iter().copied(), all.len()), all.len());
+        }
+        if !all_og.is_empty() {
+            let n = all_og.len();
+            eprintln!(
+                "where there's an og: {:.3}, og {:.3} ({n} zones)",
+                mean(&mut all_og.iter().map(|z| z.0), n),
+                mean(&mut all_og.iter().map(|z| z.1), n)
+            );
         }
     }
 
