@@ -106,6 +106,10 @@ A collapsible strip above the right panel's tabs holding Navigator and Histogram
 Photoshop's Image › Image Rotation submenu: 180°, 90° Clockwise, 90° Counter Clockwise, Flip Canvas Horizontal, and Flip Canvas Vertical. Flips and rotations permute document pixels directly with no resampling, operating tile by tile in parallel with rayon and keeping untouched tiles empty. Each command rotates or flips every layer's pixels (including groups and adjustment layers' masks), every layer mask, the selection (rebuilding outlines), and saved alpha channels in a single undo step. 90° rotations swap document dimensions and resize the canvas pyramid while keeping the view fitted to the window, fully preserved through undo and redo.
 
 
+### ~~Alt+click an eye to show only that layer~~ (done)
+
+As in Photoshop: Alt+click on a layer's eye hides every other layer, keeping the groups it's in shown (and, for a group, what's in it). Alt+click the same eye again to put back what was shown before; a plain click on any eye in between forgets it. Each is one undo step.
+
 ## 2. Hand-testing checklist
 
 The UI has been tested through the same code paths with scripts
@@ -178,6 +182,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Content-Aware Fill: a prop, a mark on the backdrop and a stray hair on a 24 MP portrait, the first use (loading), the layer and its mask, undo, and that it still fills without the model
 - [ ] Texture Fill: the same prop, backdrop mark and stray hair beside Content-Aware Fill's, a big patch of grass, gravel or a textured wall, a hard-edged and a feathered selection (does the edge show?), a fill next to the subject, the layer and its mask, undo, and how big the .ora is; with a saved alpha channel as the sampling area, near and far, and whether the edge blends
 - [ ] Healing by Poisson blending: Spot Healing and the Healing Brush on spots, a stray hair and a wrinkle with a soft and a hard brush (does the dab's edge show?), a heal copied from skin in shadow onto lit skin, a spot beside the lips with and without a selection along them, Heal Blemishes and Auto Retouch on a portrait, a long stroke with a big brush (how long it takes on release), and undo
+- [ ] Alt+click an eye: on a layer (only it and its groups stay shown), on a group (what's in it keeps its own visibility), Alt+click again (what was shown before comes back, hidden layers stay hidden), a plain eye click in between (Alt+click then shows only that layer again), and undo
 - [ ] Clone and heal source target: hold Alt with the Clone Stamp and the Healing Brush (the brush becomes a small target, and comes back on release), Alt+click sets the source where the target's centre is, Alt+right-drag still shows the brush while resizing, and the Brush's Alt still shows the eyedropper crosshair
 - [ ] Holding I (or another tool key) to use a tool and going back on release, Alt's pipette cursor with the Brush, and the right-click menu on the image with and without a selection
 - [ ] Move tool Ctrl+click picking the layer under the pointer, on a retouch with patches, a group and a masked layer
