@@ -1,5 +1,5 @@
-//! Retouch › Auto Retouch… (docs/AI.md, feature 6): Reduce Shine, Smooth
-//! Skin over the lower face and the blemishes found, lines and eye bags, Even Tone, Lighten Under Eyes and Whiten Eyes and
+//! Retouch › Auto Retouch… (docs/AI.md, feature 6): Reduce Shine, Stray
+//! Hairs, Smooth Skin over the lower face and the blemishes found, lines and eye bags, Even Tone, Lighten Under Eyes and Whiten Eyes and
 //! Teeth in one go, for each face found
 //! in what the active layer and those below it show, as a Retouch group
 //! above with a group for each face (`omapix_engine::retouch`). The dialog has a switch and a
@@ -41,6 +41,7 @@ pub struct Retouch {
     /// Moles and beauty marks are left out of the blemishes.
     pub keep_beauty_marks: bool,
     pub shine: Step,
+    pub stray_hairs: Step,
     pub smooth_skin: Step,
     pub forehead: Step,
     pub crows_feet: Step,
@@ -96,6 +97,7 @@ impl Preset {
             blemishes,
             keep_beauty_marks: false,
             shine: lighten,
+            stray_hairs: Step { on: true, amount: 100.0 },
             smooth_skin,
             forehead: lines,
             crows_feet: lines,
@@ -319,6 +321,11 @@ impl AutoRetouch {
                     ),
                     ("Reduce Shine", "Amount: the Reduce Shine layer's opacity", &mut settings.shine),
                     (
+                        "Stray Hairs",
+                        "Amount: how much of the dark hairs lying on the skin goes, the Stray Hairs layer's opacity. Not round the eyes or smile lines",
+                        &mut settings.stray_hairs,
+                    ),
+                    (
                         "Smooth Skin",
                         "Amount: how much of the blotchiness goes on the lower face and each patch, the Smooth Skin layer's opacity",
                         &mut settings.smooth_skin,
@@ -446,17 +453,19 @@ impl AutoRetouch {
                     Arc::clone(found),
                     self.healed(n),
                     amount(settings.shine),
+                    amount(settings.stray_hairs).filter(|_| found.regions.is_some()),
                     smoothing,
                     lines,
                     evening,
                     lighten,
                 )
             })
-            .filter(|(_, found, healed, shine, smoothing, lines, evening, lighten)| {
+            .filter(|(_, found, healed, shine, stray_hairs, smoothing, lines, evening, lighten)| {
                 !healed.is_empty()
                     || (found.regions.is_some() && smoothing.is_some())
                     || lines.any()
                     || shine.is_some()
+                    || stray_hairs.is_some()
                     || evening.is_some()
                     || lighten.iter().any(Option::is_some)
             })
@@ -470,7 +479,7 @@ impl AutoRetouch {
             move |doc, active| {
                 let faces: Vec<_> = (faces.iter())
                     .map(
-                        |(number, found, healed, shine, smoothing, lines, evening, [under, eyes, teeth])| retouch::Face {
+                        |(number, found, healed, shine, stray_hairs, smoothing, lines, evening, [under, eyes, teeth])| retouch::Face {
                             number: *number,
                             skin: &found.skin,
                             iod: found.iod,
@@ -478,6 +487,7 @@ impl AutoRetouch {
                             regions: found.regions.as_ref(),
                             lines: *lines,
                             shine: *shine,
+                            stray_hairs: *stray_hairs,
                             smoothing: *smoothing,
                             evening: *evening,
                             under_eyes: under.map(|amount| (&found.under_eyes.0, &found.under_eyes.1, amount)),

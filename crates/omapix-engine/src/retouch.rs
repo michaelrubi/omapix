@@ -18,6 +18,7 @@
 //!   │    ├─ Forehead Lines
 //!   │    ├─ Blemishes
 //!   │    ├─ Smooth Skin
+//!   │    ├─ Stray Hairs
 //!   │    └─ Reduce Shine
 //!   └─ Face 2
 //! ```
@@ -29,6 +30,7 @@
 use crate::blemish::{self, Spot};
 use crate::body::{Joint, Joints};
 use crate::document::Document;
+use crate::hairs;
 use crate::layer::Layer;
 use crate::selection::{Combine, Selection};
 use crate::shine::{self, Matte};
@@ -60,6 +62,11 @@ pub struct Regions {
 /// How far from the skin's edge lines are looked for, in distances between
 /// the eyes: hair and brows there look like grooves.
 const LINE_MARGIN: f32 = 0.03;
+
+/// How far round the eyes and smile lines stray hairs aren't looked for, in
+/// distances between the eyes: lines, lashes and eyeliner there look as
+/// hairs do.
+const HAIR_AVOID: f32 = 0.05;
 
 /// How much of the fine texture goes on each part of a face (0–100):
 /// without, there's no layer for it.
@@ -93,6 +100,9 @@ pub struct Face<'a> {
     /// How much of the shine on its skin goes (0–100): without, or with
     /// none, there's no Reduce Shine layer.
     pub shine: Option<f32>,
+    /// How much of the stray hairs on its skin go (0–100): without, or
+    /// without its regions, there's no Stray Hairs layer.
+    pub stray_hairs: Option<f32>,
     /// Without these, there's no Smooth Skin layer or Dodge & Burn group:
     /// `smoothing`'s amount is how much of the mid band goes on a spot.
     pub smoothing: Option<Smoothing>,
@@ -231,7 +241,8 @@ pub fn share(skin: &Selection, people: &[Person], which: usize) -> Selection {
 
 /// A "Retouch" group above the layer at `above`, with a group for each of
 /// `faces` (the first on top), each holding that face's steps: a Reduce
-/// Shine layer ([`shine::add_layer`]), a Smooth Skin layer made from that
+/// Shine layer ([`shine::add_layer`]), a Stray Hairs layer
+/// ([`hairs::add_layer`]) made from that, a Smooth Skin layer made from that
 /// ([`skin::add_band_layer`]), masked to its lower cheeks and jaw less any
 /// beard, and patches round its spots ([`skin::patches`]), a layer for
 /// each part of its [`Lines`] ([`skin::lines`]), a Dodge & Burn group
@@ -256,6 +267,14 @@ pub fn add_layers(doc: &mut Document, above: usize, faces: &[Face]) -> Option<u6
             if let Some(matte) = Matte::new(&image, face.skin, face.iod) {
                 shine::add_layer(doc, at, &matte, amount);
             }
+        }
+        if let (Some(amount), Some(regions)) = (face.stray_hairs, face.regions) {
+            let at = index(doc, id);
+            let image = doc.composite_current_and_below(at);
+            let avoid = (regions.crows_feet.combine(&regions.bags, Combine::Add))
+                .combine(&regions.smile_lines, Combine::Add)
+                .expand(HAIR_AVOID * face.iod);
+            hairs::add_layer(doc, at, &image, &hairs::find(&image, face.skin, &avoid, face.iod), amount);
         }
         if let Some(smoothing) = &face.smoothing {
             let at = index(doc, id);
@@ -376,6 +395,7 @@ mod tests {
             regions: None,
             lines: Lines::default(),
             shine: None,
+            stray_hairs: None,
             smoothing: Some(Smoothing::default()),
             evening: Some(Evening::default()),
             under_eyes: None,
@@ -611,6 +631,7 @@ mod tests {
         let ([left, right], spots) = (skins(), spot(150.0));
         let shiny = |number, skin, spots| Face {
             shine: Some(50.0),
+            stray_hairs: None,
             evening: None,
             ..face(number, skin, spots)
         };
