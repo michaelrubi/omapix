@@ -26,6 +26,14 @@ With more than one face, a strip of faces appears:
 - To give one face its own settings, pick it in the strip or click it on the canvas.
 - You can switch a face off.
 
+To use the same settings on someone again, keep them as a look:
+
+- Set the face up, type a name such as the client's, and press **Save**. Looks are kept in `~/.config/omapix/looks.toml`.
+- On the next photo, pick the face and choose its look from **Looks**. With one face, just choose the look.
+- To change a look, choose it, change the settings and press **Save**. **Delete** removes the look named in the box.
+
+Omapix doesn't recognise anyone: you choose the look for each face.
+
 Each face is measured by its own eyes, so small faces in a group shot are smoothed as finely as they need. When the pose model is installed, skin goes to the person whose face or body it's nearest. That way an arm across someone else's shoulder is retouched as its owner's skin.
 
 ## What you get
