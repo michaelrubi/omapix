@@ -21,6 +21,7 @@ pub mod fill;
 pub mod filters;
 pub mod fusion;
 pub mod groups;
+pub mod hairs;
 pub mod histogram;
 pub mod inpaint;
 pub mod io;

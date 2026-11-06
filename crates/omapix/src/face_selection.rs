@@ -563,7 +563,7 @@ pub fn find_faces(image: &Raster, profile: &ColorProfile) -> Result<Vec<FoundFac
             regions: points.as_deref().map(|p| regions(p, &face_skin, &under_eyes)),
             bounds: face.bounds,
             iod,
-            skin: retouch::share(&all_skin, &people, n),
+            skin: omapix_engine::skin::of_its_colour(&srgb, &retouch::share(&all_skin, &people, n)),
             spots: points
                 .as_deref()
                 .map_or(Vec::new(), |p| blemish::find(&srgb, &blemish_area(&face_skin, &[p]), iod)),

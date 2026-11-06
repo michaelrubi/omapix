@@ -179,9 +179,14 @@ fn step(low: f32, high: f32, v: f32) -> f32 {
 /// the eyes.
 const LINE_SOFTEN: f32 = 0.012;
 
+/// What fraction of the skin's lightness is too dark to be a line, from
+/// fully to not at all: eyeliner and lashes, which are made up, not lines.
+const TOO_DARK: [f32; 2] = [0.4, 0.55];
+
 /// The lines in `area`: grooves darker than the skin round them by more
-/// than most of it varies, softened as strokes along them are. Pores and
-/// skin between lines are left, for eyes `iod` apart.
+/// than most of it varies, but not far darker than the skin, softened as
+/// strokes along them are. Pores and skin between lines are left, for eyes
+/// `iod` apart.
 pub fn lines(image: &Raster, area: &Selection, iod: f32) -> Selection {
     let (w, h) = (area.width(), area.height());
     let Some(bounds) = area.bounds() else {
@@ -196,12 +201,62 @@ pub fn lines(image: &Raster, area: &Selection, iod: f32) -> Selection {
     let spread = median((0..mid.len()).filter(|&i| on_area(i)).map(|i| mid[i].abs()).collect())
         .unwrap_or(1.0)
         .max(1.0);
-    let grooves = mid.iter().map(|m| [step(spread, 2.0 * spread, -m); 4]).collect();
+    // Eyeliner and lashes, far darker than the skin, and the edges round them.
+    let skin = median((0..f.len()).filter(|&i| on_area(i)).map(|i| f[i][0]).collect()).unwrap_or(0.0);
+    let too_dark: Vec<_> = f.iter().map(|f| [1.0 - step(TOO_DARK[0] * skin, TOO_DARK[1] * skin, f[0]); 4]).collect();
+    let near = blur_buffer(too_dark.clone(), pw, ph, 2.0 * coarse);
+    let grooves = (0..mid.len())
+        .map(|i| {
+            let made_up = too_dark[i][0].max((near[i][0] * 16.0).min(1.0));
+            [step(spread, 2.0 * spread, -mid[i]) * (1.0 - made_up); 4]
+        })
+        .collect();
     let grooves = blur_buffer(grooves, pw, ph, LINE_SOFTEN * iod);
     let mut coverage = vec![0u16; (w * h) as usize];
     for (i, g) in grooves.iter().enumerate() {
         let (x, y) = (x0 + (i % pw) as u32, y0 + (i / pw) as u32);
         coverage[(y * w + x) as usize] = ((g[0] * 2.0).min(1.0) * area.at(x, y) * MAX) as u16;
+    }
+    Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage))
+}
+
+/// How red a pixel is, (red − green) over its sum, as a fraction of the
+/// skin's middle redness, from not being skin to being it; under the floor,
+/// skin isn't red enough to tell (a black and white photo); and how far,
+/// in pixels, redness is averaged so that noise in the shadows isn't taken
+/// for a colour.
+const RED_OF_SKIN: [f32; 2] = [0.1, 0.4];
+const RED_FLOOR: f32 = 0.02;
+const RED_REACH: f32 = 2.0;
+
+/// `skin` less what isn't nearly as red as most of it in `srgb` (8-bit
+/// sRGB, the same size): a leaf, or anything green or grey, in front of it.
+pub fn of_its_colour(srgb: &[[u8; 4]], skin: &Selection) -> Selection {
+    let (w, h) = (skin.width(), skin.height());
+    let Some([x0, y0, bw, bh]) = skin.bounds() else {
+        return skin.clone();
+    };
+    let red: Vec<[f32; 4]> = (0..bw * bh)
+        .into_par_iter()
+        .map(|i| {
+            let [r, g, b, _] = srgb[((y0 + i / bw) * w + x0 + i % bw) as usize].map(f32::from);
+            [(r - g) / (r + g + b).max(1.0); 4]
+        })
+        .collect();
+    let red = blur_buffer(red, bw as usize, bh as usize, RED_REACH);
+    let at = |i: usize| (x0 + i as u32 % bw, y0 + i as u32 / bw);
+    let on_skin = (0..red.len()).filter(|&i| {
+        let (x, y) = at(i);
+        skin.at(x, y) > 0.5
+    });
+    let Some(middle) = median(on_skin.map(|i| red[i][0]).collect()).filter(|&m| m > RED_FLOOR) else {
+        return skin.clone();
+    };
+    let mut coverage = vec![0u16; (w * h) as usize];
+    for (i, r) in red.iter().enumerate() {
+        let (x, y) = at(i);
+        let k = step(RED_OF_SKIN[0] * middle, RED_OF_SKIN[1] * middle, r[0]);
+        coverage[(y * w + x) as usize] = (k * skin.at(x, y) * MAX) as u16;
     }
     Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage))
 }
@@ -523,6 +578,55 @@ mod tests {
         let found = lines(&image, &Selection::all(w, h), 200.0);
         assert!(found.at(150, 100) > 0.8, "{}", found.at(150, 100));
         assert!(found.at(150, 40) < 0.1, "{}", found.at(150, 40));
+    }
+
+    #[test]
+    fn lines_leaves_eyeliner_far_darker_than_the_skin() {
+        let (w, h) = (300, 200);
+        let image = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let grain = ((x * 7 + y * 13) % 5) * 60;
+                    // A groove at y 60 and a line of eyeliner at y 140.
+                    let v = match y {
+                        58..62 => 30000,
+                        138..142 => 6000,
+                        _ => 40000,
+                    };
+                    [(v + grain) as u16, (v + grain) as u16, (v + grain) as u16, u16::MAX]
+                })
+                .collect(),
+        );
+        let found = lines(&image, &Selection::all(w, h), 200.0);
+        assert!(found.at(150, 60) > 0.8, "{}", found.at(150, 60));
+        for y in 130..150 {
+            assert!(found.at(150, y) < 0.2, "{y}: {}", found.at(150, y));
+        }
+    }
+
+    #[test]
+    fn of_its_colour_drops_a_green_leaf_and_keeps_shine_and_a_grey_photo() {
+        let (w, h) = (200u32, 100u32);
+        let skin = Selection::rectangle(w, h, (20.0, 10.0), (180.0, 90.0));
+        // Skin, a shine on it, and a pale leaf across its right side.
+        let photo: Vec<[u8; 4]> = (0..w * h)
+            .map(|i| match (i % w, i / w) {
+                (140.., _) => [111, 142, 116, 255],
+                (50..60, 40..50) => [208, 160, 153, 255],
+                _ => [122, 83, 67, 255],
+            })
+            .collect();
+        let kept = of_its_colour(&photo, &skin);
+        assert!(kept.at(100, 50) > 0.99, "{}", kept.at(100, 50));
+        assert!(kept.at(55, 45) > 0.99, "{}", kept.at(55, 45));
+        assert!(kept.at(160, 50) < 0.01, "{}", kept.at(160, 50));
+        assert!(kept.at(10, 50) == 0.0);
+        let grey: Vec<[u8; 4]> = photo.iter().map(|p| [p[1], p[1], p[1], 255]).collect();
+        let kept = of_its_colour(&grey, &skin);
+        assert!(kept.at(160, 50) > 0.99, "a grey photo keeps all its skin");
     }
 
     #[test]
