@@ -25,6 +25,7 @@ mod history_panel;
 mod hotkeys;
 mod layers_panel;
 mod live;
+mod looks;
 mod mcp;
 mod monitor;
 mod navigator_panel;

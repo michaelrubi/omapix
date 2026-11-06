@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::editor::{Editor, Target};
 use crate::face_selection::{FoundFace, find_faces};
 use crate::heal_blemishes::at_sensitivity;
+use crate::looks::Looks;
 use crate::theme::Theme;
 
 /// One step: whether it's done, and how strongly (0–100).
@@ -137,6 +138,15 @@ pub struct AutoRetouch {
     selected: Option<usize>,
     /// The spots that will be healed.
     circled: Vec<Spot>,
+    looks: Looks,
+    /// What's in the name box beside the looks.
+    naming: String,
+}
+
+/// The name box beside the looks: while it has the keyboard, Enter saves
+/// the look and Esc leaves the box, rather than closing the dialog.
+fn name_box() -> egui::Id {
+    egui::Id::new("auto-retouch-look-name")
 }
 
 impl AutoRetouch {
@@ -159,6 +169,8 @@ impl AutoRetouch {
             faces: Vec::new(),
             selected: None,
             circled: Vec::new(),
+            looks: Looks::load(),
+            naming: String::new(),
         })
     }
 
@@ -207,6 +219,7 @@ impl AutoRetouch {
             }
         }
         let ready = self.finding.is_none();
+        let naming = ctx.memory(|m| m.has_focus(name_box()));
         self.circled = (0..self.faces.len()).flat_map(|n| self.healed(n)).collect();
         let mut result = (ready && self.accept).then_some(true);
         let area = egui::Modal::default_area(egui::Id::new("auto-retouch")).anchor(egui::Align2::RIGHT_TOP, vec2(-320.0, 90.0));
@@ -233,11 +246,12 @@ impl AutoRetouch {
                 ui.label(RichText::new("As a Retouch group, with a group for each face.").color(theme.dark_foreground));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter)) && !naming;
                     if ui.add_enabled(ready, egui::Button::new("OK")).clicked() || (enter && ready) {
                         result = Some(true);
                     }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape)) && !naming;
+                    if ui.button("Cancel").clicked() || escape {
                         result = Some(false);
                     }
                 });
@@ -294,6 +308,8 @@ impl AutoRetouch {
                 }
             });
             ui.add_space(4.0);
+            self.look_row(ui, &mut settings);
+            ui.add_space(4.0);
             egui::Grid::new("auto-retouch-steps").num_columns(2).show(ui, |ui| {
                 for (label, hint, step) in [
                     (
@@ -347,6 +363,49 @@ impl AutoRetouch {
                 None => self.all = settings,
             }
         }
+    }
+
+    /// The looks, and a name to save `settings` under. Picking a look fills
+    /// the name in, so changing it and saving updates it.
+    fn look_row(&mut self, ui: &mut egui::Ui, settings: &mut Retouch) {
+        ui.horizontal(|ui| {
+            let matching = self.looks.iter().find(|(_, look)| *look == settings);
+            let shown = matching.map_or("Looks", |(name, _)| name.as_str()).to_owned();
+            let mut picked = None;
+            ui.add_enabled_ui(!self.looks.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt("auto-retouch-looks")
+                    .selected_text(shown)
+                    .width(100.0)
+                    .show_ui(ui, |ui| {
+                        for (name, look) in self.looks.iter() {
+                            if ui.selectable_label(look == settings, name).clicked() {
+                                picked = Some((name.clone(), *look));
+                            }
+                        }
+                    });
+            });
+            if let Some((name, look)) = picked {
+                self.naming = name;
+                *settings = look;
+            }
+            let name = egui::TextEdit::singleline(&mut self.naming)
+                .id(name_box())
+                .hint_text("Name")
+                .desired_width(90.0);
+            let name = ui.add(name);
+            let enter = name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let named = !self.naming.trim().is_empty();
+            let save = ui
+                .add_enabled(named, egui::Button::new("Save"))
+                .on_hover_text("Keep these settings as a look under this name");
+            if save.clicked() || (enter && named) {
+                self.looks.set(&self.naming, *settings);
+            }
+            if ui.add_enabled(self.looks.contains(&self.naming), egui::Button::new("Delete")).clicked() {
+                self.looks.remove(&self.naming);
+                self.naming.clear();
+            }
+        });
     }
 
     /// Add the Retouch group above the layer it was opened on (or the
@@ -548,6 +607,8 @@ mod tests {
             faces: faces.into(),
             selected: None,
             circled: Vec::new(),
+            looks: Looks::default(),
+            naming: String::new(),
         };
         (editor, dialog)
     }
@@ -787,6 +848,31 @@ mod tests {
     }
 
     #[test]
+    fn enter_in_the_name_box_saves_the_faces_settings_and_leaves_the_dialog_open() {
+        let (editor, mut dialog) = dialog();
+        let ctx = egui::Context::default();
+        let mut own = Preset::Strong.settings();
+        own.keep_beauty_marks = true;
+        dialog.faces[1].own = Some(own);
+        dialog.selected = Some(1);
+        dialog.naming = "Ana".into();
+        frame(&ctx, &editor, &mut dialog, vec![]).unwrap();
+        ctx.memory_mut(|m| m.request_focus(name_box()));
+        frame(&ctx, &editor, &mut dialog, vec![]).unwrap();
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(frame(&ctx, &editor, &mut dialog, vec![enter.clone()]), Ok(None));
+        assert_eq!(dialog.looks.iter().collect::<Vec<_>>(), [(&"Ana".to_owned(), &own)]);
+        // With the box left, Enter is OK again.
+        assert_eq!(frame(&ctx, &editor, &mut dialog, vec![enter]), Ok(Some(true)));
+    }
+
+    #[test]
     fn a_script_oks_it_once_the_faces_are_found() {
         let (editor, mut dialog) = dialog();
         let ctx = egui::Context::default();
@@ -880,6 +966,8 @@ mod tests {
                 faces,
                 selected: None,
                 circled: Vec::new(),
+                looks: Looks::default(),
+                naming: String::new(),
             };
             let before = in_linear(&editor.doc.composite());
             apply(&mut editor, &dialog);
@@ -966,6 +1054,8 @@ mod tests {
                 faces,
                 selected: None,
                 circled: Vec::new(),
+                looks: Looks::default(),
+                naming: String::new(),
             };
             let t = std::time::Instant::now();
             let names = apply(&mut editor, &dialog);
