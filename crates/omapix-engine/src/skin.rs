@@ -220,6 +220,47 @@ pub fn lines(image: &Raster, area: &Selection, iod: f32) -> Selection {
     Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage))
 }
 
+/// How red a pixel is, (red − green) over its sum, as a fraction of the
+/// skin's middle redness, from not being skin to being it; under the floor,
+/// skin isn't red enough to tell (a black and white photo); and how far,
+/// in pixels, redness is averaged so that noise in the shadows isn't taken
+/// for a colour.
+const RED_OF_SKIN: [f32; 2] = [0.1, 0.4];
+const RED_FLOOR: f32 = 0.02;
+const RED_REACH: f32 = 2.0;
+
+/// `skin` less what isn't nearly as red as most of it in `srgb` (8-bit
+/// sRGB, the same size): a leaf, or anything green or grey, in front of it.
+pub fn of_its_colour(srgb: &[[u8; 4]], skin: &Selection) -> Selection {
+    let (w, h) = (skin.width(), skin.height());
+    let Some([x0, y0, bw, bh]) = skin.bounds() else {
+        return skin.clone();
+    };
+    let red: Vec<[f32; 4]> = (0..bw * bh)
+        .into_par_iter()
+        .map(|i| {
+            let [r, g, b, _] = srgb[((y0 + i / bw) * w + x0 + i % bw) as usize].map(f32::from);
+            [(r - g) / (r + g + b).max(1.0); 4]
+        })
+        .collect();
+    let red = blur_buffer(red, bw as usize, bh as usize, RED_REACH);
+    let at = |i: usize| (x0 + i as u32 % bw, y0 + i as u32 / bw);
+    let on_skin = (0..red.len()).filter(|&i| {
+        let (x, y) = at(i);
+        skin.at(x, y) > 0.5
+    });
+    let Some(middle) = median(on_skin.map(|i| red[i][0]).collect()).filter(|&m| m > RED_FLOOR) else {
+        return skin.clone();
+    };
+    let mut coverage = vec![0u16; (w * h) as usize];
+    for (i, r) in red.iter().enumerate() {
+        let (x, y) = at(i);
+        let k = step(RED_OF_SKIN[0] * middle, RED_OF_SKIN[1] * middle, r[0]);
+        coverage[(y * w + x) as usize] = (k * skin.at(x, y) * MAX) as u16;
+    }
+    Selection::from_coverage(Tiled::from_slice(w, h, 0, &coverage))
+}
+
 /// How far fine texture and lightness are averaged, as a fraction of the
 /// distance between the eyes; how many times `reference`'s roughness it
 /// takes to be stubble, from starting to being it; and what fraction of its
@@ -564,6 +605,28 @@ mod tests {
         for y in 130..150 {
             assert!(found.at(150, y) < 0.2, "{y}: {}", found.at(150, y));
         }
+    }
+
+    #[test]
+    fn of_its_colour_drops_a_green_leaf_and_keeps_shine_and_a_grey_photo() {
+        let (w, h) = (200u32, 100u32);
+        let skin = Selection::rectangle(w, h, (20.0, 10.0), (180.0, 90.0));
+        // Skin, a shine on it, and a pale leaf across its right side.
+        let photo: Vec<[u8; 4]> = (0..w * h)
+            .map(|i| match (i % w, i / w) {
+                (140.., _) => [111, 142, 116, 255],
+                (50..60, 40..50) => [208, 160, 153, 255],
+                _ => [122, 83, 67, 255],
+            })
+            .collect();
+        let kept = of_its_colour(&photo, &skin);
+        assert!(kept.at(100, 50) > 0.99, "{}", kept.at(100, 50));
+        assert!(kept.at(55, 45) > 0.99, "{}", kept.at(55, 45));
+        assert!(kept.at(160, 50) < 0.01, "{}", kept.at(160, 50));
+        assert!(kept.at(10, 50) == 0.0);
+        let grey: Vec<[u8; 4]> = photo.iter().map(|p| [p[1], p[1], p[1], 255]).collect();
+        let kept = of_its_colour(&grey, &skin);
+        assert!(kept.at(160, 50) > 0.99, "a grey photo keeps all its skin");
     }
 
     #[test]
