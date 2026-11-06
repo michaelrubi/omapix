@@ -5743,6 +5743,7 @@ impl eframe::App for App {
                     tool: idle,
                     alt_samples: !tools_off && (tool.copies() || (tool.paints() && tool.alt_picks_colour())),
                     samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
+                    sets_source: !tools_off && tool.copies(),
                     // Holding Alt picks up a colour: a crosshair, not the brush,
                     // unless Alt+right-dragging to resize it.
                     brush: (!tools_off && tool.has_brush() && !(modifiers.alt && tool.alt_picks_colour() && !ui.input(|i| i.pointer.secondary_down())))

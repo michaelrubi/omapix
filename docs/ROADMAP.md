@@ -95,7 +95,7 @@ Alt+click on the mask button adds a black mask that hides the whole layer (Photo
 
 ### ~~Tool cursor modifier badges (`+` and `-`)~~ (done)
 
-Over the canvas, selection tools (Rectangular & Elliptical Marquee, Lasso, Magic Wand) show a small badge at the lower right of the crosshair: `+` while holding Shift (add), `-` while holding Alt (subtract), and `×` while holding Shift+Alt (intersect), matching the mode applied when clicking or dragging. The Move tool shows a copy badge while holding Alt (Alt+drag copy).
+Over the canvas, selection tools (Rectangular & Elliptical Marquee, Lasso, Magic Wand) show a small badge at the lower right of the crosshair: `+` while holding Shift (add), `-` while holding Alt (subtract), and `×` while holding Shift+Alt (intersect), matching the mode applied when clicking or dragging. The Move tool shows a copy badge while holding Alt (Alt+drag copy). The Clone Stamp and Healing Brush swap the brush for Photoshop's target (a small ring with a crosshair) while Alt is held, so it's clear which point Alt+click takes as the source.
 
 ### ~~Histogram and Navigator panels~~ (done)
 
@@ -178,6 +178,7 @@ The UI has been tested through the same code paths with scripts
 - [ ] Content-Aware Fill: a prop, a mark on the backdrop and a stray hair on a 24 MP portrait, the first use (loading), the layer and its mask, undo, and that it still fills without the model
 - [ ] Texture Fill: the same prop, backdrop mark and stray hair beside Content-Aware Fill's, a big patch of grass, gravel or a textured wall, a hard-edged and a feathered selection (does the edge show?), a fill next to the subject, the layer and its mask, undo, and how big the .ora is; with a saved alpha channel as the sampling area, near and far, and whether the edge blends
 - [ ] Healing by Poisson blending: Spot Healing and the Healing Brush on spots, a stray hair and a wrinkle with a soft and a hard brush (does the dab's edge show?), a heal copied from skin in shadow onto lit skin, a spot beside the lips with and without a selection along them, Heal Blemishes and Auto Retouch on a portrait, a long stroke with a big brush (how long it takes on release), and undo
+- [ ] Clone and heal source target: hold Alt with the Clone Stamp and the Healing Brush (the brush becomes a small target, and comes back on release), Alt+click sets the source where the target's centre is, Alt+right-drag still shows the brush while resizing, and the Brush's Alt still shows the eyedropper crosshair
 - [ ] Holding I (or another tool key) to use a tool and going back on release, Alt's pipette cursor with the Brush, and the right-click menu on the image with and without a selection
 - [ ] Move tool Ctrl+click picking the layer under the pointer, on a retouch with patches, a group and a masked layer
 - [ ] Select and Mask: a rough selection round a head of hair with Radius 20–60, Smooth, Feather, Contrast and Shift Edge, each output, Cancel, and the Defaults button
