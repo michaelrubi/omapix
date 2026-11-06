@@ -179,9 +179,14 @@ fn step(low: f32, high: f32, v: f32) -> f32 {
 /// the eyes.
 const LINE_SOFTEN: f32 = 0.012;
 
+/// What fraction of the skin's lightness is too dark to be a line, from
+/// fully to not at all: eyeliner and lashes, which are made up, not lines.
+const TOO_DARK: [f32; 2] = [0.4, 0.55];
+
 /// The lines in `area`: grooves darker than the skin round them by more
-/// than most of it varies, softened as strokes along them are. Pores and
-/// skin between lines are left, for eyes `iod` apart.
+/// than most of it varies, but not far darker than the skin, softened as
+/// strokes along them are. Pores and skin between lines are left, for eyes
+/// `iod` apart.
 pub fn lines(image: &Raster, area: &Selection, iod: f32) -> Selection {
     let (w, h) = (area.width(), area.height());
     let Some(bounds) = area.bounds() else {
@@ -196,7 +201,16 @@ pub fn lines(image: &Raster, area: &Selection, iod: f32) -> Selection {
     let spread = median((0..mid.len()).filter(|&i| on_area(i)).map(|i| mid[i].abs()).collect())
         .unwrap_or(1.0)
         .max(1.0);
-    let grooves = mid.iter().map(|m| [step(spread, 2.0 * spread, -m); 4]).collect();
+    // Eyeliner and lashes, far darker than the skin, and the edges round them.
+    let skin = median((0..f.len()).filter(|&i| on_area(i)).map(|i| f[i][0]).collect()).unwrap_or(0.0);
+    let too_dark: Vec<_> = f.iter().map(|f| [1.0 - step(TOO_DARK[0] * skin, TOO_DARK[1] * skin, f[0]); 4]).collect();
+    let near = blur_buffer(too_dark.clone(), pw, ph, 2.0 * coarse);
+    let grooves = (0..mid.len())
+        .map(|i| {
+            let made_up = too_dark[i][0].max((near[i][0] * 16.0).min(1.0));
+            [step(spread, 2.0 * spread, -mid[i]) * (1.0 - made_up); 4]
+        })
+        .collect();
     let grooves = blur_buffer(grooves, pw, ph, LINE_SOFTEN * iod);
     let mut coverage = vec![0u16; (w * h) as usize];
     for (i, g) in grooves.iter().enumerate() {
@@ -523,6 +537,33 @@ mod tests {
         let found = lines(&image, &Selection::all(w, h), 200.0);
         assert!(found.at(150, 100) > 0.8, "{}", found.at(150, 100));
         assert!(found.at(150, 40) < 0.1, "{}", found.at(150, 40));
+    }
+
+    #[test]
+    fn lines_leaves_eyeliner_far_darker_than_the_skin() {
+        let (w, h) = (300, 200);
+        let image = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let grain = ((x * 7 + y * 13) % 5) * 60;
+                    // A groove at y 60 and a line of eyeliner at y 140.
+                    let v = match y {
+                        58..62 => 30000,
+                        138..142 => 6000,
+                        _ => 40000,
+                    };
+                    [(v + grain) as u16, (v + grain) as u16, (v + grain) as u16, u16::MAX]
+                })
+                .collect(),
+        );
+        let found = lines(&image, &Selection::all(w, h), 200.0);
+        assert!(found.at(150, 60) > 0.8, "{}", found.at(150, 60));
+        for y in 130..150 {
+            assert!(found.at(150, y) < 0.2, "{y}: {}", found.at(150, y));
+        }
     }
 
     #[test]
