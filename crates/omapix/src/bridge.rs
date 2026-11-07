@@ -30,6 +30,8 @@ pub enum Request {
     Run(Command),
     /// Report the image showing, as `inspect_document` does a file.
     Inspect,
+    /// Play the saved action of this name.
+    Play(String),
 }
 
 /// A request, and where its answer goes.
@@ -100,6 +102,9 @@ pub fn listen(socket: &Path, ctx: &egui::Context) -> Option<Receiver<Asked>> {
 /// Pass a tool call to the app and wait for its answer; `None` if there's
 /// no such tool.
 fn ask(name: &str, args: &Value, tx: &Sender<Asked>, ctx: &egui::Context) -> Option<Result<Value, String>> {
+    if let Some(answer) = crate::actions::tool(name, args) {
+        return Some(answer);
+    }
     let request = match name {
         "open_documents" => match args["paths"].as_array() {
             Some(paths) => Ok(Request::Open {
@@ -115,6 +120,10 @@ fn ask(name: &str, args: &Value, tx: &Sender<Asked>, ctx: &egui::Context) -> Opt
                 .ok_or_else(|| format!("there's no command \"{command}\""))
         }
         "inspect_document" => Ok(Request::Inspect),
+        "play_action" => match args["name"].as_str() {
+            Some(name) => Ok(Request::Play(name.to_owned())),
+            None => Err("missing \"name\"".to_owned()),
+        },
         _ => return None,
     };
     Some(request.and_then(|request| {
@@ -126,7 +135,7 @@ fn ask(name: &str, args: &Value, tx: &Sender<Asked>, ctx: &egui::Context) -> Opt
 }
 
 fn tools() -> Value {
-    json!([
+    let mut tools = json!([
         {
             "name": "inspect_document",
             "description": "Report the image showing in the Omapix window: its size, colour profile, bit depth and layers (top first: name, kind, blend mode, opacity, visibility, mask, clipping, group).",
@@ -153,7 +162,18 @@ fn tools() -> Value {
                 "required": ["paths"],
             },
         },
-    ])
+        {
+            "name": "play_action",
+            "description": "Play a saved action on the image showing. It answers once the steps are queued; they run one after another as each finishes, so inspect_document afterwards may need a moment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"],
+            },
+        },
+    ]);
+    tools.as_array_mut().expect("a list").extend(crate::actions::tool_schemas());
+    tools
 }
 
 #[cfg(test)]
@@ -221,7 +241,7 @@ mod tests {
             serde_json::from_str::<Value>(&line).unwrap()
         };
         let list = send(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
         let bad = send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "run_command", "arguments": { "command": "Juggle" } } }));
         assert_eq!(bad["result"]["isError"], true);
         let good =

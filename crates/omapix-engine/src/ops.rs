@@ -33,6 +33,7 @@ pub fn prepare_for_editing(doc: &mut Document) -> crate::Result<Option<String>> 
 pub fn within_selection(original: &Tiled<crate::Pixel>, changed: Tiled<crate::Pixel>, selection: Option<&crate::selection::Selection>) -> Tiled<crate::Pixel> {
     let Some(sel) = selection else { return changed };
     let sel = &sel.coverage;
+    let changed_fill = changed.fill();
     let mut out = changed;
     out.par_update(|col, row, tile| {
         let s = sel.tile(col, row);
@@ -46,7 +47,7 @@ pub fn within_selection(original: &Tiled<crate::Pixel>, changed: Tiled<crate::Pi
                 .map(|i| {
                     let k = f32::from(s.map_or(sel.fill(), |t| t[i])) / 65535.0;
                     let a = o.map_or(original.fill(), |t| t[i]);
-                    let b = c.map_or(original.fill(), |t| t[i]);
+                    let b = c.map_or(changed_fill, |t| t[i]);
                     std::array::from_fn(|ch| (f32::from(a[ch]) + (f32::from(b[ch]) - f32::from(a[ch])) * k).round() as u16)
                 })
                 .collect(),
@@ -400,6 +401,17 @@ pub fn filtered_mask(doc: &Document, id: u64, filter: &crate::filters::LayerFilt
     let grey = mask.map(|v| [v, v, v, u16::MAX]);
     let out = within_selection(&grey, filter.apply(&grey), doc.selection.as_ref());
     Some(out.map(|p| p[0]))
+}
+
+/// `mask` inverted within the selection if there is one (Ctrl+I on a mask).
+pub fn inverted_mask(mask: &crate::layer::Mask, selection: Option<&crate::selection::Selection>) -> Tiled<u16> {
+    let mut inverted = mask.clone();
+    inverted.invert();
+    if selection.is_none() {
+        return inverted.pixels;
+    }
+    let grey = |t: &Tiled<u16>| t.map(|v| [v, v, v, u16::MAX]);
+    within_selection(&grey(&mask.pixels), grey(&inverted.pixels), selection).map(|p| p[0])
 }
 
 /// The selection after `filter`, which sees it as a grey image, as Quick
@@ -831,6 +843,12 @@ mod tests {
         doc.layers[0].mask.as_mut().unwrap().pixels = Tiled::new(300, 10, 32768);
         let noisy = filtered_mask(&doc, id, &noise).unwrap();
         assert!((0..300).any(|x| noisy.get(x, 5).abs_diff(32768) > 2000));
+        // Invert stays within the selection too.
+        doc.layers[0].mask.as_mut().unwrap().pixels = Tiled::new(300, 10, 0);
+        let sel = crate::selection::Selection::rectangle(300, 10, (0.0, 0.0), (140.0, 10.0));
+        let inverted = inverted_mask(doc.layers[0].mask.as_ref().unwrap(), Some(&sel));
+        assert_eq!((inverted.get(10, 5), inverted.get(200, 5)), (65535, 0));
+        assert_eq!(inverted_mask(doc.layers[0].mask.as_ref().unwrap(), None).get(200, 5), 65535);
         // A layer without a mask has nothing to filter.
         doc.layers[0].mask = None;
         assert!(filtered_mask(&doc, id, &blur).is_none());

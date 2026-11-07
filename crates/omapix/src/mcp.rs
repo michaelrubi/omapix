@@ -114,6 +114,9 @@ impl Server {
 
     /// Run a tool, or `None` if there's no such tool.
     fn call(&mut self, name: &str, args: &Value) -> Option<Result<Value, String>> {
+        if let Some(answer) = crate::actions::tool(name, args) {
+            return Some(answer);
+        }
         Some(match name {
             "inspect_document" => path(args, "path").and_then(|p| load(&p)).map(|doc| inspect(&doc)),
             "apply_frequency_separation" => {
@@ -140,6 +143,16 @@ impl Server {
                 Some(kind) if ADJUSTMENTS.contains(&kind) => self.retouch(args, &[&format!("New{kind}")]),
                 _ => Err(format!("\"kind\" should be one of {}", ADJUSTMENTS.join(", "))),
             },
+            "apply_action" => (|| {
+                let name = args["name"].as_str().ok_or("missing \"name\"")?;
+                let dir = crate::actions::dir().ok_or("there's no config directory")?;
+                let action = crate::actions::load(&dir)
+                    .into_iter()
+                    .find(|a| a.name == name)
+                    .ok_or_else(|| format!("there's no action \"{name}\""))?;
+                let steps: Vec<&str> = action.steps.iter().map(String::as_str).collect();
+                self.retouch(args, &steps)
+            })(),
             "get_settings" => serde_json::to_value(FilterSettings::load().0).map_err(|e| e.to_string()),
             "update_settings" => (|| {
                 let (mut settings, _) = FilterSettings::load();
@@ -237,7 +250,7 @@ fn tools() -> Value {
     let path = json!({ "type": "string", "description": "The image: .ora, .tif, .psd, .jpg or .png" });
     let output = json!({ "type": "string", "description": "Where to write the result; its extension (.ora, .tif, .jpg, .png or .psd) chooses the format" });
     let quality = json!({ "type": "integer", "minimum": 1, "maximum": 100, "description": "JPEG quality (92 if left out)" });
-    json!([
+    let mut tools = json!([
         {
             "name": "inspect_document",
             "description": "Open an image and report its size, colour profile, bit depth and layers (top first: name, kind, blend mode, opacity, visibility, mask, clipping, group).",
@@ -315,7 +328,18 @@ fn tools() -> Value {
                 "required": ["path", "output"],
             },
         },
-    ])
+        {
+            "name": "apply_action",
+            "description": "Play a saved action (see list_actions) on an image and write the result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": path, "output": output, "name": { "type": "string" }, "quality": quality },
+                "required": ["path", "output", "name"],
+            },
+        },
+    ]);
+    tools.as_array_mut().expect("a list").extend(crate::actions::tool_schemas());
+    tools
 }
 
 #[cfg(test)]
@@ -387,7 +411,10 @@ mod tests {
                 "add_adjustment_layer",
                 "get_settings",
                 "update_settings",
-                "export_document"
+                "export_document",
+                "apply_action",
+                "list_actions",
+                "save_action"
             ]
         );
         assert_eq!(replies[2]["result"], json!({}));

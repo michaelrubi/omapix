@@ -194,13 +194,15 @@ enum RightTab {
     Layers,
     Channels,
     History,
+    Actions,
 }
 
 impl RightTab {
-    const ALL: [(RightTab, Command); 3] = [
+    const ALL: [(RightTab, Command); 4] = [
         (RightTab::Layers, Command::ShowLayers),
         (RightTab::Channels, Command::ShowChannels),
         (RightTab::History, Command::ShowHistory),
+        (RightTab::Actions, Command::ShowActions),
     ];
 }
 
@@ -432,6 +434,11 @@ enum ScriptStep {
     Tolerance(u8),
     AutoRetouch(Option<crate::auto_retouch::Preset>),
     GenerativeFill(String),
+    /// A filter with its settings, without its dialog: `Filter <JSON>`.
+    Filter(LayerFilter),
+    /// A command that asks for a radius (and for frequency separation a
+    /// coarse one), with it: `Feather 5`, `FrequencySeparation3 4 24`.
+    Radius(Command, f32, Option<f32>),
 }
 
 impl ScriptStep {
@@ -441,6 +448,7 @@ impl ScriptStep {
             ScriptStep::Command(cmd) => Some(*cmd),
             ScriptStep::AutoRetouch(_) => Some(Command::AutoRetouch),
             ScriptStep::GenerativeFill(_) => Some(Command::GenerativeFill),
+            ScriptStep::Radius(cmd, ..) => Some(*cmd),
             _ => None,
         }
     }
@@ -463,6 +471,7 @@ impl ScriptStep {
                 None => None,
             }),
             ("GenerativeFill", _) => ScriptStep::GenerativeFill(words.collect::<Vec<_>>().join(" ")),
+            ("Filter", _) => ScriptStep::Filter(serde_json::from_str(step.trim_start().strip_prefix("Filter")?).ok()?),
             ("BlendIf", &[a, b, c, d]) => {
                 let under = step.split_whitespace().any(|w| w == "under");
                 ScriptStep::BlendIf(under, [a / 255.0, b / 255.0, c / 255.0, d / 255.0])
@@ -522,9 +531,16 @@ impl ScriptStep {
                 "Sponge" => ScriptStep::Tool(crate::tools::Tool::Sponge),
                 _ => return None,
             },
+            (_, &[radius]) => ScriptStep::Radius(Command::from_name(head)?, radius, None),
+            (_, &[radius, coarse]) => ScriptStep::Radius(Command::from_name(head)?, radius, Some(coarse)),
             _ => ScriptStep::Command(Command::from_name(head)?),
         })
     }
+}
+
+/// Whether `step` is a step Omapix understands, for actions an agent saves.
+pub(crate) fn step_parses(step: &str) -> bool {
+    ScriptStep::parse(step).is_some()
 }
 
 /// Work to do after a dialog closes, which needs the whole app.
@@ -564,6 +580,11 @@ pub struct App {
     batch_export: Option<BatchJob>,
     dialog: Option<Dialog>,
     filter_preview: Option<FilterPreview>,
+    /// The filter last applied, with its settings, for Filter › Last Filter.
+    last_filter: Option<LayerFilter>,
+    actions: crate::actions::ActionsPanel,
+    /// An action or script step is running, so it isn't recorded again.
+    replaying: bool,
     /// A transient message for the status bar, and whether it's an error.
     status: Option<(String, bool, Instant)>,
     /// Filter settings as last used, kept between runs.
@@ -695,6 +716,9 @@ impl App {
             batch_export: None,
             dialog: None,
             filter_preview: None,
+            last_filter: None,
+            actions: crate::actions::ActionsPanel::new(if cfg!(test) { None } else { crate::actions::dir() }),
+            replaying: false,
             status: None,
             filters,
             defaults,
@@ -782,6 +806,9 @@ impl App {
             batch_export: None,
             dialog: None,
             filter_preview: None,
+            last_filter: None,
+            actions: crate::actions::ActionsPanel::new(None),
+            replaying: false,
             status: None,
             filters,
             defaults,
@@ -1512,6 +1539,7 @@ impl App {
             Command::ShowLayers
             | Command::ShowChannels
             | Command::ShowHistory
+            | Command::ShowActions
             | Command::ShowNavigator
             | Command::ShowHistogram
             | Command::ShowBrushSettings
@@ -1581,12 +1609,55 @@ impl App {
                 }
             }
             Command::AddNoise => editor.target != Target::Mask || has_mask,
+            Command::LastFilter => match (self.last_filter, editor.target) {
+                (None, _) => false,
+                (Some(_), Target::Mask) => has_mask,
+                (Some(LayerFilter::AddNoise(_)), Target::Pixels) | (Some(_), Target::QuickMask) => true,
+                (Some(_), Target::Pixels) => !no_pixels,
+            },
             Command::Invert => editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels,
             _ => true,
         }
     }
 
+    /// Run `cmd`, recording it into the action being recorded. A command
+    /// whose dialog asks for settings is recorded with them when it's
+    /// applied instead.
     fn run(&mut self, cmd: Command, ctx: &egui::Context) {
+        let record = !self.replaying && self.actions.is_recording() && crate::actions::recordable(cmd) && self.enabled(cmd);
+        self.run_unrecorded(cmd, ctx);
+        if record && !matches!(self.dialog, Some(Dialog::Filter { .. } | Dialog::AddNoise { .. } | Dialog::Radius { .. })) {
+            self.actions.record(format!("{cmd:?}"));
+        }
+    }
+
+    /// Add `step` to the action being recorded, unless it's being played.
+    fn record(&mut self, step: String) {
+        if !self.replaying {
+            self.actions.record(step);
+        }
+    }
+
+    /// [`Self::play`], saying so in the status bar.
+    fn play_action(&mut self, action: &crate::actions::Action) {
+        match self.play(action) {
+            Ok(()) => self.message(format!("Playing {}", action.name), false),
+            Err(e) => self.message(e, true),
+        }
+    }
+
+    /// Play `action`'s steps, one after another as each finishes.
+    fn play(&mut self, action: &crate::actions::Action) -> Result<(), String> {
+        let steps = action
+            .steps
+            .iter()
+            .map(|s| ScriptStep::parse(s).ok_or_else(|| format!("{}: can't understand {s:?}", action.name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.script.extend(steps);
+        Ok(())
+    }
+
+    fn run_unrecorded(&mut self, cmd: Command, ctx: &egui::Context) {
         // Delete with several layers selected deletes them, as in Photoshop.
         let cmd = match (cmd, &self.editor) {
             (Command::Clear, Some(e)) if e.several_selected() => Command::DeleteLayer,
@@ -1663,6 +1734,7 @@ impl App {
             Command::ShowLayers => self.right_tab = RightTab::Layers,
             Command::ShowChannels => self.right_tab = RightTab::Channels,
             Command::ShowHistory => self.right_tab = RightTab::History,
+            Command::ShowActions => self.right_tab = RightTab::Actions,
             Command::ShowNavigator => TopTab::toggle(&mut self.top_tab, TopTab::Navigator),
             Command::ShowHistogram => TopTab::toggle(&mut self.top_tab, TopTab::Histogram),
             Command::ShowBrushSettings => TopTab::toggle(&mut self.top_tab, TopTab::BrushSettings),
@@ -1696,6 +1768,13 @@ impl App {
                 self.dialog = Some(Dialog::AiModels(found));
             }
             Command::Finish => self.finish(),
+            // The last filter again with the same settings, without its
+            // dialog, as in Photoshop.
+            Command::LastFilter => {
+                if let Some(filter) = self.last_filter {
+                    self.reapply_filter(filter, ctx);
+                }
+            }
             // On a mask or Quick Mask, noise goes straight into it; on
             // pixels, onto a Grain layer.
             Command::AddNoise if self.editor.as_ref().is_some_and(|e| e.target != Target::Pixels) => {
@@ -2182,11 +2261,16 @@ impl App {
     }
 
     fn apply_add_noise(&mut self, options: NoiseOptions, ctx: &egui::Context) {
+        if self.editor.is_none() {
+            return;
+        }
+        self.filters.noise = options;
+        self.filters.save();
+        self.last_filter = Some(LayerFilter::AddNoise(options));
+        self.record_filter(LayerFilter::AddNoise(options));
         let Some(editor) = &mut self.editor else {
             return;
         };
-        self.filters.noise = options;
-        self.filters.save();
         let index = editor.active_index().unwrap_or(0);
         editor.target = Target::Pixels;
         editor.edit_in_background(
@@ -2214,6 +2298,10 @@ impl App {
 
     fn apply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
         self.filters.remember(&filter);
+        if !matches!(filter, LayerFilter::MaskDensity { .. }) {
+            self.last_filter = Some(filter);
+            self.record_filter(filter);
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -2244,7 +2332,26 @@ impl App {
         );
     }
 
+    fn record_filter(&mut self, filter: LayerFilter) {
+        if let Ok(json) = serde_json::to_string(&filter) {
+            self.record(format!("Filter {json}"));
+        }
+    }
+
+    /// Apply `filter` without its dialog, as Last Filter and actions do:
+    /// on pixels Add Noise makes a Grain layer, as its dialog does.
+    fn reapply_filter(&mut self, filter: LayerFilter, ctx: &egui::Context) {
+        match filter {
+            LayerFilter::AddNoise(options) if self.editor.as_ref().is_some_and(|e| e.target == Target::Pixels) => self.apply_add_noise(options, ctx),
+            filter => self.apply_filter(filter, ctx),
+        }
+    }
+
     fn apply_radius(&mut self, command: Command, radius: f32, coarse: Option<f32>, ctx: &egui::Context) {
+        self.record(match coarse {
+            Some(c) => format!("{command:?} {radius} {c}"),
+            None => format!("{command:?} {radius}"),
+        });
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -2533,6 +2640,20 @@ impl App {
                 ui.menu_button("Automate", |ui| {
                     self.menu_item(ui, Command::Photomerge, None);
                     self.menu_item(ui, Command::MergeToHdr, None);
+                    ui.separator();
+                    let actions = self.actions.actions.clone();
+                    let open = self.editor.is_some();
+                    for action in actions {
+                        let mut button = Button::new(&action.name);
+                        if let Some(key) = &action.key {
+                            button = button.shortcut_text(ui.ctx().format_shortcut(key));
+                        }
+                        if ui.add_enabled(open, button).clicked() {
+                            self.play_action(&action);
+                            ui.close();
+                        }
+                    }
+                    self.menu_item(ui, Command::ShowActions, Some("Actions Panel".to_owned()));
                 });
                 ui.separator();
                 self.menu_item(ui, Command::Quit, None);
@@ -2675,6 +2796,9 @@ impl App {
                 self.menu_item(ui, Command::QuickMask, Some(format!("{tick} {}", Command::QuickMask.label())));
             });
             ui.menu_button("Filter", |ui| {
+                let last = self.last_filter.map(|f| f.name().to_owned());
+                self.menu_item(ui, Command::LastFilter, last);
+                ui.separator();
                 self.menu_item(ui, Command::Liquify, None);
                 ui.separator();
                 ui.menu_button("Noise", |ui| {
@@ -4580,6 +4704,7 @@ impl App {
             && self.dialog.is_none()
             && self.face_selection.busy().is_none()
             && self.whitening.busy().is_none()
+            && !self.select_subject.busy()
             && self.editor.as_ref().is_some_and(|e| e.busy().is_none() && e.canvas.ready());
         if !idle {
             return;
@@ -4588,6 +4713,12 @@ impl App {
             return;
         };
         log::info!("script: {step:?}");
+        self.replaying = true;
+        self.run_step(step, ctx);
+        self.replaying = false;
+    }
+
+    fn run_step(&mut self, step: ScriptStep, ctx: &egui::Context) {
         if let Some(cmd) = step.command() {
             let missing = missing_models(cmd, &self.models);
             if !missing.is_empty() {
@@ -4603,10 +4734,20 @@ impl App {
             }
             if !self.enabled(cmd) {
                 self.message(format!("{} can't be used on this image now", cmd.label().trim_end_matches('…')), true);
+                // The steps after it would go wrong without it.
+                self.script.clear();
                 return;
             }
         }
         match step {
+            ScriptStep::Filter(filter) => self.reapply_filter(filter, ctx),
+            ScriptStep::Radius(cmd, radius, coarse) => {
+                self.run(cmd, ctx);
+                match self.dialog.take() {
+                    Some(Dialog::Radius { command, coarse: c, .. }) => self.apply_radius(command, radius, coarse.or(c), ctx),
+                    dialog => self.dialog = dialog,
+                }
+            }
             ScriptStep::Command(cmd) => {
                 self.run(cmd, ctx);
                 // Radius commands and filters open a dialog; accept its default.
@@ -4771,6 +4912,17 @@ impl App {
                     Some((text, true, _)) => Err(text.clone()),
                     status => Ok(serde_json::json!({ "message": status.as_ref().map(|(text, ..)| text) })),
                 }
+            }
+            Request::Play(name) => {
+                if self.editor.is_none() {
+                    return Err("No image is open".into());
+                }
+                self.actions.refresh();
+                let action = crate::actions::dir()
+                    .and_then(|d| crate::actions::load(&d).into_iter().find(|a| a.name == name))
+                    .ok_or_else(|| format!("there's no action \"{name}\""))?;
+                self.play(&action)?;
+                Ok(serde_json::json!({ "queued": action.steps.len() }))
             }
             Request::Inspect => self
                 .editor
@@ -5323,8 +5475,9 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 });
             } else if editor.target == Target::Mask {
                 editor.edit("Invert Mask", |doc, _| {
+                    let selection = doc.selection.clone();
                     if let Some(m) = doc.layer_mut(id).and_then(|l| l.mask.as_mut()) {
-                        m.invert();
+                        m.pixels = ops::inverted_mask(m, selection.as_ref());
                     }
                 });
             } else {
@@ -5521,9 +5674,15 @@ impl eframe::App for App {
         self.check_liquify_keys(ctx);
         let liquifying = self.editor.as_ref().is_some_and(Editor::liquifying);
         // While a text field (layer rename) has focus, keys edit the text.
+        self.actions.refresh();
         if self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
             for cmd in Command::pressed(ctx, &mut self.v_down) {
                 self.run(cmd, ctx);
+            }
+            if self.editor.is_some()
+                && let Some(action) = self.actions.pressed(ctx)
+            {
+                self.play_action(&action);
             }
             if liquifying {
                 // Liquify's keys are its own.
@@ -5604,7 +5763,7 @@ impl eframe::App for App {
                 .show(ui, |ui| self.tools.toolbar(ui, &self.theme));
         }
         if let Some(editor) = &mut self.editor {
-            let (mut command, mut above) = (None, None);
+            let (mut command, mut above, mut played) = (None, None, None);
             egui::Panel::right("layers").frame(bar).default_size(280.0).resizable(true).show(ui, |ui| {
                 if let Some(top_tab) = self.top_tab {
                     ui.horizontal(|ui| {
@@ -5662,11 +5821,19 @@ impl eframe::App for App {
                     RightTab::History => {
                         command = self.history.show(ui, editor, &self.theme);
                     }
+                    RightTab::Actions => {
+                        if let Some(crate::actions::Asked::Play(action)) = self.actions.show(ui, &self.theme) {
+                            played = Some(action);
+                        }
+                    }
                 }
             });
             if let Some(cmd) = command.or(above) {
                 let ctx = ui.ctx().clone();
                 self.run(cmd, &ctx);
+            }
+            if let Some(action) = played {
+                self.play_action(&action);
             }
         }
         if !self.parked.is_empty() {
@@ -6481,6 +6648,31 @@ mod tests {
         assert_eq!(editor.undo_label(), Some("Smart Sharpen"));
         app.run(Command::SmartSharpen, &ctx);
         assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == custom));
+    }
+
+    #[test]
+    fn last_filter_repeats_the_last_filter_without_its_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        assert!(!app.enabled(Command::LastFilter));
+        let blur = LayerFilter::GaussianBlur { radius: 7.0 };
+        app.apply_filter(blur, &ctx);
+        let wait = |app: &mut App| {
+            let editor = app.editor.as_mut().unwrap();
+            while editor.busy().is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+                editor.update(&ctx);
+            }
+        };
+        wait(&mut app);
+        let count = app.editor.as_ref().unwrap().history_count();
+        app.run(Command::LastFilter, &ctx);
+        assert!(app.dialog.is_none());
+        wait(&mut app);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.history_count(), count + 1);
+        assert_eq!(editor.undo_label(), Some("Gaussian Blur"));
+        assert_eq!(app.last_filter, Some(blur));
     }
 
     #[test]
@@ -10615,6 +10807,51 @@ mod tests {
         let refused = app.run_steps(doc.clone(), &["SaveSelection"], &ctx);
         assert_eq!(refused.err().as_deref(), Some("Save Selection can't be used on this image now"));
         assert_eq!(app.run_steps(doc, &["Juggle"], &ctx).err().as_deref(), Some("can't understand \"Juggle\""));
+    }
+
+    #[test]
+    fn an_action_records_commands_with_their_settings_and_plays_them_back() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.actions.start_recording();
+        app.run(Command::ZoomIn, &ctx);
+        app.run(Command::Feather, &ctx);
+        let Some(Dialog::Radius { command, .. }) = app.dialog.take() else {
+            panic!("no Feather dialog");
+        };
+        app.apply_radius(command, 5.0, None, &ctx);
+        let wait = |app: &mut App| {
+            let editor = app.editor.as_mut().unwrap();
+            while editor.busy().is_some() {
+                std::thread::sleep(Duration::from_millis(1));
+                editor.update(&ctx);
+            }
+        };
+        wait(&mut app);
+        app.run(Command::NewCurves, &ctx);
+        app.run(Command::Invert, &ctx);
+        wait(&mut app);
+        app.record_filter(LayerFilter::GaussianBlur { radius: 7.0 });
+        let steps = app.actions.recorded();
+        assert_eq!(steps, ["Feather 5", "NewCurves", "Invert", r#"Filter {"GaussianBlur":{"radius":7.0}}"#]);
+        assert!(matches!(
+            ScriptStep::parse(&steps[3]),
+            Some(ScriptStep::Filter(LayerFilter::GaussianBlur { radius: 7.0 }))
+        ));
+
+        // Played on another image with a selection: a Curves layer whose
+        // mask hides the adjustment within the selection only.
+        let mut doc = app.editor.as_ref().unwrap().doc.clone();
+        doc.layers.truncate(1);
+        let mut player = App::headless(FilterSettings::default(), FilterSettings::default());
+        let steps: Vec<&str> = steps[..3].iter().map(String::as_str).collect();
+        let (doc, _) = player.run_steps(doc, &steps, &ctx).unwrap();
+        let curves = doc.layers.last().unwrap();
+        assert!(curves.adjustment.is_some());
+        let mask = &curves.mask.as_ref().unwrap().pixels;
+        assert_eq!((mask.get(150, 150), mask.get(500, 350)), (0, u16::MAX));
+        // Playing isn't recorded again.
+        assert_eq!(app.actions.recorded().len(), 4);
     }
 
     #[test]
