@@ -13,8 +13,8 @@ pub struct BlendingOptions {
     /// Layer being edited.
     pub layer: u64,
     /// Handle being dragged: which slider, which handle (0–3), whether
-    /// it moves alone (Alt held when the drag started), and where the pair
-    /// was when the drag began.
+    /// it moves alone (see [`moves_alone`]), and where the pair was when
+    /// the drag began.
     dragging: Option<Drag>,
 }
 
@@ -69,17 +69,13 @@ impl BlendingOptions {
                 ui.add_space(6.0);
                 for underlying in [false, true] {
                     let range = if underlying { &mut blend_if.underlying } else { &mut blend_if.this };
-                    ui.horizontal(|ui| {
-                        ui.label(if underlying { "Underlying Layer" } else { "This Layer" });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(readout(*range)).monospace());
-                        });
-                    });
+                    ui.label(if underlying { "Underlying Layer" } else { "This Layer" });
                     self.slider(ui, range, underlying, theme);
+                    fields(ui, range, underlying);
                     ui.add_space(6.0);
                 }
                 ui.label(
-                    RichText::new("Drag a handle to move it; Alt+drag to split it for a smooth transition.")
+                    RichText::new("Drag a handle to move it; Alt+drag to split it for a smooth transition. Drag a half to move it, Shift+drag to move both.")
                         .small()
                         .color(theme.dark_foreground),
                 );
@@ -121,7 +117,7 @@ impl BlendingOptions {
 
         if let Some(pointer) = response.interact_pointer_pos() {
             if response.drag_started() || response.clicked() {
-                let split = ui.input(|i| i.modifiers.alt);
+                let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
                 let nearest = (0..4)
                     .map(|h| (h, (x_of(range[h]) - pointer.x).abs()))
                     .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -129,7 +125,7 @@ impl BlendingOptions {
                 self.dragging = nearest.map(|(h, _)| {
                     // Overlapping handles: pick by which side the pointer is on.
                     let pair = if h < 2 { [0, 1] } else { [2, 3] };
-                    let handle = if range[pair[0]] == range[pair[1]] && split {
+                    let handle = if range[pair[0]] == range[pair[1]] && alt {
                         if pointer.x < x_of(range[pair[0]]) { pair[0] } else { pair[1] }
                     } else {
                         h
@@ -137,7 +133,7 @@ impl BlendingOptions {
                     Drag {
                         underlying,
                         handle,
-                        split,
+                        split: moves_alone(*range, handle, alt, shift),
                         start: *range,
                         start_value: value_at(pointer),
                     }
@@ -229,13 +225,44 @@ fn moved(drag: Drag, value: f32) -> [f32; 4] {
     r
 }
 
-/// Photoshop's readout: "0   255", or "0/40   200/255" when split.
-fn readout(r: [f32; 4]) -> String {
-    let v = |x: f32| (x * 255.0).round() as u32;
-    let pair = |a: f32, b: f32| {
-        if v(a) == v(b) { format!("{}", v(a)) } else { format!("{}/{}", v(a), v(b)) }
-    };
-    format!("{}   {}", pair(r[0], r[1]), pair(r[2], r[3]))
+/// Whether dragging `handle` moves it alone. As in Photoshop, Alt+drag
+/// splits a joined pair, and each half of a split pair then drags alone;
+/// Shift+drag moves a split pair together, keeping the fade's width.
+fn moves_alone(range: [f32; 4], handle: usize, alt: bool, shift: bool) -> bool {
+    let pair = if handle < 2 { [0, 1] } else { [2, 3] };
+    if range[pair[0]] == range[pair[1]] { alt } else { !shift }
+}
+
+/// The four handles as numbers in Photoshop's levels (0–255), to type or
+/// drag: black, black split, white split, white.
+fn fields(ui: &mut Ui, range: &mut [f32; 4], underlying: bool) {
+    ui.horizontal(|ui| {
+        for h in 0..4 {
+            let mut level = (range[h] * 255.0).round() as i32;
+            let hover = ["Black", "Black split", "White split", "White"][h];
+            let field = egui::DragValue::new(&mut level).range(0..=255).speed(0.5);
+            let response = ui.push_id((underlying, h), |ui| ui.add(field).on_hover_text(hover)).inner;
+            if response.changed() {
+                *range = set_handle(*range, h, level as f32 / 255.0);
+            }
+            if h == 1 {
+                ui.add_space((ui.available_width() - 2.0 * 52.0).max(8.0));
+            }
+        }
+    });
+}
+
+/// The range with handle `h` at `value`, pushing the handles it would
+/// cross along with it.
+fn set_handle(mut r: [f32; 4], h: usize, value: f32) -> [f32; 4] {
+    r[h] = value;
+    for v in &mut r[h + 1..] {
+        *v = v.max(value);
+    }
+    for v in &mut r[..h] {
+        *v = v.min(value);
+    }
+    r
 }
 
 #[cfg(test)]
@@ -270,8 +297,33 @@ mod tests {
     }
 
     #[test]
-    fn readout_shows_splits_like_photoshop() {
-        assert_eq!(readout([0.0, 0.0, 1.0, 1.0]), "0   255");
-        assert_eq!(readout([0.0, 40.0 / 255.0, 200.0 / 255.0, 1.0]), "0/40   200/255");
+    fn split_halves_drag_alone_and_shift_moves_the_pair() {
+        let joined = [0.0, 0.0, 1.0, 1.0];
+        let split = [0.1, 0.3, 1.0, 1.0];
+        // A joined pair moves together unless Alt splits it.
+        assert!(!moves_alone(joined, 0, false, false));
+        assert!(moves_alone(joined, 0, true, false));
+        assert!(!moves_alone(joined, 0, false, true));
+        // A split half moves alone without Alt; Shift moves both.
+        assert!(moves_alone(split, 1, false, false));
+        assert!(moves_alone(split, 0, true, false));
+        assert!(!moves_alone(split, 1, false, true));
+        // The white pair, still joined, isn't affected.
+        assert!(!moves_alone(split, 3, false, false));
+        // Moving the split pair keeps its width.
+        let out = moved(drag(1, false, split, 0.3), 0.5);
+        assert!((out[0] - 0.3).abs() < 1e-6 && (out[1] - 0.5).abs() < 1e-6, "{out:?}");
+    }
+
+    #[test]
+    fn typed_values_push_the_handles_they_would_cross() {
+        let joined = [0.0, 0.0, 1.0, 1.0];
+        // Typing a black split splits the pair.
+        assert_eq!(set_handle(joined, 1, 0.4), [0.0, 0.4, 1.0, 1.0]);
+        // Typing black past its split pushes it.
+        assert_eq!(set_handle([0.0, 0.2, 1.0, 1.0], 0, 0.5), [0.5, 0.5, 1.0, 1.0]);
+        // And past the white pair, pushes that too.
+        assert_eq!(set_handle([0.0, 0.0, 0.6, 0.8], 1, 0.7), [0.0, 0.7, 0.7, 0.8]);
+        assert_eq!(set_handle([0.2, 0.3, 0.6, 0.8], 3, 0.25), [0.2, 0.25, 0.25, 0.25]);
     }
 }
