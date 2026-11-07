@@ -177,7 +177,14 @@ pub fn tool(name: &str, args: &Value) -> Option<Result<Value, String>> {
                 None => None,
             };
             let d = dir()?;
-            save(&d, &Action { name: name.to_owned(), key, steps })?;
+            save(
+                &d,
+                &Action {
+                    name: name.to_owned(),
+                    key,
+                    steps,
+                },
+            )?;
             Ok(json!({ "saved": name }))
         })(),
         _ => return None,
@@ -369,36 +376,51 @@ impl ActionsPanel {
         }
 
         let bottom = 30.0;
-        ScrollArea::vertical().max_height((ui.available_height() - bottom).max(60.0)).auto_shrink([false, false]).show(ui, |ui| {
-            if self.actions.is_empty() {
-                ui.label(RichText::new("No actions yet. Press ● to record one.").color(theme.dark_foreground));
-            }
-            for action in &self.actions {
-                let selected = self.selected.as_deref() == Some(action.name.as_str());
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
-                let response = ui.interact(rect, egui::Id::new("action_row").with(&action.name), Sense::click());
-                if selected {
-                    ui.painter().rect_filled(rect, 2.0, theme.selection);
-                } else if response.hovered() {
-                    ui.painter().rect_filled(rect, 2.0, theme.lighter_background);
+        ScrollArea::vertical()
+            .max_height((ui.available_height() - bottom).max(60.0))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if self.actions.is_empty() {
+                    ui.label(RichText::new("No actions yet. Press ● to record one.").color(theme.dark_foreground));
                 }
-                let font = egui::TextStyle::Body.resolve(ui.style());
-                ui.painter().text(rect.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, &action.name, font.clone(), theme.foreground);
-                if let Some(key) = &action.key {
-                    ui.painter().text(rect.right_center() - egui::vec2(6.0, 0.0), egui::Align2::RIGHT_CENTER, format_shortcut(key), font, theme.dark_foreground);
-                }
-                if response.double_clicked() {
-                    asked = Some(Asked::Play(action.clone()));
-                } else if response.clicked() {
-                    self.selected = if selected { None } else { Some(action.name.clone()) };
-                }
-                if selected {
-                    for step in &action.steps {
-                        ui.label(RichText::new(format!("    {step}")).color(theme.dark_foreground).monospace());
+                for action in &self.actions {
+                    let selected = self.selected.as_deref() == Some(action.name.as_str());
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+                    let response = ui.interact(rect, egui::Id::new("action_row").with(&action.name), Sense::click());
+                    if selected {
+                        ui.painter().rect_filled(rect, 2.0, theme.selection);
+                    } else if response.hovered() {
+                        ui.painter().rect_filled(rect, 2.0, theme.lighter_background);
+                    }
+                    let font = egui::TextStyle::Body.resolve(ui.style());
+                    ui.painter().text(
+                        rect.left_center() + egui::vec2(6.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        &action.name,
+                        font.clone(),
+                        theme.foreground,
+                    );
+                    if let Some(key) = &action.key {
+                        ui.painter().text(
+                            rect.right_center() - egui::vec2(6.0, 0.0),
+                            egui::Align2::RIGHT_CENTER,
+                            format_shortcut(key),
+                            font,
+                            theme.dark_foreground,
+                        );
+                    }
+                    if response.double_clicked() {
+                        asked = Some(Asked::Play(action.clone()));
+                    } else if response.clicked() {
+                        self.selected = if selected { None } else { Some(action.name.clone()) };
+                    }
+                    if selected {
+                        for step in &action.steps {
+                            ui.label(RichText::new(format!("    {step}")).color(theme.dark_foreground).monospace());
+                        }
                     }
                 }
-            }
-        });
+            });
 
         let selected = self.selected.as_ref().and_then(|n| self.find(n)).cloned();
         ui.horizontal(|ui| {
@@ -465,12 +487,28 @@ mod tests {
             steps: vec!["Invert".to_owned()],
         };
         save(&dir, &action).unwrap();
-        save(&dir, &Action { name: "A".to_owned(), ..action.clone() }).unwrap();
+        save(
+            &dir,
+            &Action {
+                name: "A".to_owned(),
+                ..action.clone()
+            },
+        )
+        .unwrap();
         let names: Vec<String> = load(&dir).into_iter().map(|a| a.name).collect();
         assert_eq!(names, ["A", "b-c"]);
         delete(&dir, "A");
         assert_eq!(load(&dir).len(), 1);
-        assert!(save(&dir, &Action { name: " ".to_owned(), ..action }).is_err());
+        assert!(
+            save(
+                &dir,
+                &Action {
+                    name: " ".to_owned(),
+                    ..action
+                }
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
