@@ -5324,7 +5324,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
             } else if editor.target == Target::Mask {
                 editor.edit("Invert Mask", |doc, _| {
                     if let Some(m) = doc.layer_mut(id).and_then(|l| l.mask.as_mut()) {
-                        m.invert();
+                        m.pixels = ops::inverted_mask(m, selection.as_ref());
                     }
                 });
             } else {
@@ -5475,6 +5475,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 _ => unreachable!(),
             };
             editor.edit(label, |doc, _| {
+                    let selection = doc.selection.clone();
                 doc.apply_orientation(orientation);
             });
         }
