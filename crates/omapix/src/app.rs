@@ -85,6 +85,7 @@ enum Purpose {
     ExportLut,
     ProofProfile,
     ImportBrushes,
+    RetouchFolder,
     /// The photos for Photomerge or Merge to HDR.
     Merge(Command),
 }
@@ -318,7 +319,8 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
         | Command::LightenUnderEyes
         | Command::WhitenTeeth
         | Command::WhitenEyes
-        | Command::Makeup => FACE_MODELS,
+        | Command::Makeup
+        | Command::RetouchFolder => FACE_MODELS,
         _ => &[],
     }
 }
@@ -402,6 +404,40 @@ struct BatchJob {
     done: usize,
     failed: Vec<String>,
     rx: Receiver<Result<PathBuf, String>>,
+}
+
+fn poll_batch(slot: &mut Option<BatchJob>, verb: &str) -> Option<(String, bool)> {
+    let job = slot.as_mut()?;
+    for result in job.rx.try_iter() {
+        job.done += 1;
+        job.failed.extend(result.err());
+    }
+    if job.done < job.total {
+        return None;
+    }
+    let written = job.total - job.failed.len();
+    let plural = if written == 1 { "" } else { "s" };
+    let text = match job.failed.as_slice() {
+        [] => format!("{verb} {written} file{plural}"),
+        failed => format!("{verb} {written} file{plural}; {} failed: {}", failed.len(), failed.join("; ")),
+    };
+    let failed = !job.failed.is_empty();
+    *slot = None;
+    Some((text, failed))
+}
+
+fn retouch_one_file(file: &Path, settings: crate::auto_retouch::Retouch) -> Result<PathBuf, String> {
+    let out = file.with_extension("ora");
+    if out.exists() {
+        return Err("already exists".into());
+    }
+    let mut doc = omapix_engine::io::load(file).map_err(|e| e.to_string())?;
+    let above = doc.layers.len().saturating_sub(1);
+    if crate::auto_retouch::retouch_document(&mut doc, above, settings)?.is_none() {
+        return Err("nothing to retouch with these settings".into());
+    }
+    omapix_engine::ora::save(&doc, &out).map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 /// One step of an `OMAPIX_SCRIPT` (comma-separated steps):
@@ -580,6 +616,7 @@ pub struct App {
     merging: Option<(Command, Receiver<Result<Merged, String>>)>,
     file_job: Option<FileJob>,
     batch_export: Option<BatchJob>,
+    retouch_folder: Option<BatchJob>,
     dialog: Option<Dialog>,
     filter_preview: Option<FilterPreview>,
     /// The filter last applied, with its settings, for Filter › Last Filter.
@@ -718,6 +755,7 @@ impl App {
             merging: None,
             file_job: None,
             batch_export: None,
+            retouch_folder: None,
             dialog: None,
             filter_preview: None,
             last_filter: None,
@@ -814,6 +852,7 @@ impl App {
             merging: None,
             file_job: None,
             batch_export: None,
+            retouch_folder: None,
             dialog: None,
             filter_preview: None,
             last_filter: None,
@@ -879,7 +918,10 @@ impl App {
         let editor = self.editor.as_ref()?;
         let busy = self.dialog.is_some()
             || self.pasting.is_some()
-            || self.picking.as_ref().is_some_and(|(purpose, _)| !matches!(purpose, Purpose::Open))
+            || self
+                .picking
+                .as_ref()
+                .is_some_and(|(purpose, _)| !matches!(purpose, Purpose::Open | Purpose::RetouchFolder))
             || editor.busy().is_some()
             || editor.liquifying()
             || self.objects.busy()
@@ -1146,6 +1188,7 @@ impl App {
                 }
             }
             Purpose::ImportBrushes => dialog.set_title("Import Brushes").add_filter("Photoshop brushes", &["abr"]),
+            Purpose::RetouchFolder => dialog.set_title("Retouch Folder"),
         };
         let (tx, rx) = channel();
         let ctx = ctx.clone();
@@ -1153,6 +1196,7 @@ impl App {
             let files = match purpose {
                 Purpose::Merge(_) => dialog.pick_files(),
                 Purpose::Open | Purpose::ProofProfile | Purpose::ImportBrushes => dialog.pick_file().map(|f| vec![f]),
+                Purpose::RetouchFolder => dialog.pick_folder().map(|f| vec![f]),
                 _ => dialog.save_file().map(|f| vec![f]),
             };
             let _ = tx.send(files);
@@ -1353,6 +1397,7 @@ impl App {
                         let extension = web_format(&self.filters.web_export).1[0];
                         self.write(purpose, path.with_extension(extension), ctx);
                     }
+                    Purpose::RetouchFolder => self.retouch_folder(path, self.filters.auto_retouch, ctx),
                     _ => self.write(purpose, path, ctx),
                 }
             }
@@ -1432,22 +1477,11 @@ impl App {
                 Err(err) => self.message(format!("{label} failed: {err}"), true),
             }
         }
-        if let Some(job) = &mut self.batch_export {
-            for result in job.rx.try_iter() {
-                job.done += 1;
-                job.failed.extend(result.err());
-            }
-            if job.done == job.total {
-                let written = job.total - job.failed.len();
-                let plural = if written == 1 { "" } else { "s" };
-                let text = match job.failed.as_slice() {
-                    [] => format!("Exported {written} file{plural}"),
-                    failed => format!("Exported {written} file{plural}; {} failed: {}", failed.len(), failed.join("; ")),
-                };
-                let failed = !job.failed.is_empty();
-                self.batch_export = None;
-                self.message(text, failed);
-            }
+        if let Some((text, failed)) = poll_batch(&mut self.batch_export, "Exported") {
+            self.message(text, failed);
+        }
+        if let Some((text, failed)) = poll_batch(&mut self.retouch_folder, "Retouched") {
+            self.message(text, failed);
         }
         if let Some(rx) = &self.from_clipboard
             && let Ok(result) = rx.try_recv()
@@ -1539,7 +1573,8 @@ impl App {
                     | Command::MergeToHdr
                     | Command::AiModels
                     | Command::ImportBrushes
-            ) || (cmd == Command::ReopenLast && self.recent.last().is_some());
+            ) || (cmd == Command::ReopenLast && self.recent.last().is_some())
+                || (cmd == Command::RetouchFolder && self.retouch_folder.is_none() && missing_models(cmd, &self.models).is_empty());
         };
         let view = matches!(cmd, Command::ZoomIn | Command::ZoomOut | Command::FitOnScreen | Command::ActualPixels);
         if editor.busy().is_some() && !view && !matches!(cmd, Command::Quit) {
@@ -1639,6 +1674,7 @@ impl App {
                 (Some(_), Target::Pixels) => !no_pixels,
             },
             Command::Invert => editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels,
+            Command::RetouchFolder => self.retouch_folder.is_none(),
             _ => true,
         }
     }
@@ -1784,6 +1820,7 @@ impl App {
                     picking: None,
                 });
             }
+            Command::RetouchFolder => self.pick(Purpose::RetouchFolder, ctx),
             Command::AiModels => {
                 let models = omapix_ai::models::models();
                 let found: Vec<_> = models.iter().map(|m| omapix_ai::find_model(m.id)).collect();
@@ -2283,6 +2320,57 @@ impl App {
         });
     }
 
+    /// Run Auto Retouch with `settings` over every TIFF and .ora in `dir`
+    /// (not subfolders), saving each as `<name>.ora` beside the original
+    /// without overwriting existing files.
+    fn retouch_folder(&mut self, dir: PathBuf, settings: crate::auto_retouch::Retouch, ctx: &egui::Context) {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.message(format!("Could not read {}: {e}", dir.display()), true);
+                return;
+            }
+        };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "tif" | "tiff" | "ora"))
+            })
+            .collect();
+        files.sort();
+        let missing = missing(FACE_MODELS, &self.models);
+        let missing_reason = (!missing.is_empty()).then(|| {
+            let plural = if missing.len() > 1 { "s" } else { "" };
+            format!("Needs the {} model{plural}: see Help › AI Models", missing.join(", "))
+        });
+        let (tx, rx) = channel();
+        let total = files.len();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            for file in files {
+                let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let result = match &missing_reason {
+                    Some(reason) => Err(reason.clone()),
+                    None => retouch_one_file(&file, settings),
+                };
+                if tx.send(result.map_err(|e| format!("{name}: {e}"))).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+        self.retouch_folder = Some(BatchJob {
+            total,
+            done: 0,
+            failed: Vec::new(),
+            rx,
+        });
+    }
+
     fn apply_add_noise(&mut self, options: NoiseOptions, ctx: &egui::Context) {
         if self.editor.is_none() {
             return;
@@ -2661,6 +2749,7 @@ impl App {
                 self.menu_item(ui, Command::ExportForWeb, None);
                 self.menu_item(ui, Command::BatchExport, None);
                 ui.menu_button("Automate", |ui| {
+                    self.menu_item(ui, Command::RetouchFolder, None);
                     self.menu_item(ui, Command::Photomerge, None);
                     self.menu_item(ui, Command::MergeToHdr, None);
                     ui.separator();
@@ -3043,6 +3132,7 @@ impl App {
                         format!("Opening {name}…")
                     })
                     .or_else(|| self.batch_export.as_ref().map(|b| format!("Exporting {} of {}…", b.done + 1, b.total)))
+                    .or_else(|| self.retouch_folder.as_ref().map(|b| format!("Retouching {} of {}…", b.done + 1, b.total)))
                     .or_else(|| self.file_job.as_ref().map(|j| format!("{}…", j.label)))
                     .or_else(|| self.merging.as_ref().map(|(cmd, _)| cmd.label().to_owned()))
                     .or_else(|| {
@@ -10823,6 +10913,101 @@ mod tests {
         let (text, error, _) = app.status.clone().expect("a message");
         assert!(error && text.starts_with("Exported 1 file; 1 failed: bad.tif"), "{text}");
         assert!(dir.join("out/good.jpg").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retouch_folder_with_missing_models_writes_nothing_and_reports_both() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.models.insert(omapix_ai::face::DETECTOR, false);
+        let dir = PathBuf::from(format!("target/test-retouch-folder-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = &app.editor.as_ref().unwrap().doc;
+        omapix_engine::export::tiff(doc, &dir.join("a.tif")).unwrap();
+        omapix_engine::export::tiff(doc, &dir.join("b.tif")).unwrap();
+
+        app.retouch_folder(dir.clone(), app.filters.auto_retouch, &ctx);
+        let job = app.retouch_folder.as_mut().unwrap();
+        let (tx, rx) = channel();
+        for _ in 0..job.total {
+            tx.send(job.rx.recv_timeout(Duration::from_secs(10)).expect("a file reported")).unwrap();
+        }
+        job.rx = rx;
+        app.poll(&ctx);
+
+        assert!(app.retouch_folder.is_none());
+        let (text, error, _) = app.status.clone().expect("a message");
+        assert!(error && text.starts_with("Retouched 0 files; 2 failed:"), "{text}");
+        assert!(text.contains("a.tif:") && text.contains("b.tif:") && text.contains("model"), "{text}");
+        assert!(!dir.join("a.ora").exists() && !dir.join("b.ora").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retouch_folder_skips_existing_ora_without_overwriting() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = PathBuf::from(format!("target/test-retouch-folder-existing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = &app.editor.as_ref().unwrap().doc;
+        omapix_engine::export::tiff(doc, &dir.join("a.tif")).unwrap();
+        let sentinel = b"existing ora bytes";
+        std::fs::write(dir.join("a.ora"), sentinel).unwrap();
+
+        app.retouch_folder(dir.clone(), app.filters.auto_retouch, &ctx);
+        let job = app.retouch_folder.as_mut().unwrap();
+        let (tx, rx) = channel();
+        for _ in 0..job.total {
+            tx.send(job.rx.recv_timeout(Duration::from_secs(10)).expect("a file reported")).unwrap();
+        }
+        job.rx = rx;
+        app.poll(&ctx);
+
+        assert!(app.retouch_folder.is_none());
+        let (text, error, _) = app.status.clone().expect("a message");
+        assert!(
+            error && text == "Retouched 0 files; 2 failed: a.ora: already exists; a.tif: already exists",
+            "{text}"
+        );
+        assert_eq!(std::fs::read(dir.join("a.ora")).unwrap(), sentinel);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// End to end: Retouch Folder over `OMAPIX_FACE_PHOTO`, checking the
+    /// saved `.ora` contains the Retouch group. Needs the models
+    /// (scripts/fetch-models.sh).
+    #[test]
+    #[ignore]
+    fn retouch_folder_retouches_portrait_and_writes_retouch_group() {
+        let Ok(photo) = std::env::var("OMAPIX_FACE_PHOTO") else { return };
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let dir = PathBuf::from(format!("target/test-retouch-folder-portrait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = omapix_engine::io::load(Path::new(&photo)).unwrap();
+        omapix_engine::export::tiff(&src, &dir.join("portrait.tif")).unwrap();
+        // An image with no faces is reported, not saved.
+        omapix_engine::export::tiff(&app.editor.as_ref().unwrap().doc, &dir.join("blank.tif")).unwrap();
+
+        app.retouch_folder(dir.clone(), app.filters.auto_retouch, &ctx);
+        let job = app.retouch_folder.as_mut().unwrap();
+        let (tx, rx) = channel();
+        for _ in 0..job.total {
+            tx.send(job.rx.recv_timeout(Duration::from_secs(120)).expect("a file retouched")).unwrap();
+        }
+        job.rx = rx;
+        app.poll(&ctx);
+
+        assert!(app.retouch_folder.is_none());
+        let (text, error, _) = app.status.clone().expect("a message");
+        assert!(error && text == "Retouched 1 file; 1 failed: blank.tif: Found no faces", "{text}");
+        assert!(!dir.join("blank.ora").exists());
+        let saved = omapix_engine::ora::load(&dir.join("portrait.ora")).unwrap();
+        assert!(saved.layers.iter().any(|l| l.is_group && l.name == "Retouch"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
