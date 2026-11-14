@@ -37,6 +37,7 @@ mod presets;
 mod preview_box;
 mod properties_panel;
 mod recent;
+mod recovery;
 mod select_and_mask;
 mod select_subject;
 mod settings;
