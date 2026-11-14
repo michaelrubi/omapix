@@ -11,7 +11,7 @@
 mod cache;
 pub mod shrink;
 
-use omapix_engine::adjust::{Adjustment, Curves};
+use omapix_engine::adjust::{Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curves, HueSaturation, Levels, SelectiveColor};
 use omapix_engine::layer::{BlendIf, BlendIfChannel, Layer, Mask};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{BlendMode, ColorProfile, Document, Pixel};
@@ -24,6 +24,29 @@ pub enum Kind {
     Pixels,
     Curves,
     Group,
+    Levels,
+    HueSaturation,
+    ColorBalance,
+    SelectiveColor,
+    ChannelMixer,
+    ColorLookup,
+}
+
+impl Kind {
+    /// The adjustment layers, in the order of `Adjustment`.
+    pub const ADJUSTMENTS: [Kind; 7] = [
+        Kind::Curves,
+        Kind::Levels,
+        Kind::HueSaturation,
+        Kind::ColorBalance,
+        Kind::SelectiveColor,
+        Kind::ChannelMixer,
+        Kind::ColorLookup,
+    ];
+
+    pub fn is_adjustment(self) -> bool {
+        !matches!(self, Kind::Pixels | Kind::Group)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +168,7 @@ fn siblings(rng: &mut Rng, parent: Option<u64>, depth: usize, budget: &mut usize
         *next += 1;
         let kind = match rng.below(10) {
             0..=1 if depth < 3 && *budget > 0 => Kind::Group,
-            2..=3 if place > 0 || depth > 0 => Kind::Curves,
+            2..=3 if place > 0 || depth > 0 => rng.pick(&Kind::ADJUSTMENTS),
             _ => Kind::Pixels,
         };
         if kind == Kind::Group {
@@ -249,12 +272,71 @@ pub fn mask(id: u64) -> Tiled<u16> {
     Tiled::from_slice(w, h, 65535, &data)
 }
 
-/// A Curves of layer `id`'s own.
-fn curves(id: u64) -> Adjustment {
-    let mut c = Curves::default();
-    let y = 0.25 + 0.5 * ((hash(id, 40) >> 20) % 1000) as f32 / 1000.0;
-    c.master.points.insert(1, (0.5, y));
-    Adjustment::Curves(c)
+/// An adjustment of `kind` with settings of layer `id`'s own, none of
+/// them the default.
+fn adjustment(kind: Kind, id: u64) -> Adjustment {
+    // 0 to 1, a different one for each `salt`.
+    let u = |salt: u64| ((hash(id, salt) >> 20) % 1000) as f32 / 1000.0;
+    // −1 to 1.
+    let s = |salt: u64| 2.0 * u(salt) - 1.0;
+    match kind {
+        Kind::Curves => {
+            let mut c = Curves::default();
+            c.master.points.insert(1, (0.5, 0.25 + 0.5 * u(40)));
+            Adjustment::Curves(c)
+        }
+        Kind::Levels => Adjustment::Levels(Levels {
+            in_black: 0.15 * u(41),
+            in_white: 0.8 + 0.2 * u(42),
+            gamma: 0.6 + 0.9 * u(43),
+            out_black: 0.1 * u(44),
+            out_white: 0.9 + 0.1 * u(45),
+        }),
+        Kind::HueSaturation => Adjustment::HueSaturation(HueSaturation {
+            hue: 90.0 * s(41),
+            saturation: 60.0 * s(42),
+            lightness: 25.0 * s(43),
+        }),
+        Kind::ColorBalance => Adjustment::ColorBalance(ColorBalance {
+            shadows: [30.0 * s(41), 30.0 * s(42), 30.0 * s(43)],
+            midtones: [40.0 * s(44), 40.0 * s(45), 40.0 * s(46)],
+            highlights: [30.0 * s(47), 30.0 * s(48), 30.0 * s(49)],
+            preserve_luminosity: id.is_multiple_of(2),
+        }),
+        Kind::SelectiveColor => {
+            let ranges = std::array::from_fn(|r| std::array::from_fn(|c| 50.0 * s(60 + 4 * r as u64 + c as u64)));
+            Adjustment::SelectiveColor(SelectiveColor {
+                ranges,
+                relative: id.is_multiple_of(2),
+            })
+        }
+        Kind::ChannelMixer => Adjustment::ChannelMixer(ChannelMixer {
+            red: [100.0 - 40.0 * u(41), 40.0 * s(42), 20.0 * s(43), 10.0 * s(44)],
+            green: [30.0 * s(45), 100.0 - 40.0 * u(46), 20.0 * s(47), 10.0 * s(48)],
+            blue: [20.0 * s(49), 30.0 * s(50), 100.0 - 40.0 * u(51), 10.0 * s(52)],
+            gray: [40.0, 40.0, 20.0, 0.0],
+            monochrome: id.is_multiple_of(5),
+        }),
+        Kind::ColorLookup => {
+            // Three points a side, each corner and edge moved a little,
+            // red changing fastest as a .cube file has it.
+            let n = 3;
+            let table = (0..n * n * n)
+                .map(|i| {
+                    let at = [i % n, i / n % n, i / (n * n)].map(|v| v as f32 / (n - 1) as f32);
+                    std::array::from_fn(|c| (at[c] + 0.15 * s(70 + 3 * i as u64 + c as u64)).clamp(0.0, 1.0))
+                })
+                .collect();
+            Adjustment::ColorLookup(ColorLookup {
+                title: format!("fuzz {id}"),
+                size: n,
+                is_3d: true,
+                table,
+                ..ColorLookup::default()
+            })
+        }
+        Kind::Pixels | Kind::Group => unreachable!("not an adjustment"),
+    }
 }
 
 /// The document `specs` describes. They must be [`valid`].
@@ -267,8 +349,8 @@ pub fn document(specs: &[Spec]) -> Document {
             let name = format!("{:?} {}", s.kind, s.id);
             let mut layer = match s.kind {
                 Kind::Pixels => Layer::from_pixels(s.id, name, pixels(s.id)),
-                Kind::Curves => Layer::adjustment(s.id, curves(s.id), w, h),
                 Kind::Group => Layer::group(s.id, name, w, h),
+                kind => Layer::adjustment(s.id, adjustment(kind, s.id), w, h),
             };
             layer.mask = match s.mask {
                 MaskSpec::None => None,
@@ -291,7 +373,7 @@ mod tests {
 
     #[test]
     fn every_seed_makes_a_stack_a_document_can_hold() {
-        let mut kinds = [0; 3];
+        let mut kinds = [0; 9];
         let (mut clipped, mut deepest) = (0, 0);
         for seed in 0..2000 {
             let specs = specs(seed);
@@ -314,7 +396,9 @@ mod tests {
             }
         }
         // Each kind of thing turns up often enough to be worth the run.
-        assert!(kinds.iter().all(|&n| n > 500), "{kinds:?}");
+        let [pixels, groups] = [Kind::Pixels, Kind::Group].map(|k| kinds[k as usize]);
+        assert!(pixels > 500 && groups > 500, "{kinds:?}");
+        assert!(Kind::ADJUSTMENTS.iter().all(|&k| kinds[k as usize] > 100), "{kinds:?}");
         assert!(clipped > 500 && deepest == 3, "{clipped} clipped, {deepest} deep");
     }
 
