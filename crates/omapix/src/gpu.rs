@@ -650,6 +650,7 @@ mod tests {
     use crate::live;
     use omapix_engine::adjust::{Adjustment, Curves};
     use omapix_engine::layer::{BlendIf, BlendIfChannel, Layer, Mask};
+    use omapix_engine::reduced::Reduced;
     use omapix_engine::tiled::Tiled;
     use omapix_engine::transform::{Affine, Resampling, transformed};
     use omapix_engine::{BlendMode, ColorProfile, Document, Raster, composite};
@@ -676,9 +677,11 @@ mod tests {
         let gpu = resources.get::<LiveGpu>().unwrap();
         let uploaded = gpu.uploaded.as_ref().unwrap();
         let last = &uploaded.targets[(uploaded.passes.len() - 1) % 2].0;
+        // Rows are padded to what copies need them to be.
+        let row = (w * 16).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: u64::from(w * h * 16),
+            size: u64::from(row * h),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -688,7 +691,7 @@ mod tests {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(w * 16),
+                    bytes_per_row: Some(row),
                     rows_per_image: Some(h),
                 },
             },
@@ -698,7 +701,10 @@ mod tests {
         buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let bytes = buffer.slice(..).get_mapped_range().expect("mapped");
-        bytemuck::cast_slice(&bytes).to_vec()
+        bytes
+            .chunks(row as usize)
+            .flat_map(|r| bytemuck::cast_slice::<u8, [f32; 4]>(&r[..(w * 16) as usize]).to_vec())
+            .collect()
     }
 
     /// A 64 × 40 document: a gradient, a half-transparent patch with a
@@ -1587,7 +1593,7 @@ mod tests {
     /// How many pixels may differ by more than rounding: Blend If's
     /// unsplit sliders and some blend modes jump, so a pixel right at a
     /// jump can land either side of it. A real difference is an area.
-    const STRAYS: usize = 3;
+    const STRAYS: usize = 2;
 
     /// In how many pixels the live composite of `specs` with layer `id`
     /// moved, shown or edited is further from the CPU's than rounding
@@ -1597,11 +1603,20 @@ mod tests {
             return None;
         }
         let doc = fuzz::document(specs);
-        let (w, h) = (doc.width, doc.height);
+        // Half of them zoomed out (shrunk layers, as the canvas shows at
+        // 50 %), and half of each with only part of the image on screen.
+        let variant = (id * 3 + what as u64) % 4;
+        let level = (variant & 1) as u32;
+        let layers = match level {
+            0 => doc.layers.clone(),
+            _ => Reduced::default().layers(&doc.layers, level),
+        };
+        let (w, h) = (doc.width >> level, doc.height >> level);
+        let region = if variant & 2 == 0 { (0, 0, w, h) } else { (w / 6, h / 8, w / 2, h / 2) };
         // Built before the move or the edit, as the editor's is.
-        let stack = live::build(&doc, &doc.layers, id, what == Try::Move, 0, (0, 0, w, h))?;
-        let mut after = doc.clone();
-        let layer = after.layer_mut(id)?;
+        let stack = live::build(&doc, &layers, id, what == Try::Move, level as usize, region)?;
+        let mut after = layers.clone();
+        let layer = after.iter_mut().find(|l| l.id == id)?;
         let (mut offset, mut settings) = ((0, 0), None);
         match what {
             Try::Move => {
@@ -1649,14 +1664,18 @@ mod tests {
             scale: 1.0,
         };
         let gpu = composite_on_gpu(device, queue, draw);
-        let cpu = composite::composite(&after.layers, w, h);
+        let whole = composite::composite(&after, w, h);
+        let (x0, y0, rw, rh) = region;
+        let cpu = (y0..y0 + rh)
+            .flat_map(|y| (x0..x0 + rw).map(move |x| (x, y)))
+            .map(|(x, y)| whole.pixels()[(y * w + x) as usize]);
         // As they're seen, with colour times alpha: where next to nothing
         // shows, its colour is anyone's guess (and the CPU rounds what's
         // below the stack to 16 bits, alpha and all).
         let seen = |c: [f32; 4]| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
         // Adjustments go through a lookup table, so are a little less exact.
         let allowed = if specs.iter().any(|s| s.kind == Kind::Curves) { 4e-3 } else { 2e-4 };
-        let off = cpu.pixels().iter().zip(&gpu).map(|(c, g)| {
+        let off = cpu.zip(&gpu).map(|(c, g)| {
             let (c, g) = (seen(c.map(|v| f32::from(v) / 65535.0)), seen(*g));
             (0..4).map(|i| (c[i] - g[i]).abs()).fold(0.0, f32::max)
         });
