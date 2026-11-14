@@ -646,9 +646,10 @@ fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, bytes: &[u8], row: u32, s
 mod tests {
     //! Run with `cargo test -p omapix gpu -- --ignored`: needs a GPU.
     use super::*;
+    use crate::fuzz::{self, Kind, Spec};
     use crate::live;
     use omapix_engine::adjust::{Adjustment, Curves};
-    use omapix_engine::layer::{Layer, Mask};
+    use omapix_engine::layer::{BlendIf, BlendIfChannel, Layer, Mask};
     use omapix_engine::tiled::Tiled;
     use omapix_engine::transform::{Affine, Resampling, transformed};
     use omapix_engine::{BlendMode, ColorProfile, Document, Raster, composite};
@@ -656,6 +657,8 @@ mod tests {
     fn device() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("a GPU");
+        // Which one, for the record: `VK_DRIVER_FILES` picks another.
+        println!("on {}", adapter.get_info().name);
         pollster::block_on(adapter.request_device(&Default::default())).expect("a device")
     }
 
@@ -1570,5 +1573,135 @@ mod tests {
             .flat_map(|(c, g)| (0..4).map(move |i| (f32::from(c[i]) / 65535.0 - g[i]).abs()))
             .fold(0.0, f32::max);
         assert!(worst < 4e-3, "off by {worst}");
+    }
+
+    /// What the fuzzer does with one layer of a stack: moves it, shows it
+    /// as it is, or edits its settings.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Try {
+        Move,
+        Show,
+        Edit,
+    }
+
+    /// How many pixels may differ by more than rounding: Blend If's
+    /// unsplit sliders and some blend modes jump, so a pixel right at a
+    /// jump can land either side of it. A real difference is an area.
+    const STRAYS: usize = 3;
+
+    /// In how many pixels the live composite of `specs` with layer `id`
+    /// moved, shown or edited is further from the CPU's than rounding
+    /// allows, and how far at worst. `None` when that isn't shown live.
+    fn fuzz_difference(device: &wgpu::Device, queue: &wgpu::Queue, specs: &[Spec], id: u64, what: Try) -> Option<(usize, f32)> {
+        if !specs.iter().any(|s| s.id == id) {
+            return None;
+        }
+        let doc = fuzz::document(specs);
+        let (w, h) = (doc.width, doc.height);
+        // Built before the move or the edit, as the editor's is.
+        let stack = live::build(&doc, &doc.layers, id, what == Try::Move, 0, (0, 0, w, h))?;
+        let mut after = doc.clone();
+        let layer = after.layer_mut(id)?;
+        let (mut offset, mut settings) = ((0, 0), None);
+        match what {
+            Try::Move => {
+                offset = (5, -3);
+                layer.pixels = layer.pixels.translated(offset.0, offset.1, [0; 4]);
+                if let Some(mask) = &mut layer.mask {
+                    mask.pixels = mask.pixels.translated(offset.0, offset.1, 65535);
+                }
+            }
+            Try::Show => {}
+            Try::Edit => {
+                let modes: Vec<BlendMode> = BlendMode::MENU.iter().flat_map(|g| g.iter()).copied().collect();
+                layer.opacity *= 0.6;
+                // A group can't start or stop passing through.
+                if layer.blend != BlendMode::PassThrough {
+                    layer.blend = modes[id as usize * 7 % modes.len()];
+                }
+                layer.blend_if = match layer.blend_if {
+                    Some(_) => None,
+                    None => Some(BlendIf {
+                        channel: BlendIfChannel::Green,
+                        this: [0.1, 0.3, 1.0, 1.0],
+                        underlying: [0.0, 0.0, 0.6, 0.9],
+                    }),
+                };
+                settings = Some(Settings {
+                    opacity: layer.opacity,
+                    mode: layer.blend,
+                    lut: layer.adjustment.as_ref().map(|a| Arc::new(a.prepare().lut(LUT_SIZE))),
+                    blend_if: layer.blend_if.filter(|b| !b.is_neutral()),
+                });
+            }
+        }
+        let draw = LiveDraw {
+            frame: LiveFrame {
+                stack: Arc::new(stack),
+                painted: None,
+                painted_mask: None,
+                offset,
+                transform: None,
+                settings,
+            },
+            display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
+            origin: [0.0; 2],
+            scale: 1.0,
+        };
+        let gpu = composite_on_gpu(device, queue, draw);
+        let cpu = composite::composite(&after.layers, w, h);
+        // As they're seen, with colour times alpha: where next to nothing
+        // shows, its colour is anyone's guess (and the CPU rounds what's
+        // below the stack to 16 bits, alpha and all).
+        let seen = |c: [f32; 4]| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
+        // Adjustments go through a lookup table, so are a little less exact.
+        let allowed = if specs.iter().any(|s| s.kind == Kind::Curves) { 4e-3 } else { 2e-4 };
+        let off = cpu.pixels().iter().zip(&gpu).map(|(c, g)| {
+            let (c, g) = (seen(c.map(|v| f32::from(v) / 65535.0)), seen(*g));
+            (0..4).map(|i| (c[i] - g[i]).abs()).fold(0.0, f32::max)
+        });
+        Some((off.clone().filter(|&d| d > allowed).count(), off.fold(0.0, f32::max)))
+    }
+
+    /// Random stacks (`fuzz.rs`), each layer of each moved, shown and
+    /// edited live, against the CPU. `OMAPIX_FUZZ_SEEDS=5000` tries more
+    /// (and `OMAPIX_FUZZ_FROM` starts further on). The first stack that
+    /// differs is shrunk to the least that still does and printed, to keep
+    /// as a test.
+    #[test]
+    #[ignore]
+    fn live_composite_matches_the_cpu_for_random_stacks() {
+        let (device, queue) = device();
+        let number = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+        let from = number("OMAPIX_FUZZ_FROM", 0);
+        let (mut shown, mut tried, mut wrong) = (0, 0, Vec::new());
+        for seed in from..from + number("OMAPIX_FUZZ_SEEDS", 300) {
+            let specs = fuzz::specs(seed);
+            for (spec, what) in specs.iter().flat_map(|s| [Try::Move, Try::Show, Try::Edit].map(|what| (s, what))) {
+                tried += 1;
+                let Some((over, worst)) = fuzz_difference(&device, &queue, &specs, spec.id, what) else {
+                    continue;
+                };
+                shown += 1;
+                if over > STRAYS {
+                    wrong.push((seed, spec.id, what, over, worst));
+                }
+            }
+        }
+        println!("{shown} of {tried} shown live, {} of them wrong", wrong.len());
+        let Some(&(seed, id, what, ..)) = wrong.first() else {
+            return;
+        };
+        for (seed, id, what, over, worst) in &wrong {
+            println!("seed {seed}, layer {id}, {what:?}: {over} pixels off, by up to {worst}");
+        }
+        let fails = |specs: &[Spec]| fuzz_difference(&device, &queue, specs, id, what).is_some_and(|(over, _)| over > STRAYS);
+        let least = fuzz::shrink::shrink(fuzz::specs(seed), fails);
+        let (over, worst) = fuzz_difference(&device, &queue, &least, id, what).unwrap();
+        let lines: Vec<String> = least.iter().map(|s| format!("{s:?}")).collect();
+        panic!(
+            "seed {seed}, layer {id}, {what:?}, shrunk: {over} pixels off, by up to {worst}:\n{}",
+            lines.join("\n")
+        );
     }
 }
