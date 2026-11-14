@@ -936,7 +936,16 @@ mod tests {
     /// it, to tell too little from too much.
     /// A `<name>-og` file beside it (an earlier edit he redid) is cut the
     /// same way and scored against the redo as "og": the bar to beat. The
-    /// last lines are the means over every zone of every face. Needs the
+    /// last lines are the means over every zone of every face.
+    ///
+    /// A second score, beside the first, can see dabs: each image's L* is
+    /// split into four bands of detail, centred near 1/200, 1/60, 1/20 and
+    /// 1/7 of the distance between the eyes (differences of Gaussians whose
+    /// edges sit halfway between those, on a log scale; the finest band
+    /// starts at the pixels). In each zone, "diff" is the mean difference
+    /// between ours and his in that band, and "his" and "ours" how much each
+    /// changed it from the photo. It follows the first table for each
+    /// image, and its means by zone and overall come last. Needs the
     /// models; run with `cargo test --release -p omapix -- --ignored
     /// auto_retouch_against_hand_retouches --nocapture`.
     #[test]
@@ -980,6 +989,21 @@ mod tests {
             doc
         };
         let (mut all, mut all_og) = (Vec::new(), Vec::new());
+        // The band score: centres as fractions of the distance between the
+        // eyes, and for every zone of every face its [diff, his, ours] per band.
+        const BANDS: [f32; 4] = [200.0, 60.0, 20.0, 7.0];
+        let mut all_bands: Vec<(&str, [[f32; 3]; 4])> = Vec::new();
+        let band_header = format!(
+            "{:<12} {:>4} {:<11}{}",
+            "bands",
+            "face",
+            "zone",
+            BANDS.map(|b| format!(" | {:>18}", format!("1/{b}: diff his ours"))).concat()
+        );
+        let band_row = |name: &str, face: &str, zone: &str, b: &[[f32; 3]; 4]| {
+            let cells = b.map(|[d, h, o]| format!(" | {d:>6.2}{h:>6.2}{o:>6.2}"));
+            format!("{name:<12} {face:>4} {zone:<11}{}", cells.concat())
+        };
         eprintln!(
             "{:<12} {:>4} {:<11} {:>6} {:>8} {:>6} {:>6} {:>8} {:>8}",
             "file", "face", "zone", "tone", "texture", "his", "ours", "og tone", "og text"
@@ -1027,8 +1051,33 @@ mod tests {
             apply(&mut editor, &dialog);
             let ours = in_linear(&editor.doc.composite());
             drop(editor);
+            let mut band_rows = vec![band_header.clone()];
             for (n, face) in dialog.faces.iter().enumerate() {
                 let found = &face.found;
+                // L* split into BANDS, in a box round the face wide enough
+                // for the broadest blur.
+                let iod = found.iod;
+                let mut edges = [0.0; 5];
+                for k in 1..4 {
+                    edges[k] = iod / (BANDS[k - 1] * BANDS[k]).sqrt();
+                }
+                edges[4] = iod / BANDS[3] * (BANDS[2] / BANDS[3]).sqrt();
+                let pad = 3.0 * edges[4];
+                let [l, t, r, b] = found.bounds;
+                let x0 = (l - pad).max(0.0) as u32;
+                let y0 = (t - pad).max(0.0) as u32;
+                let x1 = ((r + pad) as u32).min(his.width());
+                let y1 = ((b + pad) as u32).min(his.height());
+                let (bw, bh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+                let bands = |image: &Raster| -> Vec<[f32; 4]> {
+                    let l: Vec<[f32; 4]> = (y0..y1)
+                        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                        .map(|(x, y)| [lightness(image.get(x, y)), 0.0, 0.0, 0.0])
+                        .collect();
+                    let blurs = edges.map(|e| omapix_engine::filters::blur_buffer(l.clone(), bw, bh, e));
+                    (0..l.len()).map(|i| [0, 1, 2, 3].map(|k| blurs[k][i][0] - blurs[k + 1][i][0])).collect()
+                };
+                let (band_before, band_his, band_ours) = (bands(&before), bands(&his), bands(&ours));
                 let radius = found.iod / 10.0;
                 let blurred = |r: &Raster| omapix_engine::filters::gaussian_blur(&Tiled::from_raster(r), radius);
                 let h = blurred(&his);
@@ -1053,6 +1102,7 @@ mod tests {
                     let (mut weight, mut his_change, mut our_change) = (0.0, 0.0, 0.0);
                     // Tone and texture differences from his, for ours and the og.
                     let (mut ours_diff, mut og_diff) = ([0.0; 2], [0.0; 2]);
+                    let (mut band_weight, mut band_sum) = (0.0, [[0.0f32; 3]; 4]);
                     for (px, py) in (y..y + hh).flat_map(|py| (x..x + w).map(move |px| (px, py))) {
                         let k = f32::from(selection.coverage.get(px, py)) / 65535.0;
                         if k == 0.0 {
@@ -1070,6 +1120,16 @@ mod tests {
                         diff(&mut ours_diff, &ours, &o);
                         if let (Some(og), Some(g)) = (&og, &g) {
                             diff(&mut og_diff, og, g);
+                        }
+                        if (x0..x1).contains(&px) && (y0..y1).contains(&py) {
+                            let i = (py - y0) as usize * bw + (px - x0) as usize;
+                            let (b, h, o) = (band_before[i], band_his[i], band_ours[i]);
+                            for (c, sum) in band_sum.iter_mut().enumerate() {
+                                sum[0] += k * (o[c] - h[c]).abs();
+                                sum[1] += k * (h[c] - b[c]).abs();
+                                sum[2] += k * (o[c] - b[c]).abs();
+                            }
+                            band_weight += k;
                         }
                         weight += k;
                         his_change += k * (at(&his) - at(&before)).abs();
@@ -1094,8 +1154,14 @@ mod tests {
                     if og.is_some() {
                         all_og.push((tone + texture, og_tone + og_texture));
                     }
+                    if band_weight > 0.0 {
+                        let means = band_sum.map(|sum| sum.map(|v| v / band_weight));
+                        band_rows.push(band_row(&name, &(n + 1).to_string(), zone, &means));
+                        all_bands.push((zone, means));
+                    }
                 }
             }
+            eprintln!("{}", band_rows.join("\n"));
         }
         let mean = |v: &mut dyn Iterator<Item = f32>, n: usize| v.sum::<f32>() / n as f32;
         if !all.is_empty() {
@@ -1108,6 +1174,26 @@ mod tests {
                 mean(&mut all_og.iter().map(|z| z.0), n),
                 mean(&mut all_og.iter().map(|z| z.1), n)
             );
+        }
+        // The band score's means, zone by zone in the order first met, then
+        // over every zone.
+        let mut zones: Vec<&str> = Vec::new();
+        for (zone, _) in &all_bands {
+            if !zones.contains(zone) {
+                zones.push(zone);
+            }
+        }
+        eprintln!("{band_header}");
+        for zone in zones.into_iter().map(Some).chain([None]) {
+            let rows: Vec<_> = all_bands.iter().filter(|r| zone.is_none_or(|z| r.0 == z)).collect();
+            let mut sum = [[0.0; 3]; 4];
+            for (_, b) in &rows {
+                for (s, b) in sum.iter_mut().zip(b) {
+                    *s = [0, 1, 2].map(|i| s[i] + b[i]);
+                }
+            }
+            let means = sum.map(|s| s.map(|v| v / rows.len() as f32));
+            eprintln!("{}", band_row("mean", &rows.len().to_string(), zone.unwrap_or("all"), &means));
         }
     }
 
