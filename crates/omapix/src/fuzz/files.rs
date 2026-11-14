@@ -64,7 +64,7 @@ fn ora_fault(specs: &[Spec]) -> Option<String> {
 }
 
 /// `specs` as a .psd holds them: without the adjustment layers (they
-/// layers aren't written), and opacity and Blend If in 255ths.
+/// aren't written), and opacity and Blend If in 255ths.
 fn as_psd_holds(specs: &[Spec]) -> Vec<Spec> {
     let to_255 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0;
     let kept = specs.iter().filter(|s| !s.kind.is_adjustment()).cloned();
