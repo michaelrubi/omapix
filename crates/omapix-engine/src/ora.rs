@@ -157,7 +157,7 @@ fn write_stack(xml: &mut String, doc: &Document, encoded: &[Encoded], parent: Op
             xml.push_str(&format!("<layer src=\"{src}\" x=\"{x}\" y=\"{y}\""));
         }
         xml.push_str(&format!(
-            " name=\"{}\" opacity=\"{:.4}\" visibility=\"{}\" composite-op=\"{}\"",
+            " name=\"{}\" opacity=\"{}\" visibility=\"{}\" composite-op=\"{}\"",
             xml_escape(&layer.name),
             layer.opacity,
             if layer.visible { "visible" } else { "hidden" },
