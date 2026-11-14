@@ -153,6 +153,10 @@ pub struct LiveLayer {
     pub blend_if: Option<BlendIf>,
     /// Its mask hides where it's high: Quick Mask's overlay.
     pub inverted: bool,
+    /// Its mask is the subject's, to bring up to date as that's painted:
+    /// the subject's own, and for an adjustment layer, the one its
+    /// clipping mask is faded back through as well.
+    pub subjects_mask: bool,
 }
 
 /// The subject's settings this frame, while they're being edited.
@@ -634,6 +638,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 fresh: step.fresh,
                 atop: step.atop,
                 inverted: layer.id == QUICK_MASK,
+                subjects_mask: step.index == index && mask.is_some(),
             }
         })
         .collect();
@@ -1030,6 +1035,19 @@ pub mod tests {
                         ..group(3, None)
                     },
                     clipped(group(8, None), true),
+                ],
+            ),
+            // Painting the mask of an adjustment layer with a layer
+            // clipped to it: the clipped layer fades back through that
+            // mask too, and kept the mask as it was before the stroke.
+            (
+                164,
+                vec![
+                    Spec {
+                        mask: fuzz::MaskSpec::On,
+                        ..Spec::new(8, Kind::Curves)
+                    },
+                    clipped(pixels(9, None), true),
                 ],
             ),
         ]

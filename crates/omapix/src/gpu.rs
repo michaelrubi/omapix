@@ -80,7 +80,7 @@ struct Uploaded {
     display_uniform: wgpu::Buffer,
     display_group: wgpu::BindGroup,
     /// The subject's pixels and mask, to bring up to date as they're painted.
-    painting: (Option<Painted<Pixel>>, Option<Painted<u16>>),
+    painting: (Option<Painted<Pixel>>, Vec<Painted<u16>>),
 }
 
 /// A texture of the subject, the area of the level it holds (x0, y0, w,
@@ -291,7 +291,7 @@ impl LiveGpu {
             write_lut(queue, &texture, data, LUT_SIZE);
             texture
         };
-        let mut painting = (None, None);
+        let mut painting = (None, Vec::new());
         for layer in &stack.layers {
             let nothing = ([0; 2], [0; 2]);
             let (pixels, lut, before, plane, fill, kind) = match &layer.source {
@@ -315,8 +315,8 @@ impl LiveGpu {
                 let texture = upload(device, queue, wgpu::TextureFormat::R16Uint, (m.w, m.h), &m.data);
                 (texture, rect(m.x0, m.y0, m.w, m.h), f32::from(m.fill) / 65535.0)
             });
-            if let (true, Some(m), Some((view, ..)), Some(was)) = (layer.subject, &layer.mask, &mask, &stack.subject_mask) {
-                painting.1 = Some((view.texture().clone(), (m.x0, m.y0, m.w, m.h), was.clone()));
+            if let (true, Some(m), Some((view, ..)), Some(was)) = (layer.subjects_mask, &layer.mask, &mask, &stack.subject_mask) {
+                painting.1.push((view.texture().clone(), (m.x0, m.y0, m.w, m.h), was.clone()));
             }
             let params = Params {
                 region_origin,
@@ -433,9 +433,11 @@ impl CallbackTrait for LiveDraw {
             repaint(queue, texture, *area, shown, now);
             *shown = now.clone();
         }
-        if let (Some(now), Some((texture, area, shown))) = (&self.frame.painted_mask, &mut uploaded.painting.1) {
-            repaint(queue, texture, *area, shown, now);
-            *shown = now.clone();
+        if let Some(now) = &self.frame.painted_mask {
+            for (texture, area, shown) in &mut uploaded.painting.1 {
+                repaint(queue, texture, *area, shown, now);
+                *shown = now.clone();
+            }
         }
         let offset = [self.frame.offset.0, self.frame.offset.1];
         let inverse = self.frame.transform.and_then(|t| t.inverse()).map(|t| t.coefficients());
