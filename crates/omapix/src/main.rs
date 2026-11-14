@@ -18,6 +18,8 @@ mod face_liquify;
 mod face_selection;
 mod fill_beard;
 mod free_transform;
+#[cfg(test)]
+mod fuzz;
 mod generative_fill;
 mod gpu;
 mod heal_blemishes;

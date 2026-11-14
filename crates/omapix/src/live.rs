@@ -255,6 +255,14 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
     };
     let plain = clips;
     let through = |l: &Layer| l.is_group && l.blend == BlendMode::PassThrough;
+    // Whether layers that show are clipped to `l`. Hidden ones don't make
+    // it a clipping mask, so a Pass Through group they're clipped to still
+    // passes through (composite.rs `nodes`).
+    let is_base = |l: &Layer| {
+        let after = doc.index_of(l.id).map_or(doc.layers.len(), |i| i + 1);
+        let mut clipped = doc.layers[after..].iter().filter(|c| c.parent == l.parent).take_while(|c| c.clipped);
+        doc.is_clip_base(l.id) && clipped.any(|c| c.visible)
+    };
     let kind = subject.has_pixels() || !moving && (subject.adjustment.is_some() || subject.is_group);
     let groups_shown = |l: &Layer| std::iter::successors(l.parent, |&g| doc.layer(g)?.parent).all(|g| doc.layer(g).is_some_and(|g| g.visible));
     // What's below the subject is composited without the groups round it
@@ -291,7 +299,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
     let isolated = groups
         .filter_map(|g| match base_of(g) {
             Some(base) if g.clipped => start_of(base),
-            _ if !through(g) || doc.is_clip_base(g.id) => start_of(g),
+            _ if !through(g) || is_base(g) => start_of(g),
             _ => None,
         })
         .min();
@@ -299,6 +307,9 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
         Some(start) => start.min(from),
         None => from,
     };
+    // The stack starts onto nothing: inside a group composited on its own,
+    // or at the first layer of a group the subject is clipped to.
+    let onto_nothing = isolated.is_some() || subject.clipped && base_of(subject).is_some_and(|b| b.is_group);
     let mut out: Vec<Step> = Vec::new();
     // The groups above the subject that fade: where each starts, and the
     // slot what's below it is kept in.
@@ -348,7 +359,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
         }
         // A group being edited that's composited on its own: its layers,
         // composited, stand in for it.
-        let alone = !through(subject) || subject.clipped || doc.is_clip_base(subject.id);
+        let alone = !through(subject) || subject.clipped || is_base(subject);
         if subject.is_group && alone && (doc.span(index).start..index).contains(&i) {
             continue;
         }
@@ -360,7 +371,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
             out.push(Step { atop, ..layer(i) });
             continue;
         }
-        if !l.is_group && doc.is_clip_base(l.id) {
+        if !l.is_group && is_base(l) {
             // The layers clipped to it are the siblings straight after it.
             let last = (i + 1..doc.layers.len())
                 .filter(|&j| doc.layers[j].parent == l.parent)
@@ -387,7 +398,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
             continue;
         }
         let start = doc.span(i).start;
-        let base = doc.is_clip_base(l.id);
+        let base = is_base(l);
         if !through(l) || l.clipped || base {
             if i == index && base {
                 // Drawn plainly onto nothing, cut by its mask, for what's
@@ -474,7 +485,7 @@ fn stack(doc: &Document, id: u64, moving: bool) -> Option<(usize, Vec<Step>)> {
         let fades = l.opacity < 1.0 || l.mask.as_ref().is_some_and(|m| m.enabled) || l.blend_if.is_some_and(|b| !b.is_neutral());
         // Inside a group composited on its own, a group starting where the
         // stack does has nothing below it.
-        if start < from || start == from && isolated.is_none() {
+        if start < from || start == from && !onto_nothing {
             // The subject, or a group round where the stack starts: what's
             // below the group doesn't change.
             if fades || i == index {
@@ -639,8 +650,9 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+    use crate::fuzz::{self, Kind, Spec};
     use omapix_engine::adjust::{Adjustment, Curves};
     use omapix_engine::{ColorProfile, Raster, ops};
 
@@ -942,5 +954,119 @@ mod tests {
         assert!(!only_settings_changed(&doc.layers, &after, doc.layers[0].id), "another layer");
         after[3].visible = false;
         assert!(!only_settings_changed(&doc.layers, &after, curves), "hiding it");
+    }
+
+    /// The stacks the random ones found the live view wrong for (see
+    /// `fuzz.rs`, and `live_stacks_the_fuzzer_found_match_the_cpu` in
+    /// `gpu.rs`), by seed.
+    pub fn found_by_fuzzing() -> Vec<(u64, Vec<Spec>)> {
+        let pixels = |id, parent| Spec {
+            parent,
+            ..Spec::new(id, Kind::Pixels)
+        };
+        let group = |id, parent| Spec {
+            parent,
+            ..Spec::new(id, Kind::Group)
+        };
+        let clipped = |spec: Spec, visible| Spec {
+            clipped: true,
+            visible,
+            ..spec
+        };
+        vec![
+            // A hidden layer clipped to a Pass Through group, which the
+            // CPU doesn't count as a clipping mask.
+            (
+                584,
+                vec![
+                    pixels(1, None),
+                    Spec {
+                        blend: BlendMode::GrainMerge,
+                        ..pixels(4, Some(2))
+                    },
+                    group(2, None),
+                    clipped(pixels(7, None), false),
+                ],
+            ),
+            (
+                319,
+                vec![
+                    pixels(2, None),
+                    pixels(5, Some(4)),
+                    Spec {
+                        blend: BlendMode::VividLight,
+                        ..group(4, Some(3))
+                    },
+                    group(3, None),
+                    clipped(pixels(7, None), false),
+                ],
+            ),
+            // A group that fades at the bottom of a group something's
+            // clipped to: it fades towards nothing, not what's below.
+            (
+                375,
+                vec![
+                    pixels(1, None),
+                    pixels(5, Some(4)),
+                    Spec {
+                        opacity: 0.5,
+                        ..group(4, Some(3))
+                    },
+                    group(3, None),
+                    clipped(pixels(6, None), true),
+                ],
+            ),
+            (
+                969,
+                vec![
+                    pixels(1, None),
+                    pixels(5, Some(4)),
+                    Spec {
+                        opacity: 0.12,
+                        ..group(4, Some(3))
+                    },
+                    Spec {
+                        blend: BlendMode::LinearBurn,
+                        ..group(3, None)
+                    },
+                    clipped(group(8, None), true),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn hidden_clipped_layers_leave_their_group_passing_through() {
+        let all = (0, 0, fuzz::SIZE.0, fuzz::SIZE.1);
+        let mut specs = found_by_fuzzing().remove(0).1;
+        let doc = fuzz::document(&specs);
+        // The layer moved, then Grain Merge straight onto it.
+        let live = build(&doc, &doc.layers, 1, true, 0, all).unwrap();
+        assert_eq!(live.layers.len(), 2);
+        assert!(live.layers.iter().all(|l| !l.fresh && matches!(l.source, Source::Pixels(_))));
+        // Shown, the clipped layer makes the group one composited on its
+        // own: Grain Merge onto nothing, cut by the group's mask, the
+        // clipped layer atop that, then all of it onto the layer moved.
+        specs[3].visible = true;
+        let doc = fuzz::document(&specs);
+        let live = build(&doc, &doc.layers, 1, true, 0, all).unwrap();
+        assert_eq!(live.layers.len(), 5);
+        assert!(live.layers[1].fresh && matches!(live.layers[2].source, Source::Masked) && live.layers[3].atop);
+    }
+
+    #[test]
+    fn a_group_that_fades_in_a_clipping_masks_group_fades_towards_nothing() {
+        let all = (0, 0, fuzz::SIZE.0, fuzz::SIZE.1);
+        for (seed, subject) in [(375, 6), (969, 8)] {
+            let specs = found_by_fuzzing().into_iter().find(|(s, _)| *s == seed).unwrap().1;
+            let doc = fuzz::document(&specs);
+            let live = build(&doc, &doc.layers, subject, false, 0, all).unwrap();
+            // The stack starts with the base group's first layer, onto
+            // nothing, and the group in it fades back to that: not to the
+            // image below, which isn't in the base group.
+            assert!(live.layers[0].fresh, "seed {seed}");
+            assert!(matches!(live.layers[1].source, Source::Group(Before::Kept(_))), "seed {seed}");
+            assert!(!live.layers.iter().any(|l| matches!(l.source, Source::Group(Before::Plane(_)))), "seed {seed}");
+        }
     }
 }
