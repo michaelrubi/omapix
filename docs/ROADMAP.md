@@ -4,7 +4,7 @@ What's still needed, in the order we plan to do it. [DESIGN.md](DESIGN.md)
 covers the architecture and what's already built. To help with any of it, see
 [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-Status: sections 1 to 7 are largely done. Omapix can open a darktable TIFF, retouch it by hand or with Auto Retouch, grade it with adjustment layers, and save or export it. What's open in those sections is the items not struck through and the "Later:" lines under the finished ones. Section 8 is what's needed for other people to install Omapix and help with it.
+Status: sections 1 to 7 are largely done. Omapix can open a darktable TIFF, retouch it by hand or with Auto Retouch, grade it with adjustment layers, and save or export it. What's open in those sections is the items not struck through and the "Later:" lines under the finished ones. Section 8 is what's needed for other people to install Omapix and help with it. Section 9 is ideas that aren't started, each written so it can be picked up cold.
 
 ## 1. Everyday UI and layers panel UX (next)
 
@@ -602,6 +602,51 @@ What Omapix needs before people other than Michael can install it, rely on it an
 - ~~**Screenshots** in the README~~ (done): the window with a portrait open, and Auto Retouch's layers (`docs/images/`, an Unsplash studio portrait).
 - ~~**Issue templates**~~ (done): `.github/ISSUE_TEMPLATE/bug_report.yml` asks for what CONTRIBUTING.md lists.
 - ~~**A user guide**~~ (done): `docs/guide/` has a page for each of the main workflows, the darktable round trip, frequency separation and Auto Retouch, linked from the README.
+
+## 9. Ideas from the review of 2026-11-14
+
+From reading the whole roadmap and the code in one sitting. None is started. Each says where to begin and when it's done, so any of them can be picked up cold. The first three are the ones to do first; the rest are in no order.
+
+- **Finish the fuzzer** (small, follows on from "Checked on random stacks" in section 6). `fuzz.rs` makes the stacks and `fuzz_difference` in `gpu.rs` compares them.
+  - Say why a try isn't shown live. 18 % of tries fall back to the CPU and nothing says which rule in `live::stack()` refused them: have it return the reason, count the reasons in the test's output, and work down the list from the commonest. That list is the plan for "every edit shown this way".
+  - A second generator for what a frame carries, not just the stack: a stroke's changed tiles (`painted`, `painted_mask`), Free Transform's `transform`, Quick Mask's overlay (`live::quick_mask_layer`) and a lifted selection (`live::lifted`). Each has one hand-written GPU test now.
+  - More kinds of layer: the other six adjustments beside Curves, and layers with nothing in them.
+  - The same for files: write a random stack as .ora and as .psd, read it back, and composite both. `ora.rs` and `psd.rs` are checked by hand-made cases only. Leave out what the .psd is known to drop (adjustment layers).
+  - Done when the reasons are printed, each of the four frame states is fuzzed, and both file formats round-trip 1,000 stacks.
+- **A clipped layer at 0 % opacity changes how its group blends** (small, a bug read from the code, not yet seen on screen). `nodes()` in `composite.rs` counts a layer as shown only if `opacity > 0.0`, so dragging the opacity of a layer clipped to a Pass Through group down to 0 stops the group being composited on its own, and the picture jumps at 0 %. `live.rs` goes by `visible` alone, so the GPU and the CPU disagree there too. First write the test that shows the jump (a group with a Grain Merge layer in it, a layer clipped to the group, opacity 0.01 against 0), then decide which is right: most likely the CPU should treat 0 % as shown but transparent.
+- **Smaller .ora files** (medium). Copies share tiles in memory but each is written whole: splitting a 24 MP image in two took it from 519 MB to 766 MB.
+  - Tiles shared on disk: write each distinct tile once and have layers point at it, so a copy not yet painted on costs nothing. It needs a layer's file to be made of tiles rather than one PNG, so it's a change to the format in `ora.rs` with a version to read old files by. Check what Krita makes of the result, since it opens .ora files.
+  - Derived layers: Frequency Separation's Low and High, and High Pass Sharpening, can be made again exactly from the layer below and the settings, so store those and not the pixels, until the layer's painted on. Not for AI layers, which don't come out the same on another machine.
+  - Done when a 24 MP image split in two is within a few MB of the unsplit one, old files still open, and the five Aspen re-edits round-trip to the same pixels.
+- **Settings kept on the layer** (medium, design first). Five "Later" lines want the same thing: Auto Retouch redone from its settings, a Reshape layer that can be updated, Liquify's mesh in the .ora, Generative Fill's prompt and seed on its layer, and a mask's density that isn't baked in. One optional record on `Layer` of what made it (which command, its settings, what it was made from), written to the .ora, with "Redo with these settings…" on the layer's menu. Start with Auto Retouch's group, which is asked for most. It's the same record that "Derived layers" above needs, so design the two together.
+- **Layers bigger than the canvas, and selections that float** (large). Pixels moved past the canvas edge are cut off, and each nudge of a feathered selection fades its edge a little, both because a layer is exactly the canvas's size. Photoshop keeps both. It touches `Tiled`, both file formats, `composite.rs`, `live.rs` and the Move tool, so it wants a design note before any code, and the fuzzer above extended to layers with an offset. Worth it only if the cut-off pixels come up in real work.
+- **Auto Retouch fitted to the Aspen pairs** (medium, can start before the next shoot). The roadmap waits for layered retouches, but the five Aspen re-edits with their `-og` originals are before-and-after pairs, and that's enough to measure what a hand retouch changes: for each zone of each face (`face_selection.rs` has the zones), the difference in each band of detail, from fine texture to broad tone.
+  - First a score that can see dabs. The one there (`auto_retouch_against`) blurs tone by a tenth of the distance between the eyes, so 29 dabs moved it from 2.867 to 2.873. Compare band by band at several radii.
+  - Then fit a preset: search Auto Retouch's sliders for the ones that leave the least difference from the hand retouch, across all five, and hold one pair back to check it isn't fitted to the others.
+  - Don't ask Michael to re-edit old photos for this. The acne pass still waits on new ones.
+- **Crash recovery** (medium). There's no autosave and nothing to recover from. Tiles are copy-on-write, so the tiles changed since the last save are known: write them and the layer list to `~/.cache/omapix/recovery/` off the UI thread when Omapix has been idle a few seconds, delete them on a clean save or close, and offer them on the next start. Done when killing Omapix mid-retouch (`kill -9`) loses less than a minute, with a headless test of write, kill and restore.
+- **History Brush** (small to medium). History keeps whole-document snapshots that cost almost nothing, so a brush that paints a layer's pixels back from a chosen step is mostly wiring: a source marker in the History panel, and a tool in the Brush's group that reads the snapshot's tiles as the Clone Stamp reads its source. `Y`, as in Photoshop.
+- **Before and after** (small). Hold a key to see the image as opened (the bottom layer alone), and let go to come back, without touching the layers' eyes or the history. Later a split down the middle that can be dragged. Alt+click on the bottom layer's eye does the first half already, in two clicks and an undo step.
+- **One retouch for a whole shoot** (medium). Apply one image's Auto Retouch settings and grade (its adjustment layers) to the other open tabs or a folder, faces found again in each. Batch Export already runs a folder in the background (`app.rs`), and the MCP server's `apply_auto_retouch` is the same code path.
+- **Screenshot tests of the hand-testing checklist** (medium). About 45 items in section 2 are unticked. `OMAPIX_SCRIPT` drives the app, and the canvas can be read back as the GPU tests do, so each item that's about what's drawn (not how it feels under the hand or the pen) can be a script with a picture to compare against. Go through the unticked items, mark which can be, and do those. Smoothness and pen feel stay Michael's.
+- **Engine work that needs no UI**, each on its own and testable headlessly:
+  - Photomerge: the frames' exposure matched before blending, seams blended by detail size (multi-band), and cylindrical projection (`align.rs`, and the "Later" under Photomerge).
+  - Merge to HDR: what moved between frames taken out (`fusion.rs`).
+  - Focus stacking, as Edit › Auto-Blend Layers, which the two above share most of.
+  - Texture Fill: rotated, scaled and mirrored patches, as PhotoCraft has (`inpaint.rs`).
+- **Slow spots**, each with its figure from this roadmap to beat:
+  - Texture Fill from a far sampling area: 12 s at 24 MP.
+  - Applying Free Transform to a whole 24 MP layer: 0.5 s.
+  - The worst heal on release, a 400 px brush corner to corner: 1.7–1.9 s.
+  - Select and Mask redraws the whole view for each preview and each Refine Edge stroke.
+- **Splitting `app.rs`** (large, only if it's in the way). It's 10,900 lines, about half of them tests. If agents or reviews are slowed by it, move the tests to files beside it first (no behaviour changes, and the diff is only moves), then the dialogs. Not for its own sake.
+
+### For whoever picks these up
+
+- `docs/PLAN.md` (untracked, written 2026-10-20) is out of date: most of its phases 2 to 5 are done. Go by this file.
+- Run the GPU tests after any change to `live.rs`, `live.wgsl` or `composite.rs`: `cargo test -p omapix gpu::tests -- --ignored`, and `OMAPIX_FUZZ_SEEDS=4000` for the long run (about 25 minutes). The two bugs it found didn't show in the first 300 stacks.
+- When the fuzzer fails it prints the smallest stack that still does. Add that stack to `found_by_fuzzing()` in `live.rs` with the fix, so it's kept as a test.
+- If a difference turns out to be the CPU's mistake, stop and ask before changing `composite.rs`: exports come from it.
 
 ## Borrowing from PhotoCraft
 
