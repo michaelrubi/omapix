@@ -232,6 +232,8 @@ enum Dialog {
     UnsavedChanges {
         then: Then,
     },
+    /// Images left by a run that didn't close cleanly, to open or delete.
+    Recover(Vec<crate::recovery::Found>),
     BlendingOptions(crate::blending_options::BlendingOptions),
     SelectAndMask(crate::select_and_mask::SelectAndMask),
     AutoRetouch(crate::auto_retouch::AutoRetouch),
@@ -650,6 +652,8 @@ pub struct App {
     models_check: Option<Receiver<HashMap<&'static str, bool>>>,
     /// What agents and later launches ask over the live session's socket.
     bridge: Option<Receiver<crate::bridge::Asked>>,
+    /// Unsaved images written in the background, for after a crash.
+    recovery: crate::recovery::Recovery,
 }
 
 impl App {
@@ -758,6 +762,7 @@ impl App {
             models: HashMap::new(),
             models_check: Some(check_models(ctx)),
             bridge: crate::bridge::socket().and_then(|socket| crate::bridge::listen(&socket, ctx)),
+            recovery: crate::recovery::Recovery::new(crate::recovery::dir()),
         };
         let warnings = crate::hotkeys::load();
         if !warnings.is_empty() {
@@ -773,6 +778,11 @@ impl App {
             } else {
                 app.open(path, ctx);
             }
+        }
+        // Images a run that didn't close cleanly left unsaved.
+        let found = app.recovery.found();
+        if !found.is_empty() {
+            app.dialog = Some(Dialog::Recover(found));
         }
         app
     }
@@ -844,6 +854,7 @@ impl App {
             models: HashMap::new(),
             models_check: None,
             bridge: None,
+            recovery: Default::default(),
         }
     }
 
@@ -971,7 +982,8 @@ impl App {
     /// Close the image in tab `index`, asking about unsaved changes first.
     fn close_tab(&mut self, index: usize, ctx: &egui::Context) {
         if index != self.tab && self.tabs().nth(index).is_some_and(|e| !e.modified) {
-            self.parked.remove(index - usize::from(index > self.tab));
+            let parked = self.parked.remove(index - usize::from(index > self.tab));
+            self.recovery.forget(&parked.editor);
             self.tab -= usize::from(index < self.tab);
         } else if self.show_tab(index) {
             match self.held() {
@@ -1246,7 +1258,9 @@ impl App {
     }
 
     fn close_document(&mut self) {
-        self.editor = None;
+        if let Some(editor) = self.editor.take() {
+            self.recovery.forget(&editor);
+        }
         self.layers = LayersPanel::default();
         self.properties = PropertiesPanel::default();
         self.history = HistoryPanel;
@@ -1364,8 +1378,14 @@ impl App {
         while let Some(result) = self.opening.front().and_then(|(_, rx)| rx.try_recv().ok()) {
             let Some((path, _)) = self.opening.pop_front() else { break };
             match result.and_then(|(doc, converted)| Ok((Editor::new(doc)?, converted))) {
-                Ok((editor, converted)) => {
-                    self.recent.add(&path);
+                Ok((mut editor, converted)) => {
+                    if self.recovery.holds(&path) {
+                        // Recovered: unsaved, and written to the same file from now on.
+                        editor.modified = true;
+                        self.recovery.adopt(&editor, &path);
+                    } else {
+                        self.recent.add(&path);
+                    }
                     if let Some(original) = converted {
                         let now = editor.doc.profile.description().to_owned();
                         self.message(format!("Converted {original} to {now} for editing"), false);
@@ -1399,6 +1419,9 @@ impl App {
                     if let Some(editor) = saved {
                         editor.doc.saved_path = Some(path.clone());
                         editor.mark_saved(revision);
+                        if !editor.modified {
+                            self.recovery.forget(editor);
+                        }
                         self.recent.add(&path);
                         if let Some(tiff) = editor.doc.round_trip.as_ref().and_then(|t| t.file_name()) {
                             text += &format!(", and {} for darktable", tiff.to_string_lossy());
@@ -3400,6 +3423,38 @@ impl App {
                 | Dialog::EvenTone(_)
                 | Dialog::Denoise(_)
                 | Dialog::GenerativeFill(_) => {}
+                Dialog::Recover(found) => {
+                    ui.heading("Recover Images");
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Omapix didn't close properly. These images had unsaved changes:").color(hint));
+                    ui.add_space(8.0);
+                    let mut chosen = None;
+                    egui::Grid::new("recover").num_columns(4).spacing([12.0, 6.0]).show(ui, |ui| {
+                        for (i, f) in found.iter().enumerate() {
+                            ui.label(&f.name);
+                            ui.label(RichText::new(f.ago()).color(hint));
+                            if ui.button("Recover").clicked() {
+                                chosen = Some((i, true));
+                            }
+                            if ui.button("Discard").clicked() {
+                                chosen = Some((i, false));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    if let Some((i, recover)) = chosen {
+                        let f = found.remove(i);
+                        action = Some(Box::new(move |app, ctx| {
+                            if recover {
+                                app.open_with(f.file, crate::recovery::load, ctx);
+                            } else {
+                                app.recovery.discard(&f);
+                            }
+                        }));
+                    }
+                    ui.add_space(12.0);
+                    close = found.is_empty() || ui.button("Later").clicked();
+                }
                 Dialog::UnsavedChanges { then } => {
                     let then = then.clone();
                     ui.heading("Unsaved changes");
@@ -5657,6 +5712,7 @@ impl eframe::App for App {
         if let Some(tablet) = &mut self.tablet {
             tablet.stop();
         }
+        self.recovery.close();
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -5732,6 +5788,10 @@ impl eframe::App for App {
         self.run_script(ctx);
         self.update_title(ctx);
         self.save_tools(ctx);
+        let tabs = self.editor.iter().chain(self.parked.iter().map(|p| &p.editor));
+        if let Some(wait) = self.recovery.tick(tabs, Instant::now(), ctx) {
+            ctx.request_repaint_after(wait);
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -9325,6 +9385,57 @@ mod tests {
         let flat = omapix_engine::io::load(&tiff).unwrap();
         assert_eq!((flat.width, flat.height, flat.layers.len()), (600, 400, 1));
         assert_eq!(app.status.as_ref().unwrap().0, "Saved IMG.ora, and IMG.tif for darktable");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_image_left_unsaved_is_recovered_with_the_same_pixels() {
+        let ctx = egui::Context::default();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/recovery-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let original = dir.join("IMG.tif");
+        let mut app = test_app();
+        app.recovery = crate::recovery::Recovery::new(Some(dir.clone()));
+        app.editor.as_mut().unwrap().doc.path = original.clone();
+        app.run(Command::Invert, &ctx);
+        let start = Instant::now();
+        app.recovery.tick(app.editor.iter(), start, &ctx);
+        app.recovery.tick(app.editor.iter(), start + Duration::from_secs(9), &ctx);
+        assert!(app.recovery.found().is_empty(), "written before 10 s without an edit");
+        let later = start + crate::recovery::IDLE;
+        while app.recovery.found().is_empty() {
+            app.recovery.tick(app.editor.iter(), later, &ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Omapix dies without saving or closing.
+        let painted = app.editor.as_ref().unwrap().doc.layers.iter().map(|l| l.pixels.to_raster()).collect::<Vec<_>>();
+        drop(app);
+
+        let mut app = App::headless(FilterSettings::default(), FilterSettings::default());
+        app.recovery = crate::recovery::Recovery::new(Some(dir.clone()));
+        let found = app.recovery.found();
+        assert_eq!(found.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["IMG.tif"]);
+        app.open_with(found[0].file.clone(), crate::recovery::load, &ctx);
+        while !app.opening.is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.modified);
+        assert_eq!(editor.doc.path, original);
+        let recovered = editor.doc.layers.iter().map(|l| l.pixels.to_raster()).collect::<Vec<_>>();
+        assert!(recovered.iter().map(|r| r.pixels()).eq(painted.iter().map(|r| r.pixels())));
+        assert!(app.recent.files.iter().all(|f| !f.starts_with(&dir)));
+
+        // Saved, its recovery file goes.
+        app.editor.as_mut().unwrap().doc.saved_path = Some(dir.join("IMG.ora"));
+        app.run(Command::Save, &ctx);
+        while app.file_job.is_some() {
+            std::thread::sleep(Duration::from_millis(5));
+            app.poll(&ctx);
+        }
+        assert!(app.recovery.found().is_empty());
+        assert!(!dir.join(found[0].file.file_name().unwrap()).exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
