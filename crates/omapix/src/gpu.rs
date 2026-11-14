@@ -80,7 +80,7 @@ struct Uploaded {
     display_uniform: wgpu::Buffer,
     display_group: wgpu::BindGroup,
     /// The subject's pixels and mask, to bring up to date as they're painted.
-    painting: (Option<Painted<Pixel>>, Option<Painted<u16>>),
+    painting: (Option<Painted<Pixel>>, Vec<Painted<u16>>),
 }
 
 /// A texture of the subject, the area of the level it holds (x0, y0, w,
@@ -110,6 +110,8 @@ struct Params {
     kind: u32,
     /// 0: none, 1: a mask, 2: one that hides where it's high.
     has_mask: u32,
+    /// How an adjustment's table is read (`live::table`).
+    adjustment: u32,
     opacity: f32,
     mask_fill: f32,
     /// The first in an isolated group, blended onto nothing.
@@ -128,7 +130,7 @@ impl Params {
             words.extend(v.map(|x| x as u32));
         }
         words.extend(self.pixel_fill.map(f32::to_bits));
-        words.extend([self.mode, self.kind, self.has_mask, LUT_SIZE as u32]);
+        words.extend([self.mode, self.kind, self.has_mask, self.adjustment]);
         words.extend([self.opacity, self.mask_fill].map(f32::to_bits));
         words.extend([u32::from(inverse.is_some()), self.fresh.into()]);
         let [a, b, c, d, e, f] = inverse.unwrap_or_default();
@@ -271,6 +273,7 @@ impl LiveGpu {
             mode: 0,
             kind: 2,
             has_mask: 0,
+            adjustment: 0,
             opacity: 1.0,
             mask_fill: 1.0,
             fresh: false,
@@ -291,7 +294,7 @@ impl LiveGpu {
             write_lut(queue, &texture, data, LUT_SIZE);
             texture
         };
-        let mut painting = (None, None);
+        let mut painting = (None, Vec::new());
         for layer in &stack.layers {
             let nothing = ([0; 2], [0; 2]);
             let (pixels, lut, before, plane, fill, kind) = match &layer.source {
@@ -303,7 +306,7 @@ impl LiveGpu {
                     unit(plane.fill),
                     if matches!(layer.source, Source::Pixels(_)) { 0 } else { 3 },
                 ),
-                Source::Adjustment(table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
+                Source::Adjustment(_, table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
                 Source::Group(Before::Kept(slot)) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 4),
                 Source::Isolated(slot) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 5),
                 Source::Masked => (None, None, None, nothing, [0.0; 4], 6),
@@ -315,8 +318,8 @@ impl LiveGpu {
                 let texture = upload(device, queue, wgpu::TextureFormat::R16Uint, (m.w, m.h), &m.data);
                 (texture, rect(m.x0, m.y0, m.w, m.h), f32::from(m.fill) / 65535.0)
             });
-            if let (true, Some(m), Some((view, ..)), Some(was)) = (layer.subject, &layer.mask, &mask, &stack.subject_mask) {
-                painting.1 = Some((view.texture().clone(), (m.x0, m.y0, m.w, m.h), was.clone()));
+            if let (true, Some(m), Some((view, ..)), Some(was)) = (layer.subjects_mask, &layer.mask, &mask, &stack.subject_mask) {
+                painting.1.push((view.texture().clone(), (m.x0, m.y0, m.w, m.h), was.clone()));
             }
             let params = Params {
                 region_origin,
@@ -326,6 +329,10 @@ impl LiveGpu {
                 mode: layer.mode as u32,
                 kind,
                 has_mask: mask.as_ref().map_or(0, |_| if layer.inverted { 2 } else { 1 }),
+                adjustment: match layer.source {
+                    Source::Adjustment(shape, _) => shape,
+                    _ => 0,
+                },
                 opacity: layer.opacity,
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
                 fresh: layer.fresh,
@@ -433,9 +440,11 @@ impl CallbackTrait for LiveDraw {
             repaint(queue, texture, *area, shown, now);
             *shown = now.clone();
         }
-        if let (Some(now), Some((texture, area, shown))) = (&self.frame.painted_mask, &mut uploaded.painting.1) {
-            repaint(queue, texture, *area, shown, now);
-            *shown = now.clone();
+        if let Some(now) = &self.frame.painted_mask {
+            for (texture, area, shown) in &mut uploaded.painting.1 {
+                repaint(queue, texture, *area, shown, now);
+                *shown = now.clone();
+            }
         }
         let offset = [self.frame.offset.0, self.frame.offset.1];
         let inverse = self.frame.transform.and_then(|t| t.inverse()).map(|t| t.coefficients());
@@ -1209,7 +1218,7 @@ mod tests {
         let settings = Settings {
             opacity: 0.6,
             mode: BlendMode::Normal,
-            lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+            lut: Some(Arc::new(live::table(layer.adjustment.as_ref().unwrap()).1)),
             blend_if: Some(split),
         };
         let draw = LiveDraw {
@@ -1554,7 +1563,7 @@ mod tests {
         let settings = Settings {
             opacity: 0.6,
             mode: BlendMode::Luminosity,
-            lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+            lut: Some(Arc::new(live::table(layer.adjustment.as_ref().unwrap()).1)),
             blend_if: None,
         };
         let draw = LiveDraw {
@@ -1582,12 +1591,21 @@ mod tests {
     }
 
     /// What the fuzzer does with one layer of a stack: moves it, shows it
-    /// as it is, or edits its settings.
+    /// as it is, edits its settings, paints on it, transforms it, shows
+    /// Quick Mask over the stack, or moves what a selection lifts from it.
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Try {
         Move,
         Show,
         Edit,
+        Paint,
+        Transform,
+        QuickMask,
+        Lift,
+    }
+
+    impl Try {
+        const ALL: [Try; 7] = [Try::Move, Try::Show, Try::Edit, Try::Paint, Try::Transform, Try::QuickMask, Try::Lift];
     }
 
     /// How many pixels in a hundred may differ by more than rounding (and
@@ -1596,29 +1614,80 @@ mod tests {
     /// difference is an area.
     const STRAYS: usize = 4;
 
-    /// In how many pixels (less one in a hundred) the live composite of `specs` with layer `id`
-    /// moved, shown or edited is further from the CPU's than rounding
-    /// allows, and how far at worst. `None` when that isn't shown live.
+    /// Quick Mask's colour and opacity, as the editor's.
+    const RED: Pixel = [65535, 0, 0, 65535];
+    const OVERLAY: u32 = 32768;
+
+    /// In how many pixels (less one in a hundred) the live composite of
+    /// `specs` with layer `id` tried as `what` is further from the CPU's
+    /// than rounding allows, and how far at worst. `None` when that isn't
+    /// shown live.
     fn fuzz_difference(device: &wgpu::Device, queue: &wgpu::Queue, specs: &[Spec], id: u64, what: Try) -> Option<(usize, f32)> {
-        if !specs.iter().any(|s| s.id == id) {
-            return None;
-        }
-        let doc = fuzz::document(specs);
+        let spec = specs.iter().find(|s| s.id == id)?;
+        let mut doc = fuzz::document(specs);
         // Half of them zoomed out (shrunk layers, as the canvas shows at
         // 50 %), and half of each with only part of the image on screen.
         let variant = (id * 3 + what as u64) % 4;
         let level = (variant & 1) as u32;
-        let layers = match level {
-            0 => doc.layers.clone(),
-            _ => Reduced::default().layers(&doc.layers, level),
+        let reduce = |layers: &[Layer]| match level {
+            0 => layers.to_vec(),
+            _ => Reduced::default().layers(layers, level),
         };
         let (w, h) = (doc.width >> level, doc.height >> level);
         let region = if variant & 2 == 0 { (0, 0, w, h) } else { (w / 6, h / 8, w / 2, h / 2) };
-        // Built before the move or the edit, as the editor's is.
-        let stack = live::build(&doc, &layers, id, what == Try::Move, level as usize, region)?;
+        // A rectangle of the level, of this try's own, for what's painted
+        // or lifted.
+        let mut rng = fuzz::Rng::new(id * 7 + what as u64);
+        let (x0, y0) = (rng.below(u64::from(w) / 2) as u32, rng.below(u64::from(h) / 2) as u32);
+        let (x1, y1) = (
+            (x0 + 3 + rng.below(u64::from(w) / 2) as u32).min(w),
+            (y0 + 3 + rng.below(u64::from(h) / 2) as u32).min(h),
+        );
+        let inside = move |x: u32, y: u32| (x0..x1).contains(&x) && (y0..y1).contains(&y);
+        let in_tile = move |i: usize| (i as u32 % TILE, i as u32 / TILE);
+        // What the live view is built from: Quick Mask's overlay on top,
+        // or the subject split by what a selection lifts.
+        let mut lift = None;
+        let (shown, subject) = match what {
+            Try::QuickMask => {
+                doc.selection = Some(omapix_engine::selection::Selection::from_coverage(fuzz::mask(id + 1000)));
+                let mut shown = doc.clone();
+                shown.layers.push(live::quick_mask_layer(&doc, RED, OVERLAY as f32 / 65535.0));
+                (shown, live::QUICK_MASK)
+            }
+            Try::Lift => {
+                if spec.kind != Kind::Pixels {
+                    return None;
+                }
+                let coverage = Tiled::from_slice(
+                    doc.width,
+                    doc.height,
+                    0,
+                    &(0..doc.width * doc.height)
+                        .map(|i| {
+                            if inside((i % doc.width) >> level, (i / doc.width) >> level) {
+                                65535
+                            } else {
+                                0
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                let l = omapix_engine::moving::Lifted::pixels(&doc.layer(id)?.pixels, &coverage, false);
+                let (stays, lifted) = l.parts();
+                let split = live::lifted(&doc, id, stays.clone(), lifted.clone())?;
+                lift = Some(l);
+                (split, live::LIFTED)
+            }
+            _ => (doc.clone(), id),
+        };
+        let layers = reduce(&shown.layers);
+        let moving = matches!(what, Try::Move | Try::Transform | Try::Lift);
+        // Built before the move, the edit or the stroke, as the editor's is.
+        let stack = live::build(&shown, &layers, subject, moving, level as usize, region)?;
         let mut after = layers.clone();
-        let layer = after.iter_mut().find(|l| l.id == id)?;
-        let (mut offset, mut settings) = ((0, 0), None);
+        let layer = after.iter_mut().find(|l| l.id == subject)?;
+        let (mut offset, mut transform, mut settings, mut painted, mut painted_mask) = ((0, 0), None, None, None, None);
         match what {
             Try::Move => {
                 offset = (5, -3);
@@ -1646,18 +1715,77 @@ mod tests {
                 settings = Some(Settings {
                     opacity: layer.opacity,
                     mode: layer.blend,
-                    lut: layer.adjustment.as_ref().map(|a| Arc::new(a.prepare().lut(LUT_SIZE))),
+                    lut: layer.adjustment.as_ref().map(|a| Arc::new(live::table(a).1)),
                     blend_if: layer.blend_if.filter(|b| !b.is_neutral()),
                 });
+            }
+            Try::Paint => {
+                // A stroke of one colour (or of nothing, erasing) on its
+                // pixels, and one grey on its mask, as the editor passes
+                // them: the pixels always, the mask if it's on.
+                let colour = [rng.below(65536), rng.below(65536), rng.below(65536)].map(|v| v as u16);
+                let alpha = [0, 30000, 65535][rng.below(3) as usize];
+                let grey = rng.below(65536) as u16;
+                if spec.kind == Kind::Pixels {
+                    for (i, p) in layer.pixels.tile_mut(0, 0).iter_mut().enumerate() {
+                        let (x, y) = in_tile(i);
+                        if inside(x, y) {
+                            *p = [colour[0], colour[1], colour[2], alpha];
+                        }
+                    }
+                }
+                if let Some(mask) = &mut layer.mask {
+                    for (i, v) in mask.pixels.tile_mut(0, 0).iter_mut().enumerate() {
+                        let (x, y) = in_tile(i);
+                        if inside(x + 2, y + 1) {
+                            *v = grey;
+                        }
+                    }
+                } else if spec.kind != Kind::Pixels {
+                    return None;
+                }
+                painted = Some(layer.pixels.clone());
+                painted_mask = layer.mask.as_ref().filter(|m| m.enabled).map(|m| m.pixels.clone());
+            }
+            Try::Transform => {
+                // Rotated a little and grown, as Free Transform's preview.
+                let centre = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+                let t = Affine::scale_about(1.15, 1.1, centre).then(&Affine::rotate_about(0.3, centre));
+                transform = Some(t);
+                layer.pixels = transformed(&layer.pixels, &t, [0; 4], Resampling::Bilinear);
+                if let Some(mask) = &mut layer.mask {
+                    mask.pixels = transformed(&mask.pixels, &t, 65535, Resampling::Bilinear);
+                }
+            }
+            Try::QuickMask => {
+                // The selection painted after the stack was made.
+                let grey = rng.below(65536) as u16;
+                let coverage = &mut layer.mask.as_mut().expect("Quick Mask's").pixels;
+                for (i, v) in coverage.tile_mut(0, 0).iter_mut().enumerate() {
+                    let (x, y) = in_tile(i);
+                    if inside(x, y) {
+                        *v = grey;
+                    }
+                }
+                painted_mask = Some(coverage.clone());
+            }
+            Try::Lift => {
+                // Put down where it's moved to, at full size, then shrunk
+                // as the canvas shows it.
+                offset = (5, -3);
+                let mut dropped = doc.clone();
+                let i = dropped.index_of(id)?;
+                dropped.layers[i].pixels = lift.as_ref()?.drop_at(offset.0 << level, offset.1 << level);
+                after = reduce(&dropped.layers);
             }
         }
         let draw = LiveDraw {
             frame: LiveFrame {
                 stack: Arc::new(stack),
-                painted: None,
-                painted_mask: None,
+                painted,
+                painted_mask: painted_mask.clone(),
                 offset,
-                transform: None,
+                transform,
                 settings,
             },
             display_lut: Arc::new(vec![[0.0; 4]; DISPLAY_LUT_SIZE.pow(3)]),
@@ -1665,17 +1793,25 @@ mod tests {
             scale: 1.0,
         };
         let gpu = composite_on_gpu(device, queue, draw);
-        let whole = composite::composite(&after, w, h);
+        let whole: Vec<Pixel> = match painted_mask.filter(|_| what == Try::QuickMask) {
+            // The document, then the overlay as the CPU draws it.
+            Some(coverage) => {
+                let mut tiles = composite::composite_tiles(&after[..after.len() - 1], &[(0, 0)], None);
+                crate::editor::apply_overlay(&mut tiles, &[(0, 0)], &coverage, RED, OVERLAY);
+                (0..w * h).map(|i| tiles[0][((i / w) * TILE + i % w) as usize]).collect()
+            }
+            None => composite::composite(&after, w, h).pixels().to_vec(),
+        };
         let (x0, y0, rw, rh) = region;
         let cpu = (y0..y0 + rh)
             .flat_map(|y| (x0..x0 + rw).map(move |x| (x, y)))
-            .map(|(x, y)| whole.pixels()[(y * w + x) as usize]);
+            .map(|(x, y)| whole[(y * w + x) as usize]);
         // As they're seen, with colour times alpha: where next to nothing
         // shows, its colour is anyone's guess (and the CPU rounds what's
         // below the stack to 16 bits, alpha and all).
         let seen = |c: [f32; 4]| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
         // Adjustments go through a lookup table, so are a little less exact.
-        let allowed = if specs.iter().any(|s| s.kind == Kind::Curves) { 4e-3 } else { 2e-4 };
+        let allowed = if specs.iter().any(|s| s.kind.is_adjustment()) { 4e-3 } else { 2e-4 };
         let off = cpu.zip(&gpu).map(|(c, g)| {
             let (c, g) = (seen(c.map(|v| f32::from(v) / 65535.0)), seen(*g));
             (0..4).map(|i| (c[i] - g[i]).abs()).fold(0.0, f32::max)
@@ -1689,7 +1825,7 @@ mod tests {
     fn live_stacks_the_fuzzer_found_match_the_cpu() {
         let (device, queue) = device();
         for (seed, specs) in live::tests::found_by_fuzzing() {
-            for (spec, what) in specs.iter().flat_map(|s| [Try::Move, Try::Show, Try::Edit].map(|what| (s, what))) {
+            for (spec, what) in specs.iter().flat_map(|s| Try::ALL.map(|what| (s, what))) {
                 if let Some((over, worst)) = fuzz_difference(&device, &queue, &specs, spec.id, what) {
                     assert!(over <= STRAYS, "seed {seed}, layer {}, {what:?}: {over} pixels off, by up to {worst}", spec.id);
                 }
@@ -1708,21 +1844,26 @@ mod tests {
         let (device, queue) = device();
         let number = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
         let from = number("OMAPIX_FUZZ_FROM", 0);
-        let (mut shown, mut tried, mut wrong) = (0, 0, Vec::new());
+        let (mut shown, mut tried, mut wrong) = ([0; 7], [0; 7], Vec::new());
         for seed in from..from + number("OMAPIX_FUZZ_SEEDS", 300) {
             let specs = fuzz::specs(seed);
-            for (spec, what) in specs.iter().flat_map(|s| [Try::Move, Try::Show, Try::Edit].map(|what| (s, what))) {
-                tried += 1;
+            for (spec, what) in specs.iter().flat_map(|s| Try::ALL.map(|what| (s, what))) {
+                tried[what as usize] += 1;
                 let Some((over, worst)) = fuzz_difference(&device, &queue, &specs, spec.id, what) else {
                     continue;
                 };
-                shown += 1;
+                shown[what as usize] += 1;
                 if over > STRAYS {
                     wrong.push((seed, spec.id, what, over, worst));
                 }
             }
         }
-        println!("{shown} of {tried} shown live, {} of them wrong", wrong.len());
+        for what in Try::ALL {
+            let i = what as usize;
+            println!("{what:?}: {} of {} shown live", shown[i], tried[i]);
+        }
+        let all = |n: [usize; 7]| n.iter().sum::<usize>();
+        println!("{} of {} shown live, {} of them wrong", all(shown), all(tried), wrong.len());
         let Some(&(seed, id, what, ..)) = wrong.first() else {
             return;
         };

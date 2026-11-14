@@ -459,6 +459,7 @@ fn layers(records: &[Record], colours: usize, depth: (u16, bool), size: (u32, u3
                 let mut group = Layer::group(id, rec.name.clone(), size.0, size.1);
                 group.blend = blend_mode(&rec.blend);
                 group.mask = mask(rec, depth, size)?;
+                group.clipped = rec.clipped;
                 group
             }
             (_, Some(mut layer)) => {

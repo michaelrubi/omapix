@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use omapix_engine::adjust::{Adjustment, Prepared};
 use omapix_engine::composite;
 use omapix_engine::layer::{BlendIf, Layer, Mask};
 use omapix_engine::tiled::{TILE, Tiled};
@@ -75,9 +76,47 @@ pub fn lifted(doc: &Document, id: u64, stays: Tiled<Pixel>, lifted: Tiled<Pixel>
 /// Points per side of an adjustment's 3D lookup table.
 pub const LUT_SIZE: usize = 33;
 
-/// An adjustment's lookup table, [`LUT_SIZE`]³ points (see
-/// `Prepared::lut`).
+/// An adjustment's table for the GPU, [`LUT_SIZE`]³ points (see [`table`]).
 pub type Table = Arc<Vec<[f32; 3]>>;
+
+/// Points in each of Curves' and Levels' tables (adjust.rs `Lut`).
+const CHANNEL_POINTS: usize = 4096;
+
+/// What the GPU needs to apply adjustment `a` exactly as `adjust.rs`
+/// does, [`LUT_SIZE`]³ points, and how live.wgsl's `adjust` reads them:
+/// 0, a lookup table over RGB (Color Lookup, which is one); 1, a table for
+/// each channel, as Curves and Levels are applied; 2 to 5, the settings of
+/// Hue/Saturation, Color Balance, Selective Color and Channel Mixer, for
+/// the shader to apply as `adjust.rs` does.
+pub fn table(a: &Adjustment) -> (u32, Vec<[f32; 3]>) {
+    let flat = |v: Vec<f32>| v.chunks(3).map(|c| std::array::from_fn(|i| c.get(i).copied().unwrap_or(0.0))).collect();
+    let percent = |v: &[f32]| v.iter().map(|x| x / 100.0).collect::<Vec<_>>();
+    let prepared = a.prepare();
+    let (shape, mut table) = match (a, &prepared) {
+        (_, Prepared::Luts(_)) => {
+            let at = |i: usize| i as f32 / (CHANNEL_POINTS - 1) as f32;
+            (1, (0..CHANNEL_POINTS).map(|i| prepared.apply([at(i); 3])).collect())
+        }
+        (Adjustment::HueSaturation(h), _) => (2, vec![[h.hue, h.saturation, h.lightness]]),
+        (Adjustment::ColorBalance(b), _) => (
+            3,
+            vec![b.shadows, b.midtones, b.highlights, [f32::from(u8::from(b.preserve_luminosity)), 0.0, 0.0]],
+        ),
+        (Adjustment::SelectiveColor(s), _) => {
+            let mut v = percent(s.ranges.as_flattened());
+            v.push(f32::from(u8::from(s.relative)));
+            (4, flat(v))
+        }
+        (Adjustment::ChannelMixer(m), _) => {
+            let mut v = percent(&[m.red, m.green, m.blue, m.gray].concat());
+            v.push(f32::from(u8::from(m.monochrome)));
+            (5, flat(v))
+        }
+        _ => (0, prepared.lut(LUT_SIZE)),
+    };
+    table.resize(LUT_SIZE.pow(3), [0.0; 3]);
+    (shape, table)
+}
 
 /// An area of one pyramid level, row-major, in that level's pixels.
 pub struct Plane<T> {
@@ -105,8 +144,8 @@ impl<T: Copy + PartialEq + Send + Sync> Plane<T> {
 
 pub enum Source {
     Pixels(Plane<Pixel>),
-    /// An adjustment, as a [`LUT_SIZE`]³ lookup table.
-    Adjustment(Vec<[f32; 3]>),
+    /// An adjustment: how its table is read, and the table (see [`table`]).
+    Adjustment(u32, Vec<[f32; 3]>),
     /// The end of a Pass Through group, which comes after its layers: what
     /// they made of what was below them is faded back towards that by the
     /// group's opacity and mask.
@@ -153,6 +192,10 @@ pub struct LiveLayer {
     pub blend_if: Option<BlendIf>,
     /// Its mask hides where it's high: Quick Mask's overlay.
     pub inverted: bool,
+    /// Its mask is the subject's, to bring up to date as that's painted:
+    /// the subject's own, and for an adjustment layer, the one its
+    /// clipping mask is faded back through as well.
+    pub subjects_mask: bool,
 }
 
 /// The subject's settings this frame, while they're being edited.
@@ -611,7 +654,10 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 (Some(End::Clip(s)), _) => Source::Isolated(slot(s)),
                 (Some(End::Fade(s)), _) => Source::Group(Before::Kept(slot(s))),
                 (Some(End::Masked), _) => Source::Masked,
-                (None, Some(a)) => Source::Adjustment(a.prepare().lut(LUT_SIZE)),
+                (None, Some(a)) => {
+                    let (shape, table) = table(a);
+                    Source::Adjustment(shape, table)
+                }
                 (None, None) => Source::Pixels(Plane::crop(&layer.pixels, area)),
             };
             // A group drawn as a base is cut by its mask after.
@@ -634,6 +680,7 @@ pub fn build(doc: &Document, layers: &[Layer], id: u64, moving: bool, level: usi
                 fresh: step.fresh,
                 atop: step.atop,
                 inverted: layer.id == QUICK_MASK,
+                subjects_mask: step.index == index && mask.is_some(),
             }
         })
         .collect();
@@ -675,7 +722,7 @@ pub mod tests {
         let live = build(&doc, &doc.layers, patch, true, 0, (10, 20, 280, 170)).unwrap();
         assert_eq!(live.layers.len(), 3);
         assert!(live.layers[0].subject && !live.layers[1].subject);
-        assert!(matches!(live.layers[2].source, Source::Adjustment(ref l) if l.len() == LUT_SIZE.pow(3)));
+        assert!(matches!(live.layers[2].source, Source::Adjustment(1, ref l) if l.len() == LUT_SIZE.pow(3)));
         // The moving layer comes whole; the others and what's below, as seen.
         let Source::Pixels(moving) = &live.layers[0].source else { panic!() };
         assert_eq!((moving.w, moving.h), (300, 200));
@@ -914,7 +961,7 @@ pub mod tests {
         // The patch, the layer above it in the group, and the Curves on top.
         assert_eq!(live.layers.len(), 3);
         assert!(live.layers[0].subject);
-        assert!(matches!(live.layers[2].source, Source::Adjustment(_)));
+        assert!(matches!(live.layers[2].source, Source::Adjustment(..)));
         // Below it: the background and the layer under it in the group.
         let mut hidden = doc.clone();
         hidden.layers[index..].iter_mut().filter(|l| !l.is_group).for_each(|l| l.visible = false);
@@ -947,13 +994,47 @@ pub mod tests {
         let curves = doc.layers[3].id;
         assert!(can_show(&doc, curves, false), "an adjustment's settings");
         let live = build(&doc, &doc.layers, curves, false, 0, (0, 0, 300, 200)).unwrap();
-        assert!(live.layers[0].subject && matches!(live.layers[0].source, Source::Adjustment(_)));
+        assert!(live.layers[0].subject && matches!(live.layers[0].source, Source::Adjustment(..)));
         let mut after = doc.layers.clone();
         after[3].opacity = 0.4;
         assert!(only_settings_changed(&doc.layers, &after, curves));
         assert!(!only_settings_changed(&doc.layers, &after, doc.layers[0].id), "another layer");
         after[3].visible = false;
         assert!(!only_settings_changed(&doc.layers, &after, curves), "hiding it");
+    }
+
+    #[test]
+    fn adjustments_go_to_the_gpu_as_tables_or_settings() {
+        let shapes: Vec<u32> = Kind::ADJUSTMENTS
+            .iter()
+            .map(|&k| {
+                let doc = fuzz::document(&[Spec::new(1, Kind::Pixels), Spec::new(2, k)]);
+                let (shape, table) = table(doc.layers[1].adjustment.as_ref().unwrap());
+                assert_eq!(table.len(), LUT_SIZE.pow(3), "{k:?}");
+                shape
+            })
+            .collect();
+        // Curves, Levels, Hue/Saturation, Color Balance, Selective Color,
+        // Channel Mixer, Color Lookup.
+        assert_eq!(shapes, [1, 1, 2, 3, 4, 5, 0]);
+        // Curves and Levels, read as live.wgsl's `channel_tables` reads
+        // them, are what adjust.rs makes of each channel.
+        for k in [Kind::Curves, Kind::Levels] {
+            let doc = fuzz::document(&[Spec::new(1, Kind::Pixels), Spec::new(2, k)]);
+            let a = doc.layers[1].adjustment.as_ref().unwrap();
+            let (_, t) = table(a);
+            let mut rng = fuzz::Rng::new(3);
+            for _ in 0..1000 {
+                let c = [rng.unit(), rng.unit(), rng.unit()];
+                let gpu: [f32; 3] = std::array::from_fn(|ch| {
+                    let pos = c[ch] * 4095.0;
+                    let i = (pos as usize).min(4094);
+                    t[i][ch] + (t[i + 1][ch] - t[i][ch]) * (pos - i as f32)
+                });
+                let cpu = a.prepare().apply(c);
+                assert!((0..3).all(|ch| (gpu[ch] - cpu[ch]).abs() < 1e-5), "{k:?} at {c:?}: {gpu:?} against {cpu:?}");
+            }
+        }
     }
 
     /// The stacks the random ones found the live view wrong for (see
@@ -1030,6 +1111,19 @@ pub mod tests {
                         ..group(3, None)
                     },
                     clipped(group(8, None), true),
+                ],
+            ),
+            // Painting the mask of an adjustment layer with a layer
+            // clipped to it: the clipped layer fades back through that
+            // mask too, and kept the mask as it was before the stroke.
+            (
+                164,
+                vec![
+                    Spec {
+                        mask: fuzz::MaskSpec::On,
+                        ..Spec::new(8, Kind::Curves)
+                    },
+                    clipped(pixels(9, None), true),
                 ],
             ),
         ]

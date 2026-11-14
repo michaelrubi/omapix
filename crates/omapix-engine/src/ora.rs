@@ -157,7 +157,7 @@ fn write_stack(xml: &mut String, doc: &Document, encoded: &[Encoded], parent: Op
             xml.push_str(&format!("<layer src=\"{src}\" x=\"{x}\" y=\"{y}\""));
         }
         xml.push_str(&format!(
-            " name=\"{}\" opacity=\"{:.4}\" visibility=\"{}\" composite-op=\"{}\"",
+            " name=\"{}\" opacity=\"{}\" visibility=\"{}\" composite-op=\"{}\"",
             xml_escape(&layer.name),
             layer.opacity,
             if layer.visible { "visible" } else { "hidden" },
@@ -206,23 +206,49 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
     let icc = doc.profile.icc();
     let (w, h) = (doc.width, doc.height);
 
-    // Encode every layer, mask and the merged image in parallel.
+    // A layer or mask whose tiles are the same as a lower one's (an
+    // untouched copy) names that one's PNG instead of writing its own.
+    let same = |a: &Tiled<Pixel>, b: &Tiled<Pixel>| a.fill() == b.fill() && a.same_tiles(b);
+    let pixels_of: Vec<Option<usize>> = (0..doc.layers.len())
+        .map(|i| {
+            let layer = &doc.layers[i];
+            if layer.is_group {
+                return None;
+            }
+            (0..i).find(|&j| !doc.layers[j].is_group && same(&doc.layers[j].pixels, &layer.pixels))
+        })
+        .collect();
+    let same_mask = |a: &Mask, b: &Mask| a.pixels.fill() == b.pixels.fill() && a.pixels.same_tiles(&b.pixels);
+    let mask_of: Vec<Option<usize>> = (0..doc.layers.len())
+        .map(|i| {
+            let mask = doc.layers[i].mask.as_ref()?;
+            (0..i).find(|&j| doc.layers[j].mask.as_ref().is_some_and(|m| same_mask(m, mask)))
+        })
+        .collect();
+
+    // Encode every layer, mask and the merged image in parallel. A shared
+    // PNG has no bytes here: it's written once, by the layer it belongs to.
     let encoded: Vec<Encoded> = doc
         .layers
         .par_iter()
         .enumerate()
         .map(|(i, layer)| -> Result<Encoded> {
-            let layer_png = match used_area(&layer.pixels) {
-                Some(area) => {
+            let layer_png = match (used_area(&layer.pixels), pixels_of[i]) {
+                (Some(area), Some(j)) => Some((format!("data/layer{j}.png"), Vec::new(), (area.0, area.1))),
+                (Some(area), None) => {
                     let data: Vec<u16> = crop(&layer.pixels, area).into_iter().flatten().collect();
                     let png = encode_png(&data, area.2, area.3, 4, icc)?;
                     Some((format!("data/layer{i}.png"), png, (area.0, area.1)))
                 }
-                None => None,
+                (None, _) => None,
             };
-            let mask_png = match &layer.mask {
-                Some(mask) => Some(encode_grey(&mask.pixels, format!("data/mask{i}.png"))?),
-                None => None,
+            let mask_png = match (&layer.mask, mask_of[i]) {
+                (Some(mask), Some(j)) => {
+                    let (x, y, ..) = used_area(&mask.pixels).unwrap_or((0, 0, 1, 1));
+                    Some(((format!("data/mask{j}.png"), Vec::new(), (x, y)), mask.pixels.fill()))
+                }
+                (Some(mask), None) => Some(encode_grey(&mask.pixels, format!("data/mask{i}.png"))?),
+                (None, _) => None,
             };
             Ok(Encoded { layer_png, mask_png })
         })
@@ -277,12 +303,13 @@ pub fn save(doc: &Document, path: &Path) -> Result<()> {
     write(&mut zip, "stack.xml", xml.as_bytes(), deflated)?;
     for (i, (enc, layer)) in encoded.iter().zip(&doc.layers).enumerate() {
         match &enc.layer_png {
+            Some((_, png, _)) if png.is_empty() => {}
             Some((name, png, _)) => write(&mut zip, name, png, stored)?,
             None if layer.is_group => {}
             // Empty layers still need a file: one transparent pixel.
             None => write(&mut zip, &format!("data/layer{i}.png"), &encode_png(&[0; 4], 1, 1, 4, icc)?, stored)?,
         }
-        if let Some(((name, png, _), _)) = &enc.mask_png {
+        if let Some(((name, png, _), _)) = enc.mask_png.as_ref().filter(|((_, png, _), _)| !png.is_empty()) {
             write(&mut zip, name, png, stored)?;
         }
     }
@@ -533,28 +560,50 @@ pub fn load(path: &Path) -> Result<Document> {
         exif: exif_path,
     } = parse_stack(&xml)?;
 
+    // Layers naming a PNG that an earlier entry already names, at the same
+    // place, share that entry's tiles rather than decoding it again.
+    let pixels_of: Vec<Option<usize>> = (0..entries.len())
+        .map(|i| {
+            let e = &entries[i];
+            e.src.as_ref()?;
+            (0..i).find(|&j| entries[j].src == e.src && (entries[j].x, entries[j].y) == (e.x, e.y))
+        })
+        .collect();
+    let mask_of: Vec<Option<usize>> = (0..entries.len())
+        .map(|i| {
+            let mask = entries[i].mask.as_ref()?;
+            (0..i).find(|&j| {
+                entries[j]
+                    .mask
+                    .as_ref()
+                    .is_some_and(|m| m.0 == mask.0 && m.1 == mask.1 && m.2 == mask.2 && m.3 == mask.3)
+            })
+        })
+        .collect();
+
     // Read compressed data sequentially, then decode in parallel.
     let mut files = Vec::new();
-    for e in &entries {
+    for (i, e) in entries.iter().enumerate() {
         let pixels = match &e.src {
-            Some(src) => read_entry(&mut zip, src)?,
-            None => Vec::new(),
+            Some(src) if pixels_of[i].is_none() => read_entry(&mut zip, src)?,
+            _ => Vec::new(),
         };
         let mask = match &e.mask {
-            Some((src, ..)) => Some(read_entry(&mut zip, src)?),
+            Some((src, ..)) if mask_of[i].is_none() => Some(read_entry(&mut zip, src)?),
+            Some(_) => Some(Vec::new()),
             None => None,
         };
         files.push((pixels, mask));
     }
 
-    let decoded: Vec<(Layer, Option<Vec<u8>>)> = entries
+    let mut decoded: Vec<(Layer, Option<Vec<u8>>)> = entries
         .par_iter()
         .zip(files.par_iter())
         .enumerate()
         .map(|(i, (e, (png, mask_png)))| -> Result<(Layer, Option<Vec<u8>>)> {
             // Stack lists top first; ids count from the bottom.
             let id_of = |entry: usize| (entries.len() - entry) as u64;
-            let (tiled, icc) = if e.src.is_some() {
+            let (tiled, icc) = if e.src.is_some() && pixels_of[i].is_none() {
                 let (w, h, samples, icc) = decode_png(png, true)?;
                 let pixels: Vec<Pixel> = samples.as_chunks::<4>().0.to_vec();
                 // Layers may be placed partly outside the canvas; clip them.
@@ -582,14 +631,26 @@ pub fn load(path: &Path) -> Result<Document> {
             layer.clipped = e.clipped;
             layer.locks = e.locks;
             if let (Some((_, mx, my, fill, enabled)), Some(mask_png)) = (&e.mask, mask_png) {
-                layer.mask = Some(Mask {
-                    pixels: decode_grey(mask_png, (*mx, *my), *fill, width, height)?,
-                    enabled: *enabled,
-                });
+                let pixels = match mask_of[i] {
+                    Some(_) => Tiled::new(width, height, *fill),
+                    None => decode_grey(mask_png, (*mx, *my), *fill, width, height)?,
+                };
+                layer.mask = Some(Mask { pixels, enabled: *enabled });
             }
             Ok((layer, icc))
         })
         .collect::<Result<_>>()?;
+    for i in 0..decoded.len() {
+        if let Some(j) = pixels_of[i] {
+            decoded[i].0.pixels = decoded[j].0.pixels.clone();
+        }
+        if let Some(j) = mask_of[i] {
+            let shared = decoded[j].0.mask.as_ref().map(|m| m.pixels.clone());
+            if let (Some(mask), Some(pixels)) = (decoded[i].0.mask.as_mut(), shared) {
+                mask.pixels = pixels;
+            }
+        }
+    }
 
     let icc = decoded.iter().find_map(|(_, icc)| icc.clone());
     let profile = match icc {
@@ -685,6 +746,68 @@ mod tests {
             assert_eq!(a.name, b.name);
             assert_eq!(a.pixels.to_vec(), b.pixels.to_vec(), "channel {}", a.name);
         }
+    }
+
+    #[test]
+    fn untouched_copies_share_their_png() {
+        let (w, h) = (600, 300);
+        // Noisy pixels, so the PNG is big next to stack.xml and the rest.
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                [
+                    (i as u64 * 7919 % 65521) as u16,
+                    (i as u64 * 104_729 % 65521) as u16,
+                    (i % 997) as u16 * 60,
+                    65535,
+                ]
+            })
+            .collect();
+        let mut doc = Document::from_image("in.tif".into(), &Raster::new(w, h, px), ColorProfile::srgb(), 16);
+        let mut mask = Mask::white(w, h);
+        // Hard-edged, so the copy over it doesn't change the merged image.
+        mask.pixels
+            .tile_mut(1, 0)
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = if i % 3 == 0 { 0 } else { 65535 });
+        doc.layers[0].mask = Some(mask);
+
+        let dir = std::env::temp_dir().join(format!("omapix-ora-shared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let size = |doc: &Document, name: &str| {
+            let path = dir.join(name);
+            save(doc, &path).unwrap();
+            (std::fs::metadata(&path).unwrap().len(), path)
+        };
+        let pngs = |path: &Path| {
+            let zip = ZipArchive::new(File::open(path).unwrap()).unwrap();
+            zip.file_names().filter(|n| n.as_ref().is_ok_and(|n| n.starts_with("data/"))).count()
+        };
+        let (alone, _) = size(&doc, "alone.ora");
+        doc.duplicate_layer(0);
+        let (with_copy, path) = size(&doc, "copy.ora");
+        assert!(with_copy as f64 <= alone as f64 * 1.01, "{alone} bytes alone, {with_copy} with a copy");
+        assert_eq!(pngs(&path), 2, "one layer PNG and one mask PNG");
+
+        // Loaded, the two share tiles, so saving again stays small.
+        let mut back = load(&path).unwrap();
+        assert!(back.layers[0].pixels.same_tiles(&back.layers[1].pixels));
+        let masks = |d: &Document, i: usize| d.layers[i].mask.as_ref().unwrap().pixels.clone();
+        assert!(masks(&back, 0).same_tiles(&masks(&back, 1)));
+        assert_eq!(back.layers[1].pixels.to_vec(), doc.layers[1].pixels.to_vec());
+        assert_eq!(masks(&back, 1).to_vec(), masks(&doc, 1).to_vec());
+        assert_eq!(back.composite().pixels(), doc.composite().pixels());
+
+        // Painted on, the copy (and its mask) get files of their own.
+        back.layers[1].pixels.tile_mut(0, 0)[0] = [1, 2, 3, 65535];
+        back.layers[1].mask.as_mut().unwrap().pixels.tile_mut(0, 0)[0] = 7;
+        let (_, painted) = size(&back, "painted.ora");
+        assert_eq!(pngs(&painted), 4);
+        let again = load(&painted).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(!again.layers[0].pixels.same_tiles(&again.layers[1].pixels));
+        assert_eq!(again.layers[1].pixels.to_vec(), back.layers[1].pixels.to_vec());
+        assert_eq!(masks(&again, 1).to_vec(), masks(&back, 1).to_vec());
     }
 
     #[test]

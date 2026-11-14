@@ -178,6 +178,40 @@ struct Moving {
     wanted: (i32, i32),
 }
 
+impl Moving {
+    /// Whether the move as made pushed visible pixels past the canvas edge,
+    /// where they're lost (a layer is exactly the canvas's size).
+    fn cuts_off_pixels(&self) -> bool {
+        let (dx, dy) = self.applied;
+        match &self.lift {
+            Some(Some(Lift::Mask(_))) => false,
+            Some(Some(Lift::Pixels(lifted))) => leaves_canvas(lifted.parts().1, dx, dy),
+            _ => std::iter::once(&self.original).chain(&self.contents).any(|l| leaves_canvas(&l.pixels, dx, dy)),
+        }
+    }
+}
+
+/// Whether any pixel of `t` that isn't transparent lands outside it when
+/// moved by (`dx`, `dy`).
+fn leaves_canvas(t: &Tiled<Pixel>, dx: i32, dy: i32) -> bool {
+    let (w, h) = (i64::from(t.width()), i64::from(t.height()));
+    let (dx, dy) = (i64::from(dx), i64::from(dy));
+    let outside = |x: i64, y: i64| x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h;
+    let tile = i64::from(TILE);
+    (0..t.rows()).any(|row| {
+        (0..t.cols()).any(|col| {
+            let Some(pixels) = t.tile(col, row) else { return false };
+            let (x0, y0) = (i64::from(col) * tile, i64::from(row) * tile);
+            let (x1, y1) = ((x0 + tile).min(w), (y0 + tile).min(h));
+            // A tile that stays wholly inside has nothing to check.
+            if !outside(x0, y0) && !outside(x1 - 1, y1 - 1) {
+                return false;
+            }
+            (y0..y1).any(|y| (x0..x1).any(|x| outside(x, y) && pixels[((y - y0) * tile + x - x0) as usize][3] != 0))
+        })
+    })
+}
+
 /// A Free Transform (Ctrl+T) in progress: the layer, or its selected pixels
 /// or mask values, scaled, rotated and moved until it's applied or
 /// cancelled.
@@ -1169,9 +1203,9 @@ impl Editor {
     }
 
     /// Finish the move at the last offset asked for.
-    pub fn end_move(&mut self) {
+    pub fn end_move(&mut self) -> bool {
         if self.moving.is_none() {
-            return;
+            return false;
         }
         // Made for real now; the live view stays up until it's on screen.
         let until = self.revision + 1;
@@ -1182,11 +1216,13 @@ impl Editor {
             }
         }
         self.apply_move();
+        let clipped = self.moving.as_ref().is_some_and(Moving::cuts_off_pixels);
         self.moving = None;
         if self.revision < until {
             // Nothing moved.
             self.live_view = None;
         }
+        clipped
     }
 
     /// Start Free Transform on the active layer: its selected pixels (or
@@ -2123,7 +2159,7 @@ impl Editor {
                 let lut = layer.adjustment.as_ref().map(|a| match cached {
                     Some((made_from, table)) if made_from == a => Arc::clone(table),
                     _ => {
-                        let table = Arc::new(a.prepare().lut(live::LUT_SIZE));
+                        let table = Arc::new(live::table(a).1);
                         *cached = Some((a.clone(), Arc::clone(&table)));
                         table
                     }
@@ -3069,6 +3105,28 @@ mod tests {
     }
 
     #[test]
+    fn ending_a_move_says_whether_pixels_went_past_the_edge() {
+        let mut e = square_editor();
+        // The 100 px square at the top left, moved wholly inside: fine.
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(300, 200);
+        assert!(!e.end_move());
+        // Back to the corner and 10 px past the left edge: cut off.
+        assert!(e.begin_move("Move", false, 0));
+        e.move_to(-310, -200);
+        assert!(e.end_move());
+        // The square's left 10 columns are gone, so another nudge left
+        // cuts off one more.
+        assert!(e.begin_move("Nudge", false, 0));
+        e.move_to(-1, 0);
+        assert!(e.end_move());
+        // Moving the other way brings nothing past an edge.
+        assert!(e.begin_move("Nudge", false, 0));
+        e.move_to(50, 0);
+        assert!(!e.end_move());
+    }
+
+    #[test]
     fn free_transform_scales_the_layer_and_mask_as_one_undo_step() {
         let mut e = square_editor();
         e.begin_transform(0).unwrap();
@@ -3960,7 +4018,8 @@ mod live_tests {
         bend(&mut e, 0.7);
         e.update(&ctx);
         let first = e.canvas.live.clone().unwrap().settings.unwrap().lut.expect("a table");
-        let mid = first[16 + 16 * 33 + 16 * 33 * 33];
+        // Curves goes as a table for each channel, of 4096 points.
+        let mid = first[2048];
         assert!((mid[0] - 0.7).abs() < 0.01, "the middle of the new curve, {mid:?}");
         // Unchanged, the table isn't made again.
         e.update(&ctx);
