@@ -202,7 +202,7 @@ pub fn valid(specs: &[Spec]) -> bool {
 
 /// The groups `s` is in, innermost first (cut short if they go round in a
 /// circle, which [`valid`] then refuses).
-fn chain(specs: &[Spec], s: &Spec) -> Vec<u64> {
+pub fn chain(specs: &[Spec], s: &Spec) -> Vec<u64> {
     std::iter::successors(s.parent, |&p| specs.iter().find(|o| o.id == p)?.parent)
         .take(specs.len() + 1)
         .collect()
