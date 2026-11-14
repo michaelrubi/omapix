@@ -125,6 +125,7 @@ pub fn recordable(cmd: Command) -> bool {
             | Command::ExportPsd
             | Command::ExportForWeb
             | Command::BatchExport
+            | Command::RetouchFolder
             | Command::Photomerge
             | Command::MergeToHdr
             | Command::SaveAdjustmentPreset

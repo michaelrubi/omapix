@@ -14,7 +14,7 @@ use egui::{Color32, Pos2, RichText, Slider, vec2};
 use omapix_engine::blemish::Spot;
 use omapix_engine::skin::Smoothing;
 use omapix_engine::tone::Evening;
-use omapix_engine::{ColorProfile, Pixel, Raster, Selection, retouch};
+use omapix_engine::{ColorProfile, Document, Pixel, Raster, Selection, retouch};
 use serde::{Deserialize, Serialize};
 
 use crate::editor::{Editor, Target};
@@ -188,12 +188,7 @@ impl AutoRetouch {
 
     /// The spots face `n` has healed: none if it or the step is off.
     fn healed(&self, n: usize) -> Vec<Spot> {
-        let (face, settings) = (&self.faces[n], self.settings(Some(n)));
-        if !face.on || !settings.blemishes.on {
-            return Vec::new();
-        }
-        let spots = at_sensitivity(&face.found.spots, settings.blemishes.amount).iter().copied();
-        spots.filter(|s| !(s.mole && settings.keep_beauty_marks)).collect()
+        healed_spots(&self.faces[n].found, self.settings(Some(n)), self.faces[n].on)
     }
 
     /// Select the face at `at` (image pixels), if there's one there.
@@ -422,54 +417,11 @@ impl AutoRetouch {
         let Some(index) = editor.doc.index_of(self.layer).or(editor.active_index()) else {
             return;
         };
-        // Each face that's on: its number, how many of its spots are
-        // healed, the other steps' settings, and how much under its eyes
-        // is lightened and its eyes and teeth whitened, if it has any.
-        let faces: Vec<_> = (0..self.faces.len())
-            .filter(|&n| self.faces[n].on)
-            .map(|n| {
-                let (settings, found) = (self.settings(Some(n)), &self.faces[n].found);
-                let amount = |step: Step| step.on.then_some(step.amount);
-                let smoothing = amount(settings.smooth_skin).map(|amount| Smoothing { amount, ..Default::default() });
-                let evening = amount(settings.even_tone).map(|amount| Evening { amount, ..Default::default() });
-                let lines = if found.regions.is_some() {
-                    retouch::Lines {
-                        forehead: amount(settings.forehead),
-                        crows_feet: amount(settings.crows_feet),
-                        smile_lines: amount(settings.smile_lines),
-                        bags: amount(settings.eye_bags),
-                    }
-                } else {
-                    retouch::Lines::default()
-                };
-                let lighten = |step: Step, part: &Selection| amount(step).filter(|_| !part.is_empty());
-                let lighten = [
-                    lighten(settings.under_eyes, &found.under_eyes.0),
-                    lighten(settings.whiten_eyes, &found.eyes),
-                    lighten(settings.whiten_teeth, &found.teeth),
-                ];
-                (
-                    n + 1,
-                    Arc::clone(found),
-                    self.healed(n),
-                    amount(settings.shine),
-                    amount(settings.stray_hairs).filter(|_| found.regions.is_some()),
-                    smoothing,
-                    lines,
-                    evening,
-                    lighten,
-                )
-            })
-            .filter(|(_, found, healed, shine, stray_hairs, smoothing, lines, evening, lighten)| {
-                !healed.is_empty()
-                    || (found.regions.is_some() && smoothing.is_some())
-                    || lines.any()
-                    || shine.is_some()
-                    || stray_hairs.is_some()
-                    || evening.is_some()
-                    || lighten.iter().any(Option::is_some)
-            })
-            .collect();
+        let faces = prepare_faces(
+            (0..self.faces.len())
+                .filter(|&n| self.faces[n].on)
+                .map(|n| (n + 1, Arc::clone(&self.faces[n].found), self.settings(Some(n)))),
+        );
         if faces.is_empty() {
             return;
         }
@@ -477,32 +429,123 @@ impl AutoRetouch {
         editor.edit_in_background(
             "Auto Retouch",
             move |doc, active| {
-                let faces: Vec<_> = (faces.iter())
-                    .map(
-                        |(number, found, healed, shine, stray_hairs, smoothing, lines, evening, [under, eyes, teeth])| retouch::Face {
-                            number: *number,
-                            skin: &found.skin,
-                            iod: found.iod,
-                            spots: healed,
-                            regions: found.regions.as_ref(),
-                            lines: *lines,
-                            shine: *shine,
-                            stray_hairs: *stray_hairs,
-                            smoothing: *smoothing,
-                            evening: *evening,
-                            under_eyes: under.map(|amount| (&found.under_eyes.0, &found.under_eyes.1, amount)),
-                            eyes: eyes.map(|amount| (&found.eyes, amount)),
-                            teeth: teeth.map(|amount| (&found.teeth, amount)),
-                        },
-                    )
-                    .collect();
-                if let Some(id) = retouch::add_layers(doc, index, &faces) {
+                if let Some(id) = apply_prepared(doc, index, &faces) {
                     *active = id;
                 }
             },
             ctx,
         );
     }
+}
+
+fn healed_spots(found: &FoundFace, settings: Retouch, on: bool) -> Vec<Spot> {
+    if !on || !settings.blemishes.on {
+        return Vec::new();
+    }
+    let spots = at_sensitivity(&found.spots, settings.blemishes.amount).iter().copied();
+    spots.filter(|s| !(s.mole && settings.keep_beauty_marks)).collect()
+}
+
+struct PreparedFace {
+    number: usize,
+    found: Arc<FoundFace>,
+    healed: Vec<Spot>,
+    shine: Option<f32>,
+    stray_hairs: Option<f32>,
+    smoothing: Option<Smoothing>,
+    lines: retouch::Lines,
+    evening: Option<Evening>,
+    lighten: [Option<f32>; 3],
+}
+
+fn prepare_faces(faces: impl IntoIterator<Item = (usize, Arc<FoundFace>, Retouch)>) -> Vec<PreparedFace> {
+    let amount = |step: Step| step.on.then_some(step.amount);
+    faces
+        .into_iter()
+        .map(|(number, found, settings)| {
+            let smoothing = amount(settings.smooth_skin).map(|amount| Smoothing { amount, ..Default::default() });
+            let evening = amount(settings.even_tone).map(|amount| Evening { amount, ..Default::default() });
+            let lines = if found.regions.is_some() {
+                retouch::Lines {
+                    forehead: amount(settings.forehead),
+                    crows_feet: amount(settings.crows_feet),
+                    smile_lines: amount(settings.smile_lines),
+                    bags: amount(settings.eye_bags),
+                }
+            } else {
+                retouch::Lines::default()
+            };
+            let lighten = |step: Step, part: &Selection| amount(step).filter(|_| !part.is_empty());
+            let lighten = [
+                lighten(settings.under_eyes, &found.under_eyes.0),
+                lighten(settings.whiten_eyes, &found.eyes),
+                lighten(settings.whiten_teeth, &found.teeth),
+            ];
+            let healed = healed_spots(&found, settings, true);
+            let shine = amount(settings.shine);
+            let stray_hairs = amount(settings.stray_hairs).filter(|_| found.regions.is_some());
+            PreparedFace {
+                number,
+                found,
+                healed,
+                shine,
+                stray_hairs,
+                smoothing,
+                lines,
+                evening,
+                lighten,
+            }
+        })
+        .filter(|face| {
+            !face.healed.is_empty()
+                || (face.found.regions.is_some() && face.smoothing.is_some())
+                || face.lines.any()
+                || face.shine.is_some()
+                || face.stray_hairs.is_some()
+                || face.evening.is_some()
+                || face.lighten.iter().any(Option::is_some)
+        })
+        .collect()
+}
+
+fn apply_prepared(doc: &mut Document, above: usize, faces: &[PreparedFace]) -> Option<u64> {
+    let faces: Vec<_> = faces
+        .iter()
+        .map(|face| {
+            let [under, eyes, teeth] = face.lighten;
+            retouch::Face {
+                number: face.number,
+                skin: &face.found.skin,
+                iod: face.found.iod,
+                spots: &face.healed,
+                regions: face.found.regions.as_ref(),
+                lines: face.lines,
+                shine: face.shine,
+                stray_hairs: face.stray_hairs,
+                smoothing: face.smoothing,
+                evening: face.evening,
+                under_eyes: under.map(|amount| (&face.found.under_eyes.0, &face.found.under_eyes.1, amount)),
+                eyes: eyes.map(|amount| (&face.found.eyes, amount)),
+                teeth: teeth.map(|amount| (&face.found.teeth, amount)),
+            }
+        })
+        .collect();
+    retouch::add_layers(doc, above, &faces)
+}
+
+/// Find faces in `doc` (from `above` and below) and add the Retouch group
+/// above `above` with `settings`, returning the group's layer id.
+pub fn retouch_document(doc: &mut Document, above: usize, settings: Retouch) -> Result<Option<u64>, String> {
+    if doc.layers.is_empty() {
+        return Err("Document has no layers".into());
+    }
+    let image = doc.composite_current_and_below(above);
+    let found = find_faces(&image, &doc.profile)?;
+    let prepared = prepare_faces(found.into_iter().enumerate().map(|(n, f)| (n + 1, Arc::new(f), settings)));
+    if prepared.is_empty() {
+        return Ok(None);
+    }
+    Ok(apply_prepared(doc, above, &prepared))
 }
 
 /// The faces in `image`, each with a picture of it for the strip.
