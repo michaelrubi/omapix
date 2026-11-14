@@ -431,7 +431,9 @@ fn retouch_one_file(file: &Path, settings: crate::auto_retouch::Retouch) -> Resu
     }
     let mut doc = omapix_engine::io::load(file).map_err(|e| e.to_string())?;
     let above = doc.layers.len().saturating_sub(1);
-    crate::auto_retouch::retouch_document(&mut doc, above, settings)?;
+    if crate::auto_retouch::retouch_document(&mut doc, above, settings)?.is_none() {
+        return Err("nothing to retouch with these settings".into());
+    }
     omapix_engine::ora::save(&doc, &out).map_err(|e| e.to_string())?;
     Ok(out)
 }
@@ -10877,6 +10879,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let src = omapix_engine::io::load(Path::new(&photo)).unwrap();
         omapix_engine::export::tiff(&src, &dir.join("portrait.tif")).unwrap();
+        // An image with no faces is reported, not saved.
+        omapix_engine::export::tiff(&app.editor.as_ref().unwrap().doc, &dir.join("blank.tif")).unwrap();
 
         app.retouch_folder(dir.clone(), app.filters.auto_retouch, &ctx);
         let job = app.retouch_folder.as_mut().unwrap();
@@ -10889,7 +10893,8 @@ mod tests {
 
         assert!(app.retouch_folder.is_none());
         let (text, error, _) = app.status.clone().expect("a message");
-        assert!(!error && text == "Retouched 1 file", "{text}");
+        assert!(error && text == "Retouched 1 file; 1 failed: blank.tif: Found no faces", "{text}");
+        assert!(!dir.join("blank.ora").exists());
         let saved = omapix_engine::ora::load(&dir.join("portrait.ora")).unwrap();
         assert!(saved.layers.iter().any(|l| l.is_group && l.name == "Retouch"));
         std::fs::remove_dir_all(&dir).ok();
