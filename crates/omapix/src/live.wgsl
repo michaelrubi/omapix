@@ -25,7 +25,8 @@ struct Layer {
     kind: u32,
     // 0: none, 1: a mask, 2: one that hides where it's high.
     has_mask: u32,
-    lut_size: u32,
+    // How an adjustment's table is read (live.rs `table`).
+    adjustment: u32,
     opacity: f32,
     mask_fill: f32,
     // 1: the layer is drawn through `inverse` (Free Transform), sampled
@@ -146,6 +147,221 @@ fn lookup(table: texture_3d<f32>, size: u32, c: vec3<f32>) -> vec3<f32> {
     let c01 = mix(c001, c101, f.x);
     let c11 = mix(c011, c111, f.x);
     return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
+// Points per side of an adjustment's table (live.rs `LUT_SIZE`).
+const LUT_SIZE: u32 = 33u;
+
+// Point `i` of the adjustment's table, in the order it's written.
+fn point(i: u32) -> vec3<f32> {
+    let at = vec3<u32>(i % LUT_SIZE, i / LUT_SIZE % LUT_SIZE, i / (LUT_SIZE * LUT_SIZE));
+    return textureLoad(lut, vec3<i32>(at), 0).rgb;
+}
+
+// Number `i` of an adjustment's settings, three to a point.
+fn setting(i: u32) -> f32 {
+    return point(i / 3u)[i % 3u];
+}
+
+// The colour `c` adjusted, as adjust.rs `Prepared::apply`.
+fn adjust(c: vec3<f32>) -> vec3<f32> {
+    switch p.adjustment {
+        case 1u: {
+            return channel_tables(c);
+        }
+        case 2u: {
+            return hue_saturation(c);
+        }
+        case 3u: {
+            return color_balance(c);
+        }
+        case 4u: {
+            return selective_color(c);
+        }
+        case 5u: {
+            return channel_mixer(c);
+        }
+        default: {
+            return lookup(lut, LUT_SIZE, c);
+        }
+    }
+}
+
+// Curves and Levels: a table of 4096 points for each channel, linearly
+// interpolated (adjust.rs `Lut::get`).
+fn channel_tables(c: vec3<f32>) -> vec3<f32> {
+    var out = vec3<f32>(0.0);
+    for (var ch = 0u; ch < 3u; ch++) {
+        let pos = clamp(c[ch], 0.0, 1.0) * 4095.0;
+        let i = min(u32(pos), 4094u);
+        let a = point(i)[ch];
+        out[ch] = a + (point(i + 1u)[ch] - a) * (pos - f32(i));
+    }
+    return out;
+}
+
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let hi = max(max(c.r, c.g), c.b);
+    let lo = min(min(c.r, c.g), c.b);
+    let l = (hi + lo) / 2.0;
+    let d = hi - lo;
+    if d < 1e-7 {
+        return vec3<f32>(0.0, 0.0, l);
+    }
+    var s = d / (hi + lo);
+    if l > 0.5 {
+        s = d / (2.0 - hi - lo);
+    }
+    var h: f32;
+    if hi == c.r {
+        h = (c.g - c.b) / d;
+        if c.g < c.b {
+            h += 6.0;
+        }
+    } else if hi == c.g {
+        h = (c.b - c.r) / d + 2.0;
+    } else {
+        h = (c.r - c.g) / d + 4.0;
+    }
+    return vec3<f32>(h / 6.0, s, l);
+}
+
+fn hue_part(p: f32, q: f32, at: f32) -> f32 {
+    let t = at - floor(at);
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 0.5 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    return p;
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
+    if s <= 0.0 {
+        return vec3<f32>(l);
+    }
+    var q = l + s - l * s;
+    if l < 0.5 {
+        q = l * (1.0 + s);
+    }
+    let p = 2.0 * l - q;
+    return vec3<f32>(hue_part(p, q, h + 1.0 / 3.0), hue_part(p, q, h), hue_part(p, q, h - 1.0 / 3.0));
+}
+
+// Settings: hue, saturation, lightness.
+fn hue_saturation(c: vec3<f32>) -> vec3<f32> {
+    let hsl = rgb_to_hsl(c);
+    let settings = point(0u);
+    let turned = hsl.x + settings.x / 360.0;
+    let k = settings.y / 100.0;
+    var s = hsl.y * (1.0 + k);
+    if k >= 0.0 {
+        s = hsl.y + (1.0 - hsl.y) * k * min(hsl.y, 1.0);
+    }
+    var rgb = hsl_to_rgb(turned - floor(turned), clamp(s, 0.0, 1.0), hsl.z);
+    let light = settings.z / 100.0;
+    if light >= 0.0 {
+        rgb = rgb + (1.0 - rgb) * light;
+    } else {
+        rgb = rgb * (1.0 + light);
+    }
+    return rgb;
+}
+
+// Settings: shadows, midtones, highlights, then whether luminosity is kept.
+fn color_balance(c: vec3<f32>) -> vec3<f32> {
+    let l = rgb_to_hsl(c).z;
+    let a = 0.25;
+    let b = 0.333;
+    let scale = 0.7;
+    let shadow_w = clamp((l - b) / -a + 0.5, 0.0, 1.0) * scale;
+    let mid_w = clamp((l - b) / a + 0.5, 0.0, 1.0) * clamp((l + b - 1.0) / -a + 0.5, 0.0, 1.0) * scale;
+    let high_w = clamp((l + b - 1.0) / a + 0.5, 0.0, 1.0) * scale;
+    let shift = point(0u) * shadow_w + point(1u) * mid_w + point(2u) * high_w;
+    var out = clamp(c + shift / 100.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    if point(3u).x > 0.5 {
+        let hsl = rgb_to_hsl(out);
+        out = hsl_to_rgb(hsl.x, hsl.y, l);
+    }
+    return out;
+}
+
+fn comp_adjust(scale: f32, value: f32, amount: f32, k: f32, relative: bool) -> f32 {
+    var res = (-1.0 - amount) * k - amount;
+    if relative {
+        res *= 1.0 - value;
+    }
+    return clamp(res, -value, 1.0 - value) * scale;
+}
+
+// Settings: cyan, magenta, yellow and black for each of the nine ranges,
+// as fractions, then whether they're relative.
+fn selective_color(c: vec3<f32>) -> vec3<f32> {
+    let lo = min(min(c.r, c.g), c.b);
+    let hi = max(max(c.r, c.g), c.b);
+    let med = c.r + c.g + c.b - lo - hi;
+    let relative = setting(36u) > 0.5;
+    var adj = vec3<f32>(0.0);
+    for (var range = 0u; range < 9u; range++) {
+        var scale = 0.0;
+        switch range {
+            case 0u: {
+                if c.r == hi { scale = hi - med; }
+            }
+            case 1u: {
+                if c.b == lo { scale = med - lo; }
+            }
+            case 2u: {
+                if c.g == hi { scale = hi - med; }
+            }
+            case 3u: {
+                if c.r == lo { scale = med - lo; }
+            }
+            case 4u: {
+                if c.b == hi { scale = hi - med; }
+            }
+            case 5u: {
+                if c.g == lo { scale = med - lo; }
+            }
+            case 6u: {
+                if all(c > vec3<f32>(0.5)) { scale = (lo - 0.5) * 2.0; }
+            }
+            case 7u: {
+                if any(c > vec3<f32>(0.0)) && any(c < vec3<f32>(1.0)) {
+                    scale = 1.0 - (abs(hi - 0.5) + abs(lo - 0.5));
+                }
+            }
+            default: {
+                if all(c < vec3<f32>(0.5)) { scale = (0.5 - hi) * 2.0; }
+            }
+        }
+        if scale > 0.0 {
+            let k = setting(range * 4u + 3u);
+            for (var ch = 0u; ch < 3u; ch++) {
+                adj[ch] += comp_adjust(scale, c[ch], setting(range * 4u + ch), k, relative);
+            }
+        }
+    }
+    return clamp(c + adj, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Settings: red, green, blue and grey, each from red, green, blue and a
+// constant, as fractions, then whether it's monochrome.
+fn channel_mixer(c: vec3<f32>) -> vec3<f32> {
+    var out = vec3<f32>(0.0);
+    for (var ch = 0u; ch < 3u; ch++) {
+        var row = ch;
+        if setting(16u) > 0.5 {
+            row = 3u;
+        }
+        let m = vec4<f32>(setting(row * 4u), setting(row * 4u + 1u), setting(row * 4u + 2u), setting(row * 4u + 3u));
+        out[ch] = clamp(c.r * m.x + c.g * m.y + c.b * m.z + m.w, 0.0, 1.0);
+    }
+    return out;
 }
 
 // Blend If's ranges, as layer.rs `BlendIf::factor`.
@@ -394,7 +610,7 @@ fn layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         if a_b <= 0.0 || coverage <= 0.0 {
             return dst;
         }
-        let adjusted = lookup(lut, p.lut_size, cb);
+        let adjusted = adjust(cb);
         let blended = blend(p.mode, cb, adjusted);
         return vec4<f32>(cb + (blended - cb) * coverage * blend_if(adjusted, cb), a_b);
     }

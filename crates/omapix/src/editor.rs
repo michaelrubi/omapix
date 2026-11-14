@@ -2123,7 +2123,7 @@ impl Editor {
                 let lut = layer.adjustment.as_ref().map(|a| match cached {
                     Some((made_from, table)) if made_from == a => Arc::clone(table),
                     _ => {
-                        let table = Arc::new(a.prepare().lut(live::LUT_SIZE));
+                        let table = Arc::new(live::table(a).1);
                         *cached = Some((a.clone(), Arc::clone(&table)));
                         table
                     }
@@ -3960,7 +3960,8 @@ mod live_tests {
         bend(&mut e, 0.7);
         e.update(&ctx);
         let first = e.canvas.live.clone().unwrap().settings.unwrap().lut.expect("a table");
-        let mid = first[16 + 16 * 33 + 16 * 33 * 33];
+        // Curves goes as a table for each channel, of 4096 points.
+        let mid = first[2048];
         assert!((mid[0] - 0.7).abs() < 0.01, "the middle of the new curve, {mid:?}");
         // Unchanged, the table isn't made again.
         e.update(&ctx);

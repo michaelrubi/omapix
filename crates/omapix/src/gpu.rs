@@ -110,6 +110,8 @@ struct Params {
     kind: u32,
     /// 0: none, 1: a mask, 2: one that hides where it's high.
     has_mask: u32,
+    /// How an adjustment's table is read (`live::table`).
+    adjustment: u32,
     opacity: f32,
     mask_fill: f32,
     /// The first in an isolated group, blended onto nothing.
@@ -128,7 +130,7 @@ impl Params {
             words.extend(v.map(|x| x as u32));
         }
         words.extend(self.pixel_fill.map(f32::to_bits));
-        words.extend([self.mode, self.kind, self.has_mask, LUT_SIZE as u32]);
+        words.extend([self.mode, self.kind, self.has_mask, self.adjustment]);
         words.extend([self.opacity, self.mask_fill].map(f32::to_bits));
         words.extend([u32::from(inverse.is_some()), self.fresh.into()]);
         let [a, b, c, d, e, f] = inverse.unwrap_or_default();
@@ -271,6 +273,7 @@ impl LiveGpu {
             mode: 0,
             kind: 2,
             has_mask: 0,
+            adjustment: 0,
             opacity: 1.0,
             mask_fill: 1.0,
             fresh: false,
@@ -303,7 +306,7 @@ impl LiveGpu {
                     unit(plane.fill),
                     if matches!(layer.source, Source::Pixels(_)) { 0 } else { 3 },
                 ),
-                Source::Adjustment(table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
+                Source::Adjustment(_, table) => (None, Some(table_texture(table)), None, nothing, [0.0; 4], 1),
                 Source::Group(Before::Kept(slot)) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 4),
                 Source::Isolated(slot) => (None, None, Some(kept[*slot].1.clone()), nothing, [0.0; 4], 5),
                 Source::Masked => (None, None, None, nothing, [0.0; 4], 6),
@@ -326,6 +329,10 @@ impl LiveGpu {
                 mode: layer.mode as u32,
                 kind,
                 has_mask: mask.as_ref().map_or(0, |_| if layer.inverted { 2 } else { 1 }),
+                adjustment: match layer.source {
+                    Source::Adjustment(shape, _) => shape,
+                    _ => 0,
+                },
                 opacity: layer.opacity,
                 mask_fill: mask.as_ref().map_or(1.0, |m| m.2),
                 fresh: layer.fresh,
@@ -1211,7 +1218,7 @@ mod tests {
         let settings = Settings {
             opacity: 0.6,
             mode: BlendMode::Normal,
-            lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+            lut: Some(Arc::new(live::table(layer.adjustment.as_ref().unwrap()).1)),
             blend_if: Some(split),
         };
         let draw = LiveDraw {
@@ -1556,7 +1563,7 @@ mod tests {
         let settings = Settings {
             opacity: 0.6,
             mode: BlendMode::Luminosity,
-            lut: Some(Arc::new(layer.adjustment.as_ref().unwrap().prepare().lut(LUT_SIZE))),
+            lut: Some(Arc::new(live::table(layer.adjustment.as_ref().unwrap()).1)),
             blend_if: None,
         };
         let draw = LiveDraw {
@@ -1708,7 +1715,7 @@ mod tests {
                 settings = Some(Settings {
                     opacity: layer.opacity,
                     mode: layer.blend,
-                    lut: layer.adjustment.as_ref().map(|a| Arc::new(a.prepare().lut(LUT_SIZE))),
+                    lut: layer.adjustment.as_ref().map(|a| Arc::new(live::table(a).1)),
                     blend_if: layer.blend_if.filter(|b| !b.is_neutral()),
                 });
             }
