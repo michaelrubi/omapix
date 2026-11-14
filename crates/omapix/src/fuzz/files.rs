@@ -10,8 +10,11 @@ use omapix_engine::{BlendMode, Document, ora, psd};
 use super::{Kind, Spec, document, shrink::shrink, specs};
 
 /// Where the files go: beside the build, not in `/tmp`, which is RAM.
+/// One folder per test thread, so tests running at once don't overwrite
+/// each other's files.
 fn folder() -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fuzz-files");
+    let thread = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fuzz-files").join(thread);
     std::fs::create_dir_all(&dir).expect("making target/fuzz-files");
     dir
 }
