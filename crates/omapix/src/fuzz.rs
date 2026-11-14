@@ -9,6 +9,7 @@
 //! left as it did.
 
 mod cache;
+mod files;
 pub mod shrink;
 
 use omapix_engine::adjust::{Adjustment, Curves};
