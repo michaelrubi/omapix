@@ -116,6 +116,8 @@ Ctrl+S on an image that hasn't changed since it was saved writes nothing and say
 
 ## 2. Hand-testing checklist
 
+Triage of the 95 unticked items: 7 scriptable, 59 partly, 29 by hand.
+
 The UI has been tested through the same code paths with scripts
 (`OMAPIX_SCRIPT`) and unit tests, but not yet with a real mouse. These need checking by hand, and any bugs fixed:
 - [x] Brush, eraser, clone, healing and spot healing with the mouse
@@ -141,21 +143,30 @@ The UI has been tested through the same code paths with scripts
 - [x] Open, Save As and Export file dialogs (xdg portal)
 - [x] Selecting several layers: Ctrl+click and Shift+click, then Ctrl+G, Ctrl+J, Delete, Ctrl+E, dragging the rows, and the Move tool
 - [ ] Layer navigation shortcuts: Alt+] and Alt+[ select layer above or below (stepping into open groups, skipping closed ones, no wrap), and Ctrl+Shift+] and Ctrl+Shift+[ bring to front and send to back of group
+  scriptable: GroupLayers, SelectLayerAbove, SelectLayerBelow, BringToFront, SendToBack
 - [x] Tool cursor modifier badges: Shift (+), Alt (-), and Shift+Alt (×) with selection tools, and Alt copy badge with the Move tool
 - [x] Eyedroppers in Curves and Levels: set black, gray and white points with crosshair cursor, one undo step per click, and Esc to disarm
 - [x] Cached group results: slider drags above a big isolated group (say a Multiply group), then painting, changing settings and hiding layers inside it, zoomed out and at 100 %: faster, and the image always ends up right
 - [ ] Switching the Omarchy theme while Omapix is open
+  by hand: live theme reload from Omarchy compositor/config watcher
 - [ ] Soft proofing: a ProPhoto TIFF from darktable with vivid colours (a red dress, a saturated backdrop): Ctrl+Y for the web against the exported JPEG in a browser, Shift+Ctrl+Y greying what sRGB hasn't got, both at once, the status bar, a second tab following; View › Proof Setup › Custom Profile… with a printer's profile (Krita's `cmyk.icm` in /usr/share/color/icc/krita will do), kept after a restart, back to Web (sRGB), a file that isn't a profile; and how fast the canvas follows a slider with the proof on
+  partly: ProofColors, GamutWarning, ProofSetupWeb, ExportJpeg are scriptable (needs a new step: ProofSetupCustom <path>); browser comparison, restart and slider feel are by hand
 - [ ] Monitor colours: a saturated portrait on the laptop's screen against the same file in a browser (less saturated in Omapix, greys the same), skin tones against the external monitor, dragging the window from one monitor to the other (canvas, thumbnails and Navigator follow), the status bar's hover on the profile, `"srgb"` and `"edid"` for a monitor in monitors.toml, and an export looking the same as before
+  by hand: multi-monitor Hyprland window moves, real screen/EDID colour and browser comparison
 - [x] Retouching setups: Frequency Separation lands in its group, and Dodge & Burn Curves paints lighter and darker on its masks
 - [ ] High Pass Sharpening at 100 %, with opacity and a mask, and Filter › Other › High Pass
+  scriptable: HighPassSharpening, HighPass, Filter, AddMask, Opacity, Tool Brush, Stroke
 - [ ] Reduce Noise at 100 % on a portrait: Strength, Preserve Details, Reduce Color Noise, and Sharpen Details with live preview
+  partly: Filter {"ReduceNoise":{...}}, Look are scriptable; dialog live preview and visual check at 100 % are by hand
 - [x] Unsharp Mask at 100 % on a portrait: Amount, Radius and Threshold with the live preview, no colour fringes on edges
 - [x] Smart Sharpen at 100 % on a portrait: Amount, Radius, Reduce Noise, Remove (Gaussian Blur or Lens Blur), and Shadows/Highlights Fade Amount with live preview
 - [ ] Smart Blur at 100 % on a portrait: Radius, Threshold, Quality (Low, Medium, High), and Mode (Normal, Edge Only, Overlay Edge) with live preview
+  partly: Filter {"SmartBlur":{...}}, Look are scriptable; dialog live preview and visual check at 100 % are by hand
 - [ ] Filter preview box: 100 % preview in Unsharp Mask, Smart Sharpen, Reduce Noise, and Smart Blur dialogs, pannable by dragging, holding mouse down shows unfiltered original, and follows slider adjustments
+  by hand: dialog preview box mouse drag, hold-for-original and slider feel
 - [x] Filters on masks: Gaussian Blur to soften a mask edge, Unsharp Mask and High Pass on a mask, and Add Noise on a gradient mask
 - [ ] Mask Density: slider 0–100 %, live preview, within a selection, from Layer menu and mask context menu, and undo
+  partly: Tool Marquee, Stroke, AddMask, MaskDensity, Undo are scriptable (needs a new step: MaskDensity <percent>); live preview feel and context menu are by hand
 - [x] Alt+right-drag: brush size left and right, hardness up and down, for the brush, eraser, clone and healing tools
 - [x] Lock transparent pixels: `/` and the lock button, then the brush, eraser, fills and Delete on a pasted patch or hair layer
 - [x] Layer locks: Lock All (`Ctrl+/`), Lock Image Pixels and Lock Position: buttons and shortcuts, refusing edits with messages, Move tool blocked, and OpenRaster round trip
@@ -164,96 +175,182 @@ The UI has been tested through the same code paths with scripts
 - [x] Selection edges: Ctrl+H hides marching ants while keeping selection, status bar notes it, Omapix goes idle, and a new selection shows them again
 - [x] Eyedropper tool: click or drag sets foreground colour live, Alt+click sets background, Sample Size averages across edges, and Current Layer vs All Layers
 - [ ] Sample "Current & Below": Clone Stamp, Healing Brush, Spot Healing and Eyedropper with Current Layer, Current & Below and All Layers, and Magic Wand Sample All Layers checkbox
+  scriptable: Tool Clone|Heal|SpotHeal|Eyedropper|Wand, Source, Stroke (needs a new step: Sample current|below|all)
 - [ ] Select › Modify: Border (1–200 px), Smooth (1–100 px), Expand (1–100 px), Contract (1–100 px), Feather (Shift+F6); verify Defaults button and undo step labels match Photoshop
+  partly: Tool Marquee, Stroke, BorderSelection, SmoothSelection, ExpandSelection, ContractSelection, Feather, Undo are scriptable; Defaults button and undo labels in UI are by hand
 - [x] Load selection: Ctrl+click layer thumbnail for transparency, mask thumbnail for mask (with Shift/Alt/Shift+Alt), Select › Load Selection (RGB, Luminosity, Transparency, Mask), and edges show again if hidden
 - [x] Live GPU Move tool drags on a 24 MP retouch (pasted patch under a Dodge & Burn group and Curves), at fit and at 100 %: smooth, looks the same as the CPU render, no flash when released
 - [ ] Custom hotkeys: override command shortcuts and tool letters in ~/.config/omapix/hotkeys.toml, menu labels and tooltips update, and startup warnings for clashes
+  by hand: config file reload, menu/tooltip labels and startup clash warnings in the UI
 - [ ] Live GPU drags inside groups on a 24 MP retouch: after Frequency Separation and Dodge & Burn Curves, the Low layer's opacity, the Dodge curve and its opacity, and the Move tool and Ctrl+T on a patch put in a group with Ctrl+G, at fit and at 100 %: smooth, the same as the CPU render, no flash when released; then the same with the group at 50 % and with a mask on it
+  partly: FrequencySeparation, DodgeAndBurnCurves, GroupLayers, Tool Move, Stroke, AddMask are scriptable and GPU vs CPU parity can be checked via composite_on_gpu (needs a new step: LayerOpacity <pct>, Transform); smoothness and no-flash on release are by hand
 - [ ] Live GPU drags with groups that fade, on a 24 MP portrait after Auto Retouch (and after Even Tone alone): the Dodge & Burn group's opacity, a face's group's opacity, Smooth Skin's opacity, the Dodge layer's curve, and the opacity of a layer below the Retouch group, at fit and at 100 %: smooth, the same as the CPU render, no flash when released; with two or three faces too (is it still smooth, and how much GPU memory does `nvidia-smi` show?)
+  partly: AutoRetouch, EvenTone are scriptable and GPU vs CPU parity can be checked via composite_on_gpu (needs a new step: LayerOpacity <pct>); smoothness, no-flash and nvidia-smi VRAM check are by hand
 - [ ] Live GPU slider drags on a 24 MP retouch: opacity, Curves and Levels, Hue/Saturation, and opacity or blend mode in Blending Options, at fit and at 100 %: smooth, no flash when released
+  partly: NewCurves, NewLevels, NewHueSaturation, BlendIf are scriptable for GPU vs CPU parity (needs a new step: LayerOpacity <pct>, BlendMode <mode>); slider smoothness and no-flash on release are by hand
 - [ ] Channels panel: view Red, Green and Blue (click and Ctrl+2…5), Ctrl+click with Shift/Alt to load them and RGB's luminosity, Save Selection as Alpha 1 and 2, view, load and delete them, and reopen the .ora with them kept
+  partly: ViewComposite, ViewRed, ViewGreen, ViewBlue, LoadSelectionRed, LoadSelectionGreen, LoadSelectionBlue, LoadSelectionLuminosity, SaveSelection, DeleteChannel, Save are scriptable (needs a new step: SelectChannel <name>); panel clicks and Ctrl+click modifiers are by hand
 - [ ] Close document (Ctrl+W) with and without unsaved changes, and dropping images onto the window (placed as centred layers, Shift+drop to open, multiple files)
+  partly: Close is scriptable for clean/dirty state; unsaved prompt dialog and compositor drag-and-drop are by hand
 - [ ] Tabs: open three images (Ctrl+O, Open Recent, `omapix a.tif b.tif`, Shift+drop), click between them and Ctrl+Tab / Ctrl+Shift+Tab, each keeping its zoom, selection, history and open groups; the Navigator and Histogram following; copy in one and paste in another; ✕ and middle click on tabs with and without unsaved changes; Ctrl+S then Ctrl+Tab straight away; opening one that's already open; Ctrl+Q with two unsaved (Save, Don't Save, Cancel); and switching refused during a dialog, Liquify and Denoise
+  partly: NextImage, PreviousImage, Copy, Paste, Save, Close, Quit exist; multi-tab opening, compositor Shift+drop, tab clicks and modal dialogs are by hand
 - [ ] New image: File › New… (Ctrl+N) at a few sizes, New from Clipboard and Ctrl+V with nothing open (a copy from Omapix, a screenshot, an image from a browser, and text on the clipboard), with and without unsaved changes, then Ctrl+S on the Untitled image
+  by hand: OS clipboard contents from other apps (browser, screenshot), New dialog and Save portal
 - [ ] PSD import: a flattened 16-bit .psd and a layered one (layers, groups, masks and colours as in Photoshop), and Ctrl+S asking where to save rather than overwriting the .psd
+  partly: opening .psd and checking layers/masks/colours is scriptable in engine tests; Save portal not overwriting .psd and visual comparison with Photoshop are by hand
 - [ ] PSD export: a retouch with frequency separation, a masked layer, a clipped layer, a group and a Curves layer, exported and opened in Photoshop or Photopea (does it open without a warning, do the layers look as they do in Omapix, are names, masks, groups, blend modes and opacity right, is Blend If where it was), and in Lightroom or a file manager for the flattened image; the same as a .psb; a .psd and a .psb from Photoshop opened in Omapix; how long a big one takes and how big it is beside the .ora
+  partly: FrequencySeparation, AddMask, ClippingMask, GroupLayers, NewCurves, BlendIf, ExportPsd can build and export (needs a new step: ExportPsd <path>); opening in Photoshop/Photopea/Lightroom is by hand
 - [ ] Alt+click on the mask button: a black mask, or one hiding the selection; and the mask menu's Add, Subtract and Intersect Mask with Selection
+  partly: Tool Marquee, Stroke, AddMask, AddMaskHideAll are scriptable; Alt+click on the mask button and mask menu's Add/Subtract/Intersect with Selection are by hand
 - [ ] Free Transform live on the GPU: dragging handles on a whole 24 MP layer at fit and at 100 %, zooming mid-transform, Enter with no flash, and Esc
+  by hand: live handle dragging, zooming mid-transform, smoothness and no-flash on Enter
 - [ ] Free Transform: Ctrl+T on a pasted patch and on a selection, corner and side handles with Shift and Alt, rotating with Shift, the cursors, Enter, Esc and Ctrl+Z, how smooth it is on a 24 MP layer, Edit › Transform's flips and turns with and without the box up, the box's right-click menu, and double-clicking inside it, and typing X, Y, W, H and Angle in the options bar
+  partly: TransformRotate180, TransformRotate90Cw, TransformRotate90Ccw, TransformFlipHorizontal, TransformFlipVertical, Undo are scriptable (needs a new step: Transform <x> <y> <w> <h> <angle>); handle dragging, cursors, right-click menu and smoothness are by hand
 - [ ] darktable round trip: export with "edit in Omapix", retouch with layers, Ctrl+S and quit, the TIFF grouped with the raw; then "edit in Omapix" on the TIFF brings the layers back, and the thumbnail updates; then the same with three images at once (a tab each, saving each, all imported and grouped on quit)
+  by hand: another app (darktable) integration, launch, save-and-quit and re-import
 - [ ] Paste Special: Paste in Place (Ctrl+Shift+V), and Paste Into (Ctrl+Alt+Shift+V) a copy from elsewhere in the image and from another app
+  partly: Tool Marquee, Stroke, Copy, PasteInPlace, PasteInto are scriptable within Omapix; pasting from another app is by hand
 - [ ] Quick Mask: Q to enter with and without selection, brush/eraser/fill strokes with undo, status bar and hidden marching ants, Q to exit with updated selection, layer switch auto-exit; a Gaussian Blur and Add Noise on it, with the preview in the red, Cancel and undo
+  scriptable: QuickMask, Tool Brush|Eraser, Stroke, FillForeground, Filter, AddNoise, SelectLayerAbove, Undo
 - [ ] Content-Aware Fill: a prop, a mark on the backdrop and a stray hair on a 24 MP portrait, the first use (loading), the layer and its mask, undo, and that it still fills without the model
+  partly: Tool Lasso, Stroke, ContentAwareFill, Undo are scriptable; visual quality of the fill on real portraits is by hand
 - [ ] Texture Fill: the same prop, backdrop mark and stray hair beside Content-Aware Fill's, a big patch of grass, gravel or a textured wall, a hard-edged and a feathered selection (does the edge show?), a fill next to the subject, the layer and its mask, undo, and how big the .ora is; with a saved alpha channel as the sampling area, near and far, and whether the edge blends
+  partly: Tool Lasso, Stroke, Feather, SaveSelection, TextureFill, Undo, Save are scriptable (needs a new step: TextureFill sample <channel>); visual blending quality is by hand
 - [ ] Healing by Poisson blending: Spot Healing and the Healing Brush on spots, a stray hair and a wrinkle with a soft and a hard brush (does the dab's edge show?), a heal copied from skin in shadow onto lit skin, a spot beside the lips with and without a selection along them, Heal Blemishes and Auto Retouch on a portrait, a long stroke with a big brush (how long it takes on release), and undo
+  partly: Tool SpotHeal|Heal, Source, Size, Stroke, HealBlemishes, AutoRetouch, Undo are scriptable (needs a new step: Hardness <pct>); seam invisibility and release feel are by hand
 - [ ] Alt+click an eye: on a layer (only it and its groups stay shown), on a group (what's in it keeps its own visibility), Alt+click again (what was shown before comes back, hidden layers stay hidden), a plain eye click in between (Alt+click then shows only that layer again), and undo
+  by hand: Alt+click and plain click on layer/group eye icons in the Layers panel
 - [ ] Save with nothing changed: Ctrl+S right after opening an .ora and right after saving ("Already saved", nothing written), after an edit (saved), Save As (always writes), and an image opened from darktable
+  partly: Save, Stroke and status bar message are scriptable; Save As portal and darktable-launched image are by hand
 - [ ] Clone and heal source target: hold Alt with the Clone Stamp and the Healing Brush (the brush becomes a small target, and comes back on release), Alt+click sets the source where the target's centre is, Alt+right-drag still shows the brush while resizing, and the Brush's Alt still shows the eyedropper crosshair
+  by hand: Alt cursor switching, Alt+click target alignment and Alt+right-drag feel
 - [ ] Holding I (or another tool key) to use a tool and going back on release, Alt's pipette cursor with the Brush, and the right-click menu on the image with and without a selection
+  by hand: spring-loaded key hold/release timing, pipette cursor and canvas right-click menu
 - [ ] Move tool Ctrl+click picking the layer under the pointer, on a retouch with patches, a group and a masked layer
+  by hand: Move tool Ctrl+click auto-select layer under pointer
 - [ ] Select and Mask: a rough selection round a head of hair with Radius 20–60, Smooth, Feather, Contrast and Shift Edge, each output, Cancel, and the Defaults button
+  partly: Tool Lasso, Stroke, SelectAndMask are scriptable (needs a new step: SelectAndMask <params>); Cancel, Defaults button and hair edge quality are by hand
 - [ ] Select and Mask's Refine Edge brush: a small Radius and strokes over flyaway hair (picked up, the backdrop between strands left out), Alt over skin a big Radius had eaten into, `[` and `]`, how the preview keeps up on a 24 MP portrait, then OK and one undo
+  by hand: interactive Refine Edge brush strokes with Alt, [ ] keys, preview responsiveness and hair quality
 - [ ] Pen tablet: hovering shows the brush outline, pressure thins and lightens strokes with each pressure button on and off, the side buttons, and the mouse still working afterwards
+  by hand: real Wayland tablet-v2 pen, hover, pressure and side buttons
 - [ ] Brush Settings (F5): each slider on the Brush with a mouse and a pen (Spacing up to separate dabs, a flat tip at an angle and following the stroke, Size, Angle and Roundness Jitter, Minimum Diameter with a light touch, Scatter with and without Both Axes, Count and Count Jitter, Opacity and Flow Jitter), the same on the Eraser, Clone Stamp, Dodge and a mask, each tool keeping its own after a restart, Reset, a single click with Follow the stroke on, a healing stroke with a scattered brush, and how a big scattered brush with a Count of 16 keeps up
+  partly: Tool Brush|Eraser|Clone|Dodge|Heal, AddMask, Stroke are scriptable (needs a new step: BrushSettings <JSON>); pen pressure, restart persistence and big-brush feel are by hand
 - [ ] Flip, Noise and Wet Edges in Brush Settings: Flip X and Flip Y and their jitter on a brush made from an image (the list's picture mirrors too), Noise on a soft brush at high and low Flow, Wet Edges with a soft and a hard brush (half strength inside, darker along the edge, no darker where a stroke crosses itself, darker where two strokes do), both on the Eraser and on a mask, and a brush file with any of them switched on
+  partly: Tool Brush|Eraser, AddMask, Stroke can verify pixel output (needs a new step: BrushSettings <JSON>); brush list thumbnail mirroring and visual inspection are by hand
 - [ ] Brush preview, right-click and speed: the stroke at the top of Brush Settings following each slider and each brush picked from the list, with a pen's pressure buttons on and off; right-click on the image with the Brush, Eraser and Clone Stamp (Brush Settings at the top of the menu, ticked when it's showing) and with the Move tool (not there); and how the smoke brushes at 2,500 px, a 1,000 px soft brush and the everyday 150 px one keep up on a 24 MP image with one layer and with several
+  by hand: live preview widget, pen pressure buttons, right-click menu and 24 MP brush speed feel
 - [ ] Photoshop brushes: Load… in Brush Settings (and Edit › Import Brushes…) with real `.abr` files, old and new, small and large (skin texture, hair, a general set): how many brushes come in and what the message says was left out, whether each looks in the list and paints as it does in Photoshop (size, spacing, angle, scatter, jitter), picking one on the Brush, Eraser, Clone Stamp and a mask, the brushes and each tool's choice still there after a restart, a file that isn't a brush file, the same file twice, and a big sampled brush on a 24 MP image
+  partly: .abr parsing and stroke rendering are scriptable (needs a new step: ImportBrushes <path>, BrushPreset <name>); Photoshop comparison, restart and file dialog are by hand
 - [ ] Brush outline: a flat tip at a few angles and a sampled tip wider and taller than it's high, at several zooms and with Alt+right-drag resizing
+  by hand: cursor outline rendering at pointer across zooms and Alt+right-drag
 - [ ] Filter settings kept between runs: apply a few filters and Frequency Separation, quit, reopen and check their dialogs; the Defaults buttons; and a default changed in defaults.toml
+  by hand: quit/reopen persistence, dialog Defaults buttons and defaults.toml config
 - [ ] Tool settings kept between runs: change brush sizes/pressure buttons on a few tools, restart, check
+  by hand: restart persistence of tool settings
 - [ ] Quick Selection and Threshold: painting, adding, Alt, Shift, and the threshold slider on a click, a box and a painted selection
+  partly: Stroke could test strokes (needs a new step: Tool QuickSelection|ObjectSelection, Threshold <n>); Alt/Shift modifiers and live slider re-cut are by hand
 - [ ] Select › Eyes, Lips and Teeth: a headshot with an open smile and one with a closed mouth ("Found no teeth"), a group shot, glasses, Shift and Alt, and the edges at 100 %
+  partly: SelectEyes, SelectLips, SelectTeeth and status bar message are scriptable; Shift/Alt combining and edge quality on real portraits are by hand
 - [ ] Filter › Noise › Denoise on a noisy photo (or one from `~/Pictures/denoise-tests`): the preview box (dragging, holding for before, Luminance and Color), OK and the status bar count, the Denoise layer's opacity and a mask, undo, on a ProPhoto TIFF, and greyed out without darktable's model
+  partly: Denoise, AddMask, Undo and ProPhoto TIFF output are scriptable (needs a new step: Denoise <luma> <chroma>); preview box dragging, hold-for-before and visual noise quality are by hand
 - [ ] Retouch › Reduce Shine: an oily face in flash or sun (nose, forehead, cheeks, chin), a matte one, darker skin, a half-length with shoulders (is 50 % a good start, does 100 % still look like a face, and is the texture kept at 100 %?), a forehead that's shiny all over (mostly left), highlighter on a cheekbone painted out of the mask, undo; and as a step in Auto Retouch, before Smooth Skin
+  partly: ReduceShine, AutoRetouch, Tool Brush, Stroke, Undo are scriptable; visual judgement on diverse faces is by hand
 - [ ] Retouch › Lighten Under Eyes: a face with dark circles and one without (is 50 % a good start, and does 100 % go too flat?), glasses, heavy eye makeup (lashes and liner left alone), a face turned three-quarters, a group shot, the layer's opacity, painting on its mask, undo; after Even Tone; and as a step in Auto Retouch
+  partly: LightenUnderEyes, EvenTone, AutoRetouch, Tool Brush, Stroke, Undo are scriptable; visual judgement on real portraits is by hand
 - [ ] Retouch › Whiten Teeth and Whiten Eyes: an open smile (teeth, not gums or tongue), a closed mouth ("Found no teeth"), a wink, glasses, a face turned three-quarters and one in profile, a group shot; is 50 % a good start, the layer's opacity up to 100 %, painting on its mask, its Saturation and Lightness in Properties, undo; and both as steps in Auto Retouch
+  partly: WhitenTeeth, WhitenEyes, AutoRetouch, Tool Brush, Stroke, Undo and status bar message are scriptable; visual judgement and Properties sliders are by hand
 - [ ] Retouch › Auto Retouch: a headshot with spots, a clean one and a group shot (does each face get the right skin, and is Standard a good default?), each preset, a step switched off, a face given its own settings and one switched off, clicking a face on the canvas, the circles following Sensitivity, the groups' and layers' opacities afterwards, undo in one step, the settings remembered next time, and the message with no faces
+  partly: AutoRetouch Natural|Standard|Strong, Undo and no-faces status message are scriptable; per-face dialog toggles, canvas face clicks, Sensitivity circles, persistence and visual judgement are by hand
 - [ ] Auto Retouch's looks: save a face's settings under a name (the button and Enter), restart Omapix and choose it on another photo, for one face of a group shot and for a headshot; change a look and save it again; Delete; Enter and Esc in the name box leave the dialog open
+  by hand: Auto Retouch looks dialog UI, Enter/Esc key handling and restart persistence
 - [ ] Retouch › Fill Beard, on a real patchy beard: gaps painted in Quick Mask, small and large (does it read as hair, do strands run the right way, does tone match?), a full beard, stubble, a face with no beard, and undo
+  partly: QuickMask, Tool Brush, Stroke, FillBeard, Undo are scriptable; hair realism and tone match on real beards are by hand
 - [ ] Retouch › Soften Scars: an acne scar and a long scar painted with a soft brush at 100 % (is 60 % a good start, does the stroke's edge show?), a stroke over a lip or brow (left alone), after Auto Retouch, a photo with no faces (the message), Cancel while it's finding skin, and undo
+  partly: SoftenScars, AutoRetouch, Tool Brush, Stroke, Undo and no-faces message are scriptable; Cancel mid-detection and scar blend quality are by hand
 - [ ] Auto Retouch's Blemishes layer and Keep Beauty Marks: acne at each preset and Find Blemishes at 100 (are the heals seamless, does a false heal show, are too many circled?), a face with moles and one with freckles with Keep Beauty Marks on and off, and Retouch › Heal Blemishes with its Sensitivity now reaching further
+  partly: AutoRetouch Natural|Standard|Strong, HealBlemishes are scriptable; Sensitivity/Keep Beauty Marks dialog controls and visual judgement on real skin are by hand
 - [ ] Auto Retouch's Forehead Lines, Crow's Feet, Smile Lines and Eye Bags: each slider on its own, one switched off (no layer), smile lines on a broad smile and a neutral face and a three-quarter one (does the area sit on the fold, and is the fold softened or does it need more than the fine bands?)
+  partly: AutoRetouch is scriptable for default preset layers; per-slider isolation in the dialog and visual judgement on real faces are by hand
 - [ ] Auto Retouch's Stray Hairs: dark hairs across a cheek, the forehead and the jaw (all of each hair gone, and does the fill show at 100 %?), hairs round the eyes and smile lines (left, as are lashes and eyeliner), a brow, the hairline, the face's edge against the background, a face with no strays (no layer), the slider, and erasing a fill from its mask
+  partly: AutoRetouch, Tool Eraser, Stroke are scriptable; slider tuning and visual inspection on real portraits are by hand
 - [ ] Auto Retouch's Crow's Feet on cat-eye eyeliner (MJR00599): the liner and its wing are left alone, the crow's feet still softened
+  partly: AutoRetouch on MJR00599 is scriptable to check pixel diff; visual inspection of the liner/wing at 100 % is by hand
 - [ ] Auto Retouch with something in front of a face (the leaf on MJR00599): none of its layers reach the leaf, and bare skin beside it is still smoothed
+  partly: AutoRetouch on MJR00599 is scriptable to check mask bounds vs the leaf; visual inspection is by hand
 - [ ] Skin split between people: Auto Retouch on group shots (two side by side, an arm round a shoulder, someone in front of someone else): each face's Smooth Skin mask covers that person's neck, arms and hands and nobody else's; and the same without the pose model installed
+  partly: AutoRetouch on group shots is scriptable to inspect each Smooth Skin mask; visual inspection and testing without the pose model are by hand
 - [ ] Retouch › Even Tone: a headshot, a darker-skinned face and a half-length (is 60 % a good default, and does the face keep its shape at 100 %?), Size from 0 to 100, the preview box (dragging, holding for before), the group's opacity and painting on the Dodge and Burn masks afterwards, after Smooth Skin, undo, and the message with no faces
+  partly: EvenTone, SmoothSkin, Tool Brush, Stroke, Undo and no-faces message are scriptable; Size slider, preview box and visual judgement are by hand
 - [ ] Retouch › Heal Blemishes: faces with real spots and with clean skin, Sensitivity from 0 to 100 % (do the circles pick the right spots, and is 50 % a good default?), the heals at 100 %, a group shot, erasing one heal from the layer, undo, and the message with no faces
+  partly: HealBlemishes, Tool Eraser, Stroke, Undo and no-faces message are scriptable; Sensitivity circles and visual judgement on real skin are by hand
 - [ ] Select › Skin and Hair: a headshot, a 24 MP half-length and a group shot, with Shift and Alt, the first use (loading), eyes, brows and lips left out of Skin at 100 %, then Feather and a mask from it, and the message without the models
+  partly: SelectSkin, SelectHair, Feather, AddMask and missing-model message are scriptable; Shift/Alt combining and visual edge quality are by hand
 - [ ] Object Selection: W then Shift+W, click a face, a dress and a prop, drag boxes, Shift and Alt, the first use (model loading) and after editing (analysed again), and how the edges look at 100 %
+  partly: Stroke after edits can verify re-analysis (needs a new step: Tool ObjectSelection); Shift/Alt, tool cycling and 100 % edge quality are by hand
 - [ ] Navigator and Histogram panels: Window menu toggles strip, Navigator thumbnail drag pans canvas, zoom slider and field, and Histogram Colors and Luminosity views with statistics
+  partly: ShowNavigator, ShowHistogram exist; panel UI dragging, zoom field and live statistics are by hand
 - [ ] Gradient tool: `G` shortcut, dragging linear and radial gradients on pixels and masks, Shift constraint to 45°, Foreground to Background and Foreground to Transparent, Reverse, Opacity with number keys, within a selection, and one undo step
+  partly: Tool Gradient, Color, Opacity, Stroke, AddMask, Tool Marquee, Undo are scriptable (needs a new step: GradientType linear|radial, GradientColors fg_bg|fg_trans, Reverse); Shift 45° constraint and G/number keys are by hand
 - [ ] Paint Bucket tool: `G` and Shift+G to switch with Gradient, click fills contiguous similar colour with foreground, Tolerance, Anti-alias, Contiguous, All Layers, Opacity slider and number keys, on pixels and masks, within a selection, and one undo step
+  partly: Tool PaintBucket, Tolerance, Opacity, Color, Stroke, AddMask, Tool Marquee, Undo are scriptable (needs a new step: Contiguous on|off, Sample current|all); G/Shift+G and number keys are by hand
 - [x] Dodge, Burn and Sponge tools: `O` and Shift+O, Dodge lightens and Burn darkens (Shadows, Midtones, Highlights with Protect Tones), Sponge saturates/desaturates with Vibrance, Alt swaps Dodge/Burn and Sponge mode, 1–9 set Exposure/Flow, works on layers and masks, and one undo step
 - [ ] Image rotation (180°, 90° CW, 90° CCW) and canvas flips (horizontal, vertical): layers, masks, selections, alpha channels, canvas fit, and undo/redo
+  scriptable: Rotate180, Rotate90Cw, Rotate90Ccw, FlipCanvasHorizontal, FlipCanvasVertical, AddMask, SaveSelection, Undo, Redo
 - [ ] EXIF metadata preservation: open a camera JPEG/TIFF with capture date, camera and lens, save to .ora, reopen, export JPEG/TIFF, and verify with exiftool that DateTimeOriginal, camera and lens survive
+  scriptable: Save, ExportTiff, ExportJpeg (needs a new step: ExportTiff <path>, ExportJpeg <path>, plus exiftool check)
 - [ ] Curves: grabbing points quickly and from a little off, typing Input and Output for a selected point, switching channel or layer clears it
+  by hand: pointer grab feel and Curves dialog input/selection interaction
 - [ ] Mask menu: Replace Mask with Selection, and Add, Subtract and Intersect Selection with the mask, on a feathered selection
+  by hand: mask context menu actions (no commands for Replace/Add/Subtract/Intersect Mask with Selection)
 - [ ] Sample per tool: set Spot Healing to Current Layer and the Eyedropper to Current & Below, switch between them, restart, and check each kept its own
+  by hand: restart persistence of per-tool Sample settings
 - [ ] Adjustment presets: save a grade group (Curves, Hue/Saturation, a clipped layer, a Soft Light group) as a preset, open another image, add it from Presets, check it looks the same and stays editable, then undo; save over it (the warning and Replace) and delete it
+  partly: NewCurves, NewHueSaturation, ClippingMask, GroupLayers, SaveAdjustmentPreset, Undo exist; preset name/replace/delete dialogs and second-image check are by hand
 - [ ] Export Adjustments as LUT: export a grade, load the .cube in a Color Lookup layer on another image and in darktable's LUT 3D, and compare with the adjustment layers
+  partly: ExportAdjustmentLut, NewColorLookup can be tested in engine/script (needs a new step: ExportAdjustmentLut <path>, LoadLut <path>); darktable LUT 3D comparison is by hand
 - [ ] Image Size, Canvas Size and Crop: Image Size on a layered 24 MP retouch (half size and 150 %) with masks and a selection, Constrain Proportions; Canvas Size with each anchor and extension colour; the Crop tool's handles with Shift and Alt, moving the box, drawing a new one, Enter and Esc; Image › Crop to a selection; and undo after each
+  partly: Tool Crop, Stroke, Crop, Undo are scriptable (needs a new step: ImageSize <w> <h>, CanvasSize <w> <h> <anchor>); Crop handle drags with Shift/Alt and dialogs are by hand
 - [ ] Image Size, Enlarge with AI: a retouched portrait (with a Blemishes layer, a mask and a selection) to 200 % and to 150 %, the status bar count, the Upscale layer at 100 % against it hidden (hair, lashes, skin, any seams or tone change), its opacity, undo as one step, a ProPhoto TIFF, the checkbox greyed out for a smaller size and without darktable's model, and a crop made while it runs
+  partly: upscale result and Undo are scriptable (needs a new step: ImageSize <w> <h> ai); status bar count, dialog checkbox state, cropping mid-run and visual quality at 100 % are by hand
 - [ ] Crop tool with a selection: the box starts on the selection's bounds, Enter crops to it, Esc goes back to the tool before; without one it starts round the image
+  partly: Tool Marquee, Stroke, Tool Crop, Crop are scriptable; Esc returning to previous tool and box bounds UI are by hand
 - [ ] jpegli JPEG export: File › Export as JPEG and Batch Export of a 24 MP portrait, the file size, a look at skin, hair and a smooth backdrop at 100 %, and the colours and EXIF in a browser and in darktable
+  partly: ExportJpeg, BatchExport can produce the file (needs a new step: ExportJpeg <path>); visual quality at 100 % and colours/EXIF in a browser and darktable are by hand
 - [ ] Export as PNG: a cut-out with transparency and an opaque portrait, opened in a browser and in GIMP (transparency, colours, EXIF), and how long a 24 MP one takes
+  partly: ExportPng can produce the file (needs a new step: ExportPng <path>); opening in a browser and GIMP is by hand
 - [ ] Liquify on a 24 MP portrait: each brush and its key, Size with [ and ], Pressure, Alt with Pucker, Bloat and Push Left, holding still with Bloat, big brushes dragged fast, Enter, Esc, Ctrl+Z, and reopening Liquify to Reconstruct an earlier move; then Ctrl+Z and Ctrl+Shift+Z on single strokes while it's open, dragging Restore All, Alt+right-drag to size the brush, and light and heavy pen strokes
+  by hand: interactive Liquify brushes, keys, Alt/pen pressure, Restore All drag and fast-drag feel
 - [ ] Retouch › Finish: stamps visible image onto "Sharpen" layer with saved Unsharp Mask settings, adds "Grain" layer in Overlay with saved Add Noise settings, and single undo step reverts both
+  scriptable: Finish, Undo
 - [ ] File › Batch Export…: dialog with source file picker, output folder, checkboxes for resize long edge, sharpen and grain, format choice (JPEG with quality slider, 16-bit TIFF), status bar progress, summary message, and settings remembered between runs
+  by hand: Batch Export dialog, OS file/folder pickers, progress UI and restart persistence
 - [ ] Face-Aware Liquify on a 24 MP headshot and a group shot: A opens the panel (the first time loads the models), each slider both ways and how fast it follows zoomed to fit and at 100 % (and that nothing jumps when it's let go), Preview off and on, Symmetry on a face looking at the camera and one turned away, Reset, another face's sliders, a brush stroke over a reshaped face, Reconstruct and Restore All (the sliders' work stays), Ctrl+Z through a drag and a stroke, Enter, then Liquify again (the sliders are where they were) and Esc
+  by hand: interactive Face-Aware Liquify sliders, 24 MP responsiveness, Preview/Symmetry and brush interaction
 - [ ] Face-Aware Liquify, each eye and brow: Left Eye, Right Eye, Left Brow and Right Brow unfold and fold (and the others), the dot on a folded group with a slider set, one eye made larger to match the other, Height, Width, Tilt and Lift both ways, a brow's Lift and Tilt, that left is the left of the picture, Symmetry's note on a turned face and none on one looking at the camera, every group open on the laptop's screen (they scroll), Reset
+  by hand: Face-Aware Liquify panel layout, scrolling on laptop screen, fold/dot indicators and visual eye/brow checks
 - [x] Esc deselects: with a marquee, Magic Wand and Object Selection selection; and still cancels Free Transform, Crop, Liquify, a layer rename, an eyedropper and a menu first, and leaves Quick Mask alone
 - [x] Select › Subject on a few portraits (hair against a busy background, two people, a full-length shot), the first use (loading), how hair edges look at 100 %, then Feather and Add Mask on the result; Help › AI Models with and without a model, and `scripts/fetch-models.sh` finding SAM in darktable's folder
 - [ ] Auto-Align Layers: two handheld frames of a group (drop the second on the first, Shift+click both layers, Edit › Auto-Align Layers), the background at 100 % with the top layer at 50 %, a head masked in from the other frame; a layer with Lock Position on as the one that stays; a layer of something else, named in the status bar
+  partly: LockPosition, AutoAlignLayers and status bar message are scriptable (needs a new step: SelectLayers <indices>, PlaceLayer <path>); drag-and-drop and visual alignment check at 100 % are by hand
 - [ ] Photomerge: three or four overlapping handheld frames (File › Automate › Photomerge…), the seams at 100 %, painting on a mask to move a seam off someone, then Crop and Save As; a photo of something else among them, named in the status bar
+  partly: Photomerge, Tool Brush, Stroke, Crop and status bar message are scriptable (needs a new step: Photomerge <paths...>); file picker, Save As portal and seam quality at 100 % are by hand
 - [ ] Merge to HDR: a handheld three-frame bracket (File › Automate › Merge to HDR…), the Merged layer at 100 % for doubled edges, highlights and shadows against the middle exposure, a Curves layer on top, and an exposure layer shown and masked in by hand
+  partly: MergeToHdr, NewCurves, AddMask, Tool Brush, Stroke are scriptable (needs a new step: MergeToHdr <paths...>); file picker and visual ghost/tone check at 100 % are by hand
 - [ ] Frequency Separation's edit layers: both dialogs with Add edit layers ticked, cloning and healing texture on High Edit and blurring a lassoed patch of Low Edit on a 24 MP portrait, erasing part of a copy and hiding it to get the layer back, unticked (as before), the tick remembered after a restart, Defaults, and how big the .ora is
+  partly: FrequencySeparation, FrequencySeparation3, Tool Clone|Heal|Lasso|Eraser, Stroke, Filter, Save are scriptable; dialog checkbox, Defaults, restart persistence and .ora size check are by hand
 - [ ] Export for Web: Ctrl+Alt+Shift+S on a layered 24 MP portrait, the file size following the quality slider, the format, the long edge and metadata, the size in px for a landscape and a portrait image, Export… and the file's real size against the one shown, the JPEG and PNG in a browser, `exiftool` with metadata off, the settings after a restart, Defaults, and Cancel
+  by hand: Export for Web dialog live size estimate, Export portal, browser, exiftool and restart persistence
 - [ ] Retouch › Makeup: a bare-faced headshot and one already made up, a darker-skinned face, a face turned three-quarters (nothing on the background, none round the far eye), a group shot, a man (is it too much to start with?); each layer's opacity up to 100 %, the group's opacity, painting and erasing on Lipstick and Blush, another lipstick colour with `/` and a fill, the edges of the lips and the eyeliner at 100 %, undo in one step, and the message with no faces
+  partly: Makeup, Tool Brush|Eraser, LockTransparent, FillForeground, Color, Stroke, Undo and no-faces message are scriptable; visual judgement on diverse faces at 100 % is by hand
 - [ ] Face-Aware Liquify's Auto: a headshot looking at the camera (what it sets, and does the face still look like the person with Preview off and on?), one with a head tilt, one with a smirk or a raised eyebrow (does it flatten the expression?), a face turned three-quarters (little or nothing), a group shot (each face its own), the other sliders kept, the button greyed once applied, Ctrl+Z, and Reset
+  by hand: Face-Aware Liquify Auto button state, Preview off/on and likeness/expression judgement
 - [ ] Body Reshape's Level Shoulders: a portrait with one shoulder a little higher (what the panel says they are from level, and the slider at 50 and 100 with Preview off and on), a neckline and a necklace across the chest, long hair on the shoulders, a hand on a hip and a raised arm, a wall or a horizon behind the shoulders, a close-up with the shoulders at the bottom edge, someone lying down (nothing is done, and it says so), with Waist and Neck Length set as well, Ctrl+Z, and Reset
+  by hand: Body Reshape panel UI, Preview off/on and visual distortion check on real portraits
 - [ ] Body Reshape with straight lines behind: someone in a doorway or against a brick or tiled wall, a horizon or a skirting board behind the waist, a railing or a fence (Waist, Hips, Shoulders, Arms and Legs at −50 and 50, Level Shoulders and Neck Length at 100: the lines should stay straight up to the person, with at most a short kink there), the same on a portrait in the woods (nothing looks different from before), a close-up against a wall, stray hair and a loose sleeve against lines (not cut off or dented), and looked at at 100 % as well as fitted
+  by hand: Body Reshape sliders and visual background-line check at 100 % and fitted
 - [ ] Undo/redo after each of the above (done for everything checked)
+  partly: Undo, Redo are scriptable for every scripted item; by-hand items are verified by hand
 
 ## 3. Retouching and editing
 
