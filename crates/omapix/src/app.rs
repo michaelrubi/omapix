@@ -4593,7 +4593,9 @@ impl App {
             }
             ToolInput::StrokeEnd => {
                 self.move_from = None;
-                editor.end_move();
+                if editor.end_move() {
+                    self.message("Pixels moved past the canvas edge were cut off. Undo to get them back", false);
+                }
             }
             ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
         }
@@ -5849,7 +5851,9 @@ impl eframe::App for App {
                 if let Some(editor) = &mut self.editor {
                     if editor.begin_move("Nudge", false, background) {
                         editor.move_to(dx, dy);
-                        editor.end_move();
+                        if editor.end_move() {
+                            self.message("Pixels moved past the canvas edge were cut off. Undo to get them back", false);
+                        }
                     } else if editor.doc.layer(editor.active).is_some_and(|l| !l.can_move()) {
                         self.message("Could not use the move tool because the layer is locked", true);
                     }
