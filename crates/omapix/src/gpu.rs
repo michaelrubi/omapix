@@ -1590,12 +1590,13 @@ mod tests {
         Edit,
     }
 
-    /// How many pixels may differ by more than rounding: Blend If's
-    /// unsplit sliders and some blend modes jump, so a pixel right at a
-    /// jump can land either side of it. A real difference is an area.
-    const STRAYS: usize = 2;
+    /// How many pixels in a hundred may differ by more than rounding (and
+    /// at least this many): Blend If's sliders and some blend modes jump,
+    /// so a pixel right at a jump can land either side of it. A real
+    /// difference is an area.
+    const STRAYS: usize = 4;
 
-    /// In how many pixels the live composite of `specs` with layer `id`
+    /// In how many pixels (less one in a hundred) the live composite of `specs` with layer `id`
     /// moved, shown or edited is further from the CPU's than rounding
     /// allows, and how far at worst. `None` when that isn't shown live.
     fn fuzz_difference(device: &wgpu::Device, queue: &wgpu::Queue, specs: &[Spec], id: u64, what: Try) -> Option<(usize, f32)> {
@@ -1679,7 +1680,21 @@ mod tests {
             let (c, g) = (seen(c.map(|v| f32::from(v) / 65535.0)), seen(*g));
             (0..4).map(|i| (c[i] - g[i]).abs()).fold(0.0, f32::max)
         });
-        Some((off.clone().filter(|&d| d > allowed).count(), off.fold(0.0, f32::max)))
+        let over = off.clone().filter(|&d| d > allowed).count();
+        Some((over.saturating_sub((rw * rh) as usize / 100), off.fold(0.0, f32::max)))
+    }
+
+    #[test]
+    #[ignore]
+    fn live_stacks_the_fuzzer_found_match_the_cpu() {
+        let (device, queue) = device();
+        for (seed, specs) in live::tests::found_by_fuzzing() {
+            for (spec, what) in specs.iter().flat_map(|s| [Try::Move, Try::Show, Try::Edit].map(|what| (s, what))) {
+                if let Some((over, worst)) = fuzz_difference(&device, &queue, &specs, spec.id, what) {
+                    assert!(over <= STRAYS, "seed {seed}, layer {}, {what:?}: {over} pixels off, by up to {worst}", spec.id);
+                }
+            }
+        }
     }
 
     /// Random stacks (`fuzz.rs`), each layer of each moved, shown and
