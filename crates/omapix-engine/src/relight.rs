@@ -424,11 +424,56 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
         return image.clone();
     }
     let pixels = image.to_vec();
-    let luma: Vec<f32> = pixels.par_iter().map(|p| luminance([p[0], p[1], p[2]].map(|v| f32::from(v) / MAX))).collect();
     let sigma = options.sigma(whole);
-    let shape = crate::denoise::blur(&luma, w, h, sigma);
-    let d = step(sigma) as isize;
-    let at = |x: isize, y: isize| shape[y.clamp(0, h as isize - 1) as usize * w + x.clamp(0, w as isize - 1) as usize];
+    let d = step(sigma) as f32;
+    // The brightness's shape, blurred, on a grid `f` pixels a cell: the
+    // blur is broad enough not to need every pixel. Cells are aligned to
+    // the whole image, so a part comes out as in it.
+    let f = ((sigma / 3.0) as usize).clamp(1, 8);
+    let (ox0, oy0) = (origin.0 as usize, origin.1 as usize);
+    let (cx0, cy0) = (ox0 / f, oy0 / f);
+    let (sw, sh) = ((ox0 + w - 1) / f - cx0 + 1, (oy0 + h - 1) / f - cy0 + 1);
+    let small: Vec<f32> = (0..sw * sh)
+        .into_par_iter()
+        .map(|i| {
+            let (gx, gy) = ((cx0 + i % sw) * f, (cy0 + i / sw) * f);
+            let (x0, y0) = (gx.max(ox0) - ox0, gy.max(oy0) - oy0);
+            let (x1, y1) = ((gx + f).min(ox0 + w) - ox0, (gy + f).min(oy0 + h) - oy0);
+            let mut sum = 0.0;
+            for y in y0..y1 {
+                for p in &pixels[y * w + x0..y * w + x1] {
+                    sum += luminance([p[0], p[1], p[2]].map(|v| f32::from(v) / MAX));
+                }
+            }
+            sum / ((x1 - x0) * (y1 - y0)).max(1) as f32
+        })
+        .collect();
+    let shape = crate::denoise::blur(&small, sw, sh, sigma / f as f32);
+    // Its slopes per cell, over the same step as at full size.
+    let k = ((d / f as f32).round() as usize).max(1);
+    let s = |x: usize, y: usize| shape[y.min(sh - 1) * sw + x.min(sw - 1)];
+    let scale = d * SLOPE / (k * f) as f32;
+    let slopes: Vec<[f32; 2]> = (0..sw * sh)
+        .map(|i| {
+            let (x, y) = (i % sw, i / sw);
+            [
+                (s(x.saturating_sub(k), y) - s(x + k, y)) * scale,
+                (s(x, y.saturating_sub(k)) - s(x, y + k)) * scale,
+            ]
+        })
+        .collect();
+    // A pixel's slopes, between the cells' middles.
+    let half = (f as f32 - 1.0) / 2.0;
+    let slope_at = |x: usize, y: usize| {
+        let u = (((ox0 + x) as f32 - half) / f as f32 - cx0 as f32).clamp(0.0, (sw - 1) as f32);
+        let v = (((oy0 + y) as f32 - half) / f as f32 - cy0 as f32).clamp(0.0, (sh - 1) as f32);
+        let (x0, y0) = (u as usize, v as usize);
+        let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
+        let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+        let g = |x: usize, y: usize, c: usize| slopes[y * sw + x][c];
+        let mix = |c| (g(x0, y0, c) * (1.0 - fx) + g(x1, y0, c) * fx) * (1.0 - fy) + (g(x0, y1, c) * (1.0 - fx) + g(x1, y1, c) * fx) * fy;
+        (mix(0), mix(1))
+    };
 
     let [lx, ly, lz] = options.lamp(whole);
     // What each face shades from the lamp.
@@ -444,7 +489,7 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
         .enumerate()
         .map(|(i, p)| {
             let (x, y) = ((i % w) as isize, (i / w) as isize);
-            let (mut nx, mut ny) = ((at(x - d, y) - at(x + d, y)) * SLOPE, (at(x, y - d) - at(x, y + d)) * SLOPE);
+            let (mut nx, mut ny) = slope_at(x as usize, y as usize);
             let (mut skin, mut lit_by): (f32, f32) = (0.0, 1.0);
             for (face, shadow) in faces.iter().zip(&shadows) {
                 let (px, py) = (ox + x as f32, oy + y as f32);
