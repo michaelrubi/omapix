@@ -154,6 +154,9 @@ pub struct Stroke {
     limit: Option<Tiled<u16>>,
     /// Keep each pixel's alpha (Lock Transparent Pixels).
     keep_alpha: bool,
+    /// Copied pixels replace what's there, transparency included, rather
+    /// than being laid over it (the History Brush).
+    replace: bool,
     /// The picture each dab stamps, in place of a round one.
     tip: Option<Arc<Tip>>,
     /// Texture's pattern, levelled as its settings say.
@@ -204,6 +207,7 @@ impl Stroke {
             source: None,
             limit: None,
             keep_alpha: false,
+            replace: false,
             tip: None,
             pattern: None,
             dual_tip: None,
@@ -263,6 +267,13 @@ impl Stroke {
         }
         self.dual_tip = parts.dual_tip.clone();
         self.background = parts.background;
+        self
+    }
+
+    /// Have copied pixels replace what's there, transparency included, as
+    /// the History Brush paints a layer back to how it was.
+    pub fn replacing(mut self) -> Self {
+        self.replace = true;
         self
     }
 
@@ -638,6 +649,8 @@ impl Stroke {
                             let (x, y) = (tx + i as u32 % TILE, ty + i as u32 / TILE);
                             if a <= 0.0 || x >= w || y >= h {
                                 out[i]
+                            } else if self.replace && !self.keep_alpha {
+                                towards(out[i], self.copied(x, y), a)
                             } else {
                                 self.paint_onto(out[i], a, Paint::Color(self.copied(x, y)))
                             }
@@ -1032,6 +1045,24 @@ fn tip_reach(radius: f32, hardness: f32) -> f32 {
     core + 2.6 * shoulder
 }
 
+/// `base` moved `a` of the way to `to`, alpha included, the colours
+/// weighted by their alpha so a transparent pixel's colour doesn't show.
+fn towards(base: Pixel, to: Pixel, a: f32) -> Pixel {
+    let a = a.min(1.0);
+    let (base_a, to_a) = (f32::from(base[3]) / MAX, f32::from(to[3]) / MAX);
+    let out_a = base_a + (to_a - base_a) * a;
+    if out_a <= 0.0 {
+        return [0; 4];
+    }
+    let mut out = [0u16; 4];
+    for ch in 0..3 {
+        let v = (f32::from(base[ch]) * base_a * (1.0 - a) + f32::from(to[ch]) * to_a * a) / out_a;
+        out[ch] = v.round().clamp(0.0, MAX) as u16;
+    }
+    out[3] = (out_a * MAX).round() as u16;
+    out
+}
+
 fn paint_pixel(base: Pixel, a: f32, paint: Paint) -> Pixel {
     if a <= 0.0 {
         return base;
@@ -1339,6 +1370,37 @@ mod tests {
         s.apply(&mut out, &tiles);
         let Surface::Pixels(out) = out else { unreachable!() };
         assert_eq!(out.get(150, 100), img.get(150, 150));
+    }
+
+    #[test]
+    fn a_replacing_clone_brings_transparency_back_and_a_soft_edge_fades_to_it() {
+        let painted = Tiled::new(300, 200, [50000, 10000, 10000, 65535]);
+        let before = Tiled::new(300, 200, [0, 0, 0, 0]);
+        let settings = BrushSettings {
+            size: 30.0,
+            hardness: 0.0,
+            ..Default::default()
+        };
+        let paint = |replacing: bool| {
+            let surface = Surface::Pixels(painted.clone());
+            let mut s = Stroke::new(settings, Paint::Clone { dx: 0, dy: 0 }, surface.clone()).sampling(before.clone());
+            if replacing {
+                s = s.replacing();
+            }
+            let mut out = surface;
+            let tiles = s.add_point(150.0, 100.0, 1.0);
+            s.apply(&mut out, &tiles);
+            let Surface::Pixels(out) = out else { unreachable!() };
+            out
+        };
+        let laid = paint(false);
+        assert_eq!(laid.get(150, 100), painted.get(150, 100), "laid over, nothing changes");
+        let out = paint(true);
+        assert!(out.get(150, 100)[3] < 656, "the middle's transparent again, but for a soft tip's last 1 %");
+        let edge = out.get(160, 100);
+        assert!(edge[3] > 0 && edge[3] < 65535, "the soft edge fades: {edge:?}");
+        assert_eq!(edge[..3], [50000, 10000, 10000], "without darkening the colour that's left");
+        assert_eq!(out.get(10, 10), painted.get(10, 10), "outside the stroke");
     }
 
     #[test]

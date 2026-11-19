@@ -20,6 +20,7 @@ const MOVE_ICON: &str = "\u{f047}";
 const BRUSH_ICON: &str = "\u{f1fc}";
 const ERASER_ICON: &str = "\u{f12d}";
 const CLONE_ICON: &str = "\u{f24d}";
+pub(crate) const HISTORY_ICON: &str = "\u{f1da}";
 const HEAL_ICON: &str = "\u{f0fa}";
 const SPOT_ICON: &str = "\u{f462}";
 const WAND_ICON: &str = "\u{f0d0}";
@@ -50,6 +51,7 @@ pub enum ToolGroup {
     Healing,
     Brush,
     CloneStamp,
+    HistoryBrush,
     Eraser,
     Gradient,
     Dodge,
@@ -66,6 +68,7 @@ impl ToolGroup {
         ToolGroup::Healing,
         ToolGroup::Brush,
         ToolGroup::CloneStamp,
+        ToolGroup::HistoryBrush,
         ToolGroup::Eraser,
         ToolGroup::Gradient,
         ToolGroup::Dodge,
@@ -82,6 +85,7 @@ impl ToolGroup {
             ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
             ToolGroup::Brush => &[Tool::Brush],
             ToolGroup::CloneStamp => &[Tool::CloneStamp],
+            ToolGroup::HistoryBrush => &[Tool::HistoryBrush],
             ToolGroup::Eraser => &[Tool::Eraser],
             ToolGroup::Gradient => &[Tool::Gradient, Tool::PaintBucket],
             ToolGroup::Dodge => &[Tool::Dodge, Tool::Burn, Tool::Sponge],
@@ -99,6 +103,7 @@ impl ToolGroup {
             ToolGroup::Healing => Key::J,
             ToolGroup::Brush => Key::B,
             ToolGroup::CloneStamp => Key::S,
+            ToolGroup::HistoryBrush => Key::Y,
             ToolGroup::Eraser => Key::E,
             ToolGroup::Gradient => Key::G,
             ToolGroup::Dodge => Key::O,
@@ -117,6 +122,7 @@ pub enum Tool {
     Brush,
     Eraser,
     CloneStamp,
+    HistoryBrush,
     SpotHealing,
     Healing,
     Marquee,
@@ -141,6 +147,7 @@ impl Tool {
             Tool::Brush => "Brush",
             Tool::Eraser => "Eraser",
             Tool::CloneStamp => "Clone Stamp",
+            Tool::HistoryBrush => "History Brush",
             Tool::SpotHealing => "Spot Healing Brush",
             Tool::Healing => "Healing Brush",
             Tool::Marquee => "Rectangular Marquee",
@@ -165,6 +172,7 @@ impl Tool {
             Tool::Brush => BRUSH_ICON,
             Tool::Eraser => ERASER_ICON,
             Tool::CloneStamp => CLONE_ICON,
+            Tool::HistoryBrush => HISTORY_ICON,
             Tool::SpotHealing => SPOT_ICON,
             Tool::Healing => HEAL_ICON,
             Tool::Marquee => MARQUEE_ICON,
@@ -197,6 +205,7 @@ impl Tool {
             Tool::SpotHealing | Tool::Healing => ToolGroup::Healing,
             Tool::Brush => ToolGroup::Brush,
             Tool::CloneStamp => ToolGroup::CloneStamp,
+            Tool::HistoryBrush => ToolGroup::HistoryBrush,
             Tool::Eraser => ToolGroup::Eraser,
             Tool::Gradient | Tool::PaintBucket => ToolGroup::Gradient,
             Tool::Dodge | Tool::Burn | Tool::Sponge => ToolGroup::Dodge,
@@ -230,7 +239,7 @@ impl Tool {
 
     /// Tools where holding Alt picks up a colour, as the Eyedropper does.
     pub fn alt_picks_colour(self) -> bool {
-        self.paints() && !self.copies() && !matches!(self, Tool::Dodge | Tool::Burn | Tool::Sponge)
+        self.paints() && !self.copies() && !matches!(self, Tool::Dodge | Tool::Burn | Tool::Sponge | Tool::HistoryBrush)
     }
 }
 
@@ -494,6 +503,7 @@ pub struct Tools {
     brush: BrushSettings,
     eraser: BrushSettings,
     clone: BrushSettings,
+    history: BrushSettings,
     spot: BrushSettings,
     heal: BrushSettings,
     quick: BrushSettings,
@@ -577,6 +587,10 @@ impl Default for Tools {
                 hardness: 0.5,
                 ..BrushSettings::default()
             },
+            history: BrushSettings {
+                hardness: 0.5,
+                ..BrushSettings::default()
+            },
             spot: BrushSettings {
                 size: 30.0,
                 hardness: 0.6,
@@ -655,6 +669,7 @@ impl Tools {
             Tool::QuickSelection => self.quick,
             Tool::Eraser => self.eraser,
             Tool::CloneStamp => self.clone,
+            Tool::HistoryBrush => self.history,
             Tool::SpotHealing => self.spot,
             Tool::Healing => self.heal,
             Tool::Dodge => self.dodge,
@@ -700,6 +715,7 @@ impl Tools {
             Tool::QuickSelection => &mut self.quick,
             Tool::Eraser => &mut self.eraser,
             Tool::CloneStamp => &mut self.clone,
+            Tool::HistoryBrush => &mut self.history,
             Tool::SpotHealing => &mut self.spot,
             Tool::Healing => &mut self.heal,
             Tool::Dodge => &mut self.dodge,
@@ -736,6 +752,10 @@ impl Tools {
         }
         if self.tool == Tool::SpotHealing {
             return (target == Target::Pixels).then_some(Paint::SpotHeal);
+        }
+        // Painted from the history source by the editor.
+        if self.tool == Tool::HistoryBrush {
+            return (target == Target::Pixels).then_some(Paint::Clone { dx: 0, dy: 0 });
         }
         if self.tool.copies() {
             if target == Target::Mask || target == Target::QuickMask {
@@ -857,6 +877,7 @@ impl Tools {
             ToolGroup::Eyedropper => Tool::Eyedropper,
             ToolGroup::Brush => Tool::Brush,
             ToolGroup::CloneStamp => Tool::CloneStamp,
+            ToolGroup::HistoryBrush => Tool::HistoryBrush,
             ToolGroup::Eraser => Tool::Eraser,
         }
     }
