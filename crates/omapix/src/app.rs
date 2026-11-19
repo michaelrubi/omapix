@@ -1665,6 +1665,7 @@ impl App {
             Command::Paste | Command::PasteInPlace => self.pasting.is_none(),
             Command::PasteInto => editor.doc.selection.is_some() && self.pasting.is_none(),
             Command::DeleteMask | Command::ToggleMask | Command::MaskOverlay | Command::MaskDensity => has_mask,
+            Command::Relight => editor.target == Target::Pixels && !no_pixels,
             Command::GaussianBlur | Command::SmartBlur | Command::HighPass | Command::UnsharpMask | Command::SmartSharpen | Command::ReduceNoise => {
                 match editor.target {
                     Target::Mask => has_mask,
@@ -1894,7 +1895,13 @@ impl App {
                     preview: true,
                 });
             }
-            Command::GaussianBlur | Command::SmartBlur | Command::HighPass | Command::UnsharpMask | Command::SmartSharpen | Command::ReduceNoise => {
+            Command::GaussianBlur
+            | Command::SmartBlur
+            | Command::HighPass
+            | Command::UnsharpMask
+            | Command::SmartSharpen
+            | Command::ReduceNoise
+            | Command::Relight => {
                 if let Some(editor) = &self.editor
                     && editor.target == Target::Pixels
                     && editor.doc.layer(editor.active).is_some_and(|l| !l.can_paint_pixels())
@@ -1912,6 +1919,7 @@ impl App {
                     Command::UnsharpMask => settings.unsharp_mask.into(),
                     Command::SmartSharpen => LayerFilter::SmartSharpen(settings.smart_sharpen),
                     Command::ReduceNoise => LayerFilter::ReduceNoise(settings.reduce_noise),
+                    Command::Relight => LayerFilter::Relight(settings.relight),
                     _ => unreachable!(),
                 };
                 self.dialog = Some(Dialog::Filter { filter, preview: true });
@@ -2933,6 +2941,9 @@ impl App {
                     self.menu_item(ui, Command::SmartSharpen, None);
                 });
                 self.menu_item(ui, Command::HighPass, None);
+                ui.menu_button("Render", |ui| {
+                    self.menu_item(ui, Command::Relight, None);
+                });
             });
             ui.menu_button("Retouch", |ui| {
                 self.menu_item(ui, Command::AutoRetouch, None);
@@ -3468,6 +3479,7 @@ impl App {
                         LayerFilter::SmartBlur(options) => {
                             smart_blur_controls(ui, options, hint);
                         }
+                        LayerFilter::Relight(options) => relight_controls(ui, options, hint),
                     }
                     ui.add_space(4.0);
                     ui.checkbox(preview, "Preview");
@@ -5272,6 +5284,66 @@ fn reduce_noise_controls(ui: &mut Ui, options: &mut ReduceNoiseOptions, hint: eg
 }
 
 /// Smart Blur's settings, for its dialog.
+/// Relight's light: a pad to drag where it comes from (the dot's direction
+/// from the middle is the Angle, and its distance from the rim the
+/// Altitude, as in Photoshop's Global Light), then how it shines.
+fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOptions, hint: egui::Color32) {
+    ui.horizontal(|ui| {
+        light_pad(ui, &mut options.angle, &mut options.elevation);
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Angle");
+                ui.add(egui::DragValue::new(&mut options.angle).range(-180.0..=180.0).suffix("°").fixed_decimals(0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Altitude");
+                ui.add(egui::DragValue::new(&mut options.elevation).range(0.0..=90.0).suffix("°").fixed_decimals(0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Colour");
+                ui.color_edit_button_srgb(&mut options.colour);
+            });
+        });
+    });
+    for (label, value, range) in [
+        ("Intensity", &mut options.intensity, 0.0..=100.0),
+        ("Ambient", &mut options.ambient, 0.0..=100.0),
+        ("Softness", &mut options.softness, 1.0..=100.0),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::Slider::new(value, range).suffix(" %").fixed_decimals(0));
+        });
+    }
+    ui.label(RichText::new("Ambient fills the shadows. Softness is how broad the shapes the light follows are.").color(hint));
+}
+
+/// Photoshop's light dial: click or drag the dot. Up is light from above.
+fn light_pad(ui: &mut Ui, angle: &mut f32, elevation: &mut f32) -> egui::Response {
+    let size = 96.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let response = ui.interact(rect, egui::Id::new("relight-light-pad"), egui::Sense::click_and_drag());
+    let (centre, radius) = (rect.center(), size / 2.0 - 4.0);
+    if let Some(at) = response.interact_pointer_pos() {
+        let d = at - centre;
+        // Straight left is 180°, not −180°.
+        *angle = match (-d.y).atan2(d.x).to_degrees().round() {
+            -180.0 => 180.0,
+            a => a,
+        };
+        *elevation = (90.0 * (1.0 - (d.length() / radius).min(1.0))).round();
+    }
+    let visuals = ui.style().interact(&response);
+    let painter = ui.painter_at(rect);
+    painter.circle_stroke(centre, radius, visuals.fg_stroke);
+    let (s, c) = angle.to_radians().sin_cos();
+    let reach = radius * (1.0 - elevation.clamp(0.0, 90.0) / 90.0);
+    let dot = centre + egui::vec2(c, -s) * reach;
+    painter.line_segment([centre, dot], visuals.fg_stroke);
+    painter.circle_filled(dot, 5.0, ui.visuals().selection.bg_fill);
+    response.on_hover_text("Where the light comes from: drag the dot")
+}
+
 fn smart_blur_controls(ui: &mut Ui, options: &mut SmartBlurOptions, hint: egui::Color32) {
     ui.horizontal(|ui| {
         ui.label("Radius");
@@ -7193,6 +7265,60 @@ mod tests {
         assert_eq!(editor.undo_label(), Some("Smart Blur"));
         app.run(Command::SmartBlur, &ctx);
         assert!(matches!(app.dialog, Some(Dialog::Filter { filter, .. }) if filter == custom));
+    }
+
+    #[test]
+    fn relight_dialog_takes_the_light_from_the_pad_and_applies() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::Relight, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::Filter { filter: LayerFilter::Relight(o), .. }) if o == Default::default()));
+        let mut time = 0.0;
+        let mut frame = |app: &mut App, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ctx| app.dialogs(ctx));
+            output.textures_delta.clear();
+        };
+        // The dialog takes a few frames to settle in the middle.
+        for _ in 0..5 {
+            frame(&mut app, vec![]);
+        }
+        let pad = ctx.read_response(egui::Id::new("relight-light-pad")).expect("the light pad").rect;
+        // A click at the pad's left rim: light from the left, grazing.
+        let at = egui::pos2(pad.left() + 4.0, pad.center().y);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(at)]);
+        frame(&mut app, vec![button(true)]);
+        frame(&mut app, vec![button(false)]);
+        let Some(Dialog::Filter {
+            filter: LayerFilter::Relight(options),
+            ..
+        }) = app.dialog
+        else {
+            panic!("no Relight dialog");
+        };
+        assert_eq!((options.angle, options.elevation), (180.0, 0.0));
+
+        app.dialog = None;
+        app.apply_filter(LayerFilter::Relight(options), &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        assert_eq!(editor.undo_label(), Some("Relight"));
+        assert_eq!(app.filters.relight, options, "kept for next time");
     }
 
     #[test]

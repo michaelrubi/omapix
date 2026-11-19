@@ -39,7 +39,7 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   Selective Color, Channel Mixer and Color Lookup (`.cube` LUTs), with
   presets and export as a LUT.
 - **Filters:** Gaussian Blur, Smart Blur, High Pass, Unsharp Mask, Smart
-  Sharpen, Add Noise and Reduce Noise, previewed live.
+  Sharpen, Add Noise, Reduce Noise and Relight, previewed live.
 - **Retouching setups in one click:** frequency separation, dodge & burn,
   High Pass sharpening, and a Finish step (sharpen, then grain).
 - **AI retouching, on your own machine:** Auto Retouch, Heal Blemishes,
