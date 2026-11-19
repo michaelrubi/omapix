@@ -40,9 +40,11 @@ pub struct RelightOptions {
     /// How high over the image the lamp hangs, which is how far its light
     /// reaches, as a percentage of the image's shorter side.
     pub reach: f32,
-    /// How strong the lamp is (0–100 %). 0 leaves the image as it is.
+    /// How much light the lamp adds right under it, as a percentage of the
+    /// light the photo had (0–100 %).
     pub intensity: f32,
-    /// Light from everywhere, which fills the shadows (0–100 %).
+    /// How much of the photo's own light is kept, which fills the shadows
+    /// (0–100 %). 100 % with no Intensity leaves the image as it is.
     pub ambient: f32,
     /// How broad the shapes the light follows are (1–100 %).
     pub softness: f32,
@@ -57,8 +59,8 @@ impl Default for RelightOptions {
             x: 0.25,
             y: 0.2,
             reach: 75.0,
-            intensity: 35.0,
-            ambient: 65.0,
+            intensity: 45.0,
+            ambient: 70.0,
             softness: 25.0,
             colour: [255, 255, 255],
         }
@@ -94,6 +96,47 @@ impl RelightOptions {
     }
 }
 
+/// Each 16-bit value, encoded with sRGB's curve, as linear light (0–1).
+fn linear_table() -> Vec<f32> {
+    (0..=u16::MAX)
+        .map(|v| {
+            let v = f32::from(v) / MAX;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        })
+        .collect()
+}
+
+/// `v` (linear) times `gain`, where light added eases into white rather
+/// than clipping, as film's shoulder does.
+fn lighten(v: f32, gain: f32) -> f32 {
+    if gain <= 1.0 || v >= 1.0 {
+        return v * gain;
+    }
+    let room = 1.0 - v;
+    v + room * (1.0 - (-(v * (gain - 1.0)) / room).exp())
+}
+
+/// Linear light encoded with sRGB's curve as 16-bit values, in 65536
+/// steps of its square root, so the shadows keep their precision.
+fn encode_table() -> Vec<u16> {
+    (0..=u16::MAX)
+        .map(|v| {
+            let root = f32::from(v) / MAX;
+            (from_linear(root * root) * MAX).round() as u16
+        })
+        .collect()
+}
+
+/// Linear light `v` as a 16-bit value encoded with sRGB's curve.
+fn encode_lookup(table: &[u16], v: f32) -> u16 {
+    table[(v.max(0.0).sqrt() * MAX).round().min(MAX) as usize]
+}
+
+/// Linear light (0–1 and above) encoded with sRGB's curve.
+fn from_linear(v: f32) -> f32 {
+    if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+}
+
 fn step(sigma: f32) -> usize {
     sigma.round().clamp(1.0, STEP_MAX) as usize
 }
@@ -103,7 +146,7 @@ fn step(sigma: f32) -> usize {
 /// the whole). Alpha is kept.
 pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32), whole: (u32, u32)) -> Tiled<Pixel> {
     let (w, h) = (image.width() as usize, image.height() as usize);
-    if w == 0 || h == 0 || options.intensity.is_nan() || options.intensity <= 0.0 {
+    if w == 0 || h == 0 || options.intensity.is_nan() || options.ambient.is_nan() {
         return image.clone();
     }
     let pixels = image.to_vec();
@@ -118,8 +161,8 @@ pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32
     let filter = options.filter();
     let ambient = options.ambient.clamp(0.0, 100.0) / 100.0;
     let lamp = options.intensity.clamp(0.0, 100.0) / 100.0;
-    // What a flat surface right under the lamp gets, which keeps its tone.
-    let under = (ambient + lamp).max(1e-3);
+    let decode = linear_table();
+    let encode = encode_table();
     let out: Vec<Pixel> = pixels
         .par_iter()
         .enumerate()
@@ -134,9 +177,10 @@ pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32
             let dist = (vx * vx + vy * vy + lz * lz).sqrt();
             let facing = ((nx * vx + ny * vy + lz) / (len * dist)).max(0.0);
             let lit = facing * lz * lz / (dist * dist);
+            // Light adds up in linear values, not the encoded ones.
             let c = |k: usize| {
-                let gain = (ambient + lamp * lit * filter[k]) / under;
-                (f32::from(p[k]) * gain).round().clamp(0.0, MAX) as u16
+                let gain = ambient + lamp * lit * filter[k];
+                encode_lookup(&encode, lighten(decode[p[k] as usize], gain))
             };
             [c(0), c(1), c(2), p[3]]
         })
@@ -188,9 +232,21 @@ mod tests {
     fn a_lamp_to_the_left_brightens_the_left_and_darkens_the_right() {
         let img = dome(256);
         let out = relight(&img, &from_the_left(), (0, 0), (256, 256));
-        // How much the light changes each side, against a flat surface there.
-        let flat = relight(&Tiled::new(256, 256, [30000, 30000, 30000, u16::MAX]), &from_the_left(), (0, 0), (256, 256));
-        let gain = |(x0, y0, x1, y1)| mean(&out, x0, y0, x1, y1, 0) / mean(&img, x0, y0, x1, y1, 0) / (mean(&flat, x0, y0, x1, y1, 0) / 30000.0);
+        // How much the light changes each side, in linear light, against a
+        // flat surface there.
+        let flat_in = Tiled::new(256, 256, [30000, 30000, 30000, u16::MAX]);
+        let flat = relight(&flat_in, &from_the_left(), (0, 0), (256, 256));
+        let lin = linear_table();
+        let light = |a: &Tiled<Pixel>, b: &Tiled<Pixel>, (x0, y0, x1, y1): (u32, u32, u32, u32)| {
+            let mut sum = 0.0;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    sum += lin[a.get(x, y)[0] as usize] / lin[b.get(x, y)[0] as usize];
+                }
+            }
+            sum / ((x1 - x0) * (y1 - y0)) as f32
+        };
+        let gain = |r| light(&out, &img, r) / light(&flat, &flat_in, r);
         let (left, right) = ((60, 120, 90, 136), (166, 120, 196, 136));
         assert!(gain(left) > 1.05, "the side facing the lamp: {}", gain(left));
         assert!(gain(right) < 1.0, "the side away from it: {}", gain(right));
@@ -207,23 +263,29 @@ mod tests {
             x: 0.25,
             y: 0.25,
             reach: 25.0,
+            intensity: 35.0,
+            ambient: 65.0,
             ..Default::default()
         };
         let out = relight(&flat, &options, (0, 0), (400, 400));
-        assert_eq!(out.get(100, 100), colour, "right under it");
+        let under = out.get(100, 100);
+        assert!((0..4).all(|k| under[k].abs_diff(colour[k]) <= 3), "right under it: {under:?}");
         let (near, far) = (out.get(150, 100)[2], out.get(399, 399)[2]);
         assert!(near < 50000 && far < near, "darker further away: {near}, {far}");
         // Out of reach, only the ambient light is left.
-        let ambient = options.ambient / (options.ambient + options.intensity);
-        assert!((f32::from(far) / 50000.0 - ambient).abs() < 0.03, "{far}");
+        let ambient = options.ambient / 100.0;
+        let lin = linear_table();
+        assert!((lin[far as usize] / lin[50000] - ambient).abs() < 0.03, "{far}");
         assert_eq!(out.get(399, 399)[3], 40000, "alpha kept");
 
         let img = dome(128);
         let none = RelightOptions {
             intensity: 0.0,
+            ambient: 100.0,
             ..Default::default()
         };
-        assert_eq!(relight(&img, &none, (0, 0), (128, 128)).to_vec(), img.to_vec());
+        let same = relight(&img, &none, (0, 0), (128, 128));
+        assert!(same.to_vec().iter().zip(img.to_vec()).all(|(a, b)| (0..4).all(|k| a[k].abs_diff(b[k]) <= 3)));
     }
 
     #[test]
@@ -236,13 +298,31 @@ mod tests {
         let whole = filter.apply(&img);
         let part = filter.preview(&img, 150, 120, 60, 40);
         let want = whole.crop(150, 120, 60, 40);
-        // The blur's running sums round a little differently from another start.
+        // The blur's running sums round a little differently from another
+        // start, and the linear tables round too.
         let worst = part
             .iter()
             .zip(&want)
             .map(|(a, b)| (0..4).map(|k| a[k].abs_diff(b[k])).max().unwrap_or(0))
             .max();
-        assert!(worst <= Some(1), "{worst:?} levels off");
+        assert!(worst <= Some(3), "{worst:?} levels off");
+    }
+
+    #[test]
+    fn added_light_eases_into_white() {
+        let bright = Tiled::new(64, 64, [60000, 60000, 60000, u16::MAX]);
+        let options = RelightOptions {
+            x: 0.5,
+            y: 0.5,
+            intensity: 100.0,
+            ambient: 100.0,
+            ..Default::default()
+        };
+        let v = relight(&bright, &options, (0, 0), (64, 64)).get(32, 32)[0];
+        assert!(v > 60000 && v < u16::MAX, "brighter but short of white: {v}");
+        // Dimmer, it simply scales.
+        assert_eq!(lighten(0.2, 0.5), 0.1);
+        assert!((lighten(0.01, 2.0) - 0.02).abs() < 1e-3, "barely bent in the shadows");
     }
 
     #[test]
@@ -280,6 +360,40 @@ mod timing {
             let options = RelightOptions { x, ..Default::default() };
             doc.layers[0].pixels = relight(&before, &options, (0, 0), (doc.width, doc.height));
             crate::export::jpeg(&doc, &out.join(format!("{name}.jpg")), 85).unwrap();
+        }
+    }
+
+    /// Relight a photo with lamps given as `name:x,y,reach,intensity,ambient`
+    /// separated by `;`, for comparing versions by eye:
+    /// `OMAPIX_RELIGHT=photo.jpg OMAPIX_RELIGHT_LAMPS="left:0.4,0.25,40,50,50"
+    /// OMAPIX_RELIGHT_OUT=dir cargo test --release -p omapix-engine relight_lamps -- --ignored`
+    #[test]
+    #[ignore]
+    fn relight_lamps() {
+        let (Ok(path), Ok(lamps), Ok(out)) = (
+            std::env::var("OMAPIX_RELIGHT"),
+            std::env::var("OMAPIX_RELIGHT_LAMPS"),
+            std::env::var("OMAPIX_RELIGHT_OUT"),
+        ) else {
+            return;
+        };
+        let out = std::path::Path::new(&out);
+        std::fs::create_dir_all(out).unwrap();
+        let mut doc = crate::io::load(std::path::Path::new(&path)).expect("the photo");
+        let before = doc.layers[0].pixels.clone();
+        for lamp in lamps.split(';') {
+            let (name, values) = lamp.split_once(':').unwrap();
+            let v: Vec<f32> = values.split(',').map(|v| v.trim().parse().unwrap()).collect();
+            let options = RelightOptions {
+                x: v[0],
+                y: v[1],
+                reach: v[2],
+                intensity: v[3],
+                ambient: v[4],
+                ..Default::default()
+            };
+            doc.layers[0].pixels = relight(&before, &options, (0, 0), (doc.width, doc.height));
+            crate::export::jpeg(&doc, &out.join(format!("{name}.jpg")), 90).unwrap();
         }
     }
 
