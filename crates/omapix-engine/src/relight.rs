@@ -3,15 +3,17 @@
 //! Ported from PhotoCraft's `crates/algo/src/relight.rs` (MIT OR
 //! Apache-2.0, [`b70bf524`](https://github.com/storytold/photocraft/commit/b70bf524e)).
 //! The photo's brightness, blurred, stands in for the shape of what's in it
-//! (bright as near, dark as far), and its slopes are the surfaces' normals.
-//! A lamp hanging over the photo at (`x`, `y`), `reach` above it, lights
-//! those surfaces as a matte one would be lit (Lambert), less with distance
-//! (inverse square), as Photoshop's Lighting Effects' point light.
+//! (bright as near, dark as far), and its slopes are the surfaces' normals;
+//! on faces, their landmarks give their real shape ([`FaceShape`]), which
+//! also casts shadows, and light wraps a little round skin. A lamp hanging
+//! over the photo at (`x`, `y`), `reach` above it, lights those surfaces
+//! as a matte one would be lit (Lambert), less with distance (inverse
+//! square), as Photoshop's Lighting Effects' point light.
 //!
 //! Where PhotoCraft divides each pixel by its blurred brightness and
 //! multiplies in the new light, which takes every area towards the same
-//! tone, here each pixel is scaled by how much more (or less) light its
-//! surface gets than a flat one right under the lamp, which keeps its tone.
+//! tone, here the lamp's light is added, in linear light, to the share of
+//! the photo's own that Ambient keeps, and what it adds eases into white.
 
 use rayon::prelude::*;
 

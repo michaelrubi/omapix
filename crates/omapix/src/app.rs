@@ -5494,7 +5494,13 @@ fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOp
             *eyedropper = !*eyedropper;
         }
     });
-    ui.label(RichText::new("Ambient fills the shadows. Softness is how broad the shapes the light follows are.").color(hint));
+    ui.label(
+        RichText::new(
+            "Ambient is how much of the photo's own light stays: at 100 % the lamp only adds light, \
+             so Relight again for a second lamp. Softness is how broad the shapes the light follows are.",
+        )
+        .color(hint),
+    );
     ui.label(RichText::new(faces).color(hint));
 }
 
