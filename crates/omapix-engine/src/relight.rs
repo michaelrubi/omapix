@@ -1,16 +1,17 @@
-//! Filter › Render › Relight: light a photo again from another direction.
+//! Filter › Render › Relight: light a photo again with a lamp placed on it.
 //!
 //! Ported from PhotoCraft's `crates/algo/src/relight.rs` (MIT OR
 //! Apache-2.0, [`b70bf524`](https://github.com/storytold/photocraft/commit/b70bf524e)).
 //! The photo's brightness, blurred, stands in for the shape of what's in it
 //! (bright as near, dark as far), and its slopes are the surfaces' normals.
-//! A lamp at `angle` and `elevation` lights those surfaces as a matte one
-//! would be lit (Lambert).
+//! A lamp hanging over the photo at (`x`, `y`), `reach` above it, lights
+//! those surfaces as a matte one would be lit (Lambert), less with distance
+//! (inverse square), as Photoshop's Lighting Effects' point light.
 //!
 //! Where PhotoCraft divides each pixel by its blurred brightness and
 //! multiplies in the new light, which takes every area towards the same
 //! tone, here each pixel is scaled by how much more (or less) light its
-//! surface gets than one facing the camera. Flat areas keep their tones.
+//! surface gets than a flat one right under the lamp, which keeps its tone.
 
 use rayon::prelude::*;
 
@@ -31,12 +32,14 @@ const SLOPE: f32 = 2.0;
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct RelightOptions {
-    /// Where the light comes from, in degrees: 0 from the right, 90 from
-    /// above, as Photoshop's Angle.
-    pub angle: f32,
-    /// How high the light is, in degrees: 0 grazing, 90 from the camera,
-    /// as Photoshop's Altitude.
-    pub elevation: f32,
+    /// Where the lamp is, across the image (0 its left edge, 1 its right);
+    /// it can be off the image.
+    pub x: f32,
+    /// Where the lamp is, down the image (0 its top, 1 its bottom).
+    pub y: f32,
+    /// How high over the image the lamp hangs, which is how far its light
+    /// reaches, as a percentage of the image's shorter side.
+    pub reach: f32,
     /// How strong the lamp is (0–100 %). 0 leaves the image as it is.
     pub intensity: f32,
     /// Light from everywhere, which fills the shadows (0–100 %).
@@ -50,10 +53,12 @@ pub struct RelightOptions {
 impl Default for RelightOptions {
     fn default() -> Self {
         Self {
-            angle: 45.0,
-            elevation: 40.0,
-            intensity: 40.0,
-            ambient: 55.0,
+            // A key light up and to the left.
+            x: 0.25,
+            y: 0.2,
+            reach: 75.0,
+            intensity: 35.0,
+            ambient: 65.0,
             softness: 25.0,
             colour: [255, 255, 255],
         }
@@ -69,17 +74,16 @@ impl RelightOptions {
 
     /// How far a pixel's result reaches, in pixels: the blur and the slope's
     /// step.
-    pub fn reach(&self, whole: (u32, u32)) -> u32 {
+    pub fn margin(&self, whole: (u32, u32)) -> u32 {
         let sigma = self.sigma(whole);
         (sigma * 3.0).ceil() as u32 + 1 + step(sigma) as u32
     }
 
-    /// Unit vector towards the light, in image space (x right, y down, z
-    /// towards the camera).
-    fn towards_light(&self) -> [f32; 3] {
-        let (s, c) = self.angle.to_radians().sin_cos();
-        let e = self.elevation.clamp(0.0, 90.0).to_radians();
-        [c * e.cos(), -s * e.cos(), e.sin()]
+    /// Where the lamp is, in an image `whole` big: x right and y down, in
+    /// pixels, and how high over it.
+    pub fn lamp(&self, (w, h): (u32, u32)) -> [f32; 3] {
+        let side = w.min(h).max(1) as f32;
+        [self.x * w as f32, self.y * h as f32, (self.reach / 100.0 * side).max(1.0)]
     }
 
     /// The lamp's colour as a filter: white is 1 in each channel, and a
@@ -94,10 +98,10 @@ fn step(sigma: f32) -> usize {
     sigma.round().clamp(1.0, STEP_MAX) as usize
 }
 
-/// `image` lit again with `options`, as if it were all of an image `whole`
-/// big (so a part of it, previewed, comes out as it would in the whole).
-/// Alpha is kept.
-pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, whole: (u32, u32)) -> Tiled<Pixel> {
+/// `image` lit again with `options`, as if it were the part at `origin` of
+/// an image `whole` big (so a part, previewed, comes out as it would in
+/// the whole). Alpha is kept.
+pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32), whole: (u32, u32)) -> Tiled<Pixel> {
     let (w, h) = (image.width() as usize, image.height() as usize);
     if w == 0 || h == 0 || options.intensity.is_nan() || options.intensity <= 0.0 {
         return image.clone();
@@ -109,12 +113,13 @@ pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, whole: (u32, u32)
     let d = step(sigma) as isize;
     let at = |x: isize, y: isize| shape[y.clamp(0, h as isize - 1) as usize * w + x.clamp(0, w as isize - 1) as usize];
 
-    let light = options.towards_light();
+    let [lx, ly, lz] = options.lamp(whole);
+    let (ox, oy) = (origin.0 as f32, origin.1 as f32);
     let filter = options.filter();
     let ambient = options.ambient.clamp(0.0, 100.0) / 100.0;
     let lamp = options.intensity.clamp(0.0, 100.0) / 100.0;
-    // What a surface facing the camera gets, which keeps its tone.
-    let facing = (ambient + lamp * light[2]).max(1e-3);
+    // What a flat surface right under the lamp gets, which keeps its tone.
+    let under = (ambient + lamp).max(1e-3);
     let out: Vec<Pixel> = pixels
         .par_iter()
         .enumerate()
@@ -123,9 +128,14 @@ pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, whole: (u32, u32)
             let nx = (at(x - d, y) - at(x + d, y)) * SLOPE;
             let ny = (at(x, y - d) - at(x, y + d)) * SLOPE;
             let len = (nx * nx + ny * ny + 1.0).sqrt();
-            let lit = ((nx * light[0] + ny * light[1] + light[2]) / len).max(0.0);
+            // Towards the lamp, and its light falling off with the square of
+            // the distance: 1 on a flat surface right under it.
+            let (vx, vy) = (lx - ox - x as f32, ly - oy - y as f32);
+            let dist = (vx * vx + vy * vy + lz * lz).sqrt();
+            let facing = ((nx * vx + ny * vy + lz) / (len * dist)).max(0.0);
+            let lit = facing * lz * lz / (dist * dist);
             let c = |k: usize| {
-                let gain = (ambient + lamp * lit * filter[k]) / facing;
+                let gain = (ambient + lamp * lit * filter[k]) / under;
                 (f32::from(p[k]) * gain).round().clamp(0.0, MAX) as u16
             };
             [c(0), c(1), c(2), p[3]]
@@ -162,37 +172,58 @@ mod tests {
         sum / ((x1 - x0) * (y1 - y0)) as f32
     }
 
-    #[test]
-    fn light_from_the_left_brightens_the_left_and_darkens_the_right() {
-        let img = dome(256);
-        let options = RelightOptions {
-            angle: 180.0,
-            elevation: 30.0,
+    /// A lamp to the left of the dome, low enough to rake it.
+    fn from_the_left() -> RelightOptions {
+        RelightOptions {
+            x: 0.15,
+            y: 0.5,
+            reach: 8.0,
             intensity: 80.0,
-            ambient: 30.0,
+            ambient: 5.0,
             ..Default::default()
-        };
-        let out = relight(&img, &options, (256, 256));
+        }
+    }
+
+    #[test]
+    fn a_lamp_to_the_left_brightens_the_left_and_darkens_the_right() {
+        let img = dome(256);
+        let out = relight(&img, &from_the_left(), (0, 0), (256, 256));
+        // How much the light changes each side, against a flat surface there.
+        let flat = relight(&Tiled::new(256, 256, [30000, 30000, 30000, u16::MAX]), &from_the_left(), (0, 0), (256, 256));
+        let gain = |(x0, y0, x1, y1)| mean(&out, x0, y0, x1, y1, 0) / mean(&img, x0, y0, x1, y1, 0) / (mean(&flat, x0, y0, x1, y1, 0) / 30000.0);
         let (left, right) = ((60, 120, 90, 136), (166, 120, 196, 136));
-        let before = mean(&img, left.0, left.1, left.2, left.3, 0);
-        assert!(mean(&out, left.0, left.1, left.2, left.3, 0) > before * 1.05, "the side facing the light");
-        assert!(mean(&out, right.0, right.1, right.2, right.3, 0) < before * 0.95, "the side away from it");
-        // From the right, the other way round.
-        let out = relight(&img, &RelightOptions { angle: 0.0, ..options }, (256, 256));
+        assert!(gain(left) > 1.05, "the side facing the lamp: {}", gain(left));
+        assert!(gain(right) < 1.0, "the side away from it: {}", gain(right));
+        // To the right, the other way round.
+        let out = relight(&img, &RelightOptions { x: 0.85, ..from_the_left() }, (0, 0), (256, 256));
         assert!(mean(&out, right.0, right.1, right.2, right.3, 0) > mean(&out, left.0, left.1, left.2, left.3, 0));
     }
 
     #[test]
-    fn flat_areas_keep_their_tone_and_none_does_nothing() {
-        let flat = Tiled::new(128, 128, [12000, 30000, 50000, 40000]);
-        let out = relight(&flat, &RelightOptions::default(), (128, 128));
-        assert_eq!(out.get(64, 64), [12000, 30000, 50000, 40000]);
+    fn flat_under_the_lamp_keeps_its_tone_and_falls_off_away_from_it() {
+        let colour = [12000, 30000, 50000, 40000];
+        let flat = Tiled::new(400, 400, colour);
+        let options = RelightOptions {
+            x: 0.25,
+            y: 0.25,
+            reach: 25.0,
+            ..Default::default()
+        };
+        let out = relight(&flat, &options, (0, 0), (400, 400));
+        assert_eq!(out.get(100, 100), colour, "right under it");
+        let (near, far) = (out.get(150, 100)[2], out.get(399, 399)[2]);
+        assert!(near < 50000 && far < near, "darker further away: {near}, {far}");
+        // Out of reach, only the ambient light is left.
+        let ambient = options.ambient / (options.ambient + options.intensity);
+        assert!((f32::from(far) / 50000.0 - ambient).abs() < 0.03, "{far}");
+        assert_eq!(out.get(399, 399)[3], 40000, "alpha kept");
+
         let img = dome(128);
         let none = RelightOptions {
             intensity: 0.0,
             ..Default::default()
         };
-        assert_eq!(relight(&img, &none, (128, 128)).to_vec(), img.to_vec());
+        assert_eq!(relight(&img, &none, (0, 0), (128, 128)).to_vec(), img.to_vec());
     }
 
     #[test]
@@ -200,7 +231,7 @@ mod tests {
         let img = dome(400);
         let filter = crate::filters::LayerFilter::Relight(RelightOptions {
             softness: 60.0,
-            ..Default::default()
+            ..from_the_left()
         });
         let whole = filter.apply(&img);
         let part = filter.preview(&img, 150, 120, 60, 40);
@@ -218,11 +249,10 @@ mod tests {
     fn a_coloured_lamp_tints_what_it_lights() {
         let img = dome(256);
         let warm = RelightOptions {
-            angle: 180.0,
             colour: [255, 160, 80],
-            ..Default::default()
+            ..from_the_left()
         };
-        let out = relight(&img, &warm, (256, 256));
+        let out = relight(&img, &warm, (0, 0), (256, 256));
         let lit = out.get(75, 128);
         assert!(lit[0] > lit[1] && lit[1] > lit[2], "orange where it's lit: {lit:?}");
     }
@@ -246,9 +276,9 @@ mod timing {
         std::fs::create_dir_all(&out).unwrap();
         let before = doc.layers[0].pixels.clone();
         crate::export::jpeg(&doc, &out.join("before.jpg"), 85).unwrap();
-        for (name, angle) in [("left", 180.0), ("right", 0.0)] {
-            let options = RelightOptions { angle, ..Default::default() };
-            doc.layers[0].pixels = relight(&before, &options, (doc.width, doc.height));
+        for (name, x) in [("left", 0.1), ("right", 0.9)] {
+            let options = RelightOptions { x, ..Default::default() };
+            doc.layers[0].pixels = relight(&before, &options, (0, 0), (doc.width, doc.height));
             crate::export::jpeg(&doc, &out.join(format!("{name}.jpg")), 85).unwrap();
         }
     }
@@ -268,6 +298,7 @@ mod timing {
                     softness,
                     ..Default::default()
                 },
+                (0, 0),
                 (w, h),
             );
             eprintln!("softness {softness}: {:.2} s", start.elapsed().as_secs_f32());

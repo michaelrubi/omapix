@@ -361,6 +361,19 @@ enum CropDrag {
     New(Pos2),
 }
 
+/// A drag on the canvas while Relight is open: the lamp, or its ring.
+#[derive(Clone, Copy, PartialEq)]
+enum RelightDrag {
+    Lamp,
+    Reach,
+}
+
+/// Whether `p` is on Relight's ring round a lamp at `at` reaching
+/// `reach`, all in image pixels.
+fn on_lamp_ring(canvas: &crate::canvas::Canvas, at: Pos2, reach: f32, p: Pos2) -> bool {
+    ((p - at).length() - reach).abs() <= canvas.image_per_point() * HANDLE_REACH
+}
+
 /// What Canvas Size fills new areas of the bottom layer with (Photoshop's
 /// "Canvas extension color").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -646,6 +659,10 @@ pub struct App {
     /// round the whole image.
     crop: Option<[f64; 4]>,
     crop_drag: Option<CropDrag>,
+    relight_drag: Option<RelightDrag>,
+    /// Relight's eyedropper is armed: the next click on the image takes
+    /// the lamp's colour from there.
+    relight_eyedropper: bool,
     /// Where Liquify's brush is while its button is held.
     liquify_at: Option<Pos2>,
     /// The Object Selection tool's model, running on its own thread.
@@ -749,6 +766,8 @@ impl App {
             transform_drag: None,
             crop: None,
             crop_drag: None,
+            relight_drag: None,
+            relight_eyedropper: false,
             liquify_at: None,
             objects: Default::default(),
             tools,
@@ -873,6 +892,8 @@ impl App {
             transform_drag: None,
             crop: None,
             crop_drag: None,
+            relight_drag: None,
+            relight_eyedropper: false,
             liquify_at: None,
             objects: Default::default(),
             script: VecDeque::new(),
@@ -3340,7 +3361,16 @@ impl App {
             let area = egui::Modal::default_area(egui::Id::new("dialog")).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-320.0, 90.0));
             modal = modal.area(area).backdrop_color(egui::Color32::TRANSPARENT);
         }
-        let response = modal.show(ctx, |ui| {
+        // Not modal while relighting: its lamp is placed on the canvas.
+        let relighting = matches!(
+            dialog,
+            Dialog::Filter {
+                filter: LayerFilter::Relight(_),
+                ..
+            }
+        );
+        let relight_eyedropper = &mut self.relight_eyedropper;
+        let body = |ui: &mut Ui| {
             ui.set_min_width(340.0);
             match dialog {
                 Dialog::Radius {
@@ -3479,7 +3509,7 @@ impl App {
                         LayerFilter::SmartBlur(options) => {
                             smart_blur_controls(ui, options, hint);
                         }
-                        LayerFilter::Relight(options) => relight_controls(ui, options, hint),
+                        LayerFilter::Relight(options) => relight_controls(ui, options, relight_eyedropper, hint),
                     }
                     ui.add_space(4.0);
                     ui.checkbox(preview, "Preview");
@@ -3969,10 +3999,20 @@ impl App {
                     });
                 }
             }
-        });
-        if close || response.should_close() {
+        };
+        let dismissed = if relighting {
+            let area = egui::Area::new(egui::Id::new("dialog")).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-320.0, 90.0));
+            area.show(ctx, |ui| egui::Frame::popup(ui.style()).show(ui, body));
+            // Esc disarms the eyedropper first.
+            let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            escape && !std::mem::take(&mut self.relight_eyedropper)
+        } else {
+            modal.show(ctx, body).should_close()
+        };
+        if close || dismissed {
             self.dialog = None;
             self.filter_preview = None;
+            self.relight_eyedropper = false;
         }
         // Show the separation or blur preview while its dialog is open.
         if let Some(editor) = &mut self.editor {
@@ -4499,7 +4539,67 @@ impl App {
         ctx.request_repaint();
     }
 
+    /// While Relight is open, the canvas places its lamp: a click or a
+    /// drag moves it there, and dragging its ring changes how far it
+    /// reaches.
+    fn relight_input(&mut self, input: ToolInput) {
+        let (
+            Some(editor),
+            Some(Dialog::Filter {
+                filter: LayerFilter::Relight(options),
+                ..
+            }),
+        ) = (&self.editor, &mut self.dialog)
+        else {
+            return;
+        };
+        // The armed eyedropper takes the lamp's colour from the layer as it
+        // was, not as relit.
+        if self.relight_eyedropper {
+            if let ToolInput::StrokeBegin(p) = input
+                && p.x >= 0.0
+                && p.y >= 0.0
+                && let Some(pixel) = editor.sample(p.x as u32, p.y as u32, self.tools.sample_size, crate::tools::Sample::Current)
+                && let Ok(transform) = DisplayTransform::to_srgb(&editor.doc.profile)
+            {
+                let mut out = [[0u8; 4]];
+                transform.convert(&[[pixel[0], pixel[1], pixel[2], u16::MAX]], &mut out);
+                options.colour = [out[0][0], out[0][1], out[0][2]];
+                self.relight_eyedropper = false;
+            }
+            return;
+        }
+        let (w, h) = (editor.doc.width as f32, editor.doc.height as f32);
+        let [x, y, reach] = options.lamp((editor.doc.width, editor.doc.height));
+        let at = egui::pos2(x, y);
+        let mut place = |p: Pos2| (options.x, options.y) = (p.x / w, p.y / h);
+        match input {
+            ToolInput::StrokeBegin(p) if on_lamp_ring(&editor.canvas, at, reach, p) => self.relight_drag = Some(RelightDrag::Reach),
+            ToolInput::StrokeBegin(p) => {
+                place(p);
+                self.relight_drag = Some(RelightDrag::Lamp);
+            }
+            ToolInput::StrokeMove(p) => match self.relight_drag {
+                Some(RelightDrag::Lamp) => place(p),
+                Some(RelightDrag::Reach) => options.reach = ((p - at).length() / w.min(h) * 100.0).clamp(RELIGHT_REACH.0, RELIGHT_REACH.1),
+                None => {}
+            },
+            ToolInput::StrokeEnd => self.relight_drag = None,
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
+        }
+    }
+
     fn tool_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        if matches!(
+            self.dialog,
+            Some(Dialog::Filter {
+                filter: LayerFilter::Relight(_),
+                ..
+            })
+        ) {
+            self.relight_input(input);
+            return;
+        }
         if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) {
             self.transform_input(input, modifiers);
             return;
@@ -5283,29 +5383,17 @@ fn reduce_noise_controls(ui: &mut Ui, options: &mut ReduceNoiseOptions, hint: eg
     ui.label(RichText::new("Smooths noise while preserving edges. Judge it at 100 %.").color(hint));
 }
 
-/// Smart Blur's settings, for its dialog.
-/// Relight's light: a pad to drag where it comes from (the dot's direction
-/// from the middle is the Angle, and its distance from the rim the
-/// Altitude, as in Photoshop's Global Light), then how it shines.
-fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOptions, hint: egui::Color32) {
-    ui.horizontal(|ui| {
-        light_pad(ui, &mut options.angle, &mut options.elevation);
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label("Angle");
-                ui.add(egui::DragValue::new(&mut options.angle).range(-180.0..=180.0).suffix("°").fixed_decimals(0));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Altitude");
-                ui.add(egui::DragValue::new(&mut options.elevation).range(0.0..=90.0).suffix("°").fixed_decimals(0));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Colour");
-                ui.color_edit_button_srgb(&mut options.colour);
-            });
-        });
-    });
+/// How far Relight's lamp can reach, as a percentage of the image's
+/// shorter side.
+const RELIGHT_REACH: (f32, f32) = (5.0, 200.0);
+
+/// Relight's settings, for its dialog. The lamp itself is placed on the
+/// canvas.
+fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOptions, eyedropper: &mut bool, hint: egui::Color32) {
+    ui.label(RichText::new("Click or drag on the image to place the light. Drag its ring to change how far it reaches.").color(hint));
+    ui.add_space(4.0);
     for (label, value, range) in [
+        ("Reach", &mut options.reach, RELIGHT_REACH.0..=RELIGHT_REACH.1),
         ("Intensity", &mut options.intensity, 0.0..=100.0),
         ("Ambient", &mut options.ambient, 0.0..=100.0),
         ("Softness", &mut options.softness, 1.0..=100.0),
@@ -5315,35 +5403,22 @@ fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOp
             ui.add(egui::Slider::new(value, range).suffix(" %").fixed_decimals(0));
         });
     }
+    ui.horizontal(|ui| {
+        ui.label("Colour");
+        ui.color_edit_button_srgb(&mut options.colour);
+        let button = egui::Button::new("Eyedropper").selected(*eyedropper);
+        if ui
+            .add(button)
+            .on_hover_text("Click on the image to take the light's colour from there")
+            .clicked()
+        {
+            *eyedropper = !*eyedropper;
+        }
+    });
     ui.label(RichText::new("Ambient fills the shadows. Softness is how broad the shapes the light follows are.").color(hint));
 }
 
-/// Photoshop's light dial: click or drag the dot. Up is light from above.
-fn light_pad(ui: &mut Ui, angle: &mut f32, elevation: &mut f32) -> egui::Response {
-    let size = 96.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    let response = ui.interact(rect, egui::Id::new("relight-light-pad"), egui::Sense::click_and_drag());
-    let (centre, radius) = (rect.center(), size / 2.0 - 4.0);
-    if let Some(at) = response.interact_pointer_pos() {
-        let d = at - centre;
-        // Straight left is 180°, not −180°.
-        *angle = match (-d.y).atan2(d.x).to_degrees().round() {
-            -180.0 => 180.0,
-            a => a,
-        };
-        *elevation = (90.0 * (1.0 - (d.length() / radius).min(1.0))).round();
-    }
-    let visuals = ui.style().interact(&response);
-    let painter = ui.painter_at(rect);
-    painter.circle_stroke(centre, radius, visuals.fg_stroke);
-    let (s, c) = angle.to_radians().sin_cos();
-    let reach = radius * (1.0 - elevation.clamp(0.0, 90.0) / 90.0);
-    let dot = centre + egui::vec2(c, -s) * reach;
-    painter.line_segment([centre, dot], visuals.fg_stroke);
-    painter.circle_filled(dot, 5.0, ui.visuals().selection.bg_fill);
-    response.on_hover_text("Where the light comes from: drag the dot")
-}
-
+/// Smart Blur's settings, for its dialog.
 fn smart_blur_controls(ui: &mut Ui, options: &mut SmartBlurOptions, hint: egui::Color32) {
     ui.horizontal(|ui| {
         ui.label("Radius");
@@ -6179,7 +6254,28 @@ impl eframe::App for App {
                 // pointer from the tools.
                 let liquify_brush = editor.liquifying().then(|| crate::canvas::BrushOutline::round(self.tools.liquify.size));
                 let transforming = editor.transform().is_some();
-                let tools_off = self.properties.eyedropper.is_some() || transforming || liquify_brush.is_some();
+                // Relight's lamp, and its ring to drag how far it reaches.
+                let lamp = match &self.dialog {
+                    Some(Dialog::Filter {
+                        filter: LayerFilter::Relight(options),
+                        ..
+                    }) => {
+                        let [x, y, reach] = options.lamp((editor.doc.width, editor.doc.height));
+                        let at = egui::pos2(x, y);
+                        let ring = match self.relight_drag {
+                            Some(drag) => drag == RelightDrag::Reach,
+                            None => editor.canvas.pointer.is_some_and(|p| on_lamp_ring(&editor.canvas, at, reach, p)),
+                        };
+                        let cursor = if ring && !self.relight_eyedropper {
+                            egui::CursorIcon::ResizeHorizontal
+                        } else {
+                            egui::CursorIcon::Crosshair
+                        };
+                        Some((at, reach, cursor))
+                    }
+                    _ => None,
+                };
+                let tools_off = self.properties.eyedropper.is_some() || transforming || liquify_brush.is_some() || lamp.is_some();
                 let tip = self.brushes.tip(brush.tip);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
@@ -6195,7 +6291,11 @@ impl eframe::App for App {
                     source,
                     selection: outlines,
                     drawing: (!tools_off).then_some(drawing.as_deref()).flatten(),
-                    badge: (idle && !tools_off).then(|| crate::tools::cursor_badge(tool, modifiers)).flatten(),
+                    badge: if self.relight_eyedropper && lamp.is_some() {
+                        Some(crate::tools::CursorBadge::Eyedropper)
+                    } else {
+                        (idle && !tools_off).then(|| crate::tools::cursor_badge(tool, modifiers)).flatten()
+                    },
                     transform: editor
                         .transform()
                         .map(|(bounds, t)| {
@@ -6223,6 +6323,7 @@ impl eframe::App for App {
                         Some(Dialog::AutoRetouch(dialog)) => dialog.spots(),
                         _ => &[],
                     },
+                    lamp,
                 };
                 let (tool_input, response) = editor.canvas.show(ui, pasteboard, overlay);
                 input = tool_input;
@@ -7268,57 +7369,94 @@ mod tests {
     }
 
     #[test]
-    fn relight_dialog_takes_the_light_from_the_pad_and_applies() {
+    fn relight_places_its_lamp_on_the_canvas_and_applies() {
         let ctx = egui::Context::default();
         let mut app = test_app();
         app.run(Command::Relight, &ctx);
-        assert!(matches!(app.dialog, Some(Dialog::Filter { filter: LayerFilter::Relight(o), .. }) if o == Default::default()));
-        let mut time = 0.0;
-        let mut frame = |app: &mut App, events: Vec<egui::Event>| {
-            time += 0.1;
+        let options = |app: &App| match app.dialog {
+            Some(Dialog::Filter {
+                filter: LayerFilter::Relight(o),
+                ..
+            }) => o,
+            _ => panic!("no Relight dialog"),
+        };
+        assert_eq!(options(&app), Default::default());
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
-                time: Some(time),
                 events,
                 ..Default::default()
             };
-            let mut output = ctx.run_ui(input, |ctx| app.dialogs(ctx));
-            output.textures_delta.clear();
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
         };
-        // The dialog takes a few frames to settle in the middle.
-        for _ in 0..5 {
+        for _ in 0..3 {
             frame(&mut app, vec![]);
         }
-        let pad = ctx.read_response(egui::Id::new("relight-light-pad")).expect("the light pad").rect;
-        // A click at the pad's left rim: light from the left, grazing.
-        let at = egui::pos2(pad.left() + 4.0, pad.center().y);
-        let button = |pressed| egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        frame(&mut app, vec![egui::Event::PointerMoved(at)]);
-        frame(&mut app, vec![button(true)]);
-        frame(&mut app, vec![button(false)]);
-        let Some(Dialog::Filter {
-            filter: LayerFilter::Relight(options),
-            ..
-        }) = app.dialog
-        else {
-            panic!("no Relight dialog");
-        };
-        assert_eq!((options.angle, options.elevation), (180.0, 0.0));
+        // Not modal, so the canvas under it still takes the pointer.
+        assert!(ctx.memory(|m| m.allows_interaction(egui::LayerId::background())));
+        let (w, h) = app.editor.as_ref().map(|e| (e.doc.width as f32, e.doc.height as f32)).unwrap();
+        let none = egui::Modifiers::NONE;
 
+        // A click puts the lamp there, and a drag takes it along.
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(w * 0.5, h * 0.75)), none);
+        assert_eq!((options(&app).x, options(&app).y), (0.5, 0.75));
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(w * 0.8, h * 0.1)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        let o = options(&app);
+        assert!((o.x - 0.8).abs() < 1e-4 && (o.y - 0.1).abs() < 1e-4, "{o:?}");
+
+        // Dragging its ring changes how far it reaches, and leaves it where it is.
+        let [x, y, reach] = o.lamp((w as u32, h as u32));
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(x - reach, y)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(x - reach / 2.0, y)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        let o = options(&app);
+        assert!((o.lamp((w as u32, h as u32))[2] - reach / 2.0).abs() < 0.5, "{o:?}");
+        assert!((o.x - 0.8).abs() < 1e-4, "the lamp stays put");
+        assert!(app.dialog.is_some(), "still open");
+
+        // The armed eyedropper takes the lamp's colour from the layer, once,
+        // and leaves the lamp where it is.
+        app.editor.as_mut().unwrap().edit("Orange", |doc, active| {
+            for p in doc.layer_mut(*active).unwrap().pixels.tile_mut(0, 0).iter_mut() {
+                *p = [65535, 32768, 0, 65535];
+            }
+        });
+        app.relight_eyedropper = true;
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(100.0, 100.0)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        let c = options(&app).colour;
+        assert!(c[0] == 255 && (126..=130).contains(&c[1]) && c[2] == 0, "{c:?}");
+        assert_eq!((options(&app).x, options(&app).y), (o.x, o.y));
+        assert!(!app.relight_eyedropper, "disarmed after one click");
+
+        let o = options(&app);
         app.dialog = None;
-        app.apply_filter(LayerFilter::Relight(options), &ctx);
+        app.apply_filter(LayerFilter::Relight(o), &ctx);
         let editor = app.editor.as_mut().unwrap();
         while editor.busy().is_some() {
             std::thread::sleep(Duration::from_millis(1));
             editor.update(&ctx);
         }
         assert_eq!(editor.undo_label(), Some("Relight"));
-        assert_eq!(app.filters.relight, options, "kept for next time");
+        assert_eq!(app.filters.relight, o, "kept for next time");
+
+        // Esc disarms the eyedropper, then closes it.
+        app.run(Command::Relight, &ctx);
+        frame(&mut app, vec![]);
+        app.relight_eyedropper = true;
+        let esc = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut app, vec![esc.clone()]);
+        assert!(app.dialog.is_some() && !app.relight_eyedropper);
+        frame(&mut app, vec![esc]);
+        assert!(app.dialog.is_none());
     }
 
     #[test]

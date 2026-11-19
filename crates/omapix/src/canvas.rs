@@ -278,6 +278,9 @@ pub struct Overlay<'a> {
     pub crop: bool,
     /// Blemishes to be healed, circled.
     pub spots: &'a [omapix_engine::blemish::Spot],
+    /// Relight's lamp: where it is and how far it reaches, in image pixels,
+    /// and the cursor for what's under the pointer.
+    pub lamp: Option<(Pos2, f32, CursorIcon)>,
 }
 
 /// Pointer input meant for the active tool, in image pixels.
@@ -642,6 +645,7 @@ impl Canvas {
             transform,
             crop,
             spots,
+            lamp,
         } = overlay;
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
@@ -672,10 +676,20 @@ impl Canvas {
         self.pointer = response.hover_pos().map(|p| self.to_image(p));
         self.draw_outlines(ui, selection, drawing);
         self.draw_spots(ui, spots);
-        if let Some((corners, cursor)) = transform {
-            self.draw_transform_box(ui, corners, crop);
-            if response.hover_pos().is_some() && !navigating {
+        if let Some((at, reach, _)) = lamp {
+            self.draw_lamp(ui, at, reach);
+        }
+        if let Some(cursor) = transform.map(|(_, c)| c).or(lamp.map(|(.., c)| c)) {
+            if let Some((corners, _)) = transform {
+                self.draw_transform_box(ui, corners, crop);
+            }
+            if let Some(pointer) = response.hover_pos()
+                && !navigating
+            {
                 ui.ctx().set_cursor_icon(cursor);
+                if let Some(badge) = badge {
+                    self.cursor_badge(ui, pointer, badge);
+                }
             }
         } else if let Some(pointer) = response.hover_pos()
             && !navigating
@@ -758,6 +772,18 @@ impl Canvas {
             painter.circle_stroke(centre, radius, Stroke::new(1.5, Color32::from_black_alpha(160)));
             painter.circle_stroke(centre, radius, Stroke::new(0.75, Color32::from_white_alpha(200)));
         }
+    }
+
+    /// Relight's lamp: a dot where it is and a ring as far as it reaches,
+    /// dark and light like the brush's outline.
+    fn draw_lamp(&self, ui: &Ui, at: Pos2, reach: f32) {
+        let painter = ui.painter_at(self.rect);
+        let (centre, radius) = (self.to_screen((at.x, at.y)), reach * self.view.zoom / self.ppp);
+        for (width, colour) in [(1.5, Color32::from_black_alpha(160)), (0.75, Color32::from_white_alpha(200))] {
+            painter.circle_stroke(centre, radius, Stroke::new(width, colour));
+        }
+        painter.circle_filled(centre, 5.0, Color32::WHITE);
+        painter.circle_stroke(centre, 5.0, Stroke::new(1.0, Color32::BLACK));
     }
 
     /// Screen position (points) of an image position.
