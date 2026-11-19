@@ -4064,12 +4064,20 @@ impl App {
                     editor.set_view(view);
                 }
                 Some(Dialog::Filter { filter, preview }) => {
+                    // Dragging Relight's lamp, a quick preview; exact again
+                    // once it's let go.
+                    let filter = match *filter {
+                        LayerFilter::Relight(o) if self.relight_drag.is_some() => {
+                            LayerFilter::Relight(omapix_engine::relight::RelightOptions { rough: true, ..o })
+                        }
+                        filter => filter,
+                    };
                     let view = match (*preview, editor.target) {
-                        (true, Target::QuickMask) => View::QuickMaskFilter { filter: *filter },
+                        (true, Target::QuickMask) => View::QuickMaskFilter { filter },
                         (false, Target::QuickMask) => View::QuickMask,
                         (true, target) => View::Filter {
                             layer: editor.active,
-                            filter: *filter,
+                            filter,
                             mask: target == Target::Mask,
                         },
                         (false, _) => View::Image,
@@ -7501,7 +7509,13 @@ mod tests {
         app.tool_input(ToolInput::StrokeBegin(egui::pos2(w * 0.5, h * 0.75)), none);
         assert_eq!((options(&app).x, options(&app).y), (0.5, 0.75));
         app.tool_input(ToolInput::StrokeMove(egui::pos2(w * 0.8, h * 0.1)), none);
+        // While it's dragged the canvas shows a quick preview, then the exact one.
+        let rough = |app: &App| matches!(app.editor.as_ref().unwrap().view(), View::Filter { filter: LayerFilter::Relight(o), .. } if o.rough);
+        frame(&mut app, vec![]);
+        assert!(rough(&app), "quick while dragged");
         app.tool_input(ToolInput::StrokeEnd, none);
+        frame(&mut app, vec![]);
+        assert!(!rough(&app), "exact once let go");
         let o = options(&app);
         assert!((o.x - 0.8).abs() < 1e-4 && (o.y - 0.1).abs() < 1e-4, "{o:?}");
 

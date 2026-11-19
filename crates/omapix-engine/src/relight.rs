@@ -58,6 +58,10 @@ pub struct RelightOptions {
     /// none: their brightness stands in for their shape). Not saved.
     #[serde(skip)]
     pub faces: u64,
+    /// Previewing while the lamp is dragged: the app renders it from a
+    /// shrunk copy ([`relight_shrunk`]). Not saved.
+    #[serde(skip)]
+    pub rough: bool,
 }
 
 impl Default for RelightOptions {
@@ -72,6 +76,7 @@ impl Default for RelightOptions {
             softness: 25.0,
             colour: [255, 255, 255],
             faces: 0,
+            rough: false,
         }
     }
 }
@@ -289,6 +294,16 @@ impl FaceShape {
         })
     }
 
+    /// The same face in an image `k` times the size.
+    pub fn scaled(&self, k: f32) -> Self {
+        Self {
+            origin: self.origin.map(|v| v * k),
+            cell: self.cell * k,
+            heights: self.heights.iter().map(|h| h * k).collect(),
+            ..self.clone()
+        }
+    }
+
     /// How much of each cell is in the shadow the face casts from a lamp at
     /// `lamp` (image pixels, and height over the image): the surface
     /// between the cell and the lamp standing above the line between them.
@@ -416,6 +431,13 @@ fn step(sigma: f32) -> usize {
 /// The faces' shapes are those its settings name, if they're still kept.
 pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32), whole: (u32, u32)) -> Tiled<Pixel> {
     relight_faces(image, options, origin, whole, &kept_faces(options.faces))
+}
+
+/// `image`, a whole image shrunk `shrink` times, lit as the whole would be
+/// (its faces shrunk too): a quick preview while the lamp is dragged.
+pub fn relight_shrunk(image: &Tiled<Pixel>, options: &RelightOptions, shrink: f32) -> Tiled<Pixel> {
+    let faces: Vec<FaceShape> = kept_faces(options.faces).iter().map(|f| f.scaled(1.0 / shrink)).collect();
+    relight_faces(image, options, (0, 0), (image.width(), image.height()), &faces)
 }
 
 /// [`relight`], with the shapes of the faces in it from their landmarks
@@ -696,6 +718,29 @@ mod tests {
     }
 
     #[test]
+    fn a_shrunk_copy_is_lit_as_the_whole_is() {
+        let face = FaceShape::new(&face_points(256.0, 256.0, 160.0)).unwrap();
+        let id = keep_faces(vec![face]);
+        let options = RelightOptions {
+            x: 0.1,
+            y: 0.5,
+            reach: 30.0,
+            intensity: 100.0,
+            ambient: 30.0,
+            faces: id,
+            ..Default::default()
+        };
+        let flat = Tiled::new(512, 512, [30000, 30000, 30000, u16::MAX]);
+        let whole = relight(&flat, &options, (0, 0), (512, 512));
+        let small = relight_shrunk(&Tiled::new(128, 128, [30000, 30000, 30000, u16::MAX]), &options, 4.0);
+        // The face's lit and shaded sides, near enough the same.
+        for (x, y) in [(180, 256), (330, 256), (256, 150), (40, 40)] {
+            let (a, b) = (whole.get(x, y)[0], small.get(x / 4, y / 4)[0]);
+            assert!(a.abs_diff(b) < 1500, "at ({x}, {y}): {a} and {b}");
+        }
+    }
+
+    #[test]
     fn a_face_casts_a_shadow_away_from_a_low_lamp() {
         let face = FaceShape::new(&face_points(128.0, 128.0, 80.0)).unwrap();
         // Low, to the left: the dome's right side is behind its top.
@@ -811,6 +856,44 @@ mod timing {
             };
             doc.layers[0].pixels = relight_faces(&before, &options, (0, 0), (doc.width, doc.height), &faces);
             crate::export::jpeg(&doc, &out.join(format!("{name}.jpg")), 90).unwrap();
+        }
+    }
+
+    /// The quick preview from a quarter-size copy beside the exact result,
+    /// both at a quarter size: `OMAPIX_RELIGHT=photo OMAPIX_RELIGHT_OUT=dir`.
+    #[test]
+    #[ignore]
+    fn relight_rough() {
+        let (Ok(path), Ok(out)) = (std::env::var("OMAPIX_RELIGHT"), std::env::var("OMAPIX_RELIGHT_OUT")) else {
+            return;
+        };
+        let out = std::path::Path::new(&out);
+        std::fs::create_dir_all(out).unwrap();
+        let doc = crate::io::load(std::path::Path::new(&path)).expect("the photo");
+        let options = RelightOptions {
+            x: 0.5,
+            y: 0.3,
+            reach: 30.0,
+            intensity: 90.0,
+            ambient: 40.0,
+            ..Default::default()
+        };
+        let small = crate::reduced::Reduced::default().layers(&doc.layers, 2);
+        let rough = relight_shrunk(&small[0].pixels, &options, 4.0);
+        let exact = relight(&doc.layers[0].pixels, &options, (0, 0), (doc.width, doc.height));
+        let exact_small = crate::reduced::Reduced::default().layers(
+            &[crate::layer::Layer {
+                pixels: exact,
+                ..doc.layers[0].clone()
+            }],
+            2,
+        );
+        for (name, img) in [("rough", rough), ("exact", exact_small[0].pixels.clone())] {
+            let mut d = doc.clone();
+            d.width = img.width();
+            d.height = img.height();
+            d.layers[0].pixels = img;
+            crate::export::jpeg(&d, &out.join(format!("{name}.jpg")), 92).unwrap();
         }
     }
 
