@@ -182,6 +182,8 @@ pub struct FaceShape {
     /// The surface's slope across and down (the normal is (x, y, 1)),
     /// and how much is face (0–1), per cell.
     normals: Vec<[f32; 3]>,
+    /// How far the surface stands out from the image, in pixels, per cell.
+    heights: Vec<f32>,
 }
 
 /// Cells across a face's grid.
@@ -272,13 +274,64 @@ impl FaceShape {
                 [-dx, -dy, cover[i]]
             })
             .collect();
+        // Standing out from the furthest of it.
+        let floor = smooth.iter().copied().fold(f32::MAX, f32::min);
+        let heights = smooth.iter().map(|h| h - floor).collect();
         Some(Self {
             origin,
             cell,
             width,
             height,
             normals,
+            heights,
         })
+    }
+
+    /// How much of each cell is in the shadow the face casts from a lamp at
+    /// `lamp` (image pixels, and height over the image): the surface
+    /// between the cell and the lamp standing above the line between them.
+    fn shadows(&self, lamp: [f32; 3]) -> Vec<f32> {
+        let h = |x: f32, y: f32| {
+            let (u, v) = (x.clamp(0.0, (self.width - 1) as f32), y.clamp(0.0, (self.height - 1) as f32));
+            self.heights[v as usize * self.width + u as usize]
+        };
+        let (lu, lv) = ((lamp[0] - self.origin[0]) / self.cell, (lamp[1] - self.origin[1]) / self.cell);
+        // Soft over a few pixels' height, as a lamp has some size.
+        let soft = self.cell * 3.0;
+        let raw: Vec<f32> = (0..self.width * self.height)
+            .into_par_iter()
+            .map(|i| {
+                let (u, v) = ((i % self.width) as f32, (i / self.width) as f32);
+                let from = self.heights[i];
+                let (du, dv) = (lu - u, lv - v);
+                let steps = du.abs().max(dv.abs()).ceil().min((self.width + self.height) as f32);
+                let mut shade: f32 = 0.0;
+                for s in 1..steps as usize {
+                    let t = s as f32 / steps;
+                    let (qu, qv) = (u + du * t, v + dv * t);
+                    if qu < 0.0 || qv < 0.0 || qu > (self.width - 1) as f32 || qv > (self.height - 1) as f32 {
+                        break;
+                    }
+                    // The line to the lamp's height there.
+                    let line = from + (lamp[2] - from) * t;
+                    shade = shade.max(((h(qu, qv) - line) / soft).clamp(0.0, 1.0));
+                }
+                shade
+            })
+            .collect();
+        crate::denoise::blur(&raw, self.width, self.height, 1.5)
+    }
+
+    /// `grid`, one value a cell, at (`x`, `y`), bilinearly (0 off it).
+    fn sample(&self, grid: &[f32], x: f32, y: f32) -> f32 {
+        let (u, v) = ((x - self.origin[0]) / self.cell, (y - self.origin[1]) / self.cell);
+        if u < 0.0 || v < 0.0 || u >= (self.width - 1) as f32 || v >= (self.height - 1) as f32 {
+            return 0.0;
+        }
+        let (x0, y0) = (u as usize, v as usize);
+        let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+        let g = |x: usize, y: usize| grid[y * self.width + x];
+        (g(x0, y0) * (1.0 - fx) + g(x0 + 1, y0) * fx) * (1.0 - fy) + (g(x0, y0 + 1) * (1.0 - fx) + g(x0 + 1, y0 + 1) * fx) * fy
     }
 
     /// The surface's slope and how much is face at (`x`, `y`), bilinearly.
@@ -378,6 +431,8 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
     let at = |x: isize, y: isize| shape[y.clamp(0, h as isize - 1) as usize * w + x.clamp(0, w as isize - 1) as usize];
 
     let [lx, ly, lz] = options.lamp(whole);
+    // What each face shades from the lamp.
+    let shadows: Vec<Vec<f32>> = faces.iter().map(|f| f.shadows([lx, ly, lz])).collect();
     let (ox, oy) = (origin.0 as f32, origin.1 as f32);
     let filter = options.filter();
     let ambient = options.ambient.clamp(0.0, 100.0) / 100.0;
@@ -390,12 +445,14 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
         .map(|(i, p)| {
             let (x, y) = ((i % w) as isize, (i / w) as isize);
             let (mut nx, mut ny) = ((at(x - d, y) - at(x + d, y)) * SLOPE, (at(x, y - d) - at(x, y + d)) * SLOPE);
-            let mut skin: f32 = 0.0;
-            for face in faces {
-                let [fx, fy, cover] = face.at(ox + x as f32, oy + y as f32);
+            let (mut skin, mut lit_by): (f32, f32) = (0.0, 1.0);
+            for (face, shadow) in faces.iter().zip(&shadows) {
+                let (px, py) = (ox + x as f32, oy + y as f32);
+                let [fx, fy, cover] = face.at(px, py);
                 if cover > 0.0 {
                     (nx, ny) = (nx + (fx - nx) * cover, ny + (fy - ny) * cover);
                     skin = skin.max(cover);
+                    lit_by = lit_by.min(1.0 - face.sample(shadow, px, py) * cover);
                 }
             }
             let len = (nx * nx + ny * ny + 1.0).sqrt();
@@ -404,7 +461,7 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
             let (vx, vy) = (lx - ox - x as f32, ly - oy - y as f32);
             let dist = (vx * vx + vy * vy + lz * lz).sqrt();
             let cos = (nx * vx + ny * vy + lz) / (len * dist);
-            let falloff = lz * lz / (dist * dist);
+            let falloff = lz * lz / (dist * dist) * lit_by;
             // Light adds up in linear values, not the encoded ones.
             let c = |k: usize| {
                 // On a face, light wraps round past where it stops reaching,
@@ -577,9 +634,9 @@ mod tests {
         assert!(ratio(&with) > ratio(&without) * 1.1, "{} against {}", ratio(&with), ratio(&without));
         // Away from the face, as before.
         assert_eq!(with.get(250, 10), without.get(250, 10));
-        // Its shadow side is warm, as skin's are, not grey.
-        let shadow = with.get(176, 128);
-        assert!(shadow[0] > shadow[1] && shadow[1] > shadow[2], "{shadow:?}");
+        // The edge of its shadow is warm, as skin's are, not grey.
+        let edge = with.get(150, 128);
+        assert!(edge[0] > edge[1] && edge[1] > edge[2], "{edge:?}");
 
         // Kept and named by number, as the app hands them over.
         let id = keep_faces(vec![face]);
@@ -589,6 +646,19 @@ mod tests {
         let filter = crate::filters::LayerFilter::Relight(RelightOptions { faces: id, ..options });
         let part = filter.preview(&flat, 60, 90, 40, 40);
         assert_eq!(part, with.crop(60, 90, 40, 40));
+    }
+
+    #[test]
+    fn a_face_casts_a_shadow_away_from_a_low_lamp() {
+        let face = FaceShape::new(&face_points(128.0, 128.0, 80.0)).unwrap();
+        // Low, to the left: the dome's right side is behind its top.
+        let shadows = face.shadows([0.0, 128.0, 20.0]);
+        let at = |x: f32| face.sample(&shadows, x, 128.0);
+        assert!(at(80.0) < 0.1, "the side facing it is lit: {}", at(80.0));
+        assert!(at(185.0) > 0.5, "the far side is shaded: {}", at(185.0));
+        // High overhead, nothing is.
+        let overhead = face.shadows([128.0, 128.0, 5000.0]);
+        assert!(overhead.iter().all(|&s| s < 0.05));
     }
 
     #[test]
