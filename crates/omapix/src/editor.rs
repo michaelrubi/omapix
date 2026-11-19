@@ -418,6 +418,11 @@ pub struct Editor {
     selected: (u64, Vec<u64>),
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// The document as opened, the History Brush's source at step 0 even
+    /// once that step has gone from the history.
+    opened: Document,
+    /// The history step the History Brush paints from.
+    history_source: usize,
     /// Key of the continuous edit in progress (e.g. dragging the opacity
     /// slider), so a whole drag is one undo step.
     live: Option<String>,
@@ -505,6 +510,8 @@ impl Editor {
         let active = doc.layers.last().map_or(0, |l| l.id);
         let overlay_colour = doc.profile.from_srgb8([255, 0, 0]).unwrap_or([u16::MAX, 0, 0, u16::MAX]);
         Ok(Self {
+            opened: doc.clone(),
+            history_source: 0,
             doc,
             active,
             target: Target::Pixels,
@@ -606,8 +613,13 @@ impl Editor {
         self.undo.push(snapshot);
         if self.undo.len() > HISTORY_LIMIT {
             self.undo.remove(0);
+            // A source step that's gone leaves the opened image as the source.
+            self.history_source = self.history_source.saturating_sub(1);
         }
         self.redo.clear();
+        if self.history_source > self.undo.len() {
+            self.history_source = 0;
+        }
     }
 
     fn check_size_changed(&mut self) {
@@ -869,6 +881,48 @@ impl Editor {
         self.end_gesture();
         self.undo.clear();
         self.redo.clear();
+        self.history_source = 0;
+    }
+
+    /// The history step the History Brush paints from (0, the opened image,
+    /// to start with).
+    pub fn history_source(&self) -> usize {
+        self.history_source
+    }
+
+    /// Paint from history step `index` with the History Brush.
+    pub fn set_history_source(&mut self, index: usize) {
+        if index < self.history_count() {
+            self.history_source = index;
+        }
+    }
+
+    /// The document at history step `index`, as [`Self::jump_to_history`]
+    /// would go to it, but the opened image for step 0.
+    fn history_doc(&self, index: usize) -> Option<&Document> {
+        let now = self.undo.len();
+        match index {
+            0 => Some(&self.opened),
+            i if i < now => Some(&self.undo[i].doc),
+            i if i == now => Some(&self.doc),
+            i => self.redo.len().checked_sub(i - now).map(|j| &self.redo[j].doc),
+        }
+    }
+
+    /// Start a History Brush stroke: the active layer's pixels painted back
+    /// as they were at the history source. Photoshop's reasons when it
+    /// can't.
+    pub fn begin_history_stroke(&mut self, settings: BrushSettings, parts: omapix_engine::brush::Parts) -> Result<bool, &'static str> {
+        let doc = self.history_doc(self.history_source).ok_or("the history state is gone")?;
+        if (doc.width, doc.height) != (self.doc.width, self.doc.height) {
+            return Err("the history state has a different canvas size");
+        }
+        let pixels = doc
+            .layer(self.active)
+            .filter(|l| !l.is_group && l.adjustment.is_none())
+            .map(|l| l.pixels.clone())
+            .ok_or("the history state does not contain a corresponding layer")?;
+        Ok(self.begin_stroke_from(settings, Paint::Clone { dx: 0, dy: 0 }, Sample::Current, Some(pixels), parts))
     }
 
     fn restore(&mut self, snapshot: Snapshot) {
@@ -897,6 +951,19 @@ impl Editor {
     /// is the brush's sampled tip, if it isn't a round one.
     /// Returns false if there is nothing to paint on or a background job is running.
     pub fn begin_stroke(&mut self, settings: BrushSettings, paint: Paint, sample: Sample, parts: omapix_engine::brush::Parts) -> bool {
+        self.begin_stroke_from(settings, paint, sample, None, parts)
+    }
+
+    /// [`Self::begin_stroke`], copying from `history` (the History Brush)
+    /// rather than from what `sample` says.
+    fn begin_stroke_from(
+        &mut self,
+        settings: BrushSettings,
+        paint: Paint,
+        sample: Sample,
+        history: Option<Tiled<Pixel>>,
+        parts: omapix_engine::brush::Parts,
+    ) -> bool {
         if self.job.is_some() {
             return false;
         }
@@ -941,12 +1008,17 @@ impl Editor {
         {
             stroke = stroke.within(selection.coverage.clone());
         }
+        let from_history = history.is_some();
         if copying {
-            let source = self.sample_source(sample);
+            let source = history.unwrap_or_else(|| self.sample_source(sample));
             stroke = stroke.sampling(source);
+            if from_history {
+                stroke = stroke.replacing();
+            }
         }
         self.live = None;
         let label = match (target, paint) {
+            _ if from_history => "History Brush",
             (Target::QuickMask, _) => "Quick Mask",
             (Target::Mask, _) => "Paint Mask",
             (_, Paint::Erase) => "Eraser",
@@ -2897,6 +2969,78 @@ mod tests {
             assert_eq!(e.canvas.sample(x, y), Some(full.sample_for_test(x, y)));
         }
         assert_ne!(e.canvas.sample(400, 300), e.canvas.sample(400, 380));
+    }
+
+    /// A stroke across the middle of the image with the brush, or with the
+    /// History Brush.
+    fn stroke_across(e: &mut Editor, paint: Option<Paint>) -> Result<bool, &'static str> {
+        let parts = omapix_engine::brush::Parts::default();
+        let began = match paint {
+            Some(paint) => e.begin_stroke(hard(40.0), paint, Sample::Current, parts),
+            None => e.begin_history_stroke(hard(40.0), parts)?,
+        };
+        if began {
+            e.stroke_to(100.0, 200.0, 1.0);
+            e.stroke_to(500.0, 200.0, 1.0);
+            e.end_stroke();
+        }
+        Ok(began)
+    }
+
+    #[test]
+    fn the_history_brush_paints_back_the_opened_image_or_a_chosen_step() {
+        let mut e = editor();
+        let grey = e.doc.layers[0].pixels.get(300, 200);
+        let red = Paint::Color([65535, 0, 0, 65535]);
+        assert_eq!(stroke_across(&mut e, Some(red)), Ok(true));
+        assert_ne!(e.doc.layers[0].pixels.get(300, 200), grey);
+        assert_eq!(stroke_across(&mut e, None), Ok(true));
+        assert_eq!(e.doc.layers[0].pixels.get(300, 200), grey, "back as opened");
+        assert_eq!(e.undo_label(), Some("History Brush"));
+
+        // A layer that wasn't there when the image was opened can't be.
+        let id = e.doc.next_layer_id();
+        e.edit("New Layer", |doc, _| doc.layers.push(Layer::empty(id, "Layer 1", 600, 400)));
+        e.select_layers(id, vec![]);
+        assert_eq!(stroke_across(&mut e, Some(red)), Ok(true));
+        assert_eq!(stroke_across(&mut e, None), Err("the history state does not contain a corresponding layer"));
+
+        // From the step where it was new, the red goes, back to transparent.
+        let new_layer = e.history_active_index() - 1;
+        e.set_history_source(new_layer);
+        assert_eq!(stroke_across(&mut e, None), Ok(true));
+        assert_eq!(e.doc.layer(id).unwrap().pixels.get(300, 200), [0; 4]);
+    }
+
+    #[test]
+    fn the_history_source_follows_its_step_and_falls_back_to_the_opened_image() {
+        let mut e = editor();
+        let step = |e: &mut Editor, n: usize| {
+            for i in 0..n {
+                e.edit("Opacity", |doc, _| doc.layers[0].opacity = i as f32 / 100.0);
+            }
+        };
+        step(&mut e, 5);
+        e.set_history_source(3);
+        // Undoing then editing drops the steps after: 3 is still there, 5 isn't.
+        e.undo();
+        step(&mut e, 1);
+        assert_eq!(e.history_source(), 3);
+        e.set_history_source(5);
+        e.undo();
+        e.undo();
+        step(&mut e, 1);
+        assert_eq!(e.history_source(), 0, "its step was dropped");
+
+        // Old steps going past the limit move it up, until its own goes.
+        e.set_history_source(2);
+        let room = HISTORY_LIMIT - e.history_count() + 1;
+        step(&mut e, room + 1);
+        assert_eq!(e.history_source(), 1);
+        step(&mut e, 1);
+        assert_eq!(e.history_source(), 0);
+        // Step 0 is still the image as opened, however much was let go.
+        assert_eq!(e.history_doc(0).unwrap().layers[0].opacity, 1.0);
     }
 
     #[test]

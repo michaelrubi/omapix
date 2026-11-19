@@ -555,6 +555,7 @@ impl ScriptStep {
                 "Brush" => ScriptStep::Tool(crate::tools::Tool::Brush),
                 "Eraser" => ScriptStep::Tool(crate::tools::Tool::Eraser),
                 "Clone" => ScriptStep::Tool(crate::tools::Tool::CloneStamp),
+                "History" => ScriptStep::Tool(crate::tools::Tool::HistoryBrush),
                 "Heal" => ScriptStep::Tool(crate::tools::Tool::Healing),
                 "SpotHeal" => ScriptStep::Tool(crate::tools::Tool::SpotHealing),
                 "Marquee" => ScriptStep::Tool(crate::tools::Tool::Marquee),
@@ -4575,8 +4576,15 @@ impl App {
                     background: editor.doc.profile.from_srgb8(self.tools.background).unwrap_or([65535; 4]),
                     ..self.brushes.parts(&settings)
                 };
-                if editor.begin_stroke(settings, paint, sample, parts) {
-                    editor.stroke_pen_to(p.x, p.y, pen);
+                let began = if self.tools.tool == crate::tools::Tool::HistoryBrush {
+                    editor.begin_history_stroke(settings, parts)
+                } else {
+                    Ok(editor.begin_stroke(settings, paint, sample, parts))
+                };
+                match began {
+                    Ok(true) => editor.stroke_pen_to(p.x, p.y, pen),
+                    Ok(false) => {}
+                    Err(why) => self.message(format!("Could not use the history brush because {why}"), true),
                 }
             }
             ToolInput::StrokeMove(p) => editor.stroke_pen_to(p.x, p.y, pen),

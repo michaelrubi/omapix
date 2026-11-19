@@ -20,11 +20,20 @@ pub fn history_row_id(index: usize) -> egui::Id {
     egui::Id::new("history_row").with(index)
 }
 
+/// The box at the left of a row that makes it the History Brush's source.
+pub fn history_source_id(index: usize) -> egui::Id {
+    egui::Id::new("history_source").with(index)
+}
+
+/// The width of the source box.
+const SOURCE_WIDTH: f32 = 22.0;
+
 impl HistoryPanel {
     pub fn show(&mut self, ui: &mut Ui, editor: &mut Editor, theme: &Theme) -> Option<Command> {
         let mut command = None;
         let labels = editor.history_labels();
         let active = editor.history_active_index();
+        let source = editor.history_source();
         let total = labels.len();
 
         ui.add_space(4.0);
@@ -53,6 +62,10 @@ impl HistoryPanel {
 
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
                 let response = ui.interact(rect, history_row_id(i), Sense::click());
+                let source_rect = egui::Rect::from_min_size(rect.left_top(), egui::vec2(SOURCE_WIDTH, rect.height()));
+                let source_response = ui
+                    .interact(source_rect, history_source_id(i), Sense::click())
+                    .on_hover_text("Paint from this step with the History Brush (Y)");
 
                 if is_active {
                     ui.painter().rect_filled(rect, 2.0, theme.selection);
@@ -80,22 +93,34 @@ impl HistoryPanel {
                     ui.painter().rect_filled(bar, 1.0, theme.accent);
                 }
 
+                if i == source || source_response.hovered() {
+                    let colour = if i == source { theme.accent } else { theme.dark_foreground };
+                    ui.painter().text(
+                        egui::pos2(rect.left() + 6.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        crate::tools::HISTORY_ICON,
+                        egui::FontId::proportional(13.0),
+                        colour,
+                    );
+                }
                 ui.painter().text(
-                    egui::pos2(rect.left() + 8.0, rect.center().y),
+                    egui::pos2(rect.left() + SOURCE_WIDTH + 4.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     icon,
                     egui::FontId::proportional(13.0),
                     icon_colour,
                 );
                 ui.painter().text(
-                    egui::pos2(rect.left() + 24.0, rect.center().y),
+                    egui::pos2(rect.left() + SOURCE_WIDTH + 20.0, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     label,
                     egui::FontId::proportional(13.0),
                     text_colour,
                 );
 
-                if response.clicked() {
+                if source_response.clicked() {
+                    editor.set_history_source(i);
+                } else if response.clicked() {
                     editor.jump_to_history(i);
                 }
             }
@@ -231,6 +256,13 @@ mod tests {
         h.click(pt2);
         assert_eq!(h.editor.history_active_index(), 2);
         assert_eq!(h.editor.doc.layers[0].opacity, 0.2);
+
+        // The source box sets the History Brush's source, without jumping.
+        assert_eq!(h.editor.history_source(), 0, "the opened image to start with");
+        let box1 = h.ctx.read_response(history_source_id(1)).unwrap().rect.center();
+        h.click(box1);
+        assert_eq!(h.editor.history_source(), 1);
+        assert_eq!(h.editor.history_active_index(), 2);
 
         // Hover row 1 without clicking: response is hovered
         let pt1 = h.row_point(1);
