@@ -361,6 +361,16 @@ enum CropDrag {
     New(Pos2),
 }
 
+/// Relight's faces: being found by the face models, or how many were.
+#[derive(Default)]
+enum RelightFaces {
+    #[default]
+    Idle,
+    Finding(Receiver<Result<Vec<Vec<[f32; 3]>>, String>>),
+    Found(usize),
+    NoModels,
+}
+
 /// A drag on the canvas while Relight is open: the lamp, or its ring.
 #[derive(Clone, Copy, PartialEq)]
 enum RelightDrag {
@@ -663,6 +673,7 @@ pub struct App {
     /// Relight's eyedropper is armed: the next click on the image takes
     /// the lamp's colour from there.
     relight_eyedropper: bool,
+    relight_faces: RelightFaces,
     /// Where Liquify's brush is while its button is held.
     liquify_at: Option<Pos2>,
     /// The Object Selection tool's model, running on its own thread.
@@ -768,6 +779,7 @@ impl App {
             crop_drag: None,
             relight_drag: None,
             relight_eyedropper: false,
+            relight_faces: RelightFaces::Idle,
             liquify_at: None,
             objects: Default::default(),
             tools,
@@ -894,6 +906,7 @@ impl App {
             crop_drag: None,
             relight_drag: None,
             relight_eyedropper: false,
+            relight_faces: RelightFaces::Idle,
             liquify_at: None,
             objects: Default::default(),
             script: VecDeque::new(),
@@ -1940,10 +1953,14 @@ impl App {
                     Command::UnsharpMask => settings.unsharp_mask.into(),
                     Command::SmartSharpen => LayerFilter::SmartSharpen(settings.smart_sharpen),
                     Command::ReduceNoise => LayerFilter::ReduceNoise(settings.reduce_noise),
-                    Command::Relight => LayerFilter::Relight(settings.relight),
+                    // Its faces are found again for this image.
+                    Command::Relight => LayerFilter::Relight(omapix_engine::relight::RelightOptions { faces: 0, ..settings.relight }),
                     _ => unreachable!(),
                 };
                 self.dialog = Some(Dialog::Filter { filter, preview: true });
+                if cmd == Command::Relight {
+                    self.find_relight_faces(ctx);
+                }
             }
             Command::BorderSelection | Command::SmoothSelection | Command::ExpandSelection | Command::ContractSelection | Command::Feather => {
                 let radius = modify_radius(&mut self.filters, cmd).map_or(1.0, |r| *r);
@@ -3196,6 +3213,7 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.poll_relight_faces();
         if let (Some(Dialog::BlendingOptions(panel)), Some(editor)) = (&mut self.dialog, &mut self.editor) {
             let closed = match panel.show(ctx, editor, &self.theme) {
                 Some(keep) => {
@@ -3370,6 +3388,13 @@ impl App {
             }
         );
         let relight_eyedropper = &mut self.relight_eyedropper;
+        let faces_note = match self.relight_faces {
+            RelightFaces::Finding(_) => "Finding faces, to light them by their shape…",
+            RelightFaces::Found(0) | RelightFaces::Idle => "No faces found: lit by the photo's brightness alone.",
+            RelightFaces::Found(1) => "The face is lit by its shape.",
+            RelightFaces::Found(_) => "The faces are lit by their shapes.",
+            RelightFaces::NoModels => "With the face models (Help › AI Models), faces are lit by their shape.",
+        };
         let body = |ui: &mut Ui| {
             ui.set_min_width(340.0);
             match dialog {
@@ -3509,7 +3534,7 @@ impl App {
                         LayerFilter::SmartBlur(options) => {
                             smart_blur_controls(ui, options, hint);
                         }
-                        LayerFilter::Relight(options) => relight_controls(ui, options, relight_eyedropper, hint),
+                        LayerFilter::Relight(options) => relight_controls(ui, options, relight_eyedropper, faces_note, hint),
                     }
                     ui.add_space(4.0);
                     ui.checkbox(preview, "Preview");
@@ -3520,7 +3545,12 @@ impl App {
                             close = true;
                         }
                         if ui.button("Defaults").clicked() {
+                            // Relight keeps the faces it found.
+                            let faces = if let LayerFilter::Relight(o) = filter { o.faces } else { 0 };
                             *filter = defaults.filter(filter);
+                            if let LayerFilter::Relight(o) = filter {
+                                o.faces = faces;
+                            }
                         }
                         if ok {
                             let filter = *filter;
@@ -4539,6 +4569,55 @@ impl App {
         ctx.request_repaint();
     }
 
+    /// Find the faces in the image, so Relight lights them by their shape.
+    fn find_relight_faces(&mut self, ctx: &egui::Context) {
+        self.relight_faces = RelightFaces::Idle;
+        if !missing(FACE_MODELS, &self.models).is_empty() {
+            self.relight_faces = RelightFaces::NoModels;
+            return;
+        }
+        let Some((image, profile)) = (self.editor.as_ref()).and_then(|e| Some((Arc::clone(e.canvas.render()?), e.doc.profile.clone()))) else {
+            return;
+        };
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let found = image.with_image(|image| crate::face_selection::face_points(image, &profile));
+            let _ = tx.send(found.unwrap_or_else(|| Err("The image isn't ready yet".into())));
+            ctx.request_repaint();
+        });
+        self.relight_faces = RelightFaces::Finding(rx);
+    }
+
+    /// Once Relight's faces are found, light them by their shape.
+    fn poll_relight_faces(&mut self) {
+        let RelightFaces::Finding(rx) = &self.relight_faces else {
+            return;
+        };
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("Finding faces stopped unexpectedly".into()),
+        };
+        let shapes: Vec<_> = match found {
+            Ok(faces) => faces.iter().filter_map(|p| omapix_engine::relight::FaceShape::new(p)).collect(),
+            Err(e) => {
+                log::warn!("relight: {e}");
+                Vec::new()
+            }
+        };
+        let count = shapes.len();
+        if count > 0
+            && let Some(Dialog::Filter {
+                filter: LayerFilter::Relight(options),
+                ..
+            }) = &mut self.dialog
+        {
+            options.faces = omapix_engine::relight::keep_faces(shapes);
+        }
+        self.relight_faces = RelightFaces::Found(count);
+    }
+
     /// While Relight is open, the canvas places its lamp: a click or a
     /// drag moves it there, and dragging its ring changes how far it
     /// reaches.
@@ -5389,7 +5468,7 @@ const RELIGHT_REACH: (f32, f32) = (5.0, 200.0);
 
 /// Relight's settings, for its dialog. The lamp itself is placed on the
 /// canvas.
-fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOptions, eyedropper: &mut bool, hint: egui::Color32) {
+fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOptions, eyedropper: &mut bool, faces: &str, hint: egui::Color32) {
     ui.label(RichText::new("Click or drag on the image to place the light. Drag its ring to change how far it reaches.").color(hint));
     ui.add_space(4.0);
     for (label, value, range) in [
@@ -5416,6 +5495,7 @@ fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOp
         }
     });
     ui.label(RichText::new("Ambient fills the shadows. Softness is how broad the shapes the light follows are.").color(hint));
+    ui.label(RichText::new(faces).color(hint));
 }
 
 /// Smart Blur's settings, for its dialog.
@@ -7395,6 +7475,19 @@ mod tests {
         }
         // Not modal, so the canvas under it still takes the pointer.
         assert!(ctx.memory(|m| m.allows_interaction(egui::LayerId::background())));
+        // Faces the models find are kept, and lit by their shape.
+        let (tx, rx) = channel();
+        app.relight_faces = RelightFaces::Finding(rx);
+        let face: Vec<[f32; 3]> = (0..60)
+            .map(|i| {
+                let (r, a) = ((i % 6) as f32 * 8.0, i as f32 * 0.7);
+                [50.0 + r * a.cos(), 50.0 + r * a.sin(), r - 40.0]
+            })
+            .collect();
+        tx.send(Ok(vec![face])).unwrap();
+        frame(&mut app, vec![]);
+        assert!(matches!(app.relight_faces, RelightFaces::Found(1)));
+        assert_ne!(options(&app).faces, 0);
         let (w, h) = app.editor.as_ref().map(|e| (e.doc.width as f32, e.doc.height as f32)).unwrap();
         let none = egui::Modifiers::NONE;
 

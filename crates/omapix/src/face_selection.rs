@@ -334,6 +334,13 @@ pub fn analyse(image: &Raster, profile: &ColorProfile) -> Result<(Vec<[u8; 4]>, 
     Ok((srgb, analysis))
 }
 
+/// Each face's 478 points in `image` (x, y in pixels, and depth), for
+/// those the landmarker saw.
+pub fn face_points(image: &Raster, profile: &ColorProfile) -> Result<Vec<Vec<[f32; 3]>>, String> {
+    let (_, analysis) = analyse(image, profile)?;
+    Ok(analysis.faces.into_iter().filter_map(|(_, points)| points).collect())
+}
+
 /// The face skin to look for blemishes on: [`skin`] within each face's
 /// outline (leaving out the ears), less the bottom of its nose and round
 /// its eyes. Faces the landmarker didn't see (in profile) are left out:

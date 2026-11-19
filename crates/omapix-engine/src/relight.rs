@@ -50,6 +50,10 @@ pub struct RelightOptions {
     pub softness: f32,
     /// The lamp's colour, in sRGB.
     pub colour: [u8; 3],
+    /// The faces' shapes to light, as [`keep_faces`] numbered them (0 for
+    /// none: their brightness stands in for their shape). Not saved.
+    #[serde(skip)]
+    pub faces: u64,
 }
 
 impl Default for RelightOptions {
@@ -63,6 +67,7 @@ impl Default for RelightOptions {
             ambient: 70.0,
             softness: 25.0,
             colour: [255, 255, 255],
+            faces: 0,
         }
     }
 }
@@ -137,6 +142,213 @@ fn from_linear(v: f32) -> f32 {
     if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
 
+/// Faces' shapes kept for Relight, newest last, by number: found by the
+/// app's face models, which a filter's settings (copied about, and saved)
+/// can't hold.
+static FACES: std::sync::Mutex<Vec<(u64, std::sync::Arc<Vec<FaceShape>>)>> = std::sync::Mutex::new(Vec::new());
+
+/// How many sets of faces are kept: enough for a filter still being
+/// applied while the next image's are found.
+const FACES_KEPT: usize = 4;
+
+/// Keep `faces` for Relight, and the number its settings name them by.
+pub fn keep_faces(faces: Vec<FaceShape>) -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut kept = FACES.lock().unwrap_or_else(|e| e.into_inner());
+    kept.push((id, std::sync::Arc::new(faces)));
+    let excess = kept.len().saturating_sub(FACES_KEPT);
+    kept.drain(..excess);
+    id
+}
+
+/// The faces kept as `id`, or none.
+fn kept_faces(id: u64) -> std::sync::Arc<Vec<FaceShape>> {
+    let kept = FACES.lock().unwrap_or_else(|e| e.into_inner());
+    kept.iter().find(|(k, _)| *k == id).map(|(_, f)| f.clone()).unwrap_or_default()
+}
+
+/// A face's shape, from its landmarks: which way its surface faces, on a
+/// coarse grid over it, and how much of each cell is face.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceShape {
+    /// The grid's top left, in image pixels, and the size of a cell.
+    origin: [f32; 2],
+    cell: f32,
+    width: usize,
+    height: usize,
+    /// The surface's slope across and down (the normal is (x, y, 1)),
+    /// and how much is face (0–1), per cell.
+    normals: Vec<[f32; 3]>,
+}
+
+/// Cells across a face's grid.
+const FACE_CELLS: f32 = 96.0;
+
+impl FaceShape {
+    /// The shape from a face's landmarks: x and y in image pixels, and depth
+    /// in pixels too, nearer the camera less (MediaPipe's). The points are
+    /// joined into triangles, heights filled in across each, then smoothed.
+    pub fn new(points: &[[f32; 3]]) -> Option<Self> {
+        if points.len() < 3 {
+            return None;
+        }
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for p in points {
+            for i in 0..2 {
+                lo[i] = lo[i].min(p[i]);
+                hi[i] = hi[i].max(p[i]);
+            }
+        }
+        let size = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0);
+        let margin = size * 0.15;
+        let cell = size / FACE_CELLS;
+        let origin = [lo[0] - margin, lo[1] - margin];
+        let width = ((hi[0] - lo[0] + 2.0 * margin) / cell).ceil() as usize + 1;
+        let height = ((hi[1] - lo[1] + 2.0 * margin) / cell).ceil() as usize + 1;
+        // Heights (nearer is higher) across each triangle; NaN off the face.
+        let mut heights = vec![f32::NAN; width * height];
+        let flat: Vec<[f32; 2]> = points.iter().map(|p| [(p[0] - origin[0]) / cell, (p[1] - origin[1]) / cell]).collect();
+        for [a, b, c] in delaunay(&flat) {
+            let (pa, pb, pc) = (flat[a], flat[b], flat[c]);
+            let area = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]);
+            if area.abs() < 1e-6 {
+                continue;
+            }
+            let x0 = pa[0].min(pb[0]).min(pc[0]).floor().max(0.0) as usize;
+            let x1 = (pa[0].max(pb[0]).max(pc[0]).ceil() as usize).min(width - 1);
+            let y0 = pa[1].min(pb[1]).min(pc[1]).floor().max(0.0) as usize;
+            let y1 = (pa[1].max(pb[1]).max(pc[1]).ceil() as usize).min(height - 1);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let (px, py) = (x as f32, y as f32);
+                    let wa = ((pb[0] - px) * (pc[1] - py) - (pc[0] - px) * (pb[1] - py)) / area;
+                    let wb = ((pc[0] - px) * (pa[1] - py) - (pa[0] - px) * (pc[1] - py)) / area;
+                    let wc = 1.0 - wa - wb;
+                    if wa >= -1e-4 && wb >= -1e-4 && wc >= -1e-4 {
+                        heights[y * width + x] = -(wa * points[a][2] + wb * points[b][2] + wc * points[c][2]);
+                    }
+                }
+            }
+        }
+        // Off the face, its edge carried on smoothly (no cliff to show as an
+        // outline); then smoothed. How much is face fades out inside its
+        // edge, where the brightness's shape takes over.
+        let inside: Vec<f32> = heights.iter().map(|h| if h.is_nan() { 0.0 } else { 1.0 }).collect();
+        if inside.iter().all(|&v| v == 0.0) {
+            return None;
+        }
+        let known: Vec<f32> = heights.iter().map(|h| if h.is_nan() { 0.0 } else { *h }).collect();
+        let reach = FACE_CELLS / 8.0;
+        let (sum, weight) = (
+            crate::denoise::blur(&known, width, height, reach),
+            crate::denoise::blur(&inside, width, height, reach),
+        );
+        let filled: Vec<f32> = (0..width * height)
+            .map(|i| {
+                if inside[i] > 0.0 {
+                    known[i]
+                } else if weight[i] > 1e-6 {
+                    sum[i] / weight[i]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let smooth = crate::denoise::blur(&filled, width, height, 2.0);
+        let cover: Vec<f32> = crate::denoise::blur(&inside, width, height, 4.0)
+            .iter()
+            .map(|c| ((c - 0.5) * 2.0).clamp(0.0, 1.0))
+            .collect();
+        let at = |x: usize, y: usize| smooth[y.min(height - 1) * width + x.min(width - 1)];
+        let normals = (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                let (xl, xr, yu, yd) = (x.saturating_sub(1), (x + 1).min(width - 1), y.saturating_sub(1), (y + 1).min(height - 1));
+                let dx = (at(xr, y) - at(xl, y)) / (cell * (xr - xl).max(1) as f32);
+                let dy = (at(x, yd) - at(x, yu)) / (cell * (yd - yu).max(1) as f32);
+                [-dx, -dy, cover[i]]
+            })
+            .collect();
+        Some(Self {
+            origin,
+            cell,
+            width,
+            height,
+            normals,
+        })
+    }
+
+    /// The surface's slope and how much is face at (`x`, `y`), bilinearly.
+    fn at(&self, x: f32, y: f32) -> [f32; 3] {
+        let (u, v) = ((x - self.origin[0]) / self.cell, (y - self.origin[1]) / self.cell);
+        if u < 0.0 || v < 0.0 || u >= (self.width - 1) as f32 || v >= (self.height - 1) as f32 {
+            return [0.0; 3];
+        }
+        let (x0, y0) = (u as usize, v as usize);
+        let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+        let n = |x: usize, y: usize| self.normals[y * self.width + x];
+        let (a, b, c, d) = (n(x0, y0), n(x0 + 1, y0), n(x0, y0 + 1), n(x0 + 1, y0 + 1));
+        std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
+    }
+}
+
+/// The Delaunay triangles of `points` (Bowyer–Watson), as indices.
+fn delaunay(points: &[[f32; 2]]) -> Vec<[usize; 3]> {
+    let p: Vec<[f64; 2]> = points.iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect();
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for q in &p {
+        for i in 0..2 {
+            lo[i] = lo[i].min(q[i]);
+            hi[i] = hi[i].max(q[i]);
+        }
+    }
+    let span = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(1.0) * 20.0;
+    let mid = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+    // A triangle round them all, its corners after the points.
+    let mut all = p.clone();
+    let n = p.len();
+    all.extend([[mid[0] - span, mid[1] - span], [mid[0] + span, mid[1] - span], [mid[0], mid[1] + span]]);
+    let circle = |t: [usize; 3]| {
+        let ([ax, ay], [bx, by], [cx, cy]) = (all[t[0]], all[t[1]], all[t[2]]);
+        let d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+        let (a2, b2, c2) = (ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy);
+        let ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d;
+        let uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d;
+        ([ux, uy], (ax - ux).powi(2) + (ay - uy).powi(2))
+    };
+    let mut triangles: Vec<([usize; 3], [f64; 2], f64)> = vec![{
+        let t = [n, n + 1, n + 2];
+        let (c, r) = circle(t);
+        (t, c, r)
+    }];
+    for (i, &[x, y]) in all.iter().enumerate().take(n) {
+        let (bad, good): (Vec<_>, Vec<_>) = triangles.into_iter().partition(|(_, c, r)| (x - c[0]).powi(2) + (y - c[1]).powi(2) < *r);
+        triangles = good;
+        // The hole's edges: those of one bad triangle only.
+        let mut edges: Vec<[usize; 2]> = Vec::new();
+        for (t, ..) in &bad {
+            for e in [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]] {
+                let key = [e[0].min(e[1]), e[0].max(e[1])];
+                match edges.iter().position(|f| *f == key) {
+                    Some(k) => {
+                        edges.swap_remove(k);
+                    }
+                    None => edges.push(key),
+                }
+            }
+        }
+        for [a, b] in edges {
+            let t = [a, b, i];
+            let (c, r) = circle(t);
+            if r.is_finite() {
+                triangles.push((t, c, r));
+            }
+        }
+    }
+    triangles.into_iter().map(|(t, ..)| t).filter(|t| t.iter().all(|&v| v < n)).collect()
+}
+
 fn step(sigma: f32) -> usize {
     sigma.round().clamp(1.0, STEP_MAX) as usize
 }
@@ -144,7 +356,14 @@ fn step(sigma: f32) -> usize {
 /// `image` lit again with `options`, as if it were the part at `origin` of
 /// an image `whole` big (so a part, previewed, comes out as it would in
 /// the whole). Alpha is kept.
+/// The faces' shapes are those its settings name, if they're still kept.
 pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32), whole: (u32, u32)) -> Tiled<Pixel> {
+    relight_faces(image, options, origin, whole, &kept_faces(options.faces))
+}
+
+/// [`relight`], with the shapes of the faces in it from their landmarks
+/// rather than from their brightness.
+pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32), whole: (u32, u32), faces: &[FaceShape]) -> Tiled<Pixel> {
     let (w, h) = (image.width() as usize, image.height() as usize);
     if w == 0 || h == 0 || options.intensity.is_nan() || options.ambient.is_nan() {
         return image.clone();
@@ -168,8 +387,13 @@ pub fn relight(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u32, u32
         .enumerate()
         .map(|(i, p)| {
             let (x, y) = ((i % w) as isize, (i / w) as isize);
-            let nx = (at(x - d, y) - at(x + d, y)) * SLOPE;
-            let ny = (at(x, y - d) - at(x, y + d)) * SLOPE;
+            let (mut nx, mut ny) = ((at(x - d, y) - at(x + d, y)) * SLOPE, (at(x, y - d) - at(x, y + d)) * SLOPE);
+            for face in faces {
+                let [fx, fy, cover] = face.at(ox + x as f32, oy + y as f32);
+                if cover > 0.0 {
+                    (nx, ny) = (nx + (fx - nx) * cover, ny + (fy - ny) * cover);
+                }
+            }
             let len = (nx * nx + ny * ny + 1.0).sqrt();
             // Towards the lamp, and its light falling off with the square of
             // the distance: 1 on a flat surface right under it.
@@ -308,6 +532,53 @@ mod tests {
         assert!(worst <= Some(3), "{worst:?} levels off");
     }
 
+    /// A face as landmarks: a dome of points, nearest in the middle.
+    fn face_points(cx: f32, cy: f32, r: f32) -> Vec<[f32; 3]> {
+        let mut points = Vec::new();
+        for ring in 0..=8 {
+            let rr = r * ring as f32 / 8.0;
+            for k in 0..(ring * 6).max(1) {
+                let a = k as f32 / (ring * 6).max(1) as f32 * std::f32::consts::TAU;
+                // MediaPipe's depth: nearer the camera less.
+                let depth = -(r * r - rr * rr).max(0.0).sqrt();
+                points.push([cx + rr * a.cos(), cy + rr * a.sin(), depth]);
+            }
+        }
+        points
+    }
+
+    #[test]
+    fn a_face_is_lit_by_its_shape_not_its_brightness() {
+        // Flat grey, so brightness says nothing of the face's shape.
+        let flat = Tiled::new(256, 256, [30000, 30000, 30000, u16::MAX]);
+        let face = FaceShape::new(&face_points(128.0, 128.0, 80.0)).unwrap();
+        let options = RelightOptions {
+            x: 0.0,
+            y: 0.5,
+            reach: 30.0,
+            intensity: 100.0,
+            ambient: 20.0,
+            ..Default::default()
+        };
+        let without = relight_faces(&flat, &options, (0, 0), (256, 256), &[]);
+        let with = relight_faces(&flat, &options, (0, 0), (256, 256), std::slice::from_ref(&face));
+        // Without its shape the face's two sides differ only by distance;
+        // with it, the side turned away from the lamp is much darker.
+        let ratio = |img: &Tiled<Pixel>| f32::from(img.get(80, 128)[0]) / f32::from(img.get(176, 128)[0]);
+        assert!(ratio(&with) > ratio(&without) * 1.2, "{} against {}", ratio(&with), ratio(&without));
+        // Away from the face, as before.
+        assert_eq!(with.get(250, 10), without.get(250, 10));
+
+        // Kept and named by number, as the app hands them over.
+        let id = keep_faces(vec![face]);
+        let kept = relight(&flat, &RelightOptions { faces: id, ..options }, (0, 0), (256, 256));
+        assert_eq!(kept.to_vec(), with.to_vec());
+        // A part previewed comes out as in the whole.
+        let filter = crate::filters::LayerFilter::Relight(RelightOptions { faces: id, ..options });
+        let part = filter.preview(&flat, 60, 90, 40, 40);
+        assert_eq!(part, with.crop(60, 90, 40, 40));
+    }
+
     #[test]
     fn added_light_eases_into_white() {
         let bright = Tiled::new(64, 64, [60000, 60000, 60000, u16::MAX]);
@@ -364,7 +635,9 @@ mod timing {
     }
 
     /// Relight a photo with lamps given as `name:x,y,reach,intensity,ambient`
-    /// separated by `;`, for comparing versions by eye:
+    /// separated by `;`, for comparing versions by eye, its faces' shapes
+    /// from `OMAPIX_RELIGHT_POINTS` if given (`omapix-ai`'s `face_points`
+    /// example writes them):
     /// `OMAPIX_RELIGHT=photo.jpg OMAPIX_RELIGHT_LAMPS="left:0.4,0.25,40,50,50"
     /// OMAPIX_RELIGHT_OUT=dir cargo test --release -p omapix-engine relight_lamps -- --ignored`
     #[test]
@@ -381,6 +654,21 @@ mod timing {
         std::fs::create_dir_all(out).unwrap();
         let mut doc = crate::io::load(std::path::Path::new(&path)).expect("the photo");
         let before = doc.layers[0].pixels.clone();
+        let faces: Vec<FaceShape> = std::env::var("OMAPIX_RELIGHT_POINTS")
+            .map(|f| std::fs::read_to_string(f).unwrap())
+            .unwrap_or_default()
+            .split("\n\n")
+            .filter_map(|face| {
+                let points: Vec<[f32; 3]> = face
+                    .lines()
+                    .map(|l| {
+                        let v: Vec<f32> = l.split(' ').map(|v| v.parse().unwrap()).collect();
+                        [v[0], v[1], v[2]]
+                    })
+                    .collect();
+                FaceShape::new(&points)
+            })
+            .collect();
         for lamp in lamps.split(';') {
             let (name, values) = lamp.split_once(':').unwrap();
             let v: Vec<f32> = values.split(',').map(|v| v.trim().parse().unwrap()).collect();
@@ -392,7 +680,7 @@ mod timing {
                 ambient: v[4],
                 ..Default::default()
             };
-            doc.layers[0].pixels = relight(&before, &options, (0, 0), (doc.width, doc.height));
+            doc.layers[0].pixels = relight_faces(&before, &options, (0, 0), (doc.width, doc.height), &faces);
             crate::export::jpeg(&doc, &out.join(format!("{name}.jpg")), 90).unwrap();
         }
     }
