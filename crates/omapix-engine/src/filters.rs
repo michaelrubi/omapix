@@ -175,6 +175,7 @@ pub enum LayerFilter {
         density: f32,
     },
     SmartBlur(SmartBlurOptions),
+    Relight(crate::relight::RelightOptions),
 }
 
 impl LayerFilter {
@@ -188,10 +189,17 @@ impl LayerFilter {
             Self::ReduceNoise(_) => "Reduce Noise",
             Self::MaskDensity { .. } => "Mask Density",
             Self::SmartBlur(_) => "Smart Blur",
+            Self::Relight(_) => "Relight",
         }
     }
 
     pub fn apply(&self, image: &Tiled<Pixel>) -> Tiled<Pixel> {
+        self.apply_as_part(image, (image.width(), image.height()))
+    }
+
+    /// [`Self::apply`] to `image` as part of one `whole` big, for the
+    /// filters whose reach is a part of the image's size.
+    fn apply_as_part(&self, image: &Tiled<Pixel>, whole: (u32, u32)) -> Tiled<Pixel> {
         match *self {
             Self::GaussianBlur { radius } => gaussian_blur(image, radius),
             Self::HighPass { radius } => high_pass(image, radius),
@@ -201,12 +209,16 @@ impl LayerFilter {
             Self::ReduceNoise(options) => reduce_noise(image, &options),
             Self::MaskDensity { density } => mask_density(image, density),
             Self::SmartBlur(options) => smart_blur(image, &options),
+            Self::Relight(options) => crate::relight::relight(image, &options, whole),
         }
     }
 
     /// How far a filter reaches, in pixels, so a preview of part of the
     /// image needs this much around it to come out as the whole would.
-    fn margin(&self) -> u32 {
+    fn margin(&self, whole: (u32, u32)) -> u32 {
+        if let Self::Relight(options) = self {
+            return options.reach(whole);
+        }
         let r = match self {
             Self::UnsharpMask { radius, .. } | Self::GaussianBlur { radius } | Self::HighPass { radius } => *radius,
             Self::SmartSharpen(opts) => opts.radius,
@@ -220,11 +232,12 @@ impl LayerFilter {
     /// The `w` × `h` area of `image` at (`x`, `y`), filtered as it would be
     /// in the whole image (the dialogs' 100 % preview). Row-major.
     pub fn preview(&self, image: &Tiled<Pixel>, x: u32, y: u32, w: u32, h: u32) -> Vec<Pixel> {
-        let m = self.margin();
+        let whole = (image.width(), image.height());
+        let m = self.margin(whole);
         let (x0, y0) = (x.saturating_sub(m), y.saturating_sub(m));
         let (x1, y1) = ((x + w + m).min(image.width()), (y + h + m).min(image.height()));
         let around = Tiled::from_slice(x1 - x0, y1 - y0, [0; 4], &image.crop(x0, y0, x1 - x0, y1 - y0));
-        self.apply(&around).crop(x - x0, y - y0, w, h)
+        self.apply_as_part(&around, whole).crop(x - x0, y - y0, w, h)
     }
 }
 

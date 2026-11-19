@@ -38,6 +38,7 @@ pub mod pyramid;
 pub mod raster;
 pub mod reduced;
 pub mod refine;
+pub mod relight;
 pub mod reshape;
 pub mod retouch;
 pub mod selection;

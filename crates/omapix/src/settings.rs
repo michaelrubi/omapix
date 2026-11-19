@@ -121,6 +121,7 @@ pub struct FilterSettings {
     pub smart_sharpen: SmartSharpenOptions,
     pub reduce_noise: ReduceNoiseOptions,
     pub smart_blur: SmartBlurOptions,
+    pub relight: omapix_engine::relight::RelightOptions,
     pub noise: NoiseOptions,
     pub batch_export: BatchExport,
     pub web_export: WebExport,
@@ -182,6 +183,7 @@ impl Default for FilterSettings {
                 quality: SmartBlurQuality::Medium,
                 mode: SmartBlurMode::Normal,
             },
+            relight: Default::default(),
             noise: NoiseOptions::default(),
             batch_export: BatchExport::default(),
             web_export: WebExport::default(),
@@ -304,6 +306,7 @@ impl FilterSettings {
             LayerFilter::ReduceNoise(_) => LayerFilter::ReduceNoise(self.reduce_noise),
             LayerFilter::MaskDensity { .. } => LayerFilter::MaskDensity { density: self.mask_density },
             LayerFilter::SmartBlur(_) => LayerFilter::SmartBlur(self.smart_blur),
+            LayerFilter::Relight(_) => LayerFilter::Relight(self.relight),
         }
     }
 
@@ -320,6 +323,7 @@ impl FilterSettings {
             LayerFilter::ReduceNoise(options) => self.reduce_noise = options,
             LayerFilter::MaskDensity { density } => self.mask_density = density,
             LayerFilter::SmartBlur(options) => self.smart_blur = options,
+            LayerFilter::Relight(options) => self.relight = options,
         }
         self.save();
     }
