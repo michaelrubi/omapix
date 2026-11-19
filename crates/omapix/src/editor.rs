@@ -84,6 +84,9 @@ pub enum View {
     /// The image where the selection selects it, on a backdrop where it
     /// doesn't (Select and Mask's views besides Quick Mask's red).
     Refined(Backdrop),
+    /// The image as opened: the bottom layer alone, whatever its eye,
+    /// opacity and blend mode (Before and After, `P`).
+    Before,
 }
 
 impl View {
@@ -97,7 +100,7 @@ impl View {
     fn whole(self) -> bool {
         matches!(
             self,
-            View::Separation { .. } | View::Filter { .. } | View::QuickMaskFilter { .. } | View::AddNoise { .. } | View::Alpha(_)
+            View::Separation { .. } | View::Filter { .. } | View::QuickMaskFilter { .. } | View::AddNoise { .. } | View::Alpha(_) | View::Before
         )
     }
 }
@@ -2452,6 +2455,10 @@ pub(crate) fn render_view(doc: &Document, view: View, colour: Pixel, base: Optio
             };
             (Render::new(image), None)
         }
+        View::Before => {
+            let bottom = doc.layers.iter().find(|l| !l.is_group && l.adjustment.is_none());
+            (Render::new(bottom.map_or_else(|| doc.composite(), |l| l.pixels.to_raster())), None)
+        }
         View::Mask(_) | View::MaskOverlay(_) | View::QuickMask | View::Refined(_) | View::Channel(_) => {
             let mut image = Raster::new(doc.width, doc.height, vec![[0; 4]; doc.width as usize * doc.height as usize]);
             for tiles in all_tiles().chunks(BATCH) {
@@ -2600,7 +2607,7 @@ fn draw_tiles(
             out
         }
         // The rest are drawn whole by `render_view`.
-        View::Image | View::Separation { .. } | View::Filter { .. } | View::QuickMaskFilter { .. } | View::AddNoise { .. } | View::Alpha(_) => {
+        View::Image | View::Separation { .. } | View::Filter { .. } | View::QuickMaskFilter { .. } | View::AddNoise { .. } | View::Alpha(_) | View::Before => {
             composite::composite_tiles(layers, tiles, groups)
         }
     }
@@ -2890,6 +2897,25 @@ mod tests {
             assert_eq!(e.canvas.sample(x, y), Some(full.sample_for_test(x, y)));
         }
         assert_ne!(e.canvas.sample(400, 300), e.canvas.sample(400, 380));
+    }
+
+    #[test]
+    fn before_shows_the_bottom_layer_alone() {
+        let mut e = editor();
+        let image = Raster::new(600, 400, vec![[10000, 20000, 40000, 65535]; 600 * 400]);
+        e.edit("Retouch", |doc, _| {
+            doc.layers[0].pixels = Tiled::from_raster(&image);
+            // Hidden and faded, it's still shown as it was opened.
+            doc.layers[0].visible = false;
+            doc.layers[0].opacity = 0.5;
+            let mut top = Layer::from_raster(9, "Retouch", &Raster::new(600, 400, vec![[65535, 0, 0, 65535]; 600 * 400]));
+            top.opacity = 1.0;
+            doc.layers.push(top);
+        });
+        let (render, _) = render_view(&e.doc, View::Before, RED, None);
+        assert_eq!(render.sample_for_test(5, 5), [10000, 20000, 40000, 65535]);
+        let (render, _) = render_view(&e.doc, View::Image, RED, None);
+        assert_eq!(render.sample_for_test(5, 5), [65535, 0, 0, 65535]);
     }
 
     #[test]

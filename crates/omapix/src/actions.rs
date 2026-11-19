@@ -145,6 +145,7 @@ pub fn recordable(cmd: Command) -> bool {
             | Command::ShowHistogram
             | Command::ShowBrushSettings
             | Command::SelectionEdges
+            | Command::BeforeAfter
             | Command::AiModels
             | Command::LastFilter
     )

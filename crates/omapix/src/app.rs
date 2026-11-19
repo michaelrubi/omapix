@@ -516,6 +516,7 @@ impl ScriptStep {
             }
             ("View", nums) => match (words.next()?, nums) {
                 ("image", _) => ScriptStep::View(View::Image),
+                ("before", _) => ScriptStep::View(View::Before),
                 ("mask", _) => ScriptStep::View(View::Mask(0)),
                 ("overlay", _) => ScriptStep::View(View::MaskOverlay(0)),
                 ("quickmask", _) => ScriptStep::View(View::QuickMask),
@@ -660,6 +661,8 @@ pub struct App {
     pending_drops: Vec<PathBuf>,
     /// Whether V is held, for spotting Ctrl+V (see [`Command::pressed`]).
     v_down: bool,
+    /// Before and After's key is held down (see [`Self::check_before_released`]).
+    before_held: bool,
     /// A pen tablet, on Wayland.
     tablet: Option<Tablet>,
     /// Where the pen moved this frame (egui points), and its pressure at
@@ -783,6 +786,7 @@ impl App {
             from_clipboard: None,
             pending_drops: Vec::new(),
             v_down: false,
+            before_held: false,
             tablet: Tablet::connect(cc),
             pen_moves: Vec::new(),
             pen: None,
@@ -876,6 +880,7 @@ impl App {
             from_clipboard: None,
             pending_drops: Vec::new(),
             v_down: false,
+            before_held: false,
             tablet: None,
             pen_moves: Vec::new(),
             pen: None,
@@ -2959,6 +2964,7 @@ impl App {
                 let edges_label = if hidden { "Show Selection Edges" } else { "Hide Selection Edges" };
                 self.menu_item(ui, Command::SelectionEdges, Some(edges_label.to_string()));
                 self.menu_item(ui, Command::MaskOverlay, None);
+                self.menu_item(ui, Command::BeforeAfter, None);
                 ui.separator();
                 let tick = |on: bool, label: &str| Some(format!("{} {label}", if on { "✓" } else { "  " }));
                 let custom = self.filters.proof_profile.is_some();
@@ -3048,6 +3054,7 @@ impl App {
                 let showing = match editor.view() {
                     View::Mask(_) => Some("Viewing layer mask — Alt+click the mask or press Esc to return"),
                     View::MaskOverlay(_) => Some("Mask overlay on — press \\ or Esc to hide"),
+                    View::Before => Some("Before — the bottom layer alone"),
                     View::QuickMask | View::Refined(_) | View::Image if editor.previewing_selection() => {
                         Some("Select and Mask — F changes the view, and holding X shows the image")
                     }
@@ -4138,6 +4145,35 @@ impl App {
         });
     }
 
+    /// Run the commands whose shortcuts were pressed this frame.
+    fn run_shortcuts(&mut self, ctx: &egui::Context) {
+        for cmd in Command::pressed(ctx, &mut self.v_down) {
+            // Before and After shows while its key is held, so the key's
+            // repeats don't flick it back.
+            if cmd == Command::BeforeAfter {
+                if self.before_held {
+                    continue;
+                }
+                self.before_held = self.editor.as_ref().is_some_and(|e| e.view() != View::Before);
+            }
+            self.run(cmd, ctx);
+        }
+    }
+
+    /// Letting go of Before and After's key goes back to the image.
+    fn check_before_released(&mut self, ctx: &egui::Context) {
+        let key = crate::hotkeys::current().command(Command::BeforeAfter).map(|s| s.logical_key);
+        if !self.before_held || key.is_some_and(|k| ctx.input(|i| i.key_down(k))) {
+            return;
+        }
+        self.before_held = false;
+        if let Some(editor) = &mut self.editor
+            && editor.view() == View::Before
+        {
+            editor.set_view(View::Image);
+        }
+    }
+
     /// Esc disarms an eyedropper, or leaves mask view, the mask overlay or
     /// a channel view (the editor leaves them itself when what they show
     /// goes away).
@@ -4145,7 +4181,10 @@ impl App {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let mask_view = matches!(editor.view(), View::Mask(_) | View::MaskOverlay(_) | View::Channel(_) | View::Alpha(_));
+        let mask_view = matches!(
+            editor.view(),
+            View::Mask(_) | View::MaskOverlay(_) | View::Channel(_) | View::Alpha(_) | View::Before
+        );
         let escape = (mask_view || self.properties.eyedropper.is_some())
             && self.dialog.is_none()
             && !ctx.egui_wants_keyboard_input()
@@ -5788,6 +5827,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
         Command::ZoomOut => editor.canvas.step_zoom(false),
         Command::FitOnScreen => editor.canvas.fit(),
         Command::ActualPixels => editor.canvas.actual_pixels(),
+        Command::BeforeAfter => editor.set_view(if editor.view() == View::Before { View::Image } else { View::Before }),
         Command::MaskOverlay => {
             let showing = editor.view() == View::MaskOverlay(id);
             editor.set_view(if showing { View::Image } else { View::MaskOverlay(id) });
@@ -5816,6 +5856,7 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        self.check_before_released(ctx);
         if let Some(editor) = &self.editor {
             self.tools.follow_target(editor.target);
         }
@@ -5824,9 +5865,7 @@ impl eframe::App for App {
         // While a text field (layer rename) has focus, keys edit the text.
         self.actions.refresh();
         if self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
-            for cmd in Command::pressed(ctx, &mut self.v_down) {
-                self.run(cmd, ctx);
-            }
+            self.run_shortcuts(ctx);
             if self.editor.is_some()
                 && let Some(action) = self.actions.pressed(ctx)
             {
@@ -8837,6 +8876,39 @@ mod tests {
         assert!(app.filters.select_and_mask.decontaminate);
         let active_layer = editor.doc.layer(editor.active).unwrap();
         assert!(active_layer.mask.is_some());
+    }
+
+    #[test]
+    fn before_and_after_shows_while_p_is_held() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let p = |pressed, repeat| egui::Event::Key {
+            key: egui::Key::P,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                app.check_before_released(ui.ctx());
+                app.run_shortcuts(ui.ctx());
+            });
+            out.textures_delta.clear();
+            app.editor.as_ref().unwrap().view()
+        };
+        let history = app.editor.as_ref().unwrap().history_count();
+        assert_eq!(run(&mut app, vec![p(true, false)]), View::Before);
+        assert_eq!(run(&mut app, vec![]), View::Before, "held");
+        assert_eq!(run(&mut app, vec![p(true, true)]), View::Before, "the key's repeats don't flick it back");
+        assert_eq!(run(&mut app, vec![p(false, false)]), View::Image, "let go");
+        assert_eq!(run(&mut app, vec![]), View::Image);
+        // From the View menu it stays until chosen again, or Esc.
+        app.run(Command::BeforeAfter, &ctx);
+        assert_eq!(run(&mut app, vec![]), View::Before);
+        app.run(Command::BeforeAfter, &ctx);
+        assert_eq!(run(&mut app, vec![]), View::Image);
+        assert_eq!(app.editor.as_ref().unwrap().history_count(), history, "nothing in the history");
     }
 
     #[test]
