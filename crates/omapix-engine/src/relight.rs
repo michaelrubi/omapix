@@ -25,6 +25,8 @@ const SIGMA_MIN: f32 = 2.0;
 const SIGMA_MAX: f32 = 96.0;
 /// The slope's step is the blur's size, but never more than this.
 const STEP_MAX: f32 = 32.0;
+/// How far light wraps round a face, past where it stops reaching.
+const SKIN_WRAP: f32 = 0.8;
 /// How steep a slope of brightness makes a surface (PhotoCraft's).
 const SLOPE: f32 = 2.0;
 
@@ -388,10 +390,12 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
         .map(|(i, p)| {
             let (x, y) = ((i % w) as isize, (i / w) as isize);
             let (mut nx, mut ny) = ((at(x - d, y) - at(x + d, y)) * SLOPE, (at(x, y - d) - at(x, y + d)) * SLOPE);
+            let mut skin: f32 = 0.0;
             for face in faces {
                 let [fx, fy, cover] = face.at(ox + x as f32, oy + y as f32);
                 if cover > 0.0 {
                     (nx, ny) = (nx + (fx - nx) * cover, ny + (fy - ny) * cover);
+                    skin = skin.max(cover);
                 }
             }
             let len = (nx * nx + ny * ny + 1.0).sqrt();
@@ -399,10 +403,15 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
             // the distance: 1 on a flat surface right under it.
             let (vx, vy) = (lx - ox - x as f32, ly - oy - y as f32);
             let dist = (vx * vx + vy * vy + lz * lz).sqrt();
-            let facing = ((nx * vx + ny * vy + lz) / (len * dist)).max(0.0);
-            let lit = facing * lz * lz / (dist * dist);
+            let cos = (nx * vx + ny * vy + lz) / (len * dist);
+            let falloff = lz * lz / (dist * dist);
             // Light adds up in linear values, not the encoded ones.
             let c = |k: usize| {
+                // On a face, light wraps round past where it stops reaching,
+                // red most (skin scatters it), so its shadows' edges are soft
+                // and warm rather than grey.
+                let wrap = SKIN_WRAP * skin * [1.0, 0.5, 0.3][k];
+                let lit = ((cos + wrap) / (1.0 + wrap)).max(0.0) * falloff;
                 let gain = ambient + lamp * lit * filter[k];
                 encode_lookup(&encode, lighten(decode[p[k] as usize], gain))
             };
@@ -565,9 +574,12 @@ mod tests {
         // Without its shape the face's two sides differ only by distance;
         // with it, the side turned away from the lamp is much darker.
         let ratio = |img: &Tiled<Pixel>| f32::from(img.get(80, 128)[0]) / f32::from(img.get(176, 128)[0]);
-        assert!(ratio(&with) > ratio(&without) * 1.2, "{} against {}", ratio(&with), ratio(&without));
+        assert!(ratio(&with) > ratio(&without) * 1.1, "{} against {}", ratio(&with), ratio(&without));
         // Away from the face, as before.
         assert_eq!(with.get(250, 10), without.get(250, 10));
+        // Its shadow side is warm, as skin's are, not grey.
+        let shadow = with.get(176, 128);
+        assert!(shadow[0] > shadow[1] && shadow[1] > shadow[2], "{shadow:?}");
 
         // Kept and named by number, as the app hands them over.
         let id = keep_faces(vec![face]);
