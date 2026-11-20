@@ -2553,6 +2553,23 @@ pub(crate) fn render_view(doc: &Document, view: View, colour: Pixel, base: Optio
             };
             (Render::new(image), Some(base))
         }
+        // Dragging Relight's lamp: lit and composited at a quarter size,
+        // then shown at full size until the drag ends.
+        View::Filter {
+            layer,
+            filter: filters::LayerFilter::Relight(options),
+            mask: false,
+        } if options.rough && doc.selection.is_none() => {
+            const LEVEL: u32 = 2;
+            let scale = 1 << LEVEL;
+            let mut layers = Reduced::default().layers(&doc.layers, LEVEL);
+            if let Some(target) = layers.iter_mut().find(|l| l.id == layer) {
+                target.pixels = omapix_engine::relight::relight_shrunk(&target.pixels, &options, scale as f32);
+            }
+            let (sw, sh) = (doc.width.div_ceil(scale), doc.height.div_ceil(scale));
+            let small = composite::composite(&layers, sw, sh);
+            (Render::new(enlarged(&small, scale, doc.width, doc.height)), None)
+        }
         View::Filter { layer, filter, mask } => {
             let mut layers = doc.layers.clone();
             let target = layers.iter_mut().find(|l| l.id == layer);
@@ -2683,6 +2700,21 @@ fn draw_tiles(
             composite::composite_tiles(layers, tiles, groups)
         }
     }
+}
+
+/// `small` `scale` times the size, cropped to `width` × `height`, each
+/// of its pixels a square.
+fn enlarged(small: &Raster, scale: u32, width: u32, height: u32) -> Raster {
+    use rayon::prelude::*;
+    let (w, s) = (width as usize, scale as usize);
+    let mut out = vec![[0u16; 4]; w * height as usize];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let from = &small.pixels()[y / s * small.width() as usize..];
+        for (x, p) in row.iter_mut().enumerate() {
+            *p = from[x / s];
+        }
+    });
+    Raster::new(width, height, out)
 }
 
 /// Brings a render up to date in place, in the background.
@@ -4318,6 +4350,59 @@ mod bench {
     use omapix_engine::adjust::{Adjustment, Curves};
     use omapix_engine::{ColorProfile, Raster, ops, tiles};
     use std::time::Instant;
+
+    /// What a Relight preview's render costs at 24 MP, by stage.
+    #[test]
+    #[ignore]
+    fn relight_preview_stages_24mp() {
+        let (w, h) = (6000u32, 4000u32);
+        let px: Vec<Pixel> = (0..w * h).map(|i| [(i % 60000) as u16, ((i / 7) % 60000) as u16, 30000, 65535]).collect();
+        let doc = Document::from_image("b.tif".into(), &Raster::new(w, h, px), ColorProfile::srgb(), 16);
+        let id = doc.layers[0].id;
+        let filter = filters::LayerFilter::Relight(Default::default());
+        let best = |f: &mut dyn FnMut()| {
+            (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let mut filtered = None;
+        eprintln!("relight {:?}", best(&mut || filtered = ops::filtered(&doc, id, &filter)));
+        let mut layers = doc.layers.clone();
+        layers[0].pixels = filtered.clone().unwrap();
+        let mut image = None;
+        eprintln!("composite {:?}", best(&mut || image = Some(composite::composite(&layers, w, h))));
+        eprintln!("render (pyramid) {:?}", best(&mut || drop(Render::new(image.clone().unwrap()))));
+        let view = View::Filter {
+            layer: id,
+            filter,
+            mask: false,
+        };
+        eprintln!("render_view total {:?}", best(&mut || drop(render_view(&doc, view, [0; 4], None))));
+        let rough = View::Filter {
+            layer: id,
+            filter: filters::LayerFilter::Relight(omapix_engine::relight::RelightOptions {
+                rough: true,
+                ..Default::default()
+            }),
+            mask: false,
+        };
+        eprintln!("render_view rough {:?}", best(&mut || drop(render_view(&doc, rough, [0; 4], None))));
+        let mut four = omapix_engine::relight::RelightOptions::default();
+        while four.add_lamp(omapix_engine::relight::Lamp { x: 0.8, ..four.lamps()[0] }).is_some() {}
+        let filter = filters::LayerFilter::Relight(four);
+        eprintln!("relight, four lamps {:?}", best(&mut || filtered = ops::filtered(&doc, id, &filter)));
+        let rough = View::Filter {
+            layer: id,
+            filter: filters::LayerFilter::Relight(omapix_engine::relight::RelightOptions { rough: true, ..four }),
+            mask: false,
+        };
+        eprintln!("render_view rough, four lamps {:?}", best(&mut || drop(render_view(&doc, rough, [0; 4], None))));
+    }
 
     #[test]
     #[ignore]
