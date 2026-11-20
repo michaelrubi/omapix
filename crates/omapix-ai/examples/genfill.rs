@@ -99,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 seed,
                 keep: None,
                 reference: None,
+                from: None,
             };
             let latents = timed(&format!("{size} px, {STEPS} steps"), || transformer.generate(&request, |_| true))?.unwrap();
             timed("transformer dropped", || drop(transformer));
