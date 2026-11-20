@@ -6,13 +6,21 @@
 //! `under_eyes` and `whiten`). There's no dialog: the layer's opacity is
 //! the amount, and its mask can be painted on. Retouch › Makeup (milestone
 //! 15) is found the same way, and is a group of painted layers
-//! (`omapix_engine::makeup`).
+//! (`omapix_engine::makeup`). Retouch › Regenerate Skin too, with the skin
+//! texture FLUX.2 klein draws for the skin as a masked pixel layer
+//! (docs/AI.md, "Regenerate Skin").
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
+use omapix_engine::layer::{Layer, Mask};
+use omapix_engine::raster::Pixel;
 use omapix_engine::shine::{self, Matte};
+use omapix_engine::tiled::Tiled;
+use omapix_engine::transform::{Resampling, resized};
 use omapix_engine::whiten::{self, Whiten};
-use omapix_engine::{ColorProfile, Raster, Selection, makeup, under_eyes};
+use omapix_engine::{ColorProfile, DisplayTransform, Raster, Selection, color, filters, makeup, under_eyes};
 
 use crate::editor::{Editor, Target};
 use crate::face_selection::{find_makeup, find_skin, find_under_eyes, find_whites};
@@ -27,6 +35,7 @@ pub enum Part {
     UnderEyes,
     Shine,
     Makeup,
+    Texture,
 }
 
 impl Part {
@@ -37,6 +46,7 @@ impl Part {
             Part::UnderEyes => "Lighten Under Eyes",
             Part::Shine => shine::NAME,
             Part::Makeup => "Makeup",
+            Part::Texture => TEXTURE,
         }
     }
 
@@ -48,6 +58,7 @@ impl Part {
             Part::UnderEyes => "Finding shadows under the eyes…",
             Part::Shine => "Finding shine…",
             Part::Makeup => "Finding faces…",
+            Part::Texture => "Finding skin…",
         }
     }
 }
@@ -58,6 +69,7 @@ enum Made {
     Mask(Selection),
     Matte(Matte),
     Makeup(Vec<(makeup::Product, Selection)>),
+    Texture(Texture),
 }
 
 /// Where it arrives once it's found.
@@ -67,6 +79,17 @@ type Found = Receiver<Result<Made, String>>;
 pub struct Whitening {
     /// What's being found, and the layer it goes above.
     running: Option<(Part, u64, Found)>,
+    /// How far Regenerate Skin has got.
+    progress: Arc<Progress>,
+}
+
+/// How far Regenerate Skin has got, shared with its thread: tiles done, of
+/// how many (0 until the skin's found), and whether it's been told to stop.
+#[derive(Default)]
+pub struct Progress {
+    done: AtomicUsize,
+    of: AtomicUsize,
+    stop: AtomicBool,
 }
 
 impl Whitening {
@@ -76,6 +99,10 @@ impl Whitening {
         let doc = editor.doc.clone();
         let (tx, rx) = channel();
         let ctx = ctx.clone();
+        // A new one each time: a run that was stopped may still be finishing
+        // a tile, and keeps its own.
+        self.progress = Arc::new(Progress::default());
+        let progress = Arc::clone(&self.progress);
         std::thread::spawn(move || {
             let image = doc.composite_current_and_below(index);
             let _ = tx.send(match part {
@@ -83,6 +110,13 @@ impl Whitening {
                 Part::UnderEyes => find_under_eyes(&image, &doc.profile).map(Made::Mask),
                 Part::Shine => find_shine(image, &doc.profile).map(Made::Matte),
                 Part::Makeup => find_makeup(&image, &doc.profile).map(Made::Makeup),
+                Part::Texture => find_texture(image, &doc.profile, |done, of| {
+                    progress.done.store(done, Ordering::Relaxed);
+                    progress.of.store(of, Ordering::Relaxed);
+                    ctx.request_repaint();
+                    !progress.stop.load(Ordering::Relaxed)
+                })
+                .map(Made::Texture),
             });
             ctx.request_repaint();
         });
@@ -96,6 +130,10 @@ impl Whitening {
     pub fn poll(&mut self, editor: &mut Editor) -> Option<String> {
         let (part, layer, rx) = self.running.as_ref()?;
         let (part, layer) = (*part, *layer);
+        if part == Part::Texture && self.progress.stop.load(Ordering::Relaxed) {
+            self.running = None;
+            return None;
+        }
         let result = match rx.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
@@ -113,6 +151,7 @@ impl Whitening {
                 (Part::Whites(what), Made::Mask(mask)) => whiten::add_layer(doc, index, what, mask, AMOUNT),
                 (_, Made::Mask(mask)) => under_eyes::add_layer(doc, index, mask, AMOUNT),
                 (_, Made::Matte(matte)) => shine::add_layer(doc, index, matte, AMOUNT),
+                (_, Made::Texture(texture)) => Some(texture.add_layer(doc, index, AMOUNT)),
             };
             if let Some(id) = id {
                 *active = id;
@@ -130,6 +169,21 @@ impl Whitening {
     pub fn busy(&self) -> Option<Part> {
         self.running.as_ref().map(|(part, ..)| *part)
     }
+
+    /// While Regenerate Skin draws, how many tiles it's done of how many.
+    pub fn tiles(&self) -> Option<(usize, usize)> {
+        let of = self.progress.of.load(Ordering::Relaxed);
+        (self.busy() == Some(Part::Texture) && of > 0).then(|| (self.progress.done.load(Ordering::Relaxed), of))
+    }
+
+    /// Stop Regenerate Skin: nothing's added, and from the next
+    /// [`Whitening::poll`] Omapix carries on. Its thread finishes the tile
+    /// it's on and drops it.
+    pub fn stop(&self) {
+        if self.busy() == Some(Part::Texture) {
+            self.progress.stop.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The shine on the skin in `image`, its faces and body, measured by its
@@ -140,10 +194,198 @@ fn find_shine(image: Raster, profile: &ColorProfile) -> Result<Matte, String> {
     if matte.is_empty() { Err("Found no shine".into()) } else { Ok(matte) }
 }
 
+/// Regenerate Skin's undo step and layer.
+const TEXTURE: &str = "Regenerate Skin";
+/// Faces are redrawn at most this many pixels between the eyes: the scale
+/// tried on photos, and fewer tiles on large ones.
+const TEXTURE_IOD: f32 = 280.0;
+/// What's kept of the model's drawing is what a blur of this much (as a
+/// share of the distance between the eyes) takes away: pores and fine
+/// lines, not the light or the skin's colour, which it changes too.
+const TEXTURE_DETAIL: f32 = 3.0 / TEXTURE_IOD;
+
+/// Regenerate Skin's layer: what `bounds` of the image shows, with the
+/// skin's texture drawn anew, and the skin as its mask.
+pub struct Texture {
+    /// Left, top, width and height in the image.
+    bounds: [u32; 4],
+    pixels: Vec<Pixel>,
+    mask: Vec<u16>,
+}
+
+impl Texture {
+    /// The texture for `skin` in `image`, for eyes `iod` apart, from
+    /// `model` (`omapix_ai::flux::add_texture`'s form, less `tell`).
+    /// The face is shrunk first if it's larger than [`TEXTURE_IOD`]. Only
+    /// how the model changes the image's fine detail is added to it, at
+    /// full size, so its colour and light, and detail finer than the model
+    /// saw, stay as they were.
+    fn new(
+        image: &Raster,
+        profile: &ColorProfile,
+        skin: &Selection,
+        iod: f32,
+        model: impl FnOnce(&[f32], usize, usize, &[f32]) -> Result<Option<Vec<f32>>, String>,
+    ) -> Result<Self, String> {
+        let bounds @ [x, y, w, h] = skin.bounds().ok_or("Found no skin")?;
+        let scale = (TEXTURE_IOD / iod).min(1.0);
+        let (sw, sh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
+        let crop = Tiled::from_slice(w, h, [0; 4], &Tiled::from_raster(image).crop(x, y, w, h));
+        let small = resized(&crop, sw, sh, Resampling::Bicubic);
+        let (n, plane) = ((sw * sh) as usize, (sw * sh) as usize);
+        let mut srgb = vec![[0u8; 4]; n];
+        DisplayTransform::to_srgb(profile)
+            .map_err(|e| e.to_string())?
+            .convert(small.to_raster().pixels(), &mut srgb);
+        let planes: Vec<f32> = (0..3 * plane).map(|i| f32::from(srgb[i % plane][i / plane]) / 255.0).collect();
+        let wanted: Vec<f32> = (0..n)
+            .map(|i| {
+                let at = |p: usize, size: u32, from: u32| from + (((p as f32 + 0.5) / scale) as u32).min(size - 1);
+                skin.at(at(i % sw as usize, w, x), at(i / sw as usize, h, y))
+            })
+            .collect();
+        let made = model(&planes, sw as usize, sh as usize, &wanted)?.ok_or("Regenerate Skin was stopped")?;
+        let made: Vec<Pixel> = (0..n)
+            .map(|i| {
+                let c = |c: usize| (made[c * plane + i].clamp(0.0, 1.0) * 65535.0).round() as u16;
+                [c(0), c(1), c(2), u16::MAX]
+            })
+            .collect();
+        let made = color::convert(&Tiled::from_slice(sw, sh, [0; 4], &made), &ColorProfile::srgb(), profile).map_err(|e| e.to_string())?;
+
+        // The change in fine detail, about half way up the range so it can
+        // be enlarged as a picture.
+        let sigma = TEXTURE_DETAIL * iod * scale;
+        let (made_low, small_low) = (filters::gaussian_blur(&made, sigma), filters::gaussian_blur(&small, sigma));
+        let (made, made_low, small, small_low) = (made.to_raster(), made_low.to_raster(), small.to_raster(), small_low.to_raster());
+        let change: Vec<Pixel> = (0..n)
+            .map(|i| {
+                let c = |c: usize| {
+                    let detail = |a: &Raster, b: &Raster| i32::from(a.pixels()[i][c]) - i32::from(b.pixels()[i][c]);
+                    (detail(&made, &made_low) - detail(&small, &small_low) + 32768).clamp(0, 65535) as u16
+                };
+                [c(0), c(1), c(2), u16::MAX]
+            })
+            .collect();
+        let change = resized(&Tiled::from_slice(sw, sh, [0; 4], &change), w, h, Resampling::Bicubic).to_raster();
+        let pixels = crop
+            .to_raster()
+            .pixels()
+            .iter()
+            .zip(change.pixels())
+            .map(|(p, d)| {
+                let c = |c: usize| (i32::from(p[c]) + i32::from(d[c]) - 32768).clamp(0, 65535) as u16;
+                [c(0), c(1), c(2), p[3]]
+            })
+            .collect();
+        let mask = (0..w * h).map(|i| (skin.at(x + i % w, y + i / w) * 65535.0).round() as u16).collect();
+        Ok(Self { bounds, pixels, mask })
+    }
+
+    /// Add it as a layer above `above`, at `amount` % opacity; its id.
+    fn add_layer(&self, doc: &mut omapix_engine::Document, above: usize, amount: f32) -> u64 {
+        let [x, y, w, h] = self.bounds;
+        let (dx, dy) = (x as i32, y as i32);
+        let id = doc.next_layer_id();
+        let pixels = Tiled::from_slice(w, h, [0; 4], &self.pixels).reframed(doc.width, doc.height, dx, dy, [0; 4]);
+        let mut layer = Layer::from_pixels(id, TEXTURE, pixels);
+        layer.mask = Some(Mask {
+            pixels: Tiled::from_slice(w, h, 0, &self.mask).reframed(doc.width, doc.height, dx, dy, 0),
+            enabled: true,
+        });
+        layer.opacity = amount / 100.0;
+        doc.insert_above(above, layer);
+        id
+    }
+}
+
+/// The skin in `image` with its texture drawn anew, measured by its
+/// largest face. The other models give the card up first. `tell` hears
+/// how many tiles are done of how many, and stops it by answering `false`.
+fn find_texture(image: Raster, profile: &ColorProfile, tell: impl FnMut(usize, usize) -> bool) -> Result<Texture, String> {
+    let found = find_skin(image, profile)?;
+    crate::generative_fill::free_the_card();
+    Texture::new(&found.image, profile, &found.skin, found.iod, |image, width, height, wanted| {
+        omapix_ai::flux::add_texture(image, width, height, wanted, tell)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use omapix_engine::Document;
+
+    #[test]
+    fn regenerate_skin_says_how_far_it_has_got_and_stops_at_once() {
+        let doc = Document::from_image("t.tif".into(), &Raster::new(60, 40, vec![[0; 4]; 60 * 40]), ColorProfile::srgb(), 16);
+        let mut editor = Editor::new(doc).unwrap();
+        let (tx, rx) = channel();
+        let mut whitening = Whitening {
+            running: Some((Part::Texture, editor.active, rx)),
+            ..Default::default()
+        };
+        // Finding the skin, then drawing.
+        assert_eq!((whitening.busy(), whitening.tiles()), (Some(Part::Texture), None));
+        whitening.progress.of.store(9, Ordering::Relaxed);
+        whitening.progress.done.store(3, Ordering::Relaxed);
+        assert_eq!(whitening.tiles(), Some((3, 9)));
+
+        // Stopped: not busy, the thread's told, and what it sends after is
+        // dropped, with nothing added and nothing to say.
+        let progress = Arc::clone(&whitening.progress);
+        whitening.stop();
+        assert!(progress.stop.load(Ordering::Relaxed));
+        assert_eq!(whitening.poll(&mut editor), None);
+        assert_eq!((whitening.busy(), whitening.tiles()), (None, None));
+        assert!(tx.send(Err("Regenerate Skin was stopped".into())).is_err());
+        assert_eq!(whitening.poll(&mut editor), None);
+        assert_eq!(editor.doc.layers.len(), 1);
+
+        // Stop only stops Regenerate Skin.
+        let (_tx, rx) = channel();
+        whitening.progress = Arc::default();
+        whitening.running = Some((Part::Shine, editor.active, rx));
+        whitening.stop();
+        assert_eq!(whitening.poll(&mut editor), None);
+        assert_eq!(whitening.busy(), Some(Part::Shine));
+    }
+
+    #[test]
+    fn regenerated_texture_is_a_masked_layer_of_only_the_finer_detail_the_model_changed() {
+        // Plain skin, its left half found as skin, with a face 560 px
+        // between the eyes: shrunk by half for the model.
+        let image = Raster::new(400, 300, vec![[42000, 33000, 28000, 65535]; 400 * 300]);
+        let skin = Selection::rectangle(400, 300, (0.0, 0.0), (200.0, 300.0));
+        let profile = ColorProfile::srgb();
+        let mut seen = (0, 0);
+        // The model draws fine dots everywhere and makes it all paler.
+        let texture = Texture::new(&image, &profile, &skin, 560.0, |planes, w, h, wanted| {
+            seen = (w, h);
+            assert!(wanted[0] > 0.9 && wanted[w - 1] > 0.9);
+            Ok(Some(
+                planes.iter().enumerate().map(|(i, v)| v + 0.1 + if i % 7 == 0 { 0.2 } else { 0.0 }).collect(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(seen, (100, 150));
+        assert_eq!(texture.bounds, [0, 0, 200, 300]);
+        let mean = |c: usize| texture.pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / texture.pixels.len() as f64;
+        assert!((mean(0) - 42000.0).abs() < 300.0, "not paler: {}", mean(0));
+        let spread = texture.pixels.iter().map(|p| (f64::from(p[0]) - mean(0)).abs()).sum::<f64>() / texture.pixels.len() as f64;
+        assert!(spread > 300.0, "with the dots: {spread}");
+
+        let mut doc = Document::from_image("t.tif".into(), &image, profile, 16);
+        let id = texture.add_layer(&mut doc, 0, AMOUNT);
+        let layer = doc.layer(id).unwrap();
+        assert_eq!((layer.name.as_str(), layer.opacity), (TEXTURE, AMOUNT / 100.0));
+        let after = doc.composite();
+        assert_eq!(after.get(300, 150), image.get(300, 150), "not skin");
+        assert!((0..200).any(|x| after.get(x, 150) != image.get(x, 150)), "skin");
+
+        // A model that changes nothing leaves the image as it was.
+        let same = Texture::new(&image, &ColorProfile::srgb(), &skin, 560.0, |planes, _, _, _| Ok(Some(planes.to_vec()))).unwrap();
+        assert!(same.pixels.iter().all(|p| p.iter().zip(image.get(0, 0)).all(|(a, b)| a.abs_diff(b) < 300)));
+    }
 
     #[test]
     fn teeth_found_become_a_masked_layer_above_in_one_undo_step() {
@@ -156,6 +398,7 @@ mod tests {
         let (tx, rx) = channel();
         let mut whitening = Whitening {
             running: Some((Part::Whites(Whiten::Teeth), editor.active, rx)),
+            ..Default::default()
         };
         assert_eq!(whitening.poll(&mut editor), None);
         assert_eq!(whitening.busy(), Some(Part::Whites(Whiten::Teeth)));
@@ -204,6 +447,7 @@ mod tests {
         let (tx, rx) = channel();
         let mut whitening = Whitening {
             running: Some((Part::Makeup, editor.active, rx)),
+            ..Default::default()
         };
         assert_eq!(whitening.busy(), Some(Part::Makeup));
         let lips = Selection::rectangle(600, 400, (250.0, 300.0), (350.0, 330.0));
@@ -244,6 +488,7 @@ mod tests {
         let (tx, rx) = channel();
         let mut whitening = Whitening {
             running: Some((Part::Shine, editor.active, rx)),
+            ..Default::default()
         };
         assert_eq!(whitening.busy(), Some(Part::Shine));
         tx.send(Ok(Made::Matte(matte))).unwrap();
@@ -326,6 +571,56 @@ mod tests {
             std::fs::write(&ppm_path, ppm).unwrap();
             std::process::Command::new("magick")
                 .args([&ppm_path, &format!("{out}/{name}-shine.png")])
+                .status()
+                .unwrap();
+            std::fs::remove_file(ppm_path).unwrap();
+        }
+    }
+
+    /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder
+    /// of them), the photo with its skin regenerated, as
+    /// `<photo>-texture.png` in `OMAPIX_FACE_OUT`. `AMOUNT` sets the
+    /// layer's opacity (100 by default). Needs the models
+    /// (scripts/fetch-models.sh, with fill-flux2-klein-4b) and ImageMagick.
+    #[test]
+    #[ignore]
+    fn regenerate_skin_in_photos() {
+        let (Ok(photos), Ok(out)) = (std::env::var("OMAPIX_FACE_PHOTO"), std::env::var("OMAPIX_FACE_OUT")) else {
+            return;
+        };
+        let photos = std::path::Path::new(&photos);
+        let mut paths: Vec<_> = match std::fs::read_dir(photos) {
+            Ok(dir) => dir.map(|e| e.unwrap().path()).collect(),
+            Err(_) => vec![photos.to_owned()],
+        };
+        paths.sort();
+        let amount = std::env::var("AMOUNT").map_or(100.0, |v| v.parse().unwrap());
+        for path in paths {
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let Ok(mut doc) = omapix_engine::io::load(&path) else { continue };
+            let t = std::time::Instant::now();
+            let texture = match find_texture(doc.composite(), &doc.profile, |done, of| {
+                eprintln!("{name}: {done} of {of}");
+                true
+            }) {
+                Ok(texture) => texture,
+                Err(e) => {
+                    eprintln!("{name}: {e}");
+                    continue;
+                }
+            };
+            eprintln!("{name}: {:?} in {:?}", texture.bounds, t.elapsed());
+            texture.add_layer(&mut doc, 0, amount);
+            let after = doc.composite();
+            let mut ppm = format!("P6 {} {} 255\n", doc.width, doc.height).into_bytes();
+            let srgb = omapix_engine::DisplayTransform::to_srgb(&doc.profile).unwrap();
+            let mut shown = vec![[0u8; 4]; after.pixels().len()];
+            srgb.convert(after.pixels(), &mut shown);
+            ppm.extend(shown.iter().flat_map(|p| [p[0], p[1], p[2]]));
+            let ppm_path = format!("{out}/{name}-texture.ppm");
+            std::fs::write(&ppm_path, ppm).unwrap();
+            std::process::Command::new("magick")
+                .args([&ppm_path, &format!("{out}/{name}-texture.png")])
                 .status()
                 .unwrap();
             std::fs::remove_file(ppm_path).unwrap();
