@@ -8,7 +8,8 @@
 //! also casts shadows, and light wraps a little round skin. A lamp hanging
 //! over the photo at (`x`, `y`), `reach` above it, lights those surfaces
 //! as a matte one would be lit (Lambert), less with distance (inverse
-//! square), as Photoshop's Lighting Effects' point light.
+//! square), as Photoshop's Lighting Effects' point light; up to [`LAMPS`]
+//! of them, their light added up.
 //!
 //! Where PhotoCraft divides each pixel by its blurred brightness and
 //! multiplies in the new light, which takes every area towards the same
@@ -62,6 +63,56 @@ pub struct RelightOptions {
     /// shrunk copy ([`relight_shrunk`]). Not saved.
     #[serde(skip)]
     pub rough: bool,
+    /// The lamps after the first (which is `x`, `y`, `reach`, `intensity`
+    /// and `colour` above), in order, none after a gap. Saved as a list,
+    /// as TOML has no "none".
+    #[serde(with = "more_lamps")]
+    pub more: [Option<Lamp>; LAMPS - 1],
+}
+
+/// [`RelightOptions::more`] saved as a list of the lamps there are.
+mod more_lamps {
+    use super::{LAMPS, Lamp};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(more: &[Option<Lamp>; LAMPS - 1], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(more.iter().flatten())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[Option<Lamp>; LAMPS - 1], D::Error> {
+        let lamps = Vec::<Lamp>::deserialize(d)?;
+        Ok(std::array::from_fn(|i| lamps.get(i).copied()))
+    }
+}
+
+/// How many lamps Relight can have.
+pub const LAMPS: usize = 4;
+
+/// One of Relight's lamps, in the dialog's units, as [`RelightOptions`]'
+/// first.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Lamp {
+    pub x: f32,
+    pub y: f32,
+    pub reach: f32,
+    pub intensity: f32,
+    pub colour: [u8; 3],
+}
+
+impl Lamp {
+    /// Where it is, in an image `whole` big: x right and y down, in
+    /// pixels, and how high over it.
+    pub fn at(&self, (w, h): (u32, u32)) -> [f32; 3] {
+        let side = w.min(h).max(1) as f32;
+        [self.x * w as f32, self.y * h as f32, (self.reach / 100.0 * side).max(1.0)]
+    }
+
+    /// Its colour as a filter: white is 1 in each channel, and a coloured
+    /// one holds back the others.
+    fn filter(&self) -> [f32; 3] {
+        let top = f32::from(*self.colour.iter().max().unwrap_or(&255)).max(1.0);
+        self.colour.map(|c| f32::from(c) / top)
+    }
 }
 
 impl Default for RelightOptions {
@@ -77,6 +128,7 @@ impl Default for RelightOptions {
             colour: [255, 255, 255],
             faces: 0,
             rough: false,
+            more: [None; LAMPS - 1],
         }
     }
 }
@@ -95,18 +147,59 @@ impl RelightOptions {
         (sigma * 3.0).ceil() as u32 + 1 + step(sigma) as u32
     }
 
-    /// Where the lamp is, in an image `whole` big: x right and y down, in
-    /// pixels, and how high over it.
-    pub fn lamp(&self, (w, h): (u32, u32)) -> [f32; 3] {
-        let side = w.min(h).max(1) as f32;
-        [self.x * w as f32, self.y * h as f32, (self.reach / 100.0 * side).max(1.0)]
+    /// Where the first lamp is, in an image `whole` big ([`Lamp::at`]).
+    pub fn lamp(&self, whole: (u32, u32)) -> [f32; 3] {
+        self.lamps()[0].at(whole)
     }
 
-    /// The lamp's colour as a filter: white is 1 in each channel, and a
-    /// coloured one holds back the others.
-    fn filter(&self) -> [f32; 3] {
-        let top = f32::from(*self.colour.iter().max().unwrap_or(&255)).max(1.0);
-        self.colour.map(|c| f32::from(c) / top)
+    /// Every lamp, the first first.
+    pub fn lamps(&self) -> Vec<Lamp> {
+        let first = Lamp {
+            x: self.x,
+            y: self.y,
+            reach: self.reach,
+            intensity: self.intensity,
+            colour: self.colour,
+        };
+        std::iter::once(first).chain(self.more.iter().map_while(|l| *l)).collect()
+    }
+
+    /// The lamps changed to `lamps` (at least one; past [`LAMPS`] are
+    /// left out).
+    pub fn set_lamps(&mut self, lamps: &[Lamp]) {
+        let Some(first) = lamps.first() else {
+            return;
+        };
+        (self.x, self.y, self.reach, self.intensity, self.colour) = (first.x, first.y, first.reach, first.intensity, first.colour);
+        self.more = std::array::from_fn(|i| lamps.get(i + 1).copied());
+    }
+
+    /// Lamp `i` changed by `f`, if there is one.
+    pub fn change_lamp(&mut self, i: usize, f: impl FnOnce(&mut Lamp)) {
+        let mut lamps = self.lamps();
+        if let Some(lamp) = lamps.get_mut(i) {
+            f(lamp);
+            self.set_lamps(&lamps);
+        }
+    }
+
+    /// Another lamp, unless there are [`LAMPS`] already; its number.
+    pub fn add_lamp(&mut self, lamp: Lamp) -> Option<usize> {
+        let mut lamps = self.lamps();
+        (lamps.len() < LAMPS).then(|| {
+            lamps.push(lamp);
+            self.set_lamps(&lamps);
+            lamps.len() - 1
+        })
+    }
+
+    /// Lamp `i` taken away, unless it's the only one.
+    pub fn remove_lamp(&mut self, i: usize) {
+        let mut lamps = self.lamps();
+        if lamps.len() > 1 && i < lamps.len() {
+            lamps.remove(i);
+            self.set_lamps(&lamps);
+        }
     }
 }
 
@@ -499,13 +592,17 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
         (mix(0), mix(1))
     };
 
-    let [lx, ly, lz] = options.lamp(whole);
-    // What each face shades from the lamp.
-    let shadows: Vec<Vec<f32>> = faces.iter().map(|f| f.shadows([lx, ly, lz])).collect();
+    // Each lamp: where it is, how much light it adds and its colour.
+    let lamps: Vec<([f32; 3], f32, [f32; 3])> = options
+        .lamps()
+        .iter()
+        .filter(|l| l.intensity > 0.0)
+        .map(|l| (l.at(whole), l.intensity.min(100.0) / 100.0, l.filter()))
+        .collect();
+    // What each face shades from each lamp.
+    let shadows: Vec<Vec<Vec<f32>>> = faces.iter().map(|f| lamps.iter().map(|(at, ..)| f.shadows(*at)).collect()).collect();
     let (ox, oy) = (origin.0 as f32, origin.1 as f32);
-    let filter = options.filter();
     let ambient = options.ambient.clamp(0.0, 100.0) / 100.0;
-    let lamp = options.intensity.clamp(0.0, 100.0) / 100.0;
     let decode = linear_table();
     let encode = encode_table();
     let out: Vec<Pixel> = pixels
@@ -514,31 +611,37 @@ pub fn relight_faces(image: &Tiled<Pixel>, options: &RelightOptions, origin: (u3
         .map(|(i, p)| {
             let (x, y) = ((i % w) as isize, (i / w) as isize);
             let (mut nx, mut ny) = slope_at(x as usize, y as usize);
-            let (mut skin, mut lit_by): (f32, f32) = (0.0, 1.0);
-            for (face, shadow) in faces.iter().zip(&shadows) {
+            let (mut skin, mut lit_by) = (0.0f32, [1.0f32; LAMPS]);
+            for (face, shadows) in faces.iter().zip(&shadows) {
                 let (px, py) = (ox + x as f32, oy + y as f32);
                 let [fx, fy, cover] = face.at(px, py);
                 if cover > 0.0 {
                     (nx, ny) = (nx + (fx - nx) * cover, ny + (fy - ny) * cover);
                     skin = skin.max(cover);
-                    lit_by = lit_by.min(1.0 - face.sample(shadow, px, py) * cover);
+                    for (lit_by, shadow) in lit_by.iter_mut().zip(shadows) {
+                        *lit_by = lit_by.min(1.0 - face.sample(shadow, px, py) * cover);
+                    }
                 }
             }
             let len = (nx * nx + ny * ny + 1.0).sqrt();
-            // Towards the lamp, and its light falling off with the square of
-            // the distance: 1 on a flat surface right under it.
-            let (vx, vy) = (lx - ox - x as f32, ly - oy - y as f32);
-            let dist = (vx * vx + vy * vy + lz * lz).sqrt();
-            let cos = (nx * vx + ny * vy + lz) / (len * dist);
-            let falloff = lz * lz / (dist * dist) * lit_by;
+            // Towards each lamp, and its light falling off with the square
+            // of the distance: 1 on a flat surface right under it.
+            let mut towards = [(0.0f32, 0.0f32); LAMPS];
+            for ((&([lx, ly, lz], ..), t), lit_by) in lamps.iter().zip(&mut towards).zip(lit_by) {
+                let (vx, vy) = (lx - ox - x as f32, ly - oy - y as f32);
+                let dist = (vx * vx + vy * vy + lz * lz).sqrt();
+                *t = ((nx * vx + ny * vy + lz) / (len * dist), lz * lz / (dist * dist) * lit_by);
+            }
             // Light adds up in linear values, not the encoded ones.
             let c = |k: usize| {
                 // On a face, light wraps round past where it stops reaching,
                 // red most (skin scatters it), so its shadows' edges are soft
                 // and warm rather than grey.
                 let wrap = SKIN_WRAP * skin * [1.0, 0.5, 0.3][k];
-                let lit = ((cos + wrap) / (1.0 + wrap)).max(0.0) * falloff;
-                let gain = ambient + lamp * lit * filter[k];
+                let mut gain = ambient;
+                for ((_, lamp, filter), (cos, falloff)) in lamps.iter().zip(towards) {
+                    gain += lamp * ((cos + wrap) / (1.0 + wrap)).max(0.0) * falloff * filter[k];
+                }
                 encode_lookup(&encode, lighten(decode[p[k] as usize], gain))
             };
             [c(0), c(1), c(2), p[3]]
@@ -718,6 +821,52 @@ mod tests {
     }
 
     #[test]
+    fn two_lamps_add_their_light() {
+        let img = dome(256);
+        let left = from_the_left();
+        let right = Lamp {
+            x: 0.85,
+            y: 0.5,
+            reach: 8.0,
+            intensity: 80.0,
+            colour: [255, 255, 255],
+        };
+        let mut both = left;
+        assert_eq!(both.add_lamp(right), Some(1));
+        assert_eq!(both.lamps().len(), 2);
+        let only_right = RelightOptions { x: 0.85, ..left };
+        let (a, b, ab) = (
+            relight(&img, &left, (0, 0), (256, 256)),
+            relight(&img, &only_right, (0, 0), (256, 256)),
+            relight(&img, &both, (0, 0), (256, 256)),
+        );
+        // In linear light, what each lamp adds over the ambient adds up.
+        let lin = linear_table();
+        let ambient = left.ambient / 100.0;
+        for (x, y) in [(70, 128), (186, 128), (128, 128), (128, 40)] {
+            let (i, p) = (lin[img.get(x, y)[0] as usize], |t: &Tiled<Pixel>| lin[t.get(x, y)[0] as usize]);
+            let (ga, gb, gab) = (p(&a) / i - ambient, p(&b) / i - ambient, p(&ab) / i - ambient);
+            // Lit sides ease into white, so a little under the sum.
+            assert!(
+                gab <= ga + gb + 0.01 && gab >= (ga + gb) * 0.8 - 0.01,
+                "at ({x}, {y}): {ga} + {gb} against {gab}"
+            );
+        }
+        // Both sides lit.
+        assert!(mean(&ab, 60, 120, 90, 136, 0) > mean(&b, 60, 120, 90, 136, 0) * 1.05);
+        assert!(mean(&ab, 166, 120, 196, 136, 0) > mean(&a, 166, 120, 196, 136, 0) * 1.05);
+        // Removing one leaves the other; the first can't go on its own.
+        let mut one = both;
+        one.remove_lamp(0);
+        assert_eq!(one.lamps(), vec![right]);
+        one.remove_lamp(0);
+        assert_eq!(one.lamps().len(), 1);
+        let mut full = both;
+        while full.add_lamp(right).is_some() {}
+        assert_eq!(full.lamps().len(), LAMPS);
+    }
+
+    #[test]
     fn a_shrunk_copy_is_lit_as_the_whole_is() {
         let face = FaceShape::new(&face_points(256.0, 256.0, 160.0)).unwrap();
         let id = keep_faces(vec![face]);
@@ -845,8 +994,23 @@ mod timing {
             .collect();
         for lamp in lamps.split(';') {
             let (name, values) = lamp.split_once(':').unwrap();
-            let v: Vec<f32> = values.split(',').map(|v| v.trim().parse().unwrap()).collect();
-            let options = RelightOptions {
+            // More lamps after a "+": x, y, reach, intensity, r, g, b.
+            let mut values = values.split('+');
+            let parse = |s: &str| -> Vec<f32> { s.split(',').map(|v| v.trim().parse().unwrap()).collect() };
+            let v = parse(values.next().unwrap());
+            let more: Vec<Lamp> = values
+                .map(|s| {
+                    let m = parse(s);
+                    Lamp {
+                        x: m[0],
+                        y: m[1],
+                        reach: m[2],
+                        intensity: m[3],
+                        colour: [m[4] as u8, m[5] as u8, m[6] as u8],
+                    }
+                })
+                .collect();
+            let mut options = RelightOptions {
                 x: v[0],
                 y: v[1],
                 reach: v[2],
@@ -854,6 +1018,9 @@ mod timing {
                 ambient: v[4],
                 ..Default::default()
             };
+            for m in more {
+                options.add_lamp(m);
+            }
             doc.layers[0].pixels = relight_faces(&before, &options, (0, 0), (doc.width, doc.height), &faces);
             crate::export::jpeg(&doc, &out.join(format!("{name}.jpg")), 90).unwrap();
         }

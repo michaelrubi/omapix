@@ -384,6 +384,19 @@ fn on_lamp_ring(canvas: &crate::canvas::Canvas, at: Pos2, reach: f32, p: Pos2) -
     ((p - at).length() - reach).abs() <= canvas.image_per_point() * HANDLE_REACH
 }
 
+/// Which of Relight's `lamps` has its dot under `p`, in an image
+/// `whole` big, the nearest if several.
+fn lamp_under(canvas: &crate::canvas::Canvas, lamps: &[omapix_engine::relight::Lamp], whole: (u32, u32), p: Pos2) -> Option<usize> {
+    let reach = canvas.image_per_point() * HANDLE_REACH;
+    let distance = |l: &omapix_engine::relight::Lamp| {
+        let [x, y, _] = l.at(whole);
+        (p - egui::pos2(x, y)).length()
+    };
+    (0..lamps.len())
+        .filter(|&i| distance(&lamps[i]) <= reach)
+        .min_by(|&a, &b| distance(&lamps[a]).total_cmp(&distance(&lamps[b])))
+}
+
 /// What Canvas Size fills new areas of the bottom layer with (Photoshop's
 /// "Canvas extension color").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -673,6 +686,8 @@ pub struct App {
     /// Relight's eyedropper is armed: the next click on the image takes
     /// the lamp's colour from there.
     relight_eyedropper: bool,
+    /// Which of Relight's lamps the dialog and a drag change.
+    relight_lamp: usize,
     relight_faces: RelightFaces,
     /// Where Liquify's brush is while its button is held.
     liquify_at: Option<Pos2>,
@@ -779,6 +794,7 @@ impl App {
             crop_drag: None,
             relight_drag: None,
             relight_eyedropper: false,
+            relight_lamp: 0,
             relight_faces: RelightFaces::Idle,
             liquify_at: None,
             objects: Default::default(),
@@ -906,6 +922,7 @@ impl App {
             crop_drag: None,
             relight_drag: None,
             relight_eyedropper: false,
+            relight_lamp: 0,
             relight_faces: RelightFaces::Idle,
             liquify_at: None,
             objects: Default::default(),
@@ -1959,6 +1976,7 @@ impl App {
                 };
                 self.dialog = Some(Dialog::Filter { filter, preview: true });
                 if cmd == Command::Relight {
+                    self.relight_lamp = 0;
                     self.find_relight_faces(ctx);
                 }
             }
@@ -3388,6 +3406,7 @@ impl App {
             }
         );
         let relight_eyedropper = &mut self.relight_eyedropper;
+        let relight_lamp = &mut self.relight_lamp;
         let faces_note = match self.relight_faces {
             RelightFaces::Finding(_) => "Finding faces, to light them by their shape…",
             RelightFaces::Found(0) | RelightFaces::Idle => "No faces found: lit by the photo's brightness alone.",
@@ -3534,7 +3553,7 @@ impl App {
                         LayerFilter::SmartBlur(options) => {
                             smart_blur_controls(ui, options, hint);
                         }
-                        LayerFilter::Relight(options) => relight_controls(ui, options, relight_eyedropper, faces_note, hint),
+                        LayerFilter::Relight(options) => relight_controls(ui, options, relight_lamp, relight_eyedropper, faces_note, hint),
                     }
                     ui.add_space(4.0);
                     ui.checkbox(preview, "Preview");
@@ -4626,10 +4645,11 @@ impl App {
         self.relight_faces = RelightFaces::Found(count);
     }
 
-    /// While Relight is open, the canvas places its lamp: a click or a
-    /// drag moves it there, and dragging its ring changes how far it
-    /// reaches.
-    fn relight_input(&mut self, input: ToolInput) {
+    /// While Relight is open, the canvas places its lamps: a click or a
+    /// drag moves the chosen one there, a click on another's dot chooses
+    /// that one (and drags it), Alt+click adds one, and dragging the chosen
+    /// one's ring changes how far it reaches.
+    fn relight_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
         let (
             Some(editor),
             Some(Dialog::Filter {
@@ -4651,24 +4671,41 @@ impl App {
             {
                 let mut out = [[0u8; 4]];
                 transform.convert(&[[pixel[0], pixel[1], pixel[2], u16::MAX]], &mut out);
-                options.colour = [out[0][0], out[0][1], out[0][2]];
+                options.change_lamp(self.relight_lamp, |l| l.colour = [out[0][0], out[0][1], out[0][2]]);
                 self.relight_eyedropper = false;
             }
             return;
         }
-        let (w, h) = (editor.doc.width as f32, editor.doc.height as f32);
-        let [x, y, reach] = options.lamp((editor.doc.width, editor.doc.height));
+        let whole = (editor.doc.width, editor.doc.height);
+        let (w, h) = (whole.0 as f32, whole.1 as f32);
+        let lamps = options.lamps();
+        let chosen = &mut self.relight_lamp;
+        *chosen = (*chosen).min(lamps.len() - 1);
+        let [x, y, reach] = lamps[*chosen].at(whole);
         let at = egui::pos2(x, y);
-        let mut place = |p: Pos2| (options.x, options.y) = (p.x / w, p.y / h);
+        let place = |options: &mut omapix_engine::relight::RelightOptions, i: usize, p: Pos2| options.change_lamp(i, |l| (l.x, l.y) = (p.x / w, p.y / h));
         match input {
             ToolInput::StrokeBegin(p) if on_lamp_ring(&editor.canvas, at, reach, p) => self.relight_drag = Some(RelightDrag::Reach),
             ToolInput::StrokeBegin(p) => {
-                place(p);
+                if let Some(i) = lamp_under(&editor.canvas, &lamps, whole, p) {
+                    *chosen = i;
+                } else if modifiers.alt {
+                    let lamp = omapix_engine::relight::Lamp {
+                        x: p.x / w,
+                        y: p.y / h,
+                        ..lamps[*chosen]
+                    };
+                    *chosen = options.add_lamp(lamp).unwrap_or(*chosen);
+                }
+                place(options, *chosen, p);
                 self.relight_drag = Some(RelightDrag::Lamp);
             }
             ToolInput::StrokeMove(p) => match self.relight_drag {
-                Some(RelightDrag::Lamp) => place(p),
-                Some(RelightDrag::Reach) => options.reach = ((p - at).length() / w.min(h) * 100.0).clamp(RELIGHT_REACH.0, RELIGHT_REACH.1),
+                Some(RelightDrag::Lamp) => place(options, *chosen, p),
+                Some(RelightDrag::Reach) => {
+                    let reach = ((p - at).length() / w.min(h) * 100.0).clamp(RELIGHT_REACH.0, RELIGHT_REACH.1);
+                    options.change_lamp(*chosen, |l| l.reach = reach);
+                }
                 None => {}
             },
             ToolInput::StrokeEnd => self.relight_drag = None,
@@ -4684,7 +4721,7 @@ impl App {
                 ..
             })
         ) {
-            self.relight_input(input);
+            self.relight_input(input, modifiers);
             return;
         }
         if self.editor.as_ref().is_some_and(|e| e.transform().is_some()) {
@@ -5476,14 +5513,45 @@ const RELIGHT_REACH: (f32, f32) = (5.0, 200.0);
 
 /// Relight's settings, for its dialog. The lamp itself is placed on the
 /// canvas.
-fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOptions, eyedropper: &mut bool, faces: &str, hint: egui::Color32) {
-    ui.label(RichText::new("Click or drag on the image to place the light. Drag its ring to change how far it reaches.").color(hint));
+fn relight_controls(
+    ui: &mut Ui,
+    options: &mut omapix_engine::relight::RelightOptions,
+    chosen: &mut usize,
+    eyedropper: &mut bool,
+    faces: &str,
+    hint: egui::Color32,
+) {
+    use omapix_engine::relight::{LAMPS, Lamp};
+    ui.label(RichText::new("Click or drag on the image to place the light; Alt+click adds another. Drag its ring to change how far it reaches.").color(hint));
     ui.add_space(4.0);
+    let mut lamps = options.lamps();
+    *chosen = (*chosen).min(lamps.len() - 1);
+    // The lamps: which one the settings below are for.
+    ui.horizontal(|ui| {
+        ui.label("Lamp");
+        for i in 0..lamps.len() {
+            if ui.selectable_label(*chosen == i, format!("{}", i + 1)).clicked() {
+                *chosen = i;
+            }
+        }
+        if ui
+            .add_enabled(lamps.len() < LAMPS, egui::Button::new("Add"))
+            .on_hover_text("Another lamp, across from this one")
+            .clicked()
+        {
+            let from = lamps[*chosen];
+            lamps.push(Lamp { x: 1.0 - from.x, ..from });
+            *chosen = lamps.len() - 1;
+        }
+        if ui.add_enabled(lamps.len() > 1, egui::Button::new("Remove")).clicked() {
+            lamps.remove(*chosen);
+            *chosen = (*chosen).min(lamps.len() - 1);
+        }
+    });
+    let lamp = &mut lamps[*chosen];
     for (label, value, range) in [
-        ("Reach", &mut options.reach, RELIGHT_REACH.0..=RELIGHT_REACH.1),
-        ("Intensity", &mut options.intensity, 0.0..=100.0),
-        ("Ambient", &mut options.ambient, 0.0..=100.0),
-        ("Softness", &mut options.softness, 1.0..=100.0),
+        ("Reach", &mut lamp.reach, RELIGHT_REACH.0..=RELIGHT_REACH.1),
+        ("Intensity", &mut lamp.intensity, 0.0..=100.0),
     ] {
         ui.horizontal(|ui| {
             ui.label(label);
@@ -5492,7 +5560,7 @@ fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOp
     }
     ui.horizontal(|ui| {
         ui.label("Colour");
-        ui.color_edit_button_srgb(&mut options.colour);
+        ui.color_edit_button_srgb(&mut lamp.colour);
         let button = egui::Button::new("Eyedropper").selected(*eyedropper);
         if ui
             .add(button)
@@ -5502,12 +5570,17 @@ fn relight_controls(ui: &mut Ui, options: &mut omapix_engine::relight::RelightOp
             *eyedropper = !*eyedropper;
         }
     });
+    options.set_lamps(&lamps);
+    ui.add_space(4.0);
+    for (label, value, range) in [("Ambient", &mut options.ambient, 0.0..=100.0), ("Softness", &mut options.softness, 1.0..=100.0)] {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::Slider::new(value, range).suffix(" %").fixed_decimals(0));
+        });
+    }
     ui.label(
-        RichText::new(
-            "Ambient is how much of the photo's own light stays: at 100 % the lamp only adds light, \
-             so Relight again for a second lamp. Softness is how broad the shapes the light follows are.",
-        )
-        .color(hint),
+        RichText::new("Ambient is how much of the photo's own light stays, for every lamp. Softness is how broad the shapes the light follows are.")
+            .color(hint),
     );
     ui.label(RichText::new(faces).color(hint));
 }
@@ -6354,18 +6427,32 @@ impl eframe::App for App {
                         filter: LayerFilter::Relight(options),
                         ..
                     }) => {
-                        let [x, y, reach] = options.lamp((editor.doc.width, editor.doc.height));
-                        let at = egui::pos2(x, y);
+                        let whole = (editor.doc.width, editor.doc.height);
+                        let all = options.lamps();
+                        let chosen = self.relight_lamp.min(all.len() - 1);
+                        let lamps: Vec<(Pos2, f32, bool)> = all
+                            .iter()
+                            .enumerate()
+                            .map(|(i, l)| {
+                                let [x, y, reach] = l.at(whole);
+                                (egui::pos2(x, y), reach, i == chosen)
+                            })
+                            .collect();
+                        let (at, reach, _) = lamps[chosen];
+                        let pointer = editor.canvas.pointer;
                         let ring = match self.relight_drag {
                             Some(drag) => drag == RelightDrag::Reach,
-                            None => editor.canvas.pointer.is_some_and(|p| on_lamp_ring(&editor.canvas, at, reach, p)),
+                            None => pointer.is_some_and(|p| on_lamp_ring(&editor.canvas, at, reach, p)),
                         };
-                        let cursor = if ring && !self.relight_eyedropper {
-                            egui::CursorIcon::ResizeHorizontal
-                        } else {
-                            egui::CursorIcon::Crosshair
+                        let on_dot = self.relight_drag.is_none() && pointer.is_some_and(|p| lamp_under(&editor.canvas, &all, whole, p).is_some());
+                        let cursor = match () {
+                            _ if self.relight_eyedropper => egui::CursorIcon::Crosshair,
+                            _ if ring => egui::CursorIcon::ResizeHorizontal,
+                            _ if on_dot => egui::CursorIcon::Grab,
+                            _ if modifiers.alt && all.len() < omapix_engine::relight::LAMPS => egui::CursorIcon::Copy,
+                            _ => egui::CursorIcon::Crosshair,
                         };
-                        Some((at, reach, cursor))
+                        Some((lamps, cursor))
                     }
                     _ => None,
                 };
@@ -7543,6 +7630,61 @@ mod tests {
         assert!(c[0] == 255 && (126..=130).contains(&c[1]) && c[2] == 0, "{c:?}");
         assert_eq!((options(&app).x, options(&app).y), (o.x, o.y));
         assert!(!app.relight_eyedropper, "disarmed after one click");
+
+        // Alt+click adds a lamp there, the one chosen now; the first stays.
+        let whole = (w as u32, h as u32);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(w * 0.2, h * 0.6)), egui::Modifiers::ALT);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        let lamps = options(&app).lamps();
+        assert_eq!((lamps.len(), app.relight_lamp), (2, 1));
+        assert!((lamps[1].x - 0.2).abs() < 1e-4 && (lamps[1].y - 0.6).abs() < 1e-4, "{lamps:?}");
+        assert!((lamps[0].x - 0.8).abs() < 1e-4, "{lamps:?}");
+        // A click on the first's dot chooses it again, and a drag takes it along.
+        let [x0, y0, _] = lamps[0].at(whole);
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(x0 + 1.0, y0)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(w * 0.3, h * 0.3)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        let lamps = options(&app).lamps();
+        assert_eq!(app.relight_lamp, 0);
+        assert!((lamps[0].x - 0.3).abs() < 1e-4 && (lamps[1].x - 0.2).abs() < 1e-4, "{lamps:?}");
+        // The dialog's Add puts a lamp across from the chosen one, and
+        // Remove takes the chosen one away.
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.dialogs(ui.ctx()));
+            out.textures_delta.clear();
+            fn find(shape: &egui::Shape, text: &str) -> Option<egui::Pos2> {
+                match shape {
+                    egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos + egui::vec2(3.0, 3.0)),
+                    egui::Shape::Vec(v) => v.iter().find_map(|s| find(s, text)),
+                    _ => None,
+                }
+            }
+            let found = |text: &str| out.shapes.iter().find_map(|s| find(&s.shape, text));
+            (found("Add"), found("Remove"))
+        };
+        let click = |app: &mut App, pos: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            run(app, vec![egui::Event::PointerMoved(pos), button(true)]);
+            run(app, vec![button(false)]);
+        };
+        let (add, _) = run(&mut app, vec![]);
+        click(&mut app, add.expect("an Add button"));
+        let lamps = options(&app).lamps();
+        assert_eq!((lamps.len(), app.relight_lamp), (3, 2));
+        assert!((lamps[2].x - 0.7).abs() < 1e-4 && (lamps[2].y - lamps[0].y).abs() < 1e-4, "{lamps:?}");
+        let (_, remove) = run(&mut app, vec![]);
+        click(&mut app, remove.expect("a Remove button"));
+        assert_eq!((options(&app).lamps().len(), app.relight_lamp), (2, 1));
 
         let o = options(&app);
         app.dialog = None;

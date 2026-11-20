@@ -413,6 +413,14 @@ mod tests {
         assert_eq!((settings.blur_radius, settings.separation_radius), (4.5, Some(9.0)));
         assert_eq!((settings.unsharp_mask.amount, settings.unsharp_mask.radius), (1.2, 1.5));
         assert_eq!(FilterSettings::load_from(&path, &FilterSettings::default()), settings);
+        // Relight's extra lamps are kept too.
+        let lamp = omapix_engine::relight::Lamp {
+            x: 0.9,
+            ..settings.relight.lamps()[0]
+        };
+        settings.relight.add_lamp(lamp);
+        settings.update(&serde_json::json!({ "blur_radius": 4.5 })).unwrap();
+        assert_eq!(FilterSettings::load_from(&path, &FilterSettings::default()).relight.lamps().len(), 2);
         // Nothing changes for a misspelt name or a wrong kind of value.
         let before = settings.clone();
         let err = settings.update(&serde_json::json!({ "blur_radius": 3.0, "unsharp_mask": { "amout": 1.0 } }));

@@ -4392,6 +4392,16 @@ mod bench {
             mask: false,
         };
         eprintln!("render_view rough {:?}", best(&mut || drop(render_view(&doc, rough, [0; 4], None))));
+        let mut four = omapix_engine::relight::RelightOptions::default();
+        while four.add_lamp(omapix_engine::relight::Lamp { x: 0.8, ..four.lamps()[0] }).is_some() {}
+        let filter = filters::LayerFilter::Relight(four);
+        eprintln!("relight, four lamps {:?}", best(&mut || filtered = ops::filtered(&doc, id, &filter)));
+        let rough = View::Filter {
+            layer: id,
+            filter: filters::LayerFilter::Relight(omapix_engine::relight::RelightOptions { rough: true, ..four }),
+            mask: false,
+        };
+        eprintln!("render_view rough, four lamps {:?}", best(&mut || drop(render_view(&doc, rough, [0; 4], None))));
     }
 
     #[test]
