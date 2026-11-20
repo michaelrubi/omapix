@@ -36,6 +36,15 @@ pub const CELLS: usize = 768;
 const REMOVE: &str = "Remove the object, leaving only the background";
 /// And where there's no image to fill yet.
 const EXTEND: &str = "Extend the picture, continuing the scene";
+/// [`add_texture`]'s tiles are this many pixels across: 27 cells, with as
+/// many again for the tile as it was, about what fits in 8 GB.
+pub const TILE: usize = 432;
+/// And overlap by this many, fading from one to the next.
+const OVERLAP: usize = 64;
+
+/// One run at a time: a fill told to stop may still be finishing its step,
+/// with the card to itself.
+static ONE: Mutex<()> = Mutex::new(());
 
 fn file(name: &str) -> Result<std::path::PathBuf> {
     let files = find_model(MODEL).ok_or_else(|| format!("Generative Fill needs the FLUX.2 klein model: run {} {MODEL}", crate::models::fetch_command()))?;
@@ -154,6 +163,9 @@ pub struct Request<'a> {
     /// chair"), `columns` × `rows` cells too, and which of its cells to
     /// show (1) or leave out (0), as where it has nothing in it.
     pub reference: Option<(&'a [f32], &'a [f32])>,
+    /// Latents of an image to start from rather than from noise, and how
+    /// noisy to make it first (0 to 1): the lower, the more of it stays.
+    pub from: Option<(&'a [f32], f32)>,
 }
 
 /// The transformer, which makes latents from noise.
@@ -176,7 +188,11 @@ impl Transformer {
         let cells = request.columns * request.rows;
         let noise = noise(request.seed, cells * CHANNELS);
         let mut latents = noise.clone();
-        let sigmas = sigmas(cells, STEPS);
+        let mut sigmas = sigmas(cells, STEPS);
+        if let Some((start, level)) = request.from {
+            sigmas.iter_mut().for_each(|s| *s *= level);
+            latents = start.iter().zip(&noise).map(|(x, n)| (1.0 - level) * x + level * n).collect();
+        }
 
         // Where each cell is: time (0 for the image, 10 for a reference),
         // row, column and 0; a prompt token only has its place in line.
@@ -273,9 +289,6 @@ pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progr
         anew,
         empty,
     } = *canvas;
-    // One at a time: a fill told to stop may still be finishing its step,
-    // with the card to itself.
-    static ONE: Mutex<()> = Mutex::new(());
     let _one = ONE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let tell = Mutex::new(tell);
     let tell = |progress| tell.lock().is_ok_and(|mut tell| tell(progress));
@@ -336,6 +349,7 @@ pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progr
                 seed,
                 keep: Some((&kept, anew)),
                 reference: Some((&kept, &shown)),
+                from: None,
             };
             let Some(latents) = transformer.generate(&request, |step| tell(Progress::Step(result, step))).map_err(friendly)? else {
                 break;
@@ -347,6 +361,100 @@ pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progr
         drop(tx);
         decoding.join().map_err(|_| "Generative Fill stopped unexpectedly")?
     })
+}
+
+/// `image` (in [`Canvas`]'s form, but any size of at least [`CELL`] each
+/// way) with skin texture drawn anew, tile by tile, in the tiles where
+/// `wanted` (0 to 1 for each pixel) has any: Retouch › Regenerate Skin
+/// (docs/AI.md). The transformer is shown each tile and asked for the
+/// texture `prompt` describes, starting from noise, so it can draw pores where there are none;
+/// what else it changes (colour, shape) is for the caller to leave out.
+/// Pixels in no tile come back as they were. `tell` hears how many tiles
+/// are done of how many, and stops it (with `None` for an answer) by
+/// answering `false`.
+pub fn add_texture(
+    image: &[f32],
+    width: usize,
+    height: usize,
+    wanted: &[f32],
+    prompt: &str,
+    mut tell: impl FnMut(usize, usize) -> bool,
+) -> Result<Option<Vec<f32>>> {
+    let _one = ONE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tw, th) = (TILE.min(width / CELL * CELL), TILE.min(height / CELL * CELL));
+    if tw == 0 || th == 0 {
+        return Err("The skin is too small to regenerate".into());
+    }
+    let tiles: Vec<(usize, usize)> = starts(height, th)
+        .into_iter()
+        .flat_map(|y| starts(width, tw).into_iter().map(move |x| (x, y)))
+        .filter(|&(x0, y0)| (y0..y0 + th).any(|y| wanted[y * width + x0..y * width + x0 + tw].iter().any(|&v| v > 0.0)))
+        .collect();
+    if !tell(0, tiles.len()) {
+        return Ok(None);
+    }
+    let embedding = TextEncoder::load(true).and_then(|mut text| text.embed(prompt)).map_err(friendly)?;
+    let mut vae = Vae::load(false)?;
+    let mut transformer = Transformer::load().map_err(friendly)?;
+    let (columns, rows) = (tw / CELL, th / CELL);
+    let shown = vec![1.0; columns * rows];
+    let plane = width * height;
+    let (mut sum, mut weights) = (vec![0f32; 3 * plane], vec![0f32; plane]);
+    // How much a tile's pixel counts, fading out towards its edges.
+    let weight = |i: usize, size: usize| ((i + 1).min(size - i) as f32 / OVERLAP as f32).min(1.0);
+    for (done, &(x0, y0)) in tiles.iter().enumerate() {
+        let mut crop = vec![0f32; 3 * tw * th];
+        for c in 0..3 {
+            for y in 0..th {
+                let from = c * plane + (y0 + y) * width + x0;
+                crop[(c * th + y) * tw..][..tw].copy_from_slice(&image[from..from + tw]);
+            }
+        }
+        let kept = vae.encode(&crop, tw, th)?;
+        let request = Request {
+            prompt: &embedding,
+            columns,
+            rows,
+            seed: 1,
+            keep: None,
+            reference: Some((&kept, &shown)),
+            from: None,
+        };
+        let Some(latents) = transformer.generate(&request, |_| true).map_err(friendly)? else {
+            return Ok(None);
+        };
+        let made = vae.decode(&latents, columns, rows)?;
+        for y in 0..th {
+            for x in 0..tw {
+                let (w, i) = (weight(x, tw) * weight(y, th), (y0 + y) * width + x0 + x);
+                weights[i] += w;
+                for c in 0..3 {
+                    sum[c * plane + i] += w * made[(c * th + y) * tw + x];
+                }
+            }
+        }
+        if !tell(done + 1, tiles.len()) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(
+        (0..3 * plane)
+            .map(|i| match weights[i % plane] {
+                0.0 => image[i],
+                w => sum[i] / w,
+            })
+            .collect(),
+    ))
+}
+
+/// Where tiles `size` long (no longer than `length`) start along
+/// `length`, overlapping by at least [`OVERLAP`] and covering all of it.
+fn starts(length: usize, size: usize) -> Vec<usize> {
+    if size <= OVERLAP {
+        return (0..length.div_ceil(size)).map(|i| (i * size).min(length - size)).collect();
+    }
+    let n = (length - OVERLAP).div_ceil(size - OVERLAP).max(1);
+    (0..n).map(|i| (i * (size - OVERLAP)).min(length - size)).collect()
 }
 
 /// ONNX Runtime's errors that have a plain reason, in plain words.
@@ -410,6 +518,19 @@ mod tests {
         assert!(small.windows(2).all(|w| w[0] > w[1]), "{small:?}");
         let large = sigmas(64 * 64, STEPS);
         assert!((1..STEPS).all(|i| large[i] > small[i]), "{large:?} {small:?}");
+    }
+
+    #[test]
+    fn tiles_cover_the_whole_length_and_overlap() {
+        for (length, size) in [(432, 432), (433, 432), (1000, 432), (2123, 432), (40, 32)] {
+            let starts = starts(length, size);
+            assert_eq!(starts[0], 0);
+            assert_eq!(starts.last().unwrap() + size, length, "{length} {size} {starts:?}");
+            assert!(
+                starts.windows(2).all(|w| w[1] > w[0] && w[0] + size >= w[1] + OVERLAP.min(size / 2)),
+                "{starts:?}"
+            );
+        }
     }
 
     #[test]

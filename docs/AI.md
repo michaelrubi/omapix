@@ -1829,6 +1829,49 @@ looked at on the same photos through `whiten_in_photos`, which writes
   - Working on a small copy, as Even Tone does, would make close-ups as
     quick as the rest.
 
+### Regenerate Skin
+
+Retouch › Regenerate Skin (`omapix_ai::flux::add_texture`, `Texture` in
+`crates/omapix/src/whiten.rs`), after Enhancor's skin editor: draws skin
+texture (pores, fine lines) back into skin that looks plastic. Tried on
+2026-11-20 on screenshots of Enhancor's examples, an over-smoothed copy of
+pexels-9253768 and a child's portrait (`crates/omapix-ai/examples/regen.rs`).
+
+- **The layer.** A pixel layer, "Regenerate Skin", masked to face and body
+  skin, at 50 % opacity to start, above the active layer. The
+  status bar counts the tiles done, with a Stop button (or Esc), which
+  adds nothing and frees Omapix at once; the tile being drawn is finished
+  and dropped. It's
+  the image with only the change in fine detail added, so its colour,
+  light and anything finer than the model saw stay as they were.
+- **Age.** Its dialog asks whose skin it is: Child, Young adult (the
+  default), Adult or Mature, remembered for next time. Skin changes in
+  kind with age, not just in amount: Child adds almost nothing to a
+  child's natural skin and only a soft grain to smoothed skin, Young adult
+  fine small pores, Adult coarser pores, Mature pores with fine lines and
+  creases. Opacity can only fade one of them. Each is a prompt
+  (`Age::prompt`), so changing it means running again. Tried on
+  2026-11-20 on the child's portrait and the smoothed face, with the
+  working size too (200 and 400 px between the eyes): that hardly changed
+  the look, so it isn't offered.
+- **How.** FLUX.2 klein, shown each 432 px tile of skin, starting from
+  noise and asked to add the age's texture and "keep the face, lighting
+  and colours exactly the same". Faces are first shrunk to 280 px between
+  the eyes at most.
+- **What didn't work.** Starting from the image with a little noise
+  (img2img, 0.2–0.8) keeps smoothed skin smooth: the model reads it as
+  out of focus. The edit's own pixels change the person (lighter skin,
+  redness, older under-eyes), which is why only the detail band
+  (σ 3 px at 280 px between the eyes) is kept.
+- **Speed.** About 15 s a tile on the 4070 Laptop, the VAE on the CPU: a
+  minute for a face 850 px across, 3 minutes for a 3 MP portrait. On the
+  GPU, the VAE beside the transformer runs out of memory.
+- **Left:** it always draws texture, so on skin that already has it
+  older ages add more (Child is the one to use for children); guessing
+  the age from the face; the
+  upscaler that adds detail (RealPLKSR, then the same model from the image
+  at about 0.4 noise, as `regen.rs` tried).
+
 ### Reduce Shine
 
 As built (`omapix_engine::shine`, `crates/omapix/src/whiten.rs`), looked at

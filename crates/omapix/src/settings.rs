@@ -110,6 +110,8 @@ pub struct FilterSettings {
     pub auto_retouch: crate::auto_retouch::Retouch,
     /// Heal Blemishes' Sensitivity, 0–100.
     pub blemish_sensitivity: f32,
+    /// Regenerate Skin's age.
+    pub skin_age: crate::whiten::Age,
     /// Smooth Skin's Amount, Smoothness and Detail.
     pub smooth_skin: omapix_engine::skin::Smoothing,
     /// Even Tone's Amount and Size.
@@ -152,6 +154,7 @@ impl Default for FilterSettings {
             separation_edit_layers: true,
             auto_retouch: Default::default(),
             blemish_sensitivity: 50.0,
+            skin_age: Default::default(),
             smooth_skin: Default::default(),
             even_tone: Default::default(),
             // Leaves a little fine grain at high ISO, which looks natural.
