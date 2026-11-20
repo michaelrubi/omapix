@@ -364,7 +364,7 @@ pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progr
 }
 
 /// `image` (in [`Canvas`]'s form, but any size of at least [`CELL`] each
-/// way) with skin texture drawn anew, tile by tile, in the tiles where
+/// way) with skin texture (or eyes' or hair's detail) drawn anew, tile by tile, in the tiles where
 /// `wanted` (0 to 1 for each pixel) has any: Retouch › Regenerate Skin
 /// (docs/AI.md). The transformer is shown each tile and asked for the
 /// texture `prompt` describes, starting from noise, so it can draw pores where there are none;
@@ -383,7 +383,7 @@ pub fn add_texture(
     let _one = ONE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (tw, th) = (TILE.min(width / CELL * CELL), TILE.min(height / CELL * CELL));
     if tw == 0 || th == 0 {
-        return Err("The skin is too small to regenerate".into());
+        return Err("Too small to regenerate".into());
     }
     let tiles: Vec<(usize, usize)> = starts(height, th)
         .into_iter()

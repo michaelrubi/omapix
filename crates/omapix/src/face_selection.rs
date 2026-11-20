@@ -409,6 +409,25 @@ pub fn find_skin(image: Raster, profile: &ColorProfile) -> Result<FoundSkin, Str
     Ok(FoundSkin { image, skin, iod, cheek, nose })
 }
 
+/// Regenerate Eyes' area in `image`: every face's eyes the landmarker saw,
+/// grown to take in their lashes and lids, and the distance between the
+/// eyes of the largest face.
+pub fn find_eye_area(image: &Raster, profile: &ColorProfile) -> Result<(Selection, f32), String> {
+    let (_, analysis) = analyse(image, profile)?;
+    let iod = scale(&analysis).ok_or("Found no faces facing the camera")?;
+    let eyes = draw(&points(&analysis), &ROUND_EYES, image.width(), image.height());
+    if eyes.is_empty() { Err("Found no eyes".into()) } else { Ok((eyes, iod)) }
+}
+
+/// The hair in `image`, and the distance between the eyes of its largest
+/// face.
+pub fn find_hair(image: &Raster, profile: &ColorProfile) -> Result<(Selection, f32), String> {
+    let (_, analysis) = analyse(image, profile)?;
+    let iod = scale(&analysis).ok_or("Found no faces facing the camera")?;
+    let hair = segmented(&analysis, image, &[HAIR]);
+    if hair.is_empty() { Err("Found no hair".into()) } else { Ok((hair, iod)) }
+}
+
 /// Each of `faces` as a person, for sharing the skin out: the middle of
 /// the face and the distance between its eyes, and with more than one
 /// (one has all the skin), the joints of whoever the pose model sees with

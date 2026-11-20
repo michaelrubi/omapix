@@ -1872,6 +1872,34 @@ pexels-9253768 and a child's portrait (`crates/omapix-ai/examples/regen.rs`).
   upscaler that adds detail (RealPLKSR, then the same model from the image
   at about 0.4 noise, as `regen.rs` tried).
 
+### Regenerate Eyes and Regenerate Hair
+
+Retouch › Regenerate Eyes and Regenerate Hair (`Regen` in
+`crates/omapix/src/whiten.rs`) work like Regenerate Skin: the same tiles,
+the same layer (named for the command, 50 % opacity, Stop or Esc), and only
+the model's change in fine detail kept. They don't open a dialog. Tried on 2026-11-20 on the
+child's portrait (D88L9NMH0, 1516 × 2123) and pexels-9253768 (5830 ×
+3887), through `regenerate_skin_in_photos` with `PART=eyes` or `hair`.
+
+- **Eyes.** Masked to each face's eyes grown to take in the lashes and
+  lids (`ROUND_EYES`). Eyes are small, so they're drawn larger than skin:
+  up to 560 px between the eyes, not 280. The model is shown 0.3 of that
+  round them, since an eye on its own doesn't look like one. It sharpens the iris
+  (radial fibres, crisp catchlight) and the lashes, keeping the colour and
+  the gaze. 4 tiles (45 s) on the child, 8 (110 s) on the 5830 px
+  portrait. At full opacity the lashes look like mascara, the lower ones
+  most, even asked for "natural eyelashes"; 50 % hides that.
+- **Hair.** Masked to the segmenter's hair, at 280 px between the eyes
+  like skin. It adds fine, separate strands without changing the style.
+  130 s on the child, 270 s on the portrait.
+- **Lightness only.** The model's new strands came out gold in dark hair, so for
+  both, the detail is kept as lightness only (Rec. 709 weights), the same
+  in each channel. Skin keeps its colour, since pores are redder than the
+  skin round them.
+- **Left:** leaving out closed eyes and eyes out of sight (it uses
+  every face's eyes); brows (they're in the eye mask only where it reaches
+  them).
+
 ### Reduce Shine
 
 As built (`omapix_engine::shine`, `crates/omapix/src/whiten.rs`), looked at
