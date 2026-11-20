@@ -35,8 +35,45 @@ pub enum Part {
     UnderEyes,
     Shine,
     Makeup,
-    Texture,
+    Texture(Age),
 }
+
+/// Whose skin Regenerate Skin draws: pores, how coarse it is and fine
+/// lines all change with age, which its layer's opacity can't do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Age {
+    Child,
+    #[default]
+    YoungAdult,
+    Adult,
+    Mature,
+}
+
+impl Age {
+    pub const ALL: [Age; 4] = [Age::Child, Age::YoungAdult, Age::Adult, Age::Mature];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Age::Child => "Child",
+            Age::YoungAdult => "Young adult",
+            Age::Adult => "Adult",
+            Age::Mature => "Mature",
+        }
+    }
+
+    /// What the model is asked to draw.
+    fn prompt(self) -> String {
+        let skin = match self {
+            Age::Child => "Add soft, very fine, youthful skin texture with tiny, barely visible pores, like a young child's skin.",
+            Age::YoungAdult => YOUNG_ADULT,
+            Age::Adult => "Add realistic natural skin texture with visible pores and fine skin detail.",
+            Age::Mature => "Add realistic mature skin texture of a person in their fifties, with visible pores, fine lines and natural skin detail.",
+        };
+        format!("{skin} Keep the face, lighting and colours exactly the same.")
+    }
+}
+
+const YOUNG_ADULT: &str = "Add natural young adult skin texture with fine, small pores and smooth, even skin detail, like a person in their twenties.";
 
 impl Part {
     /// Its command's name, and its undo step's.
@@ -46,7 +83,7 @@ impl Part {
             Part::UnderEyes => "Lighten Under Eyes",
             Part::Shine => shine::NAME,
             Part::Makeup => "Makeup",
-            Part::Texture => TEXTURE,
+            Part::Texture(_) => TEXTURE,
         }
     }
 
@@ -58,7 +95,7 @@ impl Part {
             Part::UnderEyes => "Finding shadows under the eyes…",
             Part::Shine => "Finding shine…",
             Part::Makeup => "Finding faces…",
-            Part::Texture => "Finding skin…",
+            Part::Texture(_) => "Finding skin…",
         }
     }
 }
@@ -110,7 +147,7 @@ impl Whitening {
                 Part::UnderEyes => find_under_eyes(&image, &doc.profile).map(Made::Mask),
                 Part::Shine => find_shine(image, &doc.profile).map(Made::Matte),
                 Part::Makeup => find_makeup(&image, &doc.profile).map(Made::Makeup),
-                Part::Texture => find_texture(image, &doc.profile, |done, of| {
+                Part::Texture(age) => find_texture(image, &doc.profile, age, |done, of| {
                     progress.done.store(done, Ordering::Relaxed);
                     progress.of.store(of, Ordering::Relaxed);
                     ctx.request_repaint();
@@ -130,7 +167,7 @@ impl Whitening {
     pub fn poll(&mut self, editor: &mut Editor) -> Option<String> {
         let (part, layer, rx) = self.running.as_ref()?;
         let (part, layer) = (*part, *layer);
-        if part == Part::Texture && self.progress.stop.load(Ordering::Relaxed) {
+        if matches!(part, Part::Texture(_)) && self.progress.stop.load(Ordering::Relaxed) {
             self.running = None;
             return None;
         }
@@ -173,14 +210,14 @@ impl Whitening {
     /// While Regenerate Skin draws, how many tiles it's done of how many.
     pub fn tiles(&self) -> Option<(usize, usize)> {
         let of = self.progress.of.load(Ordering::Relaxed);
-        (self.busy() == Some(Part::Texture) && of > 0).then(|| (self.progress.done.load(Ordering::Relaxed), of))
+        (matches!(self.busy(), Some(Part::Texture(_))) && of > 0).then(|| (self.progress.done.load(Ordering::Relaxed), of))
     }
 
     /// Stop Regenerate Skin: nothing's added, and from the next
     /// [`Whitening::poll`] Omapix carries on. Its thread finishes the tile
     /// it's on and drops it.
     pub fn stop(&self) {
-        if self.busy() == Some(Part::Texture) {
+        if matches!(self.busy(), Some(Part::Texture(_))) {
             self.progress.stop.store(true, Ordering::Relaxed);
         }
     }
@@ -300,13 +337,13 @@ impl Texture {
 }
 
 /// The skin in `image` with its texture drawn anew, measured by its
-/// largest face. The other models give the card up first. `tell` hears
+/// largest face, as `age`'s skin. The other models give the card up first. `tell` hears
 /// how many tiles are done of how many, and stops it by answering `false`.
-fn find_texture(image: Raster, profile: &ColorProfile, tell: impl FnMut(usize, usize) -> bool) -> Result<Texture, String> {
+fn find_texture(image: Raster, profile: &ColorProfile, age: Age, tell: impl FnMut(usize, usize) -> bool) -> Result<Texture, String> {
     let found = find_skin(image, profile)?;
     crate::generative_fill::free_the_card();
     Texture::new(&found.image, profile, &found.skin, found.iod, |image, width, height, wanted| {
-        omapix_ai::flux::add_texture(image, width, height, wanted, tell)
+        omapix_ai::flux::add_texture(image, width, height, wanted, &age.prompt(), tell)
     })
 }
 
@@ -321,11 +358,11 @@ mod tests {
         let mut editor = Editor::new(doc).unwrap();
         let (tx, rx) = channel();
         let mut whitening = Whitening {
-            running: Some((Part::Texture, editor.active, rx)),
+            running: Some((Part::Texture(Age::Child), editor.active, rx)),
             ..Default::default()
         };
         // Finding the skin, then drawing.
-        assert_eq!((whitening.busy(), whitening.tiles()), (Some(Part::Texture), None));
+        assert_eq!((whitening.busy(), whitening.tiles()), (Some(Part::Texture(Age::Child)), None));
         whitening.progress.of.store(9, Ordering::Relaxed);
         whitening.progress.done.store(3, Ordering::Relaxed);
         assert_eq!(whitening.tiles(), Some((3, 9)));
@@ -580,7 +617,8 @@ mod tests {
     /// A look at real photos: for `OMAPIX_FACE_PHOTO` (a photo, or a folder
     /// of them), the photo with its skin regenerated, as
     /// `<photo>-texture.png` in `OMAPIX_FACE_OUT`. `AMOUNT` sets the
-    /// layer's opacity (100 by default). Needs the models
+    /// layer's opacity (100 by default), and `AGE` whose skin it is
+    /// ([`Age::name`], Young adult by default). Needs the models
     /// (scripts/fetch-models.sh, with fill-flux2-klein-4b) and ImageMagick.
     #[test]
     #[ignore]
@@ -595,11 +633,14 @@ mod tests {
         };
         paths.sort();
         let amount = std::env::var("AMOUNT").map_or(100.0, |v| v.parse().unwrap());
+        let age = std::env::var("AGE").map_or(Age::default(), |v| {
+            *Age::ALL.iter().find(|a| a.name() == v).expect("AGE is Child, Young adult, Adult or Mature")
+        });
         for path in paths {
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
             let Ok(mut doc) = omapix_engine::io::load(&path) else { continue };
             let t = std::time::Instant::now();
-            let texture = match find_texture(doc.composite(), &doc.profile, |done, of| {
+            let texture = match find_texture(doc.composite(), &doc.profile, age, |done, of| {
                 eprintln!("{name}: {done} of {of}");
                 true
             }) {

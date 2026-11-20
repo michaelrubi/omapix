@@ -36,8 +36,6 @@ pub const CELLS: usize = 768;
 const REMOVE: &str = "Remove the object, leaving only the background";
 /// And where there's no image to fill yet.
 const EXTEND: &str = "Extend the picture, continuing the scene";
-/// What [`add_texture`] asks of each tile.
-const TEXTURE: &str = "Add realistic natural skin texture with visible pores and fine skin detail. Keep the face, lighting and colours exactly the same.";
 /// [`add_texture`]'s tiles are this many pixels across: 27 cells, with as
 /// many again for the tile as it was, about what fits in 8 GB.
 pub const TILE: usize = 432;
@@ -368,13 +366,20 @@ pub fn fill(prompt: &str, canvas: &Canvas, seeds: &[u64], tell: impl FnMut(Progr
 /// `image` (in [`Canvas`]'s form, but any size of at least [`CELL`] each
 /// way) with skin texture drawn anew, tile by tile, in the tiles where
 /// `wanted` (0 to 1 for each pixel) has any: Retouch › Regenerate Skin
-/// (docs/AI.md). The transformer is shown each tile and asked to add the
-/// texture, starting from noise, so it can draw pores where there are none;
+/// (docs/AI.md). The transformer is shown each tile and asked for the
+/// texture `prompt` describes, starting from noise, so it can draw pores where there are none;
 /// what else it changes (colour, shape) is for the caller to leave out.
 /// Pixels in no tile come back as they were. `tell` hears how many tiles
 /// are done of how many, and stops it (with `None` for an answer) by
 /// answering `false`.
-pub fn add_texture(image: &[f32], width: usize, height: usize, wanted: &[f32], mut tell: impl FnMut(usize, usize) -> bool) -> Result<Option<Vec<f32>>> {
+pub fn add_texture(
+    image: &[f32],
+    width: usize,
+    height: usize,
+    wanted: &[f32],
+    prompt: &str,
+    mut tell: impl FnMut(usize, usize) -> bool,
+) -> Result<Option<Vec<f32>>> {
     let _one = ONE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (tw, th) = (TILE.min(width / CELL * CELL), TILE.min(height / CELL * CELL));
     if tw == 0 || th == 0 {
@@ -388,7 +393,7 @@ pub fn add_texture(image: &[f32], width: usize, height: usize, wanted: &[f32], m
     if !tell(0, tiles.len()) {
         return Ok(None);
     }
-    let embedding = TextEncoder::load(true).and_then(|mut text| text.embed(TEXTURE)).map_err(friendly)?;
+    let embedding = TextEncoder::load(true).and_then(|mut text| text.embed(prompt)).map_err(friendly)?;
     let mut vae = Vae::load(false)?;
     let mut transformer = Transformer::load().map_err(friendly)?;
     let (columns, rows) = (tw / CELL, th / CELL);

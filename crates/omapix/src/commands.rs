@@ -560,7 +560,7 @@ impl Command {
             Command::SmoothSkin => "Smooth Skin…",
             Command::EvenTone => "Even Tone…",
             Command::ReduceShine => "Reduce Shine",
-            Command::RegenerateSkin => "Regenerate Skin",
+            Command::RegenerateSkin => "Regenerate Skin…",
             Command::LightenUnderEyes => "Lighten Under Eyes",
             Command::WhitenTeeth => "Whiten Teeth",
             Command::WhitenEyes => "Whiten Eyes",

@@ -208,6 +208,10 @@ impl RightTab {
 }
 
 enum Dialog {
+    /// Whose skin Regenerate Skin draws.
+    RegenerateSkin {
+        age: crate::whiten::Age,
+    },
     /// Which saved alpha channel Texture Fill copies from, if any.
     TextureFill {
         from: Option<u64>,
@@ -1425,7 +1429,7 @@ impl App {
             }
             // Esc stops Regenerate Skin, as it does Photoshop's long filters.
             if self.dialog.is_none()
-                && self.whitening.busy() == Some(crate::whiten::Part::Texture)
+                && matches!(self.whitening.busy(), Some(crate::whiten::Part::Texture(_)))
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             {
                 self.whitening.stop();
@@ -2180,12 +2184,12 @@ impl App {
                     Err(e) => self.message(e, true),
                 }
             }
-            Command::ReduceShine | Command::RegenerateSkin | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes | Command::Makeup => {
+            Command::RegenerateSkin => self.dialog = Some(Dialog::RegenerateSkin { age: self.filters.skin_age }),
+            Command::ReduceShine | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes | Command::Makeup => {
                 use crate::whiten::Part;
                 use omapix_engine::whiten::Whiten;
                 let part = match cmd {
                     Command::ReduceShine => Part::Shine,
-                    Command::RegenerateSkin => Part::Texture,
                     Command::LightenUnderEyes => Part::UnderEyes,
                     Command::Makeup => Part::Makeup,
                     Command::WhitenTeeth => Part::Whites(Whiten::Teeth),
@@ -2491,6 +2495,17 @@ impl App {
         };
         let area = from.and_then(|id| editor.doc.channel(id)).map(|c| Selection::from_coverage(c.pixels.clone()));
         if let Err(e) = self.content_fill.start(ctx, editor, texture, area) {
+            self.message(e, true);
+        }
+    }
+
+    /// Draw the skin anew as `age`'s, remembering it for next time.
+    fn regenerate_skin(&mut self, age: crate::whiten::Age, ctx: &egui::Context) {
+        self.filters.skin_age = age;
+        self.filters.save();
+        if let Some(editor) = &self.editor
+            && let Err(e) = self.whitening.start(ctx, editor, crate::whiten::Part::Texture(age))
+        {
             self.message(e, true);
         }
     }
@@ -3193,7 +3208,7 @@ impl App {
                         None => part.finding().to_owned(),
                     };
                     ui.label(RichText::new(text).color(self.theme.accent));
-                    if part == crate::whiten::Part::Texture && ui.small_button("Stop").on_hover_text("Esc").clicked() {
+                    if matches!(part, crate::whiten::Part::Texture(_)) && ui.small_button("Stop").on_hover_text("Esc").clicked() {
                         self.whitening.stop();
                     }
                     ui.separator();
@@ -3692,6 +3707,30 @@ impl App {
                             close = true;
                         }
                         if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::RegenerateSkin { age } => {
+                    ui.heading("Regenerate Skin");
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Whose skin to draw: pores, how coarse it is and fine lines\nchange with age. The layer's opacity sets how much.")
+                            .color(hint),
+                    );
+                    ui.add_space(8.0);
+                    for choice in crate::whiten::Age::ALL {
+                        ui.radio_value(age, choice, choice.name());
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ok {
+                            let age = *age;
+                            action = Some(Box::new(move |app, ctx| app.regenerate_skin(age, ctx)));
                             close = true;
                         }
                     });
@@ -7053,6 +7092,20 @@ mod tests {
             editor: Some(editor_with_selection()),
             ..App::headless(FilterSettings::default(), FilterSettings::default())
         }
+    }
+
+    #[test]
+    fn regenerate_skin_asks_whose_skin_starting_from_the_last_choice() {
+        use crate::whiten::Age;
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        app.run(Command::RegenerateSkin, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::RegenerateSkin { age: Age::YoungAdult })));
+        app.dialog = None;
+        app.filters.skin_age = Age::Mature;
+        app.run(Command::RegenerateSkin, &ctx);
+        assert!(matches!(app.dialog, Some(Dialog::RegenerateSkin { age: Age::Mature })));
+        assert_eq!(app.whitening.busy(), None);
     }
 
     #[test]
