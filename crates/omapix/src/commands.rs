@@ -116,6 +116,7 @@ pub enum Command {
     ReduceNoise,
     Denoise,
     GaussianBlur,
+    Average,
     SmartBlur,
     /// Filter › Render › Relight: light the layer again from another direction.
     Relight,
@@ -301,6 +302,7 @@ impl Command {
         Command::ReduceNoise,
         Command::Denoise,
         Command::GaussianBlur,
+        Command::Average,
         Command::SmartBlur,
         Command::Relight,
         Command::HighPass,
@@ -557,6 +559,7 @@ impl Command {
             Command::ReduceNoise => "Reduce Noise…",
             Command::Denoise => "Denoise…",
             Command::GaussianBlur => "Gaussian Blur…",
+            Command::Average => "Average",
             Command::SmartBlur => "Smart Blur…",
             Command::Relight => "Relight…",
             Command::HighPass => "High Pass…",

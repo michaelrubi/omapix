@@ -1757,6 +1757,7 @@ impl App {
                 (Some(LayerFilter::AddNoise(_)), Target::Pixels) | (Some(_), Target::QuickMask) => true,
                 (Some(_), Target::Pixels) => !no_pixels,
             },
+            Command::Average => editor.target == Target::Pixels && layer.is_some_and(|l| l.can_paint_pixels()),
             Command::Invert => editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels,
             Command::RetouchFolder => self.retouch_folder.is_none(),
             _ => true,
@@ -3055,6 +3056,7 @@ impl App {
                     self.menu_item(ui, Command::Denoise, None);
                 });
                 ui.menu_button("Blur", |ui| {
+                    self.menu_item(ui, Command::Average, None);
                     self.menu_item(ui, Command::GaussianBlur, None);
                     self.menu_item(ui, Command::SmartBlur, None);
                 });
@@ -6120,6 +6122,23 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 );
             }
         }
+        Command::Average => {
+            // Filter › Blur › Average: the selection filled with its average
+            // colour, for reading a patch's colour without its texture.
+            editor.edit_in_background(
+                "Average",
+                move |doc, _| {
+                    let selection = doc.selection.clone();
+                    if let Some(l) = doc.layer_mut(id)
+                        && let Some(colour) = ops::average(&l.pixels, selection.as_ref())
+                    {
+                        let filled = ops::fill_pixels(&l.pixels, Some(colour), selection.as_ref());
+                        l.pixels = if l.lock_alpha() { ops::keep_alpha(&l.pixels, filled) } else { filled };
+                    }
+                },
+                ctx,
+            );
+        }
         Command::MergeDown if several => {
             editor.target = Target::Pixels;
             editor.edit_in_background(
@@ -7066,6 +7085,34 @@ mod tests {
     fn degenerate_ellipse_points_is_empty() {
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(10.0, 50.0)).is_empty());
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(50.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn average_fills_the_selection_with_its_average_colour() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let editor = app.editor.as_mut().unwrap();
+        // Two colours inside the selection (100–200 square), one outside.
+        editor.edit("Paint", |doc, _| {
+            doc.layers[0].pixels.par_update(|_, _, _| {
+                Some(
+                    (0..omapix_engine::tiled::TILE_PIXELS)
+                        .map(|i| if i % 2 == 0 { [40000, 20000, 0, 65535] } else { [20000, 20000, 10000, 65535] })
+                        .collect(),
+                )
+            });
+        });
+        let outside = editor.doc.layers[0].pixels.get(10, 10);
+        app.run(Command::Average, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        let pixels = &editor.doc.layers[0].pixels;
+        assert_eq!(pixels.get(150, 150), [30000, 20000, 5000, 65535]);
+        assert_eq!(pixels.get(151, 150), [30000, 20000, 5000, 65535]);
+        assert_eq!(pixels.get(10, 10), outside, "outside the selection is left alone");
     }
 
     #[test]
