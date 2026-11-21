@@ -476,6 +476,9 @@ pub struct Editor {
     /// Ctrl+H: the selection's marching ants are hidden. A new selection
     /// shows them again.
     pub hide_selection_edges: bool,
+    /// The Color Sampler tool's points, in image pixels, numbered from 1
+    /// in this order. Not part of the history, as in Photoshop.
+    pub samplers: Vec<(u32, u32)>,
     /// While a refined selection is previewed: the real selection, and
     /// the view to go back to.
     previewing: Option<(Option<Selection>, View)>,
@@ -544,6 +547,7 @@ impl Editor {
             overlay_colour,
             quick_mask_layer: None,
             hide_selection_edges: false,
+            samplers: Vec::new(),
             previewing: None,
             sample_cache: Mutex::new(SampleCache::default()),
         })

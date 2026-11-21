@@ -66,6 +66,8 @@ fn file_size(bytes: usize) -> String {
 const LUT_SIZE: usize = 33;
 /// How near Free Transform's handles the pointer grabs them, in points.
 const HANDLE_REACH: f32 = 8.0;
+/// How many colour samplers there can be, as in Photoshop.
+const MAX_SAMPLERS: usize = 10;
 
 /// A photo to merge with others: its name and how it looks.
 type Frame = (String, Tiled<omapix_engine::Pixel>);
@@ -611,6 +613,7 @@ impl ScriptStep {
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 "Wand" | "MagicWand" => ScriptStep::Tool(crate::tools::Tool::MagicWand),
                 "Eyedropper" => ScriptStep::Tool(crate::tools::Tool::Eyedropper),
+                "ColorSampler" | "Sampler" => ScriptStep::Tool(crate::tools::Tool::ColorSampler),
                 "Gradient" => ScriptStep::Tool(crate::tools::Tool::Gradient),
                 "PaintBucket" | "Bucket" => ScriptStep::Tool(crate::tools::Tool::PaintBucket),
                 "Crop" => ScriptStep::Tool(crate::tools::Tool::Crop),
@@ -695,6 +698,8 @@ pub struct App {
     crop: Option<[f64; 4]>,
     crop_drag: Option<CropDrag>,
     relight_drag: Option<RelightDrag>,
+    /// The colour sampler being dragged, by its index.
+    sampler_drag: Option<usize>,
     /// Relight's eyedropper is armed: the next click on the image takes
     /// the lamp's colour from there.
     relight_eyedropper: bool,
@@ -805,6 +810,7 @@ impl App {
             crop: None,
             crop_drag: None,
             relight_drag: None,
+            sampler_drag: None,
             relight_eyedropper: false,
             relight_lamp: 0,
             relight_faces: RelightFaces::Idle,
@@ -933,6 +939,7 @@ impl App {
             crop: None,
             crop_drag: None,
             relight_drag: None,
+            sampler_drag: None,
             relight_eyedropper: false,
             relight_lamp: 0,
             relight_faces: RelightFaces::Idle,
@@ -4880,6 +4887,10 @@ impl App {
             self.paint_bucket_input(input);
             return;
         }
+        if self.tools.tool == crate::tools::Tool::ColorSampler {
+            self.sampler_input(input, modifiers);
+            return;
+        }
         match input {
             ToolInput::StrokeBegin(p) => {
                 let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p) else {
@@ -4939,6 +4950,50 @@ impl App {
                     self.tools.sample(pixel, &editor.doc.profile, is_bg);
                 }
             }
+        }
+    }
+
+    /// The Color Sampler tool: a click places a sampler (or picks up the one
+    /// under the pointer, to drag), Alt+click deletes one.
+    fn sampler_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let (w, h) = (editor.doc.width as f32, editor.doc.height as f32);
+        let pixel = |p: Pos2| (p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h).then_some((p.x as u32, p.y as u32));
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                let distance = |&(x, y): &(u32, u32)| (egui::pos2(x as f32 + 0.5, y as f32 + 0.5) - p).length();
+                let under = (0..editor.samplers.len())
+                    .filter(|&i| distance(&editor.samplers[i]) <= reach)
+                    .min_by(|&a, &b| distance(&editor.samplers[a]).total_cmp(&distance(&editor.samplers[b])));
+                self.sampler_drag = match (under, modifiers.alt) {
+                    (Some(i), true) => {
+                        editor.samplers.remove(i);
+                        None
+                    }
+                    (Some(i), false) => Some(i),
+                    (None, false) if editor.samplers.len() < MAX_SAMPLERS => pixel(p).map(|at| {
+                        editor.samplers.push(at);
+                        editor.samplers.len() - 1
+                    }),
+                    (None, false) => {
+                        self.message(format!("There can be at most {MAX_SAMPLERS} colour samplers"), false);
+                        None
+                    }
+                    (None, true) => None,
+                };
+            }
+            ToolInput::StrokeMove(p) => {
+                if let (Some(i), Some(at)) = (self.sampler_drag, pixel(p))
+                    && let Some(s) = editor.samplers.get_mut(i)
+                {
+                    *s = at;
+                }
+            }
+            ToolInput::StrokeEnd => self.sampler_drag = None,
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
         }
     }
 
@@ -6583,11 +6638,22 @@ impl eframe::App for App {
                     _ => None,
                 };
                 let tools_off = self.properties.eyedropper.is_some() || transforming || liquify_brush.is_some() || lamp.is_some();
+                let curves_selected = matches!(
+                    editor.doc.layer(editor.active).and_then(|l| l.adjustment.as_ref()),
+                    Some(omapix_engine::adjust::Adjustment::Curves(_))
+                );
                 let tip = self.brushes.tip(brush.tip);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
                     alt_samples: !tools_off && (tool.copies() || (tool.paints() && tool.alt_picks_colour())),
                     samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
+                    // Shown while placing them, and with a Curves layer selected,
+                    // whose panel shows their colours.
+                    samplers: if tool == crate::tools::Tool::ColorSampler || curves_selected {
+                        &editor.samplers
+                    } else {
+                        &[]
+                    },
                     sets_source: !tools_off && tool.copies(),
                     // Holding Alt picks up a colour: a crosshair, not the brush,
                     // unless Alt+right-dragging to resize it.
@@ -7085,6 +7151,35 @@ mod tests {
     fn degenerate_ellipse_points_is_empty() {
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(10.0, 50.0)).is_empty());
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(50.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn colour_samplers_are_placed_dragged_and_deleted() {
+        let mut app = test_app();
+        app.tools.select(crate::tools::Tool::ColorSampler);
+        let none = egui::Modifiers::NONE;
+        let click = |app: &mut App, x: f32, y: f32, modifiers| {
+            app.tool_input(ToolInput::StrokeBegin(egui::pos2(x, y)), modifiers);
+            app.tool_input(ToolInput::StrokeEnd, modifiers);
+        };
+        click(&mut app, 10.5, 20.5, none);
+        click(&mut app, 300.5, 200.5, none);
+        assert_eq!(app.editor.as_ref().unwrap().samplers, [(10, 20), (300, 200)]);
+        // Dragging the first moves it; outside the image, it stays put.
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(11.0, 21.0)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(50.5, 60.5)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(-5.0, 60.5)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        assert_eq!(app.editor.as_ref().unwrap().samplers, [(50, 60), (300, 200)]);
+        // Alt+click deletes; Alt+click on nothing adds nothing.
+        click(&mut app, 50.5, 60.5, egui::Modifiers::ALT);
+        click(&mut app, 400.5, 60.5, egui::Modifiers::ALT);
+        assert_eq!(app.editor.as_ref().unwrap().samplers, [(300, 200)]);
+        for i in 0..20 {
+            click(&mut app, 20.0 * i as f32 + 0.5, 300.5, none);
+        }
+        assert_eq!(app.editor.as_ref().unwrap().samplers.len(), MAX_SAMPLERS);
+        assert_eq!(app.editor.as_ref().unwrap().history_count(), 2, "not in the history");
     }
 
     #[test]
