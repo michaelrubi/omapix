@@ -18,6 +18,11 @@ pub enum Adjustment {
     SelectiveColor(SelectiveColor),
     ChannelMixer(ChannelMixer),
     ColorLookup(ColorLookup),
+    GradientMap(GradientMap),
+    /// Photoshop's Solid Color fill layer: one colour, blended with the
+    /// layer's mode, opacity and mask. It's kept as an adjustment, so it
+    /// costs no pixels, and like one it leaves transparency below alone.
+    SolidColor(SolidColor),
 }
 
 impl Adjustment {
@@ -30,6 +35,8 @@ impl Adjustment {
             Adjustment::SelectiveColor(_) => "Selective Color",
             Adjustment::ChannelMixer(_) => "Channel Mixer",
             Adjustment::ColorLookup(_) => "Color Lookup",
+            Adjustment::GradientMap(_) => "Gradient Map",
+            Adjustment::SolidColor(_) => "Color Fill",
         }
     }
 
@@ -49,6 +56,8 @@ impl Adjustment {
             Adjustment::SelectiveColor(s) => Prepared::SelectiveColor(s.prepare()),
             Adjustment::ChannelMixer(m) => Prepared::ChannelMixer(m.prepare()),
             Adjustment::ColorLookup(lut) => Prepared::ColorLookup(lut.prepare()),
+            Adjustment::GradientMap(g) => Prepared::GradientMap(g.prepare()),
+            Adjustment::SolidColor(s) => Prepared::SolidColor(s.color),
         }
     }
 
@@ -70,6 +79,8 @@ pub enum Prepared {
     SelectiveColor(PreparedSelectiveColor),
     ChannelMixer(PreparedChannelMixer),
     ColorLookup(PreparedColorLookup),
+    GradientMap(PreparedGradientMap),
+    SolidColor([f32; 3]),
 }
 
 impl Prepared {
@@ -94,6 +105,8 @@ impl Prepared {
             Prepared::SelectiveColor(s) => s.apply(c),
             Prepared::ChannelMixer(m) => m.apply(c),
             Prepared::ColorLookup(lut) => lut.apply(c),
+            Prepared::GradientMap(g) => g.apply(c),
+            Prepared::SolidColor(s) => *s,
         }
     }
 }
@@ -655,6 +668,98 @@ impl PreparedChannelMixer {
     }
 }
 
+/// A colour on a gradient, at a location 0–1 along it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+    pub at: f32,
+    /// In the document's colour space, 0–1.
+    pub color: [f32; 3],
+}
+
+/// Photoshop's Gradient Map: each pixel's luminance picks its colour from
+/// a gradient, dark at the left and light at the right (or the other way
+/// round, reversed). Colours between stops are mixed linearly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientMap {
+    /// At least two, in any order.
+    pub stops: Vec<GradientStop>,
+    pub reverse: bool,
+}
+
+impl Default for GradientMap {
+    fn default() -> Self {
+        Self::between([0.0; 3], [1.0; 3])
+    }
+}
+
+impl GradientMap {
+    /// From one colour to another, as Photoshop makes one from the
+    /// foreground colour to the background colour.
+    pub fn between(from: [f32; 3], to: [f32; 3]) -> Self {
+        Self {
+            stops: vec![GradientStop { at: 0.0, color: from }, GradientStop { at: 1.0, color: to }],
+            reverse: false,
+        }
+    }
+
+    /// The gradient's colour at `t`, 0–1, before reversing.
+    pub fn color_at(&self, t: f32) -> [f32; 3] {
+        let mut stops = self.stops.clone();
+        stops.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+            return [t; 3];
+        };
+        if t <= first.at {
+            return first.color;
+        }
+        if t >= last.at {
+            return last.color;
+        }
+        let i = stops.iter().position(|s| s.at > t).unwrap_or(stops.len() - 1);
+        let (a, b) = (stops[i - 1], stops[i]);
+        let k = if b.at > a.at { (t - a.at) / (b.at - a.at) } else { 1.0 };
+        std::array::from_fn(|c| a.color[c] + (b.color[c] - a.color[c]) * k)
+    }
+
+    pub fn prepare(&self) -> PreparedGradientMap {
+        let n = LUT_SIZE - 1;
+        PreparedGradientMap(
+            (0..LUT_SIZE)
+                .map(|i| {
+                    let t = i as f32 / n as f32;
+                    self.color_at(if self.reverse { 1.0 - t } else { t }).map(|v| v.clamp(0.0, 1.0))
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A gradient map's colours at 4096 luminances, linearly interpolated.
+#[derive(Clone)]
+pub struct PreparedGradientMap(Vec<[f32; 3]>);
+
+impl PreparedGradientMap {
+    /// The colours, darkest luminance first.
+    pub fn table(&self) -> &[[f32; 3]] {
+        &self.0
+    }
+
+    #[inline]
+    pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
+        let pos = luminance(c).clamp(0.0, 1.0) * (LUT_SIZE - 1) as f32;
+        let i = (pos as usize).min(LUT_SIZE - 2);
+        let t = pos - i as f32;
+        let (a, b) = (self.0[i], self.0[i + 1]);
+        std::array::from_fn(|ch| a[ch] + (b[ch] - a[ch]) * t)
+    }
+}
+
+/// A Solid Color fill layer's colour, in the document's space, 0–1.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SolidColor {
+    pub color: [f32; 3],
+}
+
 /// A 1D or 3D colour lookup table (LUT), loaded from a .cube file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ColorLookup {
@@ -1056,6 +1161,42 @@ mod tests {
         assert!(curves.add_sampled_point(0, [0.1, 0.4, 0.3], true));
         assert_eq!((curves.red.points[1].0, curves.green.points[1].0, curves.blue.points[1].0), (0.1, 0.4, 0.3));
         assert_eq!(curves.green.points.len(), 4);
+    }
+
+    #[test]
+    fn a_gradient_map_colours_by_luminance() {
+        let red = [1.0, 0.0, 0.0];
+        let blue = [0.0, 0.0, 1.0];
+        let mut g = GradientMap::between(red, blue);
+        // A middle stop, added out of order.
+        g.stops.push(GradientStop {
+            at: 0.5,
+            color: [0.0, 1.0, 0.0],
+        });
+        let p = Adjustment::GradientMap(g.clone()).prepare();
+        assert!(close(p.apply([0.0; 3]), red, 1e-3));
+        assert!(close(p.apply([1.0; 3]), blue, 1e-3));
+        assert!(close(p.apply([0.5; 3]), [0.0, 1.0, 0.0], 1e-3));
+        assert!(close(p.apply([0.25; 3]), [0.5, 0.5, 0.0], 1e-3));
+        // Colours of the same luminance map alike: pure green is 0.59.
+        assert!(close(p.apply([0.0, 1.0, 0.0]), p.apply([0.59; 3]), 1e-3));
+        g.reverse = true;
+        let p = Adjustment::GradientMap(g).prepare();
+        assert!(close(p.apply([0.0; 3]), blue, 1e-3));
+        // Black to white maps grey to itself.
+        let p = Adjustment::GradientMap(GradientMap::default()).prepare();
+        assert!(close(p.apply([0.3; 3]), [0.3; 3], 1e-3));
+    }
+
+    #[test]
+    fn a_solid_colour_is_the_same_everywhere_and_saves() {
+        let fill = Adjustment::SolidColor(SolidColor { color: [0.8, 0.5, 0.3] });
+        let p = fill.prepare();
+        assert_eq!(p.apply([0.0; 3]), [0.8, 0.5, 0.3]);
+        assert_eq!(p.apply([0.2, 0.9, 0.1]), [0.8, 0.5, 0.3]);
+        assert_eq!(Adjustment::from_json(&fill.to_json()), Some(fill));
+        let map = Adjustment::GradientMap(GradientMap::default());
+        assert_eq!(Adjustment::from_json(&map.to_json()), Some(map));
     }
 
     #[test]

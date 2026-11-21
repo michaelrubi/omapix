@@ -286,6 +286,8 @@ pub struct Overlay<'a> {
     /// pixels, and whether it's the one chosen; and the cursor for what's
     /// under the pointer.
     pub lamp: Option<(Vec<LampMark>, CursorIcon)>,
+    /// The Color Sampler tool's points, image pixels, numbered from 1.
+    pub samplers: &'a [(u32, u32)],
 }
 
 /// Pointer input meant for the active tool, in image pixels.
@@ -651,6 +653,7 @@ impl Canvas {
             crop,
             spots,
             lamp,
+            samplers,
         } = overlay;
         let canvas = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas, Sense::click_and_drag());
@@ -681,6 +684,7 @@ impl Canvas {
         self.pointer = response.hover_pos().map(|p| self.to_image(p));
         self.draw_outlines(ui, selection, drawing);
         self.draw_spots(ui, spots);
+        self.draw_samplers(ui, samplers);
         if let Some((lamps, _)) = &lamp {
             for &(at, reach, chosen) in lamps {
                 self.draw_lamp(ui, at, reach, chosen);
@@ -778,6 +782,26 @@ impl Canvas {
             let radius = radius.max(3.0);
             painter.circle_stroke(centre, radius, Stroke::new(1.5, Color32::from_black_alpha(160)));
             painter.circle_stroke(centre, radius, Stroke::new(0.75, Color32::from_white_alpha(200)));
+        }
+    }
+
+    /// Colour samplers: a ring with ticks round the pixel, dark and light,
+    /// and its number beside it, as in Photoshop.
+    fn draw_samplers(&self, ui: &Ui, samplers: &[(u32, u32)]) {
+        let painter = ui.painter_at(self.rect);
+        for (i, &(x, y)) in samplers.iter().enumerate() {
+            let c = self.to_screen((x as f32 + 0.5, y as f32 + 0.5));
+            for (width, colour) in [(2.5, Color32::from_black_alpha(160)), (1.0, Color32::WHITE)] {
+                let stroke = Stroke::new(width, colour);
+                painter.circle_stroke(c, 5.0, stroke);
+                for d in [vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)] {
+                    painter.line_segment([c + d * 5.0, c + d * 9.0], stroke);
+                }
+            }
+            let (at, font) = (c + vec2(8.0, 5.0), egui::FontId::proportional(11.0));
+            let number = (i + 1).to_string();
+            painter.text(at + vec2(1.0, 1.0), egui::Align2::LEFT_TOP, &number, font.clone(), Color32::BLACK);
+            painter.text(at, egui::Align2::LEFT_TOP, number, font, Color32::WHITE);
         }
     }
 

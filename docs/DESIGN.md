@@ -171,7 +171,8 @@ pressure.
 ### 4. Adjustments (done)
 
 Done: Curves, Levels, Hue/Saturation, Color Balance, Selective Color,
-Channel Mixer and Color Lookup (LUT) as adjustment layers with a live
+Channel Mixer, Color Lookup (LUT) and Gradient Map as adjustment layers,
+and Solid Color fill layers, with a live
 Properties panel, saved in OpenRaster, with a histogram and eyedroppers in
 Curves and Levels.
 

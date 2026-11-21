@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use egui::{Color32, ComboBox, Id, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, Vec2, pos2, vec2};
-use omapix_engine::adjust::{Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation, Levels, SelectiveColor};
+use omapix_engine::adjust::{
+    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, GradientMap, GradientStop, HueSaturation, Levels, SelectiveColor,
+    SolidColor,
+};
+use omapix_engine::{ColorProfile, DisplayTransform};
 
 use crate::editor::Editor;
 use crate::histogram_panel::draw_histogram;
@@ -15,6 +19,9 @@ use crate::theme::Theme;
 const GRAB: f32 = 12.0;
 /// Dragging a point this far outside the graph removes it.
 const REMOVE: f32 = 24.0;
+
+/// The layer, document revision and samplers colours were read for.
+type SamplesFor = (u64, u64, Vec<(u32, u32)>);
 
 #[derive(Default)]
 pub struct PropertiesPanel {
@@ -41,6 +48,12 @@ pub struct PropertiesPanel {
     /// Active layer id and document revision for the cached histogram.
     cached_layer_id: u64,
     cached_revision: u64,
+    /// The colour samplers' colours below the active Curves layer, and the
+    /// layer, revision and samplers they were read for.
+    samples: Vec<[f32; 3]>,
+    samples_for: Option<SamplesFor>,
+    /// Clear Samplers was clicked.
+    clear_samplers: bool,
 }
 
 impl PropertiesPanel {
@@ -71,6 +84,19 @@ impl PropertiesPanel {
             self.cached_revision = editor.revision();
         }
 
+        if matches!(adjustment, Adjustment::Curves(_)) {
+            let key = (id, editor.revision(), editor.samplers.clone());
+            if self.samples_for.as_ref() != Some(&key) {
+                self.samples = editor
+                    .samplers
+                    .iter()
+                    .filter_map(|&(x, y)| editor.doc.sample_below(id, x, y))
+                    .map(|p| [0, 1, 2].map(|c| f32::from(p[c]) / 65535.0))
+                    .collect();
+                self.samples_for = Some(key);
+            }
+        }
+
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Properties — {}", adjustment.name())).strong());
@@ -84,6 +110,8 @@ impl PropertiesPanel {
                         Adjustment::SelectiveColor(_) => Adjustment::SelectiveColor(SelectiveColor::default()),
                         Adjustment::ChannelMixer(_) => Adjustment::ChannelMixer(ChannelMixer::default()),
                         Adjustment::ColorLookup(_) => Adjustment::ColorLookup(ColorLookup::default()),
+                        Adjustment::GradientMap(_) => Adjustment::GradientMap(GradientMap::default()),
+                        Adjustment::SolidColor(_) => Adjustment::SolidColor(SolidColor::default()),
                     };
                 }
             });
@@ -97,6 +125,8 @@ impl PropertiesPanel {
             Adjustment::SelectiveColor(s) => self.selective_color(ui, s),
             Adjustment::ChannelMixer(m) => self.channel_mixer(ui, m, theme),
             Adjustment::ColorLookup(lut) => self.color_lookup(ui, lut, theme),
+            Adjustment::GradientMap(g) => gradient_map(ui, g, &editor.doc.profile, theme),
+            Adjustment::SolidColor(s) => solid_color(ui, s, &editor.doc.profile, theme),
         }
         if adjustment != original {
             let label = format!("Adjust {}", adjustment.name());
@@ -106,6 +136,13 @@ impl PropertiesPanel {
                 }
             });
             self.cached_revision = editor.revision();
+            // What's below is as it was.
+            if let Some(key) = &mut self.samples_for {
+                key.1 = editor.revision();
+            }
+        }
+        if std::mem::take(&mut self.clear_samplers) {
+            editor.samplers.clear();
         }
         ui.separator();
         true
@@ -165,6 +202,17 @@ impl PropertiesPanel {
                 ((rect.bottom() - p.y) / rect.height()).clamp(0.0, 1.0),
             )
         };
+        // The colour samplers on this graph: each one's number, its value
+        // (input) in a channel, and the channel. RGB shows all three.
+        let markers: Vec<(usize, f32, usize)> = self
+            .samples
+            .iter()
+            .enumerate()
+            .flat_map(|(n, s)| {
+                let channels = if self.channel == 0 { 0..3 } else { self.channel - 1..self.channel };
+                channels.map(move |c| (n, s[c], c))
+            })
+            .collect();
 
         // Grab, add, move and remove points. Look for a point where the
         // button went down: egui only starts a drag once the pointer has
@@ -180,7 +228,16 @@ impl PropertiesPanel {
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 self.dragging = match nearest {
                     Some((i, d)) if d <= GRAB => Some((i, to_screen(curve.points[i]) - origin)),
-                    _ if rect.contains(origin) => Some((insert_point(curve, to_curve(origin)), Vec2::ZERO)),
+                    _ if rect.contains(origin) => {
+                        // Near a sampler's marker, the point goes exactly on it.
+                        let on_marker = markers
+                            .iter()
+                            .map(|&(_, x, _)| (x, to_screen((x, curve.eval(x).clamp(0.0, 1.0))).distance(origin)))
+                            .filter(|&(_, d)| d <= GRAB)
+                            .min_by(|a, b| a.1.total_cmp(&b.1))
+                            .map(|(x, _)| (x, curve.eval(x).clamp(0.0, 1.0)));
+                        Some((insert_point(curve, on_marker.unwrap_or(to_curve(origin))), Vec2::ZERO))
+                    }
                     _ => None,
                 };
                 self.selected = self.dragging.map(|(i, _)| i);
@@ -224,6 +281,23 @@ impl PropertiesPanel {
             })
             .collect();
         painter.add(egui::Shape::line(line, Stroke::new(1.5, colour)));
+        let channel_colours = [Color32::from_rgb(230, 80, 80), Color32::from_rgb(80, 200, 100), Color32::from_rgb(90, 140, 240)];
+        for &(n, x, c) in &markers {
+            let at = to_screen((x, curve.eval(x).clamp(0.0, 1.0)));
+            let marker = if self.channel == 0 { channel_colours[c] } else { colour };
+            // In one channel, a line across at its output, to bring another
+            // sampler's level to.
+            if self.channel != 0 {
+                painter.line_segment(
+                    [pos2(rect.left(), at.y), pos2(rect.right(), at.y)],
+                    Stroke::new(1.0, marker.gamma_multiply(0.4)),
+                );
+            }
+            painter.circle_filled(at, 3.5, marker);
+            painter.circle_stroke(at, 3.5, Stroke::new(1.0, Color32::BLACK));
+            let font = egui::FontId::proportional(10.0);
+            painter.text(at + vec2(5.0, -4.0), egui::Align2::LEFT_BOTTOM, (n + 1).to_string(), font, theme.foreground);
+        }
         for (i, &p) in curve.points.iter().enumerate() {
             let at = to_screen(p);
             let r = Rect::from_center_size(at, vec2(7.0, 7.0));
@@ -255,6 +329,35 @@ impl PropertiesPanel {
         });
         let hint = "Click the curve to add a point; drag one off to remove it";
         ui.label(RichText::new(hint).small().color(theme.dark_foreground));
+        self.sampler_readouts(ui, curves, theme);
+    }
+
+    /// Each colour sampler's colour below the layer and after it, 0–255, as
+    /// Photoshop's Info panel shows them.
+    fn sampler_readouts(&mut self, ui: &mut Ui, curves: &Curves, theme: &Theme) {
+        if self.samples.is_empty() {
+            let hint = "Color Sampler (Shift+I): its points show here and on the graph";
+            ui.label(RichText::new(hint).small().color(theme.dark_foreground));
+            return;
+        }
+        ui.add_space(4.0);
+        let after = Adjustment::Curves(curves.clone()).prepare();
+        let levels = |c: [f32; 3]| {
+            let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+            format!("R {r:>3}  G {g:>3}  B {b:>3}")
+        };
+        egui::Grid::new("curves-samplers").spacing(vec2(8.0, 2.0)).show(ui, |ui| {
+            for (n, &s) in self.samples.iter().enumerate() {
+                ui.label(RichText::new(format!("#{}", n + 1)).small().strong());
+                ui.label(RichText::new(levels(s)).small().monospace());
+                ui.label(RichText::new("→").small());
+                ui.label(RichText::new(levels(after.apply(s))).small().monospace());
+                ui.end_row();
+            }
+        });
+        if ui.small_button("Clear Samplers").clicked() {
+            self.clear_samplers = true;
+        }
     }
 
     fn color_balance(&mut self, ui: &mut Ui, b: &mut ColorBalance) {
@@ -453,6 +556,115 @@ fn move_point(curve: &mut Curve, i: usize, (x, y): (f32, f32)) {
     curve.points[i] = (x.clamp(lo, hi.max(lo)), y);
 }
 
+/// Document colours (0–1) as sRGB, for egui's colour buttons.
+fn to_srgb(profile: &ColorProfile, colors: &[[f32; 3]]) -> Vec<[u8; 3]> {
+    let pixels: Vec<_> = colors
+        .iter()
+        .map(|c| {
+            let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16);
+            [r, g, b, u16::MAX]
+        })
+        .collect();
+    let mut out = vec![[0u8; 4]; pixels.len()];
+    match DisplayTransform::to_srgb(profile) {
+        Ok(t) => t.convert(&pixels, &mut out),
+        Err(_) => out.iter_mut().zip(&pixels).for_each(|(o, p)| *o = p.map(|v| (v >> 8) as u8)),
+    }
+    out.iter().map(|o| [o[0], o[1], o[2]]).collect()
+}
+
+/// An sRGB colour from a colour button in the document's space.
+fn from_srgb(profile: &ColorProfile, rgb: [u8; 3]) -> [f32; 3] {
+    match profile.from_srgb8(rgb) {
+        Ok(p) => [p[0], p[1], p[2]].map(|v| f32::from(v) / 65535.0),
+        Err(_) => rgb.map(|v| f32::from(v) / 255.0),
+    }
+}
+
+/// A colour button for a document colour; true if it was changed.
+fn color_button(ui: &mut Ui, profile: &ColorProfile, shown: [u8; 3], color: &mut [f32; 3]) -> bool {
+    let mut rgb = shown;
+    let changed = egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() && rgb != shown;
+    if changed {
+        *color = from_srgb(profile, rgb);
+    }
+    changed
+}
+
+fn solid_color(ui: &mut Ui, s: &mut SolidColor, profile: &ColorProfile, theme: &Theme) {
+    let shown = to_srgb(profile, &[s.color])[0];
+    ui.horizontal(|ui| {
+        ui.label("Color");
+        color_button(ui, profile, shown, &mut s.color);
+    });
+    let hint = "Soft Light warms or tints; Color changes only hue and saturation";
+    ui.label(RichText::new(hint).small().color(theme.dark_foreground));
+}
+
+fn gradient_map(ui: &mut Ui, g: &mut GradientMap, profile: &ColorProfile, theme: &Theme) {
+    // The gradient as it's applied, darkest tones on the left.
+    const STEPS: usize = 64;
+    let side = ui.available_width().min(300.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(side, 20.0), Sense::hover());
+    let at = |i: usize| i as f32 / (STEPS - 1) as f32;
+    let colors: Vec<_> = (0..STEPS).map(|i| g.color_at(if g.reverse { 1.0 - at(i) } else { at(i) })).collect();
+    let mut mesh = egui::Mesh::default();
+    for (i, c) in to_srgb(profile, &colors).into_iter().enumerate() {
+        let x = rect.left() + rect.width() * at(i);
+        let colour = Color32::from_rgb(c[0], c[1], c[2]);
+        mesh.colored_vertex(pos2(x, rect.top()), colour);
+        mesh.colored_vertex(pos2(x, rect.bottom()), colour);
+        if i > 0 {
+            let k = 2 * i as u32;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k, k + 1);
+        }
+    }
+    let painter = ui.painter_at(rect.expand(2.0));
+    painter.add(mesh);
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme.selection), egui::StrokeKind::Outside);
+    ui.add_space(4.0);
+
+    let shown = to_srgb(profile, &g.stops.iter().map(|s| s.color).collect::<Vec<_>>());
+    let removable = g.stops.len() > 2;
+    let mut remove = None;
+    for (i, stop) in g.stops.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            color_button(ui, profile, shown[i], &mut stop.color);
+            let mut percent = stop.at * 100.0;
+            if ui.add(Slider::new(&mut percent, 0.0..=100.0).fixed_decimals(0).suffix("%")).changed() {
+                stop.at = percent / 100.0;
+            }
+            if removable && ui.small_button("Remove").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        g.stops.remove(i);
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Add Stop").clicked() {
+            // In the middle of the widest gap, the colour the gradient has there.
+            let mut at: Vec<f32> = g.stops.iter().map(|s| s.at).collect();
+            at.sort_by(f32::total_cmp);
+            let (a, b) = at
+                .windows(2)
+                .map(|w| (w[0], w[1]))
+                .max_by(|x, y| (x.1 - x.0).total_cmp(&(y.1 - y.0)))
+                .unwrap_or((0.0, 1.0));
+            let mid = (a + b) / 2.0;
+            g.stops.push(GradientStop {
+                at: mid,
+                color: g.color_at(mid),
+            });
+        }
+        ui.checkbox(&mut g.reverse, "Reverse");
+    });
+    let hint = "Shadows take the left colour, highlights the right; try Soft Light at low opacity";
+    ui.label(RichText::new(hint).small().color(theme.dark_foreground));
+}
+
 fn hue_saturation(ui: &mut Ui, h: &mut HueSaturation) {
     ui.add(Slider::new(&mut h.hue, -180.0..=180.0).text("Hue").fixed_decimals(0));
     ui.add(Slider::new(&mut h.saturation, -100.0..=100.0).text("Saturation").fixed_decimals(0));
@@ -485,6 +697,10 @@ mod tests {
         doc.layers.push(omapix_engine::Layer::adjustment(102, cm, w, h));
         let cl = Adjustment::ColorLookup(ColorLookup::default());
         doc.layers.push(omapix_engine::Layer::adjustment(103, cl, w, h));
+        let gm = Adjustment::GradientMap(GradientMap::default());
+        doc.layers.push(omapix_engine::Layer::adjustment(104, gm, w, h));
+        let fill = Adjustment::SolidColor(SolidColor { color: [0.9, 0.6, 0.4] });
+        doc.layers.push(omapix_engine::Layer::adjustment(105, fill, w, h));
 
         let mut editor = Editor::new(doc).unwrap();
         let mut panel = PropertiesPanel::default();
@@ -520,6 +736,21 @@ mod tests {
         });
         out.textures_delta.clear();
         assert!(shown, "panel should show for color lookup adjustment");
+
+        for id in [104, 105] {
+            editor.active = id;
+            let mut shown = false;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                shown = panel.show(ui, &mut editor, &theme);
+            });
+            out.textures_delta.clear();
+            assert!(shown, "panel should show for layer {id}");
+        }
+        // Showing a colour doesn't change it.
+        assert_eq!(
+            editor.doc.layer(105).unwrap().adjustment,
+            Some(Adjustment::SolidColor(SolidColor { color: [0.9, 0.6, 0.4] }))
+        );
     }
 
     #[test]
@@ -571,6 +802,47 @@ mod tests {
             panel.show(ui, editor, &Theme::default());
         });
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn colour_samplers_show_their_colours_and_points_snap_to_them() {
+        let image = omapix_engine::Raster::new(8, 8, vec![[40000, 20000, 10000, 65535]; 64]);
+        let mut doc = omapix_engine::Document::from_image("t.tif".into(), &image, omapix_engine::ColorProfile::srgb(), 16);
+        doc.layers
+            .push(omapix_engine::Layer::adjustment(101, Adjustment::Curves(Curves::default()), 8, 8));
+        let mut editor = Editor::new(doc).unwrap();
+        editor.active = 101;
+        editor.samplers = vec![(3, 4)];
+        let (ctx, mut panel) = (egui::Context::default(), PropertiesPanel::default());
+        frame(&ctx, &mut panel, &mut editor, vec![]);
+        let below = [40000.0, 20000.0, 10000.0].map(|v: f32| v / 65535.0);
+        assert_eq!(panel.samples, [below]);
+
+        // In the red channel, a click near the marker puts a point exactly
+        // at the sampler's red.
+        panel.channel = 1;
+        frame(&ctx, &mut panel, &mut editor, vec![]);
+        let rect = ctx.read_response(curves_id()).unwrap().rect;
+        let at = pos2(rect.left() + below[0] * rect.width(), rect.bottom() - below[0] * rect.height()) + vec2(4.0, 3.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&ctx, &mut panel, &mut editor, vec![egui::Event::PointerMoved(at), button(true)]);
+        frame(&ctx, &mut panel, &mut editor, vec![button(false)]);
+        let Some(Adjustment::Curves(c)) = editor.doc.layer(101).unwrap().adjustment.clone() else {
+            panic!("a Curves layer");
+        };
+        assert_eq!(c.red.points.len(), 3);
+        assert!((c.red.points[1].0 - below[0]).abs() < 1e-6, "{:?}", c.red.points);
+        assert!((c.red.points[1].1 - below[0]).abs() < 1e-6, "on the curve: {:?}", c.red.points);
+        // The samplers' colours don't change with the layer's own edits.
+        assert_eq!(panel.samples, [below]);
+        editor.samplers.clear();
+        frame(&ctx, &mut panel, &mut editor, vec![]);
+        assert!(panel.samples.is_empty());
     }
 
     #[test]

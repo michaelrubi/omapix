@@ -67,6 +67,44 @@ pub fn fill_pixels(pixels: &Tiled<crate::Pixel>, colour: Option<crate::Pixel>, s
     within_selection(pixels, filled, selection)
 }
 
+/// Photoshop's Average blur: the average colour of `pixels` where
+/// `selection` covers (everywhere without one), each pixel weighted by how
+/// much it's selected and, for its colour, by its alpha. `None` if nothing
+/// selected has any colour.
+pub fn average(pixels: &Tiled<crate::Pixel>, selection: Option<&crate::selection::Selection>) -> Option<crate::Pixel> {
+    use crate::tiled::{TILE, TILE_PIXELS};
+    let (w, h) = (pixels.width(), pixels.height());
+    // Colour times alpha, alpha, and how much is selected.
+    let (mut colour, mut alpha, mut selected) = ([0f64; 3], 0f64, 0f64);
+    for row in 0..pixels.rows() {
+        for col in 0..pixels.cols() {
+            let sel = selection.map(|s| (s.coverage.tile(col, row), s.coverage.fill()));
+            if matches!(sel, Some((None, 0))) {
+                continue;
+            }
+            let tile = pixels.tile(col, row);
+            for i in 0..TILE_PIXELS {
+                let (x, y) = (col * TILE + i as u32 % TILE, row * TILE + i as u32 / TILE);
+                if x >= w || y >= h {
+                    continue;
+                }
+                let k = sel.map_or(1.0, |(t, fill)| f64::from(t.map_or(fill, |t| t[i])) / 65535.0);
+                let p = tile.map_or(pixels.fill(), |t| t[i]);
+                let a = k * f64::from(p[3]) / 65535.0;
+                for c in 0..3 {
+                    colour[c] += a * f64::from(p[c]);
+                }
+                (alpha, selected) = (alpha + a, selected + k);
+            }
+        }
+    }
+    if alpha <= 0.0 {
+        return None;
+    }
+    let [r, g, b] = colour.map(|c| (c / alpha).round() as u16);
+    Some([r, g, b, (alpha / selected * 65535.0).round() as u16])
+}
+
 /// `edited` with the alpha of `original`, for layers with Lock Transparent
 /// Pixels: only the colour changes.
 pub fn keep_alpha(original: &Tiled<crate::Pixel>, mut edited: Tiled<crate::Pixel>) -> Tiled<crate::Pixel> {
@@ -634,6 +672,25 @@ pub fn merge_layers(doc: &mut Document, ids: &[u64]) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::ColorProfile;
+
+    #[test]
+    fn average_is_of_what_is_selected_and_coloured() {
+        // 300 × 10, past one tile: left half red, right half blue.
+        let (w, h) = (300, 10);
+        let px = (0..w * h)
+            .map(|i| if i % w < 150 { [60000, 0, 0, 65535] } else { [0, 0, 30000, 65535] })
+            .collect();
+        let pixels = Tiled::from_raster(&Raster::new(w, h, px));
+        assert_eq!(average(&pixels, None), Some([30000, 0, 15000, 65535]));
+        // Only the left half selected.
+        let left = crate::selection::Selection::rectangle(w, h, (0.0, 0.0), (150.0, 10.0));
+        assert_eq!(average(&pixels, Some(&left)), Some([60000, 0, 0, 65535]));
+        // Transparent pixels add to the alpha only.
+        let mut half = pixels.clone();
+        half.par_update(|_, _, t| t.map(|t| t.iter().map(|&p| if p[0] == 0 { [0, 0, 0, 0] } else { p }).collect()));
+        assert_eq!(average(&half, None), Some([60000, 0, 0, 32768]));
+        assert_eq!(average(&Tiled::new(w, h, [0; 4]), None), None);
+    }
 
     fn doc_with(pixels: Vec<crate::Pixel>, w: u32, h: u32) -> Document {
         Document::from_image("t.tif".into(), &Raster::new(w, h, pixels), ColorProfile::srgb(), 16)

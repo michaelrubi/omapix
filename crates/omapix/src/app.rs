@@ -66,6 +66,8 @@ fn file_size(bytes: usize) -> String {
 const LUT_SIZE: usize = 33;
 /// How near Free Transform's handles the pointer grabs them, in points.
 const HANDLE_REACH: f32 = 8.0;
+/// How many colour samplers there can be, as in Photoshop.
+const MAX_SAMPLERS: usize = 10;
 
 /// A photo to merge with others: its name and how it looks.
 type Frame = (String, Tiled<omapix_engine::Pixel>);
@@ -611,6 +613,7 @@ impl ScriptStep {
                 "Lasso" => ScriptStep::Tool(crate::tools::Tool::Lasso),
                 "Wand" | "MagicWand" => ScriptStep::Tool(crate::tools::Tool::MagicWand),
                 "Eyedropper" => ScriptStep::Tool(crate::tools::Tool::Eyedropper),
+                "ColorSampler" | "Sampler" => ScriptStep::Tool(crate::tools::Tool::ColorSampler),
                 "Gradient" => ScriptStep::Tool(crate::tools::Tool::Gradient),
                 "PaintBucket" | "Bucket" => ScriptStep::Tool(crate::tools::Tool::PaintBucket),
                 "Crop" => ScriptStep::Tool(crate::tools::Tool::Crop),
@@ -695,6 +698,8 @@ pub struct App {
     crop: Option<[f64; 4]>,
     crop_drag: Option<CropDrag>,
     relight_drag: Option<RelightDrag>,
+    /// The colour sampler being dragged, by its index.
+    sampler_drag: Option<usize>,
     /// Relight's eyedropper is armed: the next click on the image takes
     /// the lamp's colour from there.
     relight_eyedropper: bool,
@@ -805,6 +810,7 @@ impl App {
             crop: None,
             crop_drag: None,
             relight_drag: None,
+            sampler_drag: None,
             relight_eyedropper: false,
             relight_lamp: 0,
             relight_faces: RelightFaces::Idle,
@@ -933,6 +939,7 @@ impl App {
             crop: None,
             crop_drag: None,
             relight_drag: None,
+            sampler_drag: None,
             relight_eyedropper: false,
             relight_lamp: 0,
             relight_faces: RelightFaces::Idle,
@@ -1757,6 +1764,7 @@ impl App {
                 (Some(LayerFilter::AddNoise(_)), Target::Pixels) | (Some(_), Target::QuickMask) => true,
                 (Some(_), Target::Pixels) => !no_pixels,
             },
+            Command::Average => editor.target == Target::Pixels && layer.is_some_and(|l| l.can_paint_pixels()),
             Command::Invert => editor.target == Target::Mask || editor.target == Target::QuickMask || !no_pixels,
             Command::RetouchFolder => self.retouch_folder.is_none(),
             _ => true,
@@ -2235,6 +2243,22 @@ impl App {
                     coarse: Some(coarse),
                     preview: Some(SeparationBand::Texture),
                 });
+            }
+            Command::NewGradientMap | Command::NewSolidColor => {
+                use omapix_engine::adjust::{Adjustment, GradientMap, SolidColor};
+                let Some(editor) = &mut self.editor else { return };
+                // From the foreground colour (to the background colour), as
+                // Photoshop makes them.
+                let colour = |rgb: [u8; 3]| match editor.doc.profile.from_srgb8(rgb) {
+                    Ok(p) => [p[0], p[1], p[2]].map(|v| f32::from(v) / 65535.0),
+                    Err(_) => rgb.map(|v| f32::from(v) / 255.0),
+                };
+                let (fg, bg) = (colour(self.tools.foreground), colour(self.tools.background));
+                let adjustment = match cmd {
+                    Command::NewGradientMap => Adjustment::GradientMap(GradientMap::between(fg, bg)),
+                    _ => Adjustment::SolidColor(SolidColor { color: fg }),
+                };
+                new_adjustment_layer(editor, adjustment);
             }
             Command::SelectLayerAbove => {
                 if let Some(editor) = &mut self.editor {
@@ -2924,6 +2948,7 @@ impl App {
                     self.menu_item(ui, Command::NewSelectiveColor, None);
                     self.menu_item(ui, Command::NewChannelMixer, None);
                     self.menu_item(ui, Command::NewColorLookup, None);
+                    self.menu_item(ui, Command::NewGradientMap, None);
                     ui.separator();
                     self.presets_menu(ui);
                     self.menu_item(ui, Command::SaveAdjustmentPreset, None);
@@ -2950,6 +2975,9 @@ impl App {
                 self.menu_item(ui, Command::NewLayer, None);
                 self.menu_item(ui, Command::DuplicateLayer, plural("Duplicate Layer"));
                 self.menu_item(ui, Command::DeleteLayer, plural("Delete Layer"));
+                ui.menu_button("New Fill Layer", |ui| {
+                    self.menu_item(ui, Command::NewSolidColor, None);
+                });
                 ui.separator();
                 self.menu_item(ui, Command::NewGroup, None);
                 self.menu_item(ui, Command::GroupLayers, None);
@@ -3035,6 +3063,7 @@ impl App {
                     self.menu_item(ui, Command::Denoise, None);
                 });
                 ui.menu_button("Blur", |ui| {
+                    self.menu_item(ui, Command::Average, None);
                     self.menu_item(ui, Command::GaussianBlur, None);
                     self.menu_item(ui, Command::SmartBlur, None);
                 });
@@ -4858,6 +4887,10 @@ impl App {
             self.paint_bucket_input(input);
             return;
         }
+        if self.tools.tool == crate::tools::Tool::ColorSampler {
+            self.sampler_input(input, modifiers);
+            return;
+        }
         match input {
             ToolInput::StrokeBegin(p) => {
                 let Some(mut paint) = self.tools.paint(editor.target, &editor.doc.profile, p) else {
@@ -4917,6 +4950,50 @@ impl App {
                     self.tools.sample(pixel, &editor.doc.profile, is_bg);
                 }
             }
+        }
+    }
+
+    /// The Color Sampler tool: a click places a sampler (or picks up the one
+    /// under the pointer, to drag), Alt+click deletes one.
+    fn sampler_input(&mut self, input: ToolInput, modifiers: egui::Modifiers) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let (w, h) = (editor.doc.width as f32, editor.doc.height as f32);
+        let pixel = |p: Pos2| (p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h).then_some((p.x as u32, p.y as u32));
+        match input {
+            ToolInput::StrokeBegin(p) => {
+                let reach = editor.canvas.image_per_point() * HANDLE_REACH;
+                let distance = |&(x, y): &(u32, u32)| (egui::pos2(x as f32 + 0.5, y as f32 + 0.5) - p).length();
+                let under = (0..editor.samplers.len())
+                    .filter(|&i| distance(&editor.samplers[i]) <= reach)
+                    .min_by(|&a, &b| distance(&editor.samplers[a]).total_cmp(&distance(&editor.samplers[b])));
+                self.sampler_drag = match (under, modifiers.alt) {
+                    (Some(i), true) => {
+                        editor.samplers.remove(i);
+                        None
+                    }
+                    (Some(i), false) => Some(i),
+                    (None, false) if editor.samplers.len() < MAX_SAMPLERS => pixel(p).map(|at| {
+                        editor.samplers.push(at);
+                        editor.samplers.len() - 1
+                    }),
+                    (None, false) => {
+                        self.message(format!("There can be at most {MAX_SAMPLERS} colour samplers"), false);
+                        None
+                    }
+                    (None, true) => None,
+                };
+            }
+            ToolInput::StrokeMove(p) => {
+                if let (Some(i), Some(at)) = (self.sampler_drag, pixel(p))
+                    && let Some(s) = editor.samplers.get_mut(i)
+                {
+                    *s = at;
+                }
+            }
+            ToolInput::StrokeEnd => self.sampler_drag = None,
+            ToolInput::Sample(_) | ToolInput::BrushDrag { .. } => {}
         }
     }
 
@@ -5895,6 +5972,20 @@ fn paste(editor: &mut Editor, clip: Arc<Clip>, name: Option<String>, kind: Paste
 }
 
 /// Commands that only change the open document.
+/// A new adjustment (or fill) layer above the active layer, made active
+/// with its mask targeted: painting on one paints its mask.
+fn new_adjustment_layer(editor: &mut Editor, adjustment: omapix_engine::adjust::Adjustment) {
+    let index = editor.active_index().unwrap_or(0);
+    let (w, h) = (editor.doc.width, editor.doc.height);
+    let label = format!("New {} Layer", adjustment.name());
+    editor.edit(&label, |doc, active| {
+        let new = doc.next_layer_id();
+        doc.insert_above(index, Layer::adjustment(new, adjustment, w, h));
+        *active = new;
+    });
+    editor.target = Target::Mask;
+}
+
 fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
     let index = editor.active_index().unwrap_or(0);
     let id = editor.active;
@@ -6086,6 +6177,23 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 );
             }
         }
+        Command::Average => {
+            // Filter › Blur › Average: the selection filled with its average
+            // colour, for reading a patch's colour without its texture.
+            editor.edit_in_background(
+                "Average",
+                move |doc, _| {
+                    let selection = doc.selection.clone();
+                    if let Some(l) = doc.layer_mut(id)
+                        && let Some(colour) = ops::average(&l.pixels, selection.as_ref())
+                    {
+                        let filled = ops::fill_pixels(&l.pixels, Some(colour), selection.as_ref());
+                        l.pixels = if l.lock_alpha() { ops::keep_alpha(&l.pixels, filled) } else { filled };
+                    }
+                },
+                ctx,
+            );
+        }
         Command::MergeDown if several => {
             editor.target = Target::Pixels;
             editor.edit_in_background(
@@ -6149,14 +6257,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 Command::NewChannelMixer => Adjustment::ChannelMixer(ChannelMixer::default()),
                 _ => Adjustment::ColorLookup(ColorLookup::default()),
             };
-            let label = format!("New {} Layer", adjustment.name());
-            editor.edit(&label, |doc, active| {
-                let new = doc.next_layer_id();
-                doc.insert_above(index, Layer::adjustment(new, adjustment, w, h));
-                *active = new;
-            });
-            // Painting on an adjustment layer paints its mask.
-            editor.target = Target::Mask;
+            new_adjustment_layer(editor, adjustment);
         }
         Command::SelectAll => {
             editor.edit("Select All", |doc, _| doc.selection = Some(Selection::all(w, h)));
@@ -6537,11 +6638,22 @@ impl eframe::App for App {
                     _ => None,
                 };
                 let tools_off = self.properties.eyedropper.is_some() || transforming || liquify_brush.is_some() || lamp.is_some();
+                let curves_selected = matches!(
+                    editor.doc.layer(editor.active).and_then(|l| l.adjustment.as_ref()),
+                    Some(omapix_engine::adjust::Adjustment::Curves(_))
+                );
                 let tip = self.brushes.tip(brush.tip);
                 let overlay = crate::canvas::Overlay {
                     tool: idle,
                     alt_samples: !tools_off && (tool.copies() || (tool.paints() && tool.alt_picks_colour())),
                     samples: !tools_off && tool == crate::tools::Tool::Eyedropper,
+                    // Shown while placing them, and with a Curves layer selected,
+                    // whose panel shows their colours.
+                    samplers: if tool == crate::tools::Tool::ColorSampler || curves_selected {
+                        &editor.samplers
+                    } else {
+                        &[]
+                    },
                     sets_source: !tools_off && tool.copies(),
                     // Holding Alt picks up a colour: a crosshair, not the brush,
                     // unless Alt+right-dragging to resize it.
@@ -7039,6 +7151,89 @@ mod tests {
     fn degenerate_ellipse_points_is_empty() {
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(10.0, 50.0)).is_empty());
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(50.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn colour_samplers_are_placed_dragged_and_deleted() {
+        let mut app = test_app();
+        app.tools.select(crate::tools::Tool::ColorSampler);
+        let none = egui::Modifiers::NONE;
+        let click = |app: &mut App, x: f32, y: f32, modifiers| {
+            app.tool_input(ToolInput::StrokeBegin(egui::pos2(x, y)), modifiers);
+            app.tool_input(ToolInput::StrokeEnd, modifiers);
+        };
+        click(&mut app, 10.5, 20.5, none);
+        click(&mut app, 300.5, 200.5, none);
+        assert_eq!(app.editor.as_ref().unwrap().samplers, [(10, 20), (300, 200)]);
+        // Dragging the first moves it; outside the image, it stays put.
+        app.tool_input(ToolInput::StrokeBegin(egui::pos2(11.0, 21.0)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(50.5, 60.5)), none);
+        app.tool_input(ToolInput::StrokeMove(egui::pos2(-5.0, 60.5)), none);
+        app.tool_input(ToolInput::StrokeEnd, none);
+        assert_eq!(app.editor.as_ref().unwrap().samplers, [(50, 60), (300, 200)]);
+        // Alt+click deletes; Alt+click on nothing adds nothing.
+        click(&mut app, 50.5, 60.5, egui::Modifiers::ALT);
+        click(&mut app, 400.5, 60.5, egui::Modifiers::ALT);
+        assert_eq!(app.editor.as_ref().unwrap().samplers, [(300, 200)]);
+        for i in 0..20 {
+            click(&mut app, 20.0 * i as f32 + 0.5, 300.5, none);
+        }
+        assert_eq!(app.editor.as_ref().unwrap().samplers.len(), MAX_SAMPLERS);
+        assert_eq!(app.editor.as_ref().unwrap().history_count(), 2, "not in the history");
+    }
+
+    #[test]
+    fn average_fills_the_selection_with_its_average_colour() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let editor = app.editor.as_mut().unwrap();
+        // Two colours inside the selection (100–200 square), one outside.
+        editor.edit("Paint", |doc, _| {
+            doc.layers[0].pixels.par_update(|_, _, _| {
+                Some(
+                    (0..omapix_engine::tiled::TILE_PIXELS)
+                        .map(|i| if i % 2 == 0 { [40000, 20000, 0, 65535] } else { [20000, 20000, 10000, 65535] })
+                        .collect(),
+                )
+            });
+        });
+        let outside = editor.doc.layers[0].pixels.get(10, 10);
+        app.run(Command::Average, &ctx);
+        let editor = app.editor.as_mut().unwrap();
+        while editor.busy().is_some() {
+            std::thread::sleep(Duration::from_millis(1));
+            editor.update(&ctx);
+        }
+        let pixels = &editor.doc.layers[0].pixels;
+        assert_eq!(pixels.get(150, 150), [30000, 20000, 5000, 65535]);
+        assert_eq!(pixels.get(151, 150), [30000, 20000, 5000, 65535]);
+        assert_eq!(pixels.get(10, 10), outside, "outside the selection is left alone");
+    }
+
+    #[test]
+    fn gradient_maps_and_colour_fills_start_from_the_foreground_colour() {
+        use omapix_engine::adjust::{Adjustment, GradientMap, SolidColor};
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        (app.tools.foreground, app.tools.background) = ([255, 0, 0], [0, 0, 255]);
+        app.run(Command::NewGradientMap, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        let red = editor.doc.profile.from_srgb8([255, 0, 0]).unwrap().map(|v| f32::from(v) / 65535.0);
+        let blue = editor.doc.profile.from_srgb8([0, 0, 255]).unwrap().map(|v| f32::from(v) / 65535.0);
+        let layer = editor.doc.layer(editor.active).unwrap();
+        let map = GradientMap::between([red[0], red[1], red[2]], [blue[0], blue[1], blue[2]]);
+        assert_eq!(layer.adjustment, Some(Adjustment::GradientMap(map)));
+        assert_eq!(editor.target, Target::Mask);
+        app.run(Command::NewSolidColor, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        let layer = editor.doc.layer(editor.active).unwrap();
+        assert_eq!(layer.name, "Color Fill");
+        assert_eq!(
+            layer.adjustment,
+            Some(Adjustment::SolidColor(SolidColor {
+                color: [red[0], red[1], red[2]]
+            }))
+        );
     }
 
     #[test]

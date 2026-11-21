@@ -27,6 +27,7 @@ const WAND_ICON: &str = "\u{f0d0}";
 const OBJECT_ICON: &str = "\u{f05b}";
 const QUICK_ICON: &str = "\u{f1fc}";
 const EYEDROPPER_ICON: &str = "\u{f1fb}";
+const SAMPLER_ICON: &str = "\u{f05b}";
 const MARQUEE_ICON: &str = "\u{f096}";
 const ELLIPSE_ICON: &str = "\u{f10c}";
 const LASSO_ICON: &str = "\u{f0c4}";
@@ -81,7 +82,7 @@ impl ToolGroup {
             ToolGroup::Lasso => &[Tool::Lasso],
             ToolGroup::Wand => &[Tool::ObjectSelection, Tool::QuickSelection, Tool::MagicWand],
             ToolGroup::Crop => &[Tool::Crop],
-            ToolGroup::Eyedropper => &[Tool::Eyedropper],
+            ToolGroup::Eyedropper => &[Tool::Eyedropper, Tool::ColorSampler],
             ToolGroup::Healing => &[Tool::SpotHealing, Tool::Healing],
             ToolGroup::Brush => &[Tool::Brush],
             ToolGroup::CloneStamp => &[Tool::CloneStamp],
@@ -132,6 +133,7 @@ pub enum Tool {
     ObjectSelection,
     QuickSelection,
     Eyedropper,
+    ColorSampler,
     Gradient,
     PaintBucket,
     Crop,
@@ -157,6 +159,7 @@ impl Tool {
             Tool::ObjectSelection => "Object Selection",
             Tool::QuickSelection => "Quick Selection",
             Tool::Eyedropper => "Eyedropper",
+            Tool::ColorSampler => "Color Sampler",
             Tool::Gradient => "Gradient",
             Tool::PaintBucket => "Paint Bucket",
             Tool::Crop => "Crop",
@@ -182,6 +185,7 @@ impl Tool {
             Tool::ObjectSelection => OBJECT_ICON,
             Tool::QuickSelection => QUICK_ICON,
             Tool::Eyedropper => EYEDROPPER_ICON,
+            Tool::ColorSampler => SAMPLER_ICON,
             Tool::Gradient => GRADIENT_ICON,
             Tool::PaintBucket => BUCKET_ICON,
             Tool::Crop => CROP_ICON,
@@ -201,7 +205,7 @@ impl Tool {
             Tool::Marquee | Tool::EllipticalMarquee => ToolGroup::Marquee,
             Tool::Lasso => ToolGroup::Lasso,
             Tool::MagicWand | Tool::ObjectSelection | Tool::QuickSelection => ToolGroup::Wand,
-            Tool::Eyedropper => ToolGroup::Eyedropper,
+            Tool::Eyedropper | Tool::ColorSampler => ToolGroup::Eyedropper,
             Tool::SpotHealing | Tool::Healing => ToolGroup::Healing,
             Tool::Brush => ToolGroup::Brush,
             Tool::CloneStamp => ToolGroup::CloneStamp,
@@ -229,7 +233,11 @@ impl Tool {
 
     /// Tools that paint with a brush, and so show its outline.
     pub fn paints(self) -> bool {
-        !self.selects() && !matches!(self, Tool::Move | Tool::Eyedropper | Tool::Gradient | Tool::PaintBucket | Tool::Crop)
+        !self.selects()
+            && !matches!(
+                self,
+                Tool::Move | Tool::Eyedropper | Tool::ColorSampler | Tool::Gradient | Tool::PaintBucket | Tool::Crop
+            )
     }
 
     /// Tools that copy pixels from a source point set with Alt+click.
@@ -493,6 +501,8 @@ pub struct Tools {
     #[serde(skip)]
     last_gradient: Tool,
     #[serde(skip)]
+    last_eyedropper: Tool,
+    #[serde(skip)]
     last_dodge: Tool,
     /// The tool before the Crop tool, which Esc goes back to.
     #[serde(skip)]
@@ -573,6 +583,7 @@ impl Default for Tools {
             last_healing: Tool::SpotHealing,
             last_wand: Tool::MagicWand,
             last_gradient: Tool::Gradient,
+            last_eyedropper: Tool::Eyedropper,
             last_dodge: Tool::Dodge,
             before_crop: Tool::Marquee,
             held: None,
@@ -663,6 +674,7 @@ impl Tools {
             | Tool::MagicWand
             | Tool::ObjectSelection
             | Tool::Eyedropper
+            | Tool::ColorSampler
             | Tool::Gradient
             | Tool::PaintBucket
             | Tool::Crop => self.brush,
@@ -709,6 +721,7 @@ impl Tools {
             | Tool::MagicWand
             | Tool::ObjectSelection
             | Tool::Eyedropper
+            | Tool::ColorSampler
             | Tool::Gradient
             | Tool::PaintBucket
             | Tool::Crop => &mut self.brush,
@@ -847,6 +860,7 @@ impl Tools {
             Tool::SpotHealing | Tool::Healing => self.last_healing = self.tool,
             Tool::MagicWand | Tool::ObjectSelection | Tool::QuickSelection => self.last_wand = self.tool,
             Tool::Gradient | Tool::PaintBucket => self.last_gradient = self.tool,
+            Tool::Eyedropper | Tool::ColorSampler => self.last_eyedropper = self.tool,
             Tool::Dodge | Tool::Burn | Tool::Sponge => self.last_dodge = self.tool,
             _ => {}
         }
@@ -874,7 +888,7 @@ impl Tools {
             ToolGroup::Move => Tool::Move,
             ToolGroup::Lasso => Tool::Lasso,
             ToolGroup::Crop => Tool::Crop,
-            ToolGroup::Eyedropper => Tool::Eyedropper,
+            ToolGroup::Eyedropper => self.last_eyedropper,
             ToolGroup::Brush => Tool::Brush,
             ToolGroup::CloneStamp => Tool::CloneStamp,
             ToolGroup::HistoryBrush => Tool::HistoryBrush,
@@ -1458,6 +1472,11 @@ impl Tools {
                 ui.label(RichText::new(hint).color(theme.dark_foreground));
                 return;
             }
+            if self.tool == Tool::ColorSampler {
+                let hint = "Click to place a sampler (up to 10) · drag one to move it · Alt+click to delete · their colours show in Curves";
+                ui.label(RichText::new(hint).color(theme.dark_foreground));
+                return;
+            }
             if self.tool == Tool::Eyedropper {
                 ui.label("Sample Size");
                 ComboBox::from_id_salt("eyedropper-sample-size")
@@ -1958,6 +1977,18 @@ mod tests {
         assert_eq!(tools.nudge(&ctx), Some((-2, 10)));
         // The keys were consumed.
         assert_eq!(tools.nudge(&ctx), None);
+    }
+
+    #[test]
+    fn shift_i_switches_to_the_color_sampler_and_i_comes_back_to_it() {
+        let mut tools = Tools::default();
+        tools.select(Tool::Eyedropper);
+        tools.cycle_group(ToolGroup::Eyedropper);
+        assert_eq!(tools.tool, Tool::ColorSampler);
+        tools.select(Tool::Brush);
+        assert_eq!(tools.group_tool(ToolGroup::Eyedropper), Tool::ColorSampler);
+        tools.cycle_group(ToolGroup::Eyedropper);
+        assert_eq!(tools.tool, Tool::Eyedropper);
     }
 
     #[test]
