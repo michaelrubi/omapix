@@ -314,7 +314,7 @@ fn models_for(cmd: Command) -> &'static [&'static str] {
     match cmd {
         Command::SelectSubject => &[omapix_ai::subject::MODEL],
         Command::GenerativeFill => &[omapix_ai::flux::MODEL],
-        Command::RegenerateSkin => TEXTURE_MODELS,
+        Command::RegenerateSkin | Command::RegenerateEyes | Command::RegenerateHair => TEXTURE_MODELS,
         Command::Denoise => &[omapix_ai::denoise::MODEL],
         Command::SelectSkin
         | Command::SelectHair
@@ -1427,7 +1427,7 @@ impl App {
             for e in errors.into_iter().flatten() {
                 self.message(e, true);
             }
-            // Esc stops Regenerate Skin, as it does Photoshop's long filters.
+            // Esc stops Regenerate Skin, Eyes or Hair, as it does Photoshop's long filters.
             if self.dialog.is_none()
                 && matches!(self.whitening.busy(), Some(crate::whiten::Part::Texture(_)))
                 && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
@@ -1725,9 +1725,14 @@ impl App {
             Command::SelectSkin | Command::SelectHair | Command::SelectEyes | Command::SelectLips | Command::SelectTeeth => {
                 self.face_selection.busy().is_none()
             }
-            Command::ReduceShine | Command::RegenerateSkin | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes | Command::Makeup => {
-                self.whitening.busy().is_none()
-            }
+            Command::ReduceShine
+            | Command::RegenerateSkin
+            | Command::RegenerateEyes
+            | Command::RegenerateHair
+            | Command::LightenUnderEyes
+            | Command::WhitenTeeth
+            | Command::WhitenEyes
+            | Command::Makeup => self.whitening.busy().is_none(),
             Command::Crop => editor.doc.selection.is_some(),
             Command::Liquify => editor.target == Target::Pixels && !no_pixels && !editor.liquifying(),
             Command::SelectAndMask => editor.doc.selection.is_some(),
@@ -2185,11 +2190,19 @@ impl App {
                 }
             }
             Command::RegenerateSkin => self.dialog = Some(Dialog::RegenerateSkin { age: self.filters.skin_age }),
-            Command::ReduceShine | Command::LightenUnderEyes | Command::WhitenTeeth | Command::WhitenEyes | Command::Makeup => {
-                use crate::whiten::Part;
+            Command::ReduceShine
+            | Command::RegenerateEyes
+            | Command::RegenerateHair
+            | Command::LightenUnderEyes
+            | Command::WhitenTeeth
+            | Command::WhitenEyes
+            | Command::Makeup => {
+                use crate::whiten::{Part, Regen};
                 use omapix_engine::whiten::Whiten;
                 let part = match cmd {
                     Command::ReduceShine => Part::Shine,
+                    Command::RegenerateEyes => Part::Texture(Regen::Eyes),
+                    Command::RegenerateHair => Part::Texture(Regen::Hair),
                     Command::LightenUnderEyes => Part::UnderEyes,
                     Command::Makeup => Part::Makeup,
                     Command::WhitenTeeth => Part::Whites(Whiten::Teeth),
@@ -2504,7 +2517,7 @@ impl App {
         self.filters.skin_age = age;
         self.filters.save();
         if let Some(editor) = &self.editor
-            && let Err(e) = self.whitening.start(ctx, editor, crate::whiten::Part::Texture(age))
+            && let Err(e) = self.whitening.start(ctx, editor, crate::whiten::Part::Texture(crate::whiten::Regen::Skin(age)))
         {
             self.message(e, true);
         }
@@ -3044,6 +3057,8 @@ impl App {
                 self.menu_item(ui, Command::EvenTone, None);
                 self.menu_item(ui, Command::ReduceShine, None);
                 self.menu_item(ui, Command::RegenerateSkin, None);
+                self.menu_item(ui, Command::RegenerateEyes, None);
+                self.menu_item(ui, Command::RegenerateHair, None);
                 self.menu_item(ui, Command::LightenUnderEyes, None);
                 self.menu_item(ui, Command::WhitenTeeth, None);
                 self.menu_item(ui, Command::WhitenEyes, None);
@@ -3203,9 +3218,9 @@ impl App {
                     ui.separator();
                 }
                 if let Some(part) = self.whitening.busy() {
-                    let text = match self.whitening.tiles() {
-                        Some((done, of)) => format!("Regenerating skin… {done} of {of}"),
-                        None => part.finding().to_owned(),
+                    let text = match (part, self.whitening.tiles()) {
+                        (crate::whiten::Part::Texture(regen), Some((done, of))) => format!("{} {done} of {of}", regen.drawing()),
+                        _ => part.finding().to_owned(),
                     };
                     ui.label(RichText::new(text).color(self.theme.accent));
                     if matches!(part, crate::whiten::Part::Texture(_)) && ui.small_button("Stop").on_hover_text("Esc").clicked() {
