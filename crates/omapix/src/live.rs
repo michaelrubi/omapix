@@ -87,7 +87,9 @@ const CHANNEL_POINTS: usize = 4096;
 /// 0, a lookup table over RGB (Color Lookup, which is one); 1, a table for
 /// each channel, as Curves and Levels are applied; 2 to 5, the settings of
 /// Hue/Saturation, Color Balance, Selective Color and Channel Mixer, for
-/// the shader to apply as `adjust.rs` does.
+/// the shader to apply as `adjust.rs` does; 6, a Gradient Map's colours
+/// at 4096 luminances. A Solid Color is a table over RGB of one colour,
+/// which is exact.
 pub fn table(a: &Adjustment) -> (u32, Vec<[f32; 3]>) {
     let flat = |v: Vec<f32>| v.chunks(3).map(|c| std::array::from_fn(|i| c.get(i).copied().unwrap_or(0.0))).collect();
     let percent = |v: &[f32]| v.iter().map(|x| x / 100.0).collect::<Vec<_>>();
@@ -97,6 +99,7 @@ pub fn table(a: &Adjustment) -> (u32, Vec<[f32; 3]>) {
             let at = |i: usize| i as f32 / (CHANNEL_POINTS - 1) as f32;
             (1, (0..CHANNEL_POINTS).map(|i| prepared.apply([at(i); 3])).collect())
         }
+        (_, Prepared::GradientMap(g)) => (6, g.table().to_vec()),
         (Adjustment::HueSaturation(h), _) => (2, vec![[h.hue, h.saturation, h.lightness]]),
         (Adjustment::ColorBalance(b), _) => (
             3,
@@ -1015,8 +1018,8 @@ pub mod tests {
             })
             .collect();
         // Curves, Levels, Hue/Saturation, Color Balance, Selective Color,
-        // Channel Mixer, Color Lookup.
-        assert_eq!(shapes, [1, 1, 2, 3, 4, 5, 0]);
+        // Channel Mixer, Color Lookup, Gradient Map, Solid Color.
+        assert_eq!(shapes, [1, 1, 2, 3, 4, 5, 0, 6, 0]);
         // Curves and Levels, read as live.wgsl's `channel_tables` reads
         // them, are what adjust.rs makes of each channel.
         for k in [Kind::Curves, Kind::Levels] {

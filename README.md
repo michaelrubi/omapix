@@ -36,8 +36,8 @@ been tried. If you try one, [say how it went](CONTRIBUTING.md).
   Auto-Align Layers, Liquify and Select and Mask. Pen pressure from a
   tablet. Photomerge for panoramas and Merge to HDR for brackets.
 - **Adjustment layers:** Curves, Levels, Hue/Saturation, Color Balance,
-  Selective Color, Channel Mixer and Color Lookup (`.cube` LUTs), with
-  presets and export as a LUT.
+  Selective Color, Channel Mixer, Color Lookup (`.cube` LUTs) and Gradient
+  Map, with presets and export as a LUT; Solid Color fill layers.
 - **Filters:** Gaussian Blur, Smart Blur, High Pass, Unsharp Mask, Smart
   Sharpen, Add Noise, Reduce Noise and Relight, previewed live.
 - **Retouching setups in one click:** frequency separation, dodge & burn,

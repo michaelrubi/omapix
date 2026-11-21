@@ -12,7 +12,9 @@ mod cache;
 mod files;
 pub mod shrink;
 
-use omapix_engine::adjust::{Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curves, HueSaturation, Levels, SelectiveColor};
+use omapix_engine::adjust::{
+    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curves, GradientMap, GradientStop, HueSaturation, Levels, SelectiveColor, SolidColor,
+};
 use omapix_engine::layer::{BlendIf, BlendIfChannel, Layer, Mask};
 use omapix_engine::tiled::Tiled;
 use omapix_engine::{BlendMode, ColorProfile, Document, Pixel};
@@ -31,11 +33,13 @@ pub enum Kind {
     SelectiveColor,
     ChannelMixer,
     ColorLookup,
+    GradientMap,
+    SolidColor,
 }
 
 impl Kind {
     /// The adjustment layers, in the order of `Adjustment`.
-    pub const ADJUSTMENTS: [Kind; 7] = [
+    pub const ADJUSTMENTS: [Kind; 9] = [
         Kind::Curves,
         Kind::Levels,
         Kind::HueSaturation,
@@ -43,6 +47,8 @@ impl Kind {
         Kind::SelectiveColor,
         Kind::ChannelMixer,
         Kind::ColorLookup,
+        Kind::GradientMap,
+        Kind::SolidColor,
     ];
 
     pub fn is_adjustment(self) -> bool {
@@ -336,6 +342,17 @@ fn adjustment(kind: Kind, id: u64) -> Adjustment {
                 ..ColorLookup::default()
             })
         }
+        Kind::GradientMap => {
+            let colour = |salt: u64| [u(salt), u(salt + 1), u(salt + 2)];
+            let mut map = GradientMap::between(colour(41), colour(44));
+            map.stops.push(GradientStop {
+                at: 0.2 + 0.6 * u(47),
+                color: colour(48),
+            });
+            map.reverse = id.is_multiple_of(2);
+            Adjustment::GradientMap(map)
+        }
+        Kind::SolidColor => Adjustment::SolidColor(SolidColor { color: [u(41), u(42), u(43)] }),
         Kind::Pixels | Kind::Group => unreachable!("not an adjustment"),
     }
 }
@@ -374,7 +391,7 @@ mod tests {
 
     #[test]
     fn every_seed_makes_a_stack_a_document_can_hold() {
-        let mut kinds = [0; 9];
+        let mut kinds = [0; 11];
         let (mut clipped, mut deepest) = (0, 0);
         for seed in 0..2000 {
             let specs = specs(seed);

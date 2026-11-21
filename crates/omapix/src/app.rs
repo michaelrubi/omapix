@@ -2236,6 +2236,22 @@ impl App {
                     preview: Some(SeparationBand::Texture),
                 });
             }
+            Command::NewGradientMap | Command::NewSolidColor => {
+                use omapix_engine::adjust::{Adjustment, GradientMap, SolidColor};
+                let Some(editor) = &mut self.editor else { return };
+                // From the foreground colour (to the background colour), as
+                // Photoshop makes them.
+                let colour = |rgb: [u8; 3]| match editor.doc.profile.from_srgb8(rgb) {
+                    Ok(p) => [p[0], p[1], p[2]].map(|v| f32::from(v) / 65535.0),
+                    Err(_) => rgb.map(|v| f32::from(v) / 255.0),
+                };
+                let (fg, bg) = (colour(self.tools.foreground), colour(self.tools.background));
+                let adjustment = match cmd {
+                    Command::NewGradientMap => Adjustment::GradientMap(GradientMap::between(fg, bg)),
+                    _ => Adjustment::SolidColor(SolidColor { color: fg }),
+                };
+                new_adjustment_layer(editor, adjustment);
+            }
             Command::SelectLayerAbove => {
                 if let Some(editor) = &mut self.editor {
                     self.layers.step_selection(editor, true);
@@ -2924,6 +2940,7 @@ impl App {
                     self.menu_item(ui, Command::NewSelectiveColor, None);
                     self.menu_item(ui, Command::NewChannelMixer, None);
                     self.menu_item(ui, Command::NewColorLookup, None);
+                    self.menu_item(ui, Command::NewGradientMap, None);
                     ui.separator();
                     self.presets_menu(ui);
                     self.menu_item(ui, Command::SaveAdjustmentPreset, None);
@@ -2950,6 +2967,9 @@ impl App {
                 self.menu_item(ui, Command::NewLayer, None);
                 self.menu_item(ui, Command::DuplicateLayer, plural("Duplicate Layer"));
                 self.menu_item(ui, Command::DeleteLayer, plural("Delete Layer"));
+                ui.menu_button("New Fill Layer", |ui| {
+                    self.menu_item(ui, Command::NewSolidColor, None);
+                });
                 ui.separator();
                 self.menu_item(ui, Command::NewGroup, None);
                 self.menu_item(ui, Command::GroupLayers, None);
@@ -5895,6 +5915,20 @@ fn paste(editor: &mut Editor, clip: Arc<Clip>, name: Option<String>, kind: Paste
 }
 
 /// Commands that only change the open document.
+/// A new adjustment (or fill) layer above the active layer, made active
+/// with its mask targeted: painting on one paints its mask.
+fn new_adjustment_layer(editor: &mut Editor, adjustment: omapix_engine::adjust::Adjustment) {
+    let index = editor.active_index().unwrap_or(0);
+    let (w, h) = (editor.doc.width, editor.doc.height);
+    let label = format!("New {} Layer", adjustment.name());
+    editor.edit(&label, |doc, active| {
+        let new = doc.next_layer_id();
+        doc.insert_above(index, Layer::adjustment(new, adjustment, w, h));
+        *active = new;
+    });
+    editor.target = Target::Mask;
+}
+
 fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
     let index = editor.active_index().unwrap_or(0);
     let id = editor.active;
@@ -6149,14 +6183,7 @@ fn run_on_editor(editor: &mut Editor, cmd: Command, ctx: &egui::Context) {
                 Command::NewChannelMixer => Adjustment::ChannelMixer(ChannelMixer::default()),
                 _ => Adjustment::ColorLookup(ColorLookup::default()),
             };
-            let label = format!("New {} Layer", adjustment.name());
-            editor.edit(&label, |doc, active| {
-                let new = doc.next_layer_id();
-                doc.insert_above(index, Layer::adjustment(new, adjustment, w, h));
-                *active = new;
-            });
-            // Painting on an adjustment layer paints its mask.
-            editor.target = Target::Mask;
+            new_adjustment_layer(editor, adjustment);
         }
         Command::SelectAll => {
             editor.edit("Select All", |doc, _| doc.selection = Some(Selection::all(w, h)));
@@ -7039,6 +7066,32 @@ mod tests {
     fn degenerate_ellipse_points_is_empty() {
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(10.0, 50.0)).is_empty());
         assert!(ellipse_points(egui::pos2(10.0, 10.0), egui::pos2(50.0, 10.0)).is_empty());
+    }
+
+    #[test]
+    fn gradient_maps_and_colour_fills_start_from_the_foreground_colour() {
+        use omapix_engine::adjust::{Adjustment, GradientMap, SolidColor};
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        (app.tools.foreground, app.tools.background) = ([255, 0, 0], [0, 0, 255]);
+        app.run(Command::NewGradientMap, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        let red = editor.doc.profile.from_srgb8([255, 0, 0]).unwrap().map(|v| f32::from(v) / 65535.0);
+        let blue = editor.doc.profile.from_srgb8([0, 0, 255]).unwrap().map(|v| f32::from(v) / 65535.0);
+        let layer = editor.doc.layer(editor.active).unwrap();
+        let map = GradientMap::between([red[0], red[1], red[2]], [blue[0], blue[1], blue[2]]);
+        assert_eq!(layer.adjustment, Some(Adjustment::GradientMap(map)));
+        assert_eq!(editor.target, Target::Mask);
+        app.run(Command::NewSolidColor, &ctx);
+        let editor = app.editor.as_ref().unwrap();
+        let layer = editor.doc.layer(editor.active).unwrap();
+        assert_eq!(layer.name, "Color Fill");
+        assert_eq!(
+            layer.adjustment,
+            Some(Adjustment::SolidColor(SolidColor {
+                color: [red[0], red[1], red[2]]
+            }))
+        );
     }
 
     #[test]

@@ -181,10 +181,22 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
         case 5u: {
             return channel_mixer(c);
         }
+        case 6u: {
+            return gradient_map(c);
+        }
         default: {
             return lookup(lut, LUT_SIZE, c);
         }
     }
+}
+
+// Gradient Map: 4096 colours by luminance, linearly interpolated
+// (adjust.rs `PreparedGradientMap::apply`).
+fn gradient_map(c: vec3<f32>) -> vec3<f32> {
+    let pos = clamp(dot(c, vec3<f32>(0.3, 0.59, 0.11)), 0.0, 1.0) * 4095.0;
+    let i = min(u32(pos), 4094u);
+    let a = point(i);
+    return a + (point(i + 1u) - a) * (pos - f32(i));
 }
 
 // Curves and Levels: a table of 4096 points for each channel, linearly

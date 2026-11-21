@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use egui::{Color32, ComboBox, Id, Pos2, Rect, RichText, Sense, Slider, Stroke, Ui, Vec2, pos2, vec2};
-use omapix_engine::adjust::{Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, HueSaturation, Levels, SelectiveColor};
+use omapix_engine::adjust::{
+    Adjustment, ChannelMixer, ColorBalance, ColorLookup, Curve, Curves, Eyedropper, GradientMap, GradientStop, HueSaturation, Levels, SelectiveColor,
+    SolidColor,
+};
+use omapix_engine::{ColorProfile, DisplayTransform};
 
 use crate::editor::Editor;
 use crate::histogram_panel::draw_histogram;
@@ -84,6 +88,8 @@ impl PropertiesPanel {
                         Adjustment::SelectiveColor(_) => Adjustment::SelectiveColor(SelectiveColor::default()),
                         Adjustment::ChannelMixer(_) => Adjustment::ChannelMixer(ChannelMixer::default()),
                         Adjustment::ColorLookup(_) => Adjustment::ColorLookup(ColorLookup::default()),
+                        Adjustment::GradientMap(_) => Adjustment::GradientMap(GradientMap::default()),
+                        Adjustment::SolidColor(_) => Adjustment::SolidColor(SolidColor::default()),
                     };
                 }
             });
@@ -97,6 +103,8 @@ impl PropertiesPanel {
             Adjustment::SelectiveColor(s) => self.selective_color(ui, s),
             Adjustment::ChannelMixer(m) => self.channel_mixer(ui, m, theme),
             Adjustment::ColorLookup(lut) => self.color_lookup(ui, lut, theme),
+            Adjustment::GradientMap(g) => gradient_map(ui, g, &editor.doc.profile, theme),
+            Adjustment::SolidColor(s) => solid_color(ui, s, &editor.doc.profile, theme),
         }
         if adjustment != original {
             let label = format!("Adjust {}", adjustment.name());
@@ -453,6 +461,115 @@ fn move_point(curve: &mut Curve, i: usize, (x, y): (f32, f32)) {
     curve.points[i] = (x.clamp(lo, hi.max(lo)), y);
 }
 
+/// Document colours (0–1) as sRGB, for egui's colour buttons.
+fn to_srgb(profile: &ColorProfile, colors: &[[f32; 3]]) -> Vec<[u8; 3]> {
+    let pixels: Vec<_> = colors
+        .iter()
+        .map(|c| {
+            let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16);
+            [r, g, b, u16::MAX]
+        })
+        .collect();
+    let mut out = vec![[0u8; 4]; pixels.len()];
+    match DisplayTransform::to_srgb(profile) {
+        Ok(t) => t.convert(&pixels, &mut out),
+        Err(_) => out.iter_mut().zip(&pixels).for_each(|(o, p)| *o = p.map(|v| (v >> 8) as u8)),
+    }
+    out.iter().map(|o| [o[0], o[1], o[2]]).collect()
+}
+
+/// An sRGB colour from a colour button in the document's space.
+fn from_srgb(profile: &ColorProfile, rgb: [u8; 3]) -> [f32; 3] {
+    match profile.from_srgb8(rgb) {
+        Ok(p) => [p[0], p[1], p[2]].map(|v| f32::from(v) / 65535.0),
+        Err(_) => rgb.map(|v| f32::from(v) / 255.0),
+    }
+}
+
+/// A colour button for a document colour; true if it was changed.
+fn color_button(ui: &mut Ui, profile: &ColorProfile, shown: [u8; 3], color: &mut [f32; 3]) -> bool {
+    let mut rgb = shown;
+    let changed = egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() && rgb != shown;
+    if changed {
+        *color = from_srgb(profile, rgb);
+    }
+    changed
+}
+
+fn solid_color(ui: &mut Ui, s: &mut SolidColor, profile: &ColorProfile, theme: &Theme) {
+    let shown = to_srgb(profile, &[s.color])[0];
+    ui.horizontal(|ui| {
+        ui.label("Color");
+        color_button(ui, profile, shown, &mut s.color);
+    });
+    let hint = "Soft Light warms or tints; Color changes only hue and saturation";
+    ui.label(RichText::new(hint).small().color(theme.dark_foreground));
+}
+
+fn gradient_map(ui: &mut Ui, g: &mut GradientMap, profile: &ColorProfile, theme: &Theme) {
+    // The gradient as it's applied, darkest tones on the left.
+    const STEPS: usize = 64;
+    let side = ui.available_width().min(300.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(side, 20.0), Sense::hover());
+    let at = |i: usize| i as f32 / (STEPS - 1) as f32;
+    let colors: Vec<_> = (0..STEPS).map(|i| g.color_at(if g.reverse { 1.0 - at(i) } else { at(i) })).collect();
+    let mut mesh = egui::Mesh::default();
+    for (i, c) in to_srgb(profile, &colors).into_iter().enumerate() {
+        let x = rect.left() + rect.width() * at(i);
+        let colour = Color32::from_rgb(c[0], c[1], c[2]);
+        mesh.colored_vertex(pos2(x, rect.top()), colour);
+        mesh.colored_vertex(pos2(x, rect.bottom()), colour);
+        if i > 0 {
+            let k = 2 * i as u32;
+            mesh.add_triangle(k - 2, k - 1, k);
+            mesh.add_triangle(k - 1, k, k + 1);
+        }
+    }
+    let painter = ui.painter_at(rect.expand(2.0));
+    painter.add(mesh);
+    painter.rect_stroke(rect, 0.0, Stroke::new(1.0, theme.selection), egui::StrokeKind::Outside);
+    ui.add_space(4.0);
+
+    let shown = to_srgb(profile, &g.stops.iter().map(|s| s.color).collect::<Vec<_>>());
+    let removable = g.stops.len() > 2;
+    let mut remove = None;
+    for (i, stop) in g.stops.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            color_button(ui, profile, shown[i], &mut stop.color);
+            let mut percent = stop.at * 100.0;
+            if ui.add(Slider::new(&mut percent, 0.0..=100.0).fixed_decimals(0).suffix("%")).changed() {
+                stop.at = percent / 100.0;
+            }
+            if removable && ui.small_button("Remove").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        g.stops.remove(i);
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Add Stop").clicked() {
+            // In the middle of the widest gap, the colour the gradient has there.
+            let mut at: Vec<f32> = g.stops.iter().map(|s| s.at).collect();
+            at.sort_by(f32::total_cmp);
+            let (a, b) = at
+                .windows(2)
+                .map(|w| (w[0], w[1]))
+                .max_by(|x, y| (x.1 - x.0).total_cmp(&(y.1 - y.0)))
+                .unwrap_or((0.0, 1.0));
+            let mid = (a + b) / 2.0;
+            g.stops.push(GradientStop {
+                at: mid,
+                color: g.color_at(mid),
+            });
+        }
+        ui.checkbox(&mut g.reverse, "Reverse");
+    });
+    let hint = "Shadows take the left colour, highlights the right; try Soft Light at low opacity";
+    ui.label(RichText::new(hint).small().color(theme.dark_foreground));
+}
+
 fn hue_saturation(ui: &mut Ui, h: &mut HueSaturation) {
     ui.add(Slider::new(&mut h.hue, -180.0..=180.0).text("Hue").fixed_decimals(0));
     ui.add(Slider::new(&mut h.saturation, -100.0..=100.0).text("Saturation").fixed_decimals(0));
@@ -485,6 +602,10 @@ mod tests {
         doc.layers.push(omapix_engine::Layer::adjustment(102, cm, w, h));
         let cl = Adjustment::ColorLookup(ColorLookup::default());
         doc.layers.push(omapix_engine::Layer::adjustment(103, cl, w, h));
+        let gm = Adjustment::GradientMap(GradientMap::default());
+        doc.layers.push(omapix_engine::Layer::adjustment(104, gm, w, h));
+        let fill = Adjustment::SolidColor(SolidColor { color: [0.9, 0.6, 0.4] });
+        doc.layers.push(omapix_engine::Layer::adjustment(105, fill, w, h));
 
         let mut editor = Editor::new(doc).unwrap();
         let mut panel = PropertiesPanel::default();
@@ -520,6 +641,21 @@ mod tests {
         });
         out.textures_delta.clear();
         assert!(shown, "panel should show for color lookup adjustment");
+
+        for id in [104, 105] {
+            editor.active = id;
+            let mut shown = false;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                shown = panel.show(ui, &mut editor, &theme);
+            });
+            out.textures_delta.clear();
+            assert!(shown, "panel should show for layer {id}");
+        }
+        // Showing a colour doesn't change it.
+        assert_eq!(
+            editor.doc.layer(105).unwrap().adjustment,
+            Some(Adjustment::SolidColor(SolidColor { color: [0.9, 0.6, 0.4] }))
+        );
     }
 
     #[test]

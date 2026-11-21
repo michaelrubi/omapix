@@ -15,7 +15,7 @@ use crate::settings::FilterSettings;
 
 /// What `add_adjustment_layer` adds: Layer › New Adjustment Layer's
 /// commands, without their `New`.
-const ADJUSTMENTS: [&str; 7] = [
+const ADJUSTMENTS: [&str; 9] = [
     "Curves",
     "Levels",
     "HueSaturation",
@@ -23,6 +23,8 @@ const ADJUSTMENTS: [&str; 7] = [
     "SelectiveColor",
     "ChannelMixer",
     "ColorLookup",
+    "GradientMap",
+    "SolidColor",
 ];
 
 /// The protocol versions understood, newest last.
